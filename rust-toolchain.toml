@@ -1,0 +1,7 @@
+# Pin the toolchain so every contributor's local `cargo` matches CI — no
+# "works on my machine" drift. Channel (not a fixed version) keeps us on the
+# latest stable; the `rust-version` field in Cargo.toml documents the MSRV
+# floor (1.85, edition 2024).
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
