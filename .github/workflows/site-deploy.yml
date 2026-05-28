@@ -50,7 +50,9 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          # Hugo's PostCSS step runs node under its permission model (--permission),
+          # which is only recognized on Node >= 23. Node 20 rejects it as a bad option.
+          node-version: "24"
 
       - name: Install PostCSS / Tailwind deps
         run: npm install
@@ -62,7 +64,10 @@ jobs:
           extended: true
 
       - name: Build
-        run: hugo --gc --minify --logLevel info
+        # Pages serves this project under the /ardur-agent/ subpath, so baseURL
+        # must include it or every asset link 404s. Override the hugo.toml value
+        # (which points at the eventual custom domain) until that domain is live.
+        run: hugo --gc --minify --logLevel info --baseURL "https://ardurai.github.io/ardur-agent/"
 
       - name: Upload Pages artifact
         if: github.event_name != 'pull_request'
