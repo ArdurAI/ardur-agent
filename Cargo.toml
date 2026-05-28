@@ -46,6 +46,8 @@ anyhow = "1"
 thiserror = "2"
 # Stable IDs (UUIDv7 — time-ordered) for runtime turn/session ids.
 uuid = { version = "1", features = ["v7", "serde"] }
+# Non-poisoning sync primitives for the in-process memory store (crates/memory, §7.0).
+parking_lot = "0.12"
 
 # --- Internal crate path-deps (one per Phase-0 crate). Declared here so
 #     cross-crate wiring in Phase 1 references `{ workspace = true }`. ---
