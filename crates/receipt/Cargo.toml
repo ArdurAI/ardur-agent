@@ -7,4 +7,25 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-anyhow = { workspace = true }
+# JWS-ES256 over NIST P-256 (sign/verify) + PKCS#8 PEM key custody. Pinned at
+# the workspace level (features ecdsa, pkcs8, pem); see the root Cargo.toml.
+p256 = { workspace = true }
+# OsRng for key generation — p256's `SigningKey::random` needs a CSPRNG;
+# signing itself is deterministic (RFC 6979), so no RNG on the hot path.
+rand_core = { workspace = true }
+sha2 = { workspace = true }
+base64 = { workspace = true }
+regex = { workspace = true }
+once_cell = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+# Workspace pins v7; receipt ids are v4 per §11.14 Phase 1, so opt v4 in on
+# top of the shared pin (Cargo unifies the feature set).
+uuid = { workspace = true, features = ["v4"] }
+
+[dev-dependencies]
+# Integration tests are a separate crate, so they re-declare the deps they
+# name directly (the lib's own deps aren't in scope for `tests/`).
+uuid = { workspace = true, features = ["v4"] }
+serde_json = { workspace = true }

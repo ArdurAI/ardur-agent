@@ -32,8 +32,18 @@ biscuit-auth = "5"
 cedar-policy = "4"
 # Bi-temporal time for crates/memory (§7.0).
 chrono = { version = "0.4", features = ["serde"] }
-# JWS-ES256 receipt signing for crates/receipt (§11.14).
-jsonwebtoken = "9"
+# JWS-ES256 receipt signing for crates/receipt (§11.14). Built directly on
+# p256 (ECDSA P-256 + SHA-256) rather than a JWT facade: the receipt crate
+# needs the raw EC `x`/`y` affine coordinates to publish JWKS keys and to
+# reconstruct verifying keys offline (ADR-Phase3-549). `pem` enables the
+# PKCS#8 PEM round-trip for key custody; `rand_core`'s `getrandom` backs
+# `Es256SigningKey::generate`.
+p256 = { version = "0.13", features = ["ecdsa", "pkcs8", "pem"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+sha2 = "0.10"
+base64 = "0.22"
+regex = "1"
+once_cell = "1"
 # Serialization.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
