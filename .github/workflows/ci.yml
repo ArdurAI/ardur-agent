@@ -1,0 +1,43 @@
+# CI skeleton for Ardur.
+#
+# NOTE: The Rust workspace is intentionally empty right now (members = []),
+# pending the §0.0 Phase-0 scaffold. Until crates land, the cargo steps below
+# have nothing to compile and this workflow is EXPECTED TO FAIL. That is by
+# design — it is wired up ahead of the code so it goes green the moment the
+# first crate is added. Branch protection does NOT require these checks yet.
+
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+jobs:
+  check:
+    name: check / fmt / clippy / test
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+      - name: cargo check
+        run: cargo check --workspace --all-targets
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace

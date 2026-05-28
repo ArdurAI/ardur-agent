@@ -1,0 +1,22 @@
+# Verifies that every commit in a pull request carries a Signed-off-by trailer
+# (Developer Certificate of Origin). See CONTRIBUTING.md.
+
+name: DCO
+
+on:
+  pull_request:
+    branches: [main, dev]
+
+jobs:
+  dco:
+    name: Check DCO sign-off
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check Signed-off-by on all PR commits
+        uses: tim-actions/dco@v1.1.0
+        with:
+          commits: ${{ github.event.pull_request.commits }}

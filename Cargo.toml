@@ -1,0 +1,14 @@
+# Workspace root for Ardur.
+#
+# `members` is intentionally empty for now. The crate structure will be added
+# by the §0.0 Phase-0 scaffold session; until then there is nothing to build.
+
+[workspace]
+resolver = "2"
+members = []
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.83"
+license = "Apache-2.0"
+repository = "https://github.com/ArdurAI/ardur-agent"
