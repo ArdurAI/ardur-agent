@@ -8,7 +8,7 @@ use ardur_memory::{
 use serde_json::{Value, json};
 
 fn payloads(mut recs: Vec<MemoryRecord>) -> Vec<Value> {
-    recs.sort_by(|a, b| a.valid_from.cmp(&b.valid_from));
+    recs.sort_by_key(|r| r.valid_from);
     recs.into_iter().map(|r| r.payload).collect()
 }
 
