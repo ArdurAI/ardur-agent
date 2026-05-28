@@ -1,0 +1,84 @@
+# Builds the Hugo landing site in site/ and publishes it to GitHub Pages.
+#
+# NOTE: GitHub Pages must be enabled for this repo with "Source: GitHub Actions"
+# (Settings -> Pages) before the deploy step can succeed. Until then the build
+# job still runs and validates the site on every push/PR touching site/**.
+#
+# baseURL: site/hugo.toml currently points at the production domain (ardurai.dev).
+# If you deploy to the default *.github.io project path instead, override it with
+# `hugo --baseURL "$BASE"` here, or set a CNAME for the custom domain.
+
+name: site-deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "site/**"
+      - ".github/workflows/site-deploy.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "site/**"
+      - ".github/workflows/site-deploy.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Allow one concurrent deployment; newer pushes cancel older in-progress runs.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+env:
+  HUGO_VERSION: "0.161.1"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: site
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install PostCSS / Tailwind deps
+        run: npm install
+
+      - name: Setup Hugo (extended)
+        uses: peaceiris/actions-hugo@v3
+        with:
+          hugo-version: ${{ env.HUGO_VERSION }}
+          extended: true
+
+      - name: Build
+        run: hugo --gc --minify --logLevel info
+
+      - name: Upload Pages artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/public
+
+  deploy:
+    # Only deploy on pushes to main, never on PRs.
+    if: github.event_name == 'push'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
