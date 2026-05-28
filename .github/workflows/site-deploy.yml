@@ -48,7 +48,7 @@ jobs:
           fetch-depth: 0
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           # Hugo's PostCSS step runs node under its permission model (--permission),
           # which is only recognized on Node >= 23. Node 20 rejects it as a bad option.
