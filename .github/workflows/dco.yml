@@ -16,7 +16,16 @@ jobs:
         with:
           fetch-depth: 0
 
+      # `github.event.pull_request.commits` is the commit *count* (an integer),
+      # not a list — passing it to tim-actions/dco fails with "commits is not
+      # iterable". Fetch the actual commit list first.
+      - name: Get PR commits
+        id: get_pr_commits
+        uses: tim-actions/get-pr-commits@master
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Check Signed-off-by on all PR commits
         uses: tim-actions/dco@v1.1.0
         with:
-          commits: ${{ github.event.pull_request.commits }}
+          commits: ${{ steps.get_pr_commits.outputs.commits }}

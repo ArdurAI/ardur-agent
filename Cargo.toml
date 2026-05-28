@@ -1,14 +1,56 @@
 # Workspace root for Ardur.
 #
-# `members` is intentionally empty for now. The crate structure will be added
-# by the §0.0 Phase-0 scaffold session; until then there is nothing to build.
+# Phase-0 scaffold (§0.0): a flat `crates/` workspace, one crate per §X.Y
+# plan-family. The crates below are contracts-only skeletons — their public
+# trait surface is frozen against the owning plan-doc; bodies land in the
+# owning plan's Phase 1. See `plans/0.0-workspace-scaffold-blueprint.md`.
 
 [workspace]
 resolver = "2"
-members = []
+members = [
+    "crates/cap-token",
+    "crates/receipt",
+    "crates/cedar-policy",
+    "crates/memory",
+    "crates/runtime",
+]
 
 [workspace.package]
 edition = "2024"
-rust-version = "1.83"
+# Edition 2024 stabilized in Rust 1.85, so the MSRV floor is 1.85 (R-2
+# reconciliation in §0.0 — the seed's 1.83 predated the edition-2024 bump).
+rust-version = "1.85"
 license = "Apache-2.0"
 repository = "https://github.com/ArdurAI/ardur-agent"
+
+[workspace.dependencies]
+# --- External crates (pinned at the workspace level; crates opt in with
+#     `{ workspace = true }` so versions stay uniform). ---
+# Cap-tokens — Biscuit issuance + attenuation (crates/cap-token, §11.14).
+biscuit-auth = "5"
+# Cedar policy engine — wrapped by crates/cedar-policy (§11.0).
+cedar-policy = "4"
+# Bi-temporal time for crates/memory (§7.0).
+chrono = { version = "0.4", features = ["serde"] }
+# JWS-ES256 receipt signing for crates/receipt (§11.14).
+jsonwebtoken = "9"
+# Serialization.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Async runtime (crates/runtime, §1.0).
+tokio = { version = "1", features = ["full"] }
+# Tracing & observability.
+tracing = "0.1"
+# Error handling.
+anyhow = "1"
+thiserror = "2"
+# Stable IDs (UUIDv7 — time-ordered) for runtime turn/session ids.
+uuid = { version = "1", features = ["v7", "serde"] }
+
+# --- Internal crate path-deps (one per Phase-0 crate). Declared here so
+#     cross-crate wiring in Phase 1 references `{ workspace = true }`. ---
+ardur-cap-token = { path = "crates/cap-token" }
+ardur-receipt = { path = "crates/receipt" }
+ardur-cedar-policy = { path = "crates/cedar-policy" }
+ardur-memory = { path = "crates/memory" }
+ardur-runtime = { path = "crates/runtime" }
