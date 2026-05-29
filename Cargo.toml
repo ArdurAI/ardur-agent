@@ -18,6 +18,7 @@ members = [
     "crates/cli",
     "crates/messaging-gateway",
     "crates/tool-registry",
+    "crates/session-journals",
 ]
 
 [workspace.package]
@@ -75,6 +76,9 @@ rustyline = "14"
 # Black-box CLI assertions — drives the built `ardur` binary in integration
 # tests (crates/cli dev-dependency, §2.1).
 assert_cmd = "2"
+# Throwaway directories for the file-backed session-journal tests
+# (crates/session-journals dev-dependency, §7.10).
+tempfile = "3"
 
 # --- Internal crate path-deps (one per Phase-0 crate). Declared here so
 #     cross-crate wiring in Phase 1 references `{ workspace = true }`. ---
@@ -87,3 +91,4 @@ ardur-cost-gate = { path = "crates/cost-gate" }
 ardur-provider-runtime = { path = "crates/provider-runtime" }
 ardur-messaging-gateway = { path = "crates/messaging-gateway" }
 ardur-tool-registry = { path = "crates/tool-registry" }
+ardur-session-journals = { path = "crates/session-journals" }
