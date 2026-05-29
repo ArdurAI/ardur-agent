@@ -10,6 +10,6 @@ fn trait_objects_construct() {
     // `load` carries `where Self: Sized`, so the trait stays object-safe.
     let _bundle: &dyn PolicyBundle = &Dummy;
 
-    // Name-stability for the re-exported Cedar decision type.
+    // Name-stability for the crate's own decision type.
     let _decision: Option<Decision> = None;
 }
