@@ -22,9 +22,21 @@ target
 
 # Ardur project-specific excludes
 references/            # vendored upstream code
-architect/sessions/   # private session journals
 /Volumes/
 /Users/
 .DS_Store
 tmp/
 *.swp
+
+# Agent / editor workspace state
+.claude/
+.obsidian/
+
+# Internal planning & scratch (not part of the public repo)
+architect/
+plans/
+dev-workspace/
+
+# Local nested clones / backups
+ardur-agent/
+ardur-agent.mirror.backup/
