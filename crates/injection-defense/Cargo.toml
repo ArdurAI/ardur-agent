@@ -35,3 +35,6 @@ ardur-messaging-gateway = { workspace = true }
 [dev-dependencies]
 # The trait surface is async; integration tests drive it on a Tokio runtime.
 tokio = { workspace = true }
+# The cross-crate E2E test builds a real `IncomingMessage`, whose `message_id`
+# is a UUID.
+uuid = { workspace = true }
