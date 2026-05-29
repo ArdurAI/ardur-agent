@@ -13,8 +13,10 @@
 //!   the [`FinishReason`] taxonomy, [`Usage`] token counts, and the
 //!   [`CostEnvelope`] budget ceiling.
 //! - [`ProviderRegistry`] — name→provider resolution keyed by [`ProviderId`].
-//! - [`AnthropicProvider`] — the Anthropic backend, a deterministic stub in
-//!   Phase 1.
+//! - [`AnthropicProvider`] — the Anthropic backend. Phase 1 ships a real
+//!   Messages-API HTTP client via [`AnthropicProvider::new`] /
+//!   [`AnthropicProvider::from_env`]; [`AnthropicProvider::stub`] retains the
+//!   deterministic placeholder for network-free tests.
 //! - [`RateCard`] — versioned pricing that turns [`Usage`] into a billed
 //!   [`CostTuple`].
 //! - [`ProviderError`] — the crate's single typed-error surface.
@@ -24,9 +26,9 @@
 //! for the prompt, the registry key, and the billed cost — rather than
 //! redefining placeholders that would later have to be reconciled.
 //!
-//! Phase 2 (see the inline `// TODO §3.0 Phase 2:` markers) adds the live HTTP
-//! path, cost-envelope enforcement at admission, streaming, and request
-//! idempotency.
+//! Phase 2 (see the inline `// TODO §3.0 Phase 2:` markers) adds streaming,
+//! `tool_use` parsing, cost-envelope enforcement at admission, multi-turn cost
+//! projection, and request idempotency.
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
