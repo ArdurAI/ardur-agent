@@ -16,7 +16,7 @@ fn req() -> CompletionRequest {
 
 #[tokio::test]
 async fn stub_returns_fixed_completion() {
-    let provider = AnthropicProvider::new("sk-test", ModelId::new("claude-opus-4-8"));
+    let provider = AnthropicProvider::stub(ModelId::new("claude-opus-4-8"));
 
     let resp = provider.complete(req()).await.expect("stub completes");
 
