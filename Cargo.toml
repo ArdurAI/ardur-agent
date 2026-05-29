@@ -20,6 +20,7 @@ members = [
     "crates/tool-registry",
     "crates/session-journals",
     "crates/multi-agent",
+    "crates/injection-defense",
 ]
 
 [workspace.package]
@@ -98,3 +99,4 @@ ardur-messaging-gateway = { path = "crates/messaging-gateway" }
 ardur-tool-registry = { path = "crates/tool-registry" }
 ardur-session-journals = { path = "crates/session-journals" }
 ardur-multi-agent = { path = "crates/multi-agent" }
+ardur-injection-defense = { path = "crates/injection-defense" }

@@ -1,0 +1,37 @@
+[package]
+name = "ardur-injection-defense"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The InjectionFilter trait is async (Phase 2 swaps the rule engine for an
+# ML-backed scanner behind the same object-safe surface).
+async-trait = { workspace = true }
+# Typed scan/compile failure surfaces.
+thiserror = { workspace = true }
+# Pattern matching is the whole of Phase 1 — the built-in injection signatures
+# are compiled regexes held in a `RegexSet`-style table.
+regex = { workspace = true }
+# The built-in pattern table compiles once and is shared across filters.
+once_cell = { workspace = true }
+# ScannableContent::ToolOutput carries an arbitrary tool result as JSON; the
+# scanner stringifies it to match against.
+serde_json = { workspace = true }
+# ScanResult / InjectionFlag / Verdict are serializable so a verdict can be
+# folded into a §11.14 receipt.
+serde = { workspace = true }
+# Non-poisoning locks for the filter registry's interior mutability.
+parking_lot = { workspace = true }
+# Internal-error escape hatch (`FilterError::Internal`).
+anyhow = { workspace = true }
+# Shared newtypes — ToolId / ChannelId are owned by the tool + messaging layers;
+# re-exported so a scannable tool output / channel source shares one schema.
+ardur-tool-registry = { workspace = true }
+ardur-messaging-gateway = { workspace = true }
+
+[dev-dependencies]
+# The trait surface is async; integration tests drive it on a Tokio runtime.
+tokio = { workspace = true }
