@@ -1,85 +1,39 @@
-//! ardur-runtime — the §1.0 runtime foundation: the chat runtime, the typed
-//! command bus, and the Session/Turn domain types every other crate plugs
+//! ardur-runtime — the §1.0 runtime foundation: the interactive chat runtime,
+//! the typed command bus, and the Session domain type every other crate plugs
 //! into.
 //!
-//! Plan family: §1.0 (`plans/1.0-phase-one-runtime-foundation-plan.md`).
+//! Plan family: §1.0 (`plans/1.0-runtime-foundation-blueprint.md`).
 //!
-//! PHASE 0: contracts only. No implementation bodies — every trait method is
-//! `unimplemented!()`. The public trait surface is FROZEN against §1.0;
-//! widening it is a §0.0 amendment. Bodies land in §1.0 Phase 1 (the first
-//! real implementation work after this scaffold).
+//! # Phase 1 (this crate)
+//!
+//! - [`ChatRuntime`] / [`InMemoryRuntime`] — submit a batch of [`ChatMessage`]s
+//!   ([`SubmitRequest`]) to run one turn ([`SubmitResult`]); the in-memory
+//!   runtime echoes the last user message, mints a placeholder [`ReceiptId`],
+//!   and charges a zeroed [`CostTuple`].
+//! - [`CommandBus`] / [`InMemoryCommandBus`] / [`Command`] — a registry of
+//!   named command handlers dispatched against a [`CommandContext`].
+//! - [`Session`] — a stable [`SessionId`], the bound [`CapTokenRef`], and the
+//!   ordered [`ChatMessage`] history.
+//! - [`RuntimeError`] — the crate's single typed-error surface.
+//!
+//! The newtypes [`CapTokenRef`], [`ReceiptId`], [`ProviderId`], and
+//! [`CostTuple`] are local Phase-1 placeholders; the inline
+//! `// TODO §1.0 Phase 2:` markers point at the cross-crate re-exports
+//! (cap-token, receipt) that replace them once the runtime is wired to its
+//! siblings.
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
-use std::future::Future;
+mod command;
+mod error;
+mod runtime;
+mod session;
+mod types;
 
-use anyhow::Result;
-use uuid::Uuid;
-
-/// A message submitted by the user to begin or continue a turn.
-#[derive(Clone, Debug)]
-pub struct UserMessage(pub String);
-
-/// The stable, time-ordered identifier of a single turn (UUIDv7).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct TurnId(pub Uuid);
-
-/// The stable, time-ordered identifier of a session (UUIDv7).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct SessionId(pub Uuid);
-
-/// A typed command dispatched through the [`CommandBus`]. The concrete
-/// command variants land in §1.0 Phase 1.
-#[derive(Clone, Debug, Default)]
-pub struct Command {
-    // TODO(§1.0 Phase 1): the typed command envelope (verb + payload + scope).
-}
-
-/// The receipt returned by the bus acknowledging a dispatched [`Command`].
-#[derive(Clone, Debug, Default)]
-pub struct CommandReceipt {
-    // TODO(§1.0 Phase 1): accepted/rejected + the emitted receipt hash.
-}
-
-/// A single request/response cycle within a [`Session`].
-#[derive(Clone, Debug)]
-pub struct Turn {
-    /// The turn's stable identifier.
-    pub id: TurnId,
-    // TODO(§1.0 Phase 1): request, response, receipts, cost.
-}
-
-/// A conversational session: a stable id plus its ordered turns. The cap-token
-/// binding and the full history model are added in §1.0 Phase 1.
-#[derive(Clone, Debug)]
-pub struct Session {
-    /// The session's stable identifier.
-    pub id: SessionId,
-    /// The turns recorded in this session, in order.
-    pub turns: Vec<Turn>,
-}
-
-/// The interactive chat runtime: submit a user message to start a turn, or
-/// cancel an in-flight one.
-pub trait ChatRuntime {
-    /// Submit a user message, returning the id of the turn it begins.
-    ///
-    /// This is a required method: its `impl Future` return type cannot be
-    /// satisfied by an `unimplemented!()` default body, so the contract is
-    /// expressed as a bare signature rather than a stub.
-    fn submit(&self, message: UserMessage) -> impl Future<Output = Result<TurnId>>;
-    /// Cancel an in-flight turn by id.
-    fn cancel(&self, turn: TurnId) -> Result<()> {
-        let _ = turn;
-        unimplemented!("Phase 0 contract — body lands in §1.0 Phase 1")
-    }
-}
-
-/// The typed command bus: dispatches a [`Command`] and returns its receipt.
-pub trait CommandBus {
-    /// Dispatch a command, returning the bus's acknowledgement receipt.
-    fn dispatch(&self, command: Command) -> Result<CommandReceipt> {
-        let _ = command;
-        unimplemented!("Phase 0 contract — body lands in §1.0 Phase 1")
-    }
-}
+pub use command::{Command, CommandBus, CommandContext, CommandResult, InMemoryCommandBus};
+pub use error::RuntimeError;
+pub use runtime::{ChatRuntime, InMemoryRuntime, SubmitRequest, SubmitResult};
+pub use session::Session;
+pub use types::{
+    CapTokenRef, ChatMessage, CostTuple, ProviderId, ReceiptId, Role, SessionId, TurnId,
+};
