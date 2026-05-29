@@ -19,6 +19,7 @@ members = [
     "crates/messaging-gateway",
     "crates/tool-registry",
     "crates/session-journals",
+    "crates/multi-agent",
 ]
 
 [workspace.package]
@@ -79,6 +80,10 @@ assert_cmd = "2"
 # Throwaway directories for the file-backed session-journal tests
 # (crates/session-journals dev-dependency, §7.10).
 tempfile = "3"
+# Concurrent future joining — `join_all` drives the multi-agent parallel-asks
+# test without spawning (the `?Send` runtime cannot move across threads)
+# (crates/multi-agent dev-dependency, §5.0).
+futures = "0.3"
 
 # --- Internal crate path-deps (one per Phase-0 crate). Declared here so
 #     cross-crate wiring in Phase 1 references `{ workspace = true }`. ---
@@ -92,3 +97,4 @@ ardur-provider-runtime = { path = "crates/provider-runtime" }
 ardur-messaging-gateway = { path = "crates/messaging-gateway" }
 ardur-tool-registry = { path = "crates/tool-registry" }
 ardur-session-journals = { path = "crates/session-journals" }
+ardur-multi-agent = { path = "crates/multi-agent" }
