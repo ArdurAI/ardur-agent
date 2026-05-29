@@ -1,0 +1,23 @@
+[package]
+name = "ardur-cap-token"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Cap-tokens are Biscuits: Ed25519 issuance, offline block-append attenuation,
+# and Datalog-check verification. KeyPair/PublicKey are Ed25519, so no separate
+# ed25519 dependency is needed.
+biscuit-auth = { workspace = true }
+# issue/attenuate keep the Phase-0 anyhow::Result surface; verification uses the
+# typed CapTokenError below.
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+# The issued claims travel as JSON in the (signed) authority-block context.
+serde_json = { workspace = true }
+# Workspace pins v7; cap-token ids are v4 (random) per §11.14 Phase 1, so opt v4
+# in on top of the shared pin (Cargo unifies the feature set).
+uuid = { workspace = true, features = ["v4"] }

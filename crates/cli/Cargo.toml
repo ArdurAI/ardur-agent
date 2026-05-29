@@ -1,0 +1,55 @@
+[package]
+name = "ardur-cli"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# The `ardur` binary; the crate also exposes a library so the chat engine and
+# command handlers are unit/integration-testable without spawning a process.
+[[bin]]
+name = "ardur"
+path = "src/main.rs"
+
+[lib]
+name = "ardur_cli"
+path = "src/lib.rs"
+
+[dependencies]
+# §1.0 runtime — the ChatRuntime + CommandBus + Session this REPL drives.
+ardur-runtime = { workspace = true }
+# §11.14 cap-tokens — the CliError::CapToken surface and the verified-token
+# types the chat session authorizes turns against (Phase 2 wiring seam).
+ardur-cap-token = { workspace = true }
+# §11.14 receipts — re-exported here so the chat path can later attach a signed
+# receipt id to each turn (Phase 2).
+ardur-receipt = { workspace = true }
+# §3.0 provider runtime — the ProviderRegistry + Anthropic stub the engine wires.
+ardur-provider-runtime = { workspace = true }
+# §11.14 cost gate — the budget store + admission gate every turn routes through.
+ardur-cost-gate = { workspace = true }
+
+# CLI surface.
+clap = { workspace = true }
+# Multi-thread runtime + sync primitives drive the async submit/admit path from
+# the synchronous `run_chat` entrypoint.
+tokio = { workspace = true }
+rustyline = { workspace = true }
+
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+# The cost gate keys admission on a UUIDv4 cap-token id; the workspace pins v7,
+# so opt v4 in on top (Cargo unifies the feature set).
+uuid = { workspace = true, features = ["v4"] }
+
+[dev-dependencies]
+# Integration tests are a separate crate; they re-declare the deps they name.
+assert_cmd = { workspace = true }
+tokio = { workspace = true }
+ardur-runtime = { workspace = true }
+ardur-cost-gate = { workspace = true }

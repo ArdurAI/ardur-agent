@@ -1,10 +1,6 @@
-# CI skeleton for Ardur.
-#
-# NOTE: The Rust workspace is intentionally empty right now (members = []),
-# pending the §0.0 Phase-0 scaffold. Until crates land, the cargo steps below
-# have nothing to compile and this workflow is EXPECTED TO FAIL. That is by
-# design — it is wired up ahead of the code so it goes green the moment the
-# first crate is added. Branch protection does NOT require these checks yet.
+# CI for Ardur — the four-stage gauntlet (fmt → clippy → check → test),
+# ordered cheapest-first so a formatting failure short-circuits before the
+# expensive test compile. Matrix on {ubuntu, macos} × stable. See §0.0.
 
 name: CI
 
@@ -14,14 +10,19 @@ on:
   pull_request:
     branches: [main, dev]
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  check:
-    name: check / fmt / clippy / test
+  gauntlet:
+    name: ${{ matrix.os }} / stable
+    runs-on: ${{ matrix.os }}
     strategy:
+      # Don't let a macOS-only failure mask a Linux pass (and vice-versa).
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
 
@@ -30,14 +31,16 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      - name: cargo fmt
-        run: cargo fmt --all -- --check
+      - uses: Swatinem/rust-cache@v2
 
-      - name: cargo check
-        run: cargo check --workspace --all-targets
+      - name: cargo fmt
+        run: cargo fmt --all --check
 
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo check
+        run: cargo check --workspace --all-targets
 
       - name: cargo test
         run: cargo test --workspace

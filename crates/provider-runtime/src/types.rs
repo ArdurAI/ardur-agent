@@ -1,0 +1,166 @@
+//! The values a provider call is expressed in: the request/response envelopes,
+//! the token/budget accounting types, and the finish-reason taxonomy.
+//!
+//! [`ChatMessage`](ardur_runtime::ChatMessage),
+//! [`Role`](ardur_runtime::Role), and [`CostTuple`](ardur_runtime::CostTuple)
+//! are re-exported from `ardur-runtime` (see the crate root) rather than
+//! redefined here.
+
+use ardur_runtime::ChatMessage;
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+/// Identifier of a concrete model offered by a provider (e.g.
+/// `"claude-opus-4-8"`). Opaque to this layer — each provider validates it.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ModelId(pub String);
+
+impl ModelId {
+    /// Wrap a model name.
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+}
+
+impl std::fmt::Display for ModelId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Caller-supplied correlation id for a single completion request (UUIDv4).
+///
+/// It travels with the request so logs, receipts, and retries can be tied back
+/// to one logical call.
+// TODO §3.0 Phase 2: use this as the idempotency key the HTTP path replays on,
+// so a retried request is de-duplicated upstream rather than re-billed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct RequestId(pub Uuid);
+
+impl RequestId {
+    /// Mint a fresh, random request id.
+    #[must_use]
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+}
+
+impl Default for RequestId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The token counts a provider reports for one completion.
+///
+/// This is the *raw* usage the provider billed; pricing it into a
+/// [`CostTuple`](ardur_runtime::CostTuple) is the [`RateCard`](crate::RateCard)'s
+/// job.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Usage {
+    /// Prompt/input tokens consumed.
+    pub tokens_in: u32,
+    /// Completion/output tokens generated.
+    pub tokens_out: u32,
+}
+
+/// The cost ceiling a caller is willing to spend on a request.
+///
+/// A `None` field means that dimension is unbounded. Phase 1 records the
+/// envelope but does not enforce it.
+// TODO §3.0 Phase 2: enforce the envelope at admission — price the projected
+// usage against the rate card and reject with
+// [`ProviderError::CostCeilingExceeded`](crate::ProviderError::CostCeilingExceeded)
+// before dispatching the upstream call.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CostEnvelope {
+    /// Hard ceiling on monetary cost, in whole US cents.
+    pub max_cents: Option<u64>,
+    /// Hard ceiling on total (input + output) tokens.
+    pub max_total_tokens: Option<u64>,
+}
+
+impl CostEnvelope {
+    /// An envelope with no ceiling on any dimension.
+    #[must_use]
+    pub fn unbounded() -> Self {
+        Self::default()
+    }
+}
+
+/// A model-requested tool invocation, surfaced via
+/// [`FinishReason::ToolUse`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ToolCall {
+    /// Provider-assigned id of this call, echoed back when returning the result.
+    pub id: String,
+    /// Name of the tool the model wants to run.
+    pub name: String,
+    /// Arguments the model passed, as raw JSON.
+    pub arguments: serde_json::Value,
+}
+
+/// Why a completion stopped generating.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum FinishReason {
+    /// The model emitted a natural end-of-turn.
+    Stop,
+    /// Generation hit the request's `max_tokens` ceiling.
+    MaxTokens,
+    /// One of the request's `stop_sequences` was produced (carries which one).
+    StopSequence(String),
+    /// The model is requesting one or more tool calls.
+    ToolUse(Vec<ToolCall>),
+    /// Generation aborted with a provider-reported error (carries the message).
+    Error(String),
+}
+
+/// One completion request handed to a [`Provider`](crate::Provider).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CompletionRequest {
+    /// Correlation id for logs, receipts, and retries.
+    pub request_id: RequestId,
+    /// The prompt: an ordered chat transcript.
+    pub messages: Vec<ChatMessage>,
+    /// The model to run the completion against.
+    pub model: ModelId,
+    /// Upper bound on output tokens to generate.
+    pub max_tokens: u32,
+    /// Sampling temperature.
+    pub temperature: f32,
+    /// Sequences that, if generated, halt the completion.
+    pub stop_sequences: Vec<String>,
+    /// The cost ceiling the caller authorizes for this request.
+    pub requested_cost_envelope: CostEnvelope,
+}
+
+impl CompletionRequest {
+    /// Build a request against `model` with a fresh [`RequestId`], an unbounded
+    /// [`CostEnvelope`], `temperature` 1.0, and no stop sequences.
+    pub fn new(messages: Vec<ChatMessage>, model: ModelId, max_tokens: u32) -> Self {
+        Self {
+            request_id: RequestId::new(),
+            messages,
+            model,
+            max_tokens,
+            temperature: 1.0,
+            stop_sequences: Vec::new(),
+            requested_cost_envelope: CostEnvelope::unbounded(),
+        }
+    }
+}
+
+/// One completion result returned by a [`Provider`](crate::Provider).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CompletionResponse {
+    /// The generated text.
+    pub content: String,
+    /// Why generation stopped.
+    pub finish_reason: FinishReason,
+    /// Raw token counts the provider billed.
+    pub usage: Usage,
+    /// The rate-card-priced cost of the call.
+    pub cost: ardur_runtime::CostTuple,
+    /// The untouched upstream response body, when retained for audit.
+    pub raw_provider_response: Option<serde_json::Value>,
+}
