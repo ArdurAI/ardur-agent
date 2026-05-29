@@ -156,6 +156,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ardur-messaging-gateway"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "ardur-runtime",
+ "async-trait",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "ardur-provider-runtime"
 version = "0.0.1"
 dependencies = [
