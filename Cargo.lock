@@ -210,6 +210,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ardur-tool-registry"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "ardur-runtime",
+ "async-trait",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "arrayvec"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

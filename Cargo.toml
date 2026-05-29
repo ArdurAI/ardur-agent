@@ -17,6 +17,7 @@ members = [
     "crates/provider-runtime",
     "crates/cli",
     "crates/messaging-gateway",
+    "crates/tool-registry",
 ]
 
 [workspace.package]
@@ -85,3 +86,4 @@ ardur-runtime = { path = "crates/runtime" }
 ardur-cost-gate = { path = "crates/cost-gate" }
 ardur-provider-runtime = { path = "crates/provider-runtime" }
 ardur-messaging-gateway = { path = "crates/messaging-gateway" }
+ardur-tool-registry = { path = "crates/tool-registry" }

@@ -1,0 +1,33 @@
+[package]
+name = "ardur-tool-registry"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The §1.0 runtime owns the shared value types a tool call speaks in —
+# CapTokenRef (the authorizing token), SessionId (the owning session), and
+# CostTuple (the billed cost). We re-export rather than redefine so the runtime
+# and the tool layer never drift into two incompatible schemas (§6.0).
+ardur-runtime = { workspace = true }
+# Object-safe `Tool::invoke` — async-trait boxes the returned future so
+# `dyn Tool` works as a registry value (§6.0).
+async-trait = { workspace = true }
+serde = { workspace = true }
+# Tool input/output payloads and JSON-Schema documents are untyped JSON.
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+# `ToolError::Internal` carries an opaque execution failure verbatim.
+anyhow = { workspace = true }
+# Workspace pins v7 (time-ordered ids); per-call invocation-correlation ids are
+# v4 (random) per §6.0 Phase 1, so opt v4 in on top of the shared pin (Cargo
+# unifies the feature set).
+uuid = { workspace = true, features = ["v4"] }
+
+[dev-dependencies]
+# Integration tests are a separate crate; the async `invoke` calls need a
+# runtime to poll them.
+tokio = { workspace = true }
+serde_json = { workspace = true }
