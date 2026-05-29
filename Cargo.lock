@@ -41,6 +41,10 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "biscuit-auth",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "uuid",
 ]
 
 [[package]]
