@@ -145,6 +145,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "ardur-injection-defense"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "ardur-messaging-gateway",
+ "ardur-tool-registry",
+ "async-trait",
+ "once_cell",
+ "parking_lot",
+ "regex",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "ardur-memory"
 version = "0.0.1"
 dependencies = [
