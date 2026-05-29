@@ -1,0 +1,31 @@
+[package]
+name = "ardur-provider-runtime"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The §1.0 runtime owns the shared value types a provider call speaks in —
+# ChatMessage/Role (the prompt), ProviderId (the registry key), and CostTuple
+# (the billed cost). We re-export rather than redefine so the runtime and the
+# provider layer never drift into two incompatible schemas.
+ardur-runtime = { workspace = true }
+# Object-safe `Provider::complete` — async-trait boxes the returned future so
+# `dyn Provider` works as a registry value (§3.0).
+async-trait = { workspace = true }
+serde = { workspace = true }
+# `raw_provider_response` carries the untouched upstream JSON; tool-call
+# arguments are JSON too.
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+# Workspace pins v7; provider request-correlation ids are v4 (random) per §3.0
+# Phase 1, so opt v4 in on top of the shared pin (Cargo unifies the feature set).
+uuid = { workspace = true, features = ["v4"] }
+
+[dev-dependencies]
+# Integration tests are a separate crate, so they re-declare the deps they name
+# directly. The async `complete` calls need a runtime to poll them.
+tokio = { workspace = true }
+serde_json = { workspace = true }

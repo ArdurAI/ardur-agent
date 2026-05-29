@@ -81,6 +81,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ardur-provider-runtime"
+version = "0.0.1"
+dependencies = [
+ "ardur-runtime",
+ "async-trait",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "ardur-receipt"
 version = "0.0.1"
 dependencies = [

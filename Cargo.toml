@@ -14,6 +14,7 @@ members = [
     "crates/memory",
     "crates/runtime",
     "crates/cost-gate",
+    "crates/provider-runtime",
 ]
 
 [workspace.package]
@@ -59,7 +60,8 @@ thiserror = "2"
 uuid = { version = "1", features = ["v7", "serde"] }
 # Non-poisoning sync primitives for the in-process memory store (crates/memory, §7.0).
 parking_lot = "0.12"
-# Async trait methods for the cost-admission gate + budget store (crates/cost-gate, §11.14).
+# Async trait methods — object-safe `Provider` trait (crates/provider-runtime,
+# §3.0) and the cost-admission gate + budget store (crates/cost-gate, §11.14).
 async-trait = "0.1"
 
 # --- Internal crate path-deps (one per Phase-0 crate). Declared here so
@@ -70,3 +72,4 @@ ardur-cedar-policy = { path = "crates/cedar-policy" }
 ardur-memory = { path = "crates/memory" }
 ardur-runtime = { path = "crates/runtime" }
 ardur-cost-gate = { path = "crates/cost-gate" }
+ardur-provider-runtime = { path = "crates/provider-runtime" }
