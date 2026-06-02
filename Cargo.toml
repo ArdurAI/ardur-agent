@@ -24,6 +24,7 @@ members = [
     "crates/injection-defense",
     "crates/fused-runtime",
     "crates/slack-adapter",
+    "crates/server",
     "crates/e2e-tests",
 ]
 
@@ -75,6 +76,12 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Async runtime (crates/runtime, §1.0).
 tokio = { version = "1", features = ["full"] }
+# HTTP server framework backing the `ardur-server` binary (crates/server): the
+# Slack Events-API webhook listener + `/healthz`. `tower` supplies the
+# `ServiceExt::oneshot` the router is driven through in-process by the server's
+# integration tests (no real listener needed).
+axum = "0.7"
+tower = { version = "0.5", features = ["util"] }
 # Tracing & observability.
 tracing = "0.1"
 # Error handling.
@@ -125,3 +132,4 @@ ardur-multi-agent = { path = "crates/multi-agent" }
 ardur-injection-defense = { path = "crates/injection-defense" }
 ardur-fused-runtime = { path = "crates/fused-runtime" }
 ardur-slack-adapter = { path = "crates/slack-adapter" }
+ardur-server = { path = "crates/server" }
