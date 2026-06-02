@@ -21,6 +21,7 @@ members = [
     "crates/session-journals",
     "crates/multi-agent",
     "crates/injection-defense",
+    "crates/e2e-tests",
 ]
 
 [workspace.package]

@@ -145,6 +145,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "ardur-e2e-tests"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "ardur-cap-token",
+ "ardur-cedar-policy",
+ "ardur-cli",
+ "ardur-cost-gate",
+ "ardur-injection-defense",
+ "ardur-memory",
+ "ardur-messaging-gateway",
+ "ardur-multi-agent",
+ "ardur-provider-runtime",
+ "ardur-receipt",
+ "ardur-runtime",
+ "ardur-session-journals",
+ "ardur-tool-registry",
+ "assert_matches",
+ "biscuit-auth",
+ "parking_lot",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "ardur-injection-defense"
 version = "0.0.1"
 dependencies = [
@@ -308,6 +335,12 @@ dependencies = [
  "predicates-tree",
  "wait-timeout",
 ]
+
+[[package]]
+name = "assert_matches"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9b34d609dfbaf33d6889b2b7106d3ca345eacad44200913df5ba02bfd31d2ba9"
 
 [[package]]
 name = "async-trait"
