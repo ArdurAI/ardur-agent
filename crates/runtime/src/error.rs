@@ -26,6 +26,19 @@ pub enum RuntimeError {
     #[error("provider unavailable")]
     ProviderUnavailable,
 
+    /// A lifecycle hook vetoed the turn before it reached the provider. Carries
+    /// the id of the hook that blocked and the reason it gave. See §11.17
+    /// (`ardur-lifecycle-hooks`): a pre-submit hook returning `Veto` aborts the
+    /// submit, and the registry's first-veto-wins composition names the
+    /// blocking hook here so the caller can surface *which* policy fired.
+    #[error("turn vetoed by lifecycle hook `{hook_id}`: {reason}")]
+    VetoedByHook {
+        /// The `hook_id` of the hook that vetoed the turn.
+        hook_id: String,
+        /// The human-readable reason the hook gave for blocking.
+        reason: String,
+    },
+
     /// No command was registered under the dispatched name.
     #[error("command not found: {0}")]
     CommandNotFound(String),
