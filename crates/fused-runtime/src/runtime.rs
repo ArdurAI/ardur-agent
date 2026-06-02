@@ -1,0 +1,472 @@
+//! [`FusedRuntime`] — the fused [`ChatRuntime`] and its ten-stage [`submit`]
+//! pipeline. See the crate root for the stage list and the Option-B rationale.
+//!
+//! [`submit`]: FusedRuntime::submit
+
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use ardur_cap_token::{
+    BiscuitCapTokenVerifier, CapToken, CapTokenError, CapTokenVerifier, PublicKey, RequiredCaveats,
+};
+use ardur_cedar_policy::{
+    ActionRef, CedarPolicyBundle, Decision, EvaluationContext, PolicyBundle, PrincipalRef,
+    ResourceRef,
+};
+use ardur_cost_gate::{
+    AdmissionError, AdmissionRequest, Clock, CostAdmissionGate, CostEnvelope,
+    CostTuple as GateCostTuple, HolderId as GateHolderId, InMemoryCostAdmissionGate,
+    ModelId as GateModelId, ProviderId as GateProviderId, Reservation, Sha256Digest as GateSha256,
+    TokenId as GateTokenId,
+};
+use ardur_lifecycle_hooks::{
+    ErrorCtx, HookError, HookRegistry, LifecyclePhase, PostReceiptCtx, PreSubmitCtx,
+    PreSubmitOutcome, RevokeCtx,
+};
+use ardur_memory::MemoryRuntime;
+use ardur_provider_runtime::{
+    CompletionRequest, CompletionResponse, ModelId, Provider, ProviderError,
+};
+use ardur_receipt::{Es256SigningKey, ReceiptBody, ReceiptSigner, Sha256Digest, VerbObject};
+use ardur_runtime::{
+    CapTokenRef, ChatMessage, ChatRuntime, CostTuple as RuntimeCostTuple, ReceiptId, Role,
+    RuntimeError, SessionId, SubmitRequest, SubmitResult,
+};
+use ardur_session_journals::{JournalEntry, SessionJournal};
+use parking_lot::Mutex;
+
+use crate::shared::{SharedBudget, SharedDenyList};
+
+/// The receipt verb minted for a completed turn (`verb.object.state.vN`).
+pub(crate) const COMPLETION_VERB: &str = "llm.completion.minted.v1";
+
+/// A [`ChatRuntime`] that fuses every Phase-1 substrate crate behind one
+/// [`submit`](FusedRuntime::submit). Build it with
+/// [`FusedRuntimeBuilder`](crate::FusedRuntimeBuilder).
+pub struct FusedRuntime {
+    pub(crate) cap_root: PublicKey,
+    pub(crate) verifier: BiscuitCapTokenVerifier<SharedDenyList>,
+    pub(crate) deny: SharedDenyList,
+    pub(crate) audience: String,
+    pub(crate) tool: String,
+    pub(crate) cost_units: u64,
+    pub(crate) clock: Arc<dyn Clock>,
+    pub(crate) policies: CedarPolicyBundle,
+    pub(crate) principal: PrincipalRef,
+    pub(crate) action: ActionRef,
+    pub(crate) resource: ResourceRef,
+    pub(crate) cedar_attributes: serde_json::Value,
+    pub(crate) provider: Arc<dyn Provider>,
+    pub(crate) model: ModelId,
+    pub(crate) max_tokens: u32,
+    pub(crate) receipt_key: Es256SigningKey,
+    pub(crate) verb: VerbObject,
+    pub(crate) gate: InMemoryCostAdmissionGate<SharedBudget>,
+    pub(crate) budget: SharedBudget,
+    pub(crate) gate_provider_id: GateProviderId,
+    pub(crate) gate_model_id: GateModelId,
+    pub(crate) envelope: CostEnvelope,
+    pub(crate) registry: Arc<HookRegistry>,
+    pub(crate) memory: Option<Arc<dyn MemoryRuntime + Send + Sync>>,
+    pub(crate) journal: Option<Arc<dyn SessionJournal>>,
+    pub(crate) chain_tail: Mutex<Option<Sha256Digest>>,
+    pub(crate) receipt_log: Option<PathBuf>,
+}
+
+impl FusedRuntime {
+    /// The hook registry threaded through every turn.
+    #[must_use]
+    pub fn registry(&self) -> &Arc<HookRegistry> {
+        &self.registry
+    }
+
+    /// The holder's remaining budget, or `None` if the holder was never
+    /// provisioned. Reads the *same* ledger the cost gate reserves against, so a
+    /// test can confirm no reservation was stranded.
+    pub async fn remaining_budget(&self, holder: &GateHolderId) -> Option<GateCostTuple> {
+        ardur_cost_gate::BudgetStore::current_balance(&self.budget, holder)
+            .await
+            .ok()
+    }
+
+    /// Revoke a capability token mid-session: add its revocation ids to the
+    /// shared deny-list (so the next turn carrying it fails at stage 1 with
+    /// [`RuntimeError::CapDenied`]) and fire `on_revoke` across the registry.
+    pub async fn revoke_cap_token(
+        &self,
+        session_id: SessionId,
+        cap_token: CapTokenRef,
+        revocation_reason: impl Into<String>,
+    ) -> Result<Vec<HookError>, RuntimeError> {
+        let token = CapToken::from_base64(&cap_token.0, &self.cap_root).map_err(|e| {
+            RuntimeError::CapDenied {
+                reason: format!("revoke: {e}"),
+            }
+        })?;
+        self.deny.revoke_token(&token);
+        let ctx = RevokeCtx {
+            session_id,
+            cap_token_id: &cap_token,
+            revocation_reason: revocation_reason.into(),
+        };
+        Ok(self.registry.run_revoke(&ctx).await)
+    }
+
+    /// Fire `on_error` across the registry, swallowing hook-side errors (an
+    /// error hook that itself fails must not mask the original failure).
+    async fn fire_error(
+        &self,
+        session_id: SessionId,
+        phase: LifecyclePhase,
+        error: &(dyn std::error::Error + '_),
+    ) {
+        let ctx = ErrorCtx {
+            session_id,
+            phase,
+            error,
+        };
+        let _ = self.registry.run_error(&ctx).await;
+    }
+
+    /// Release a reservation on an error path — finalize it to zero actual cost
+    /// so the gate refunds the entire hold. Best-effort: a failure here cannot
+    /// be acted on (the turn is already aborting), and an un-refunded hold lapses
+    /// on the gate's TTL regardless.
+    async fn release(&self, reservation: Reservation) {
+        let _ = self.gate.finalize(reservation, GateCostTuple::ZERO).await;
+    }
+
+    /// Append a signed receipt's compact JWS to the durable receipt log
+    /// (one line, fsynced), if a log path is configured.
+    fn persist_receipt(&self, jws_compact: &str) -> std::io::Result<()> {
+        let Some(path) = &self.receipt_log else {
+            return Ok(());
+        };
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
+        writeln!(file, "{jws_compact}")?;
+        // fsync the line so the chain survives a crash — the same durability
+        // contract the session journal makes for its entries.
+        file.sync_all()
+    }
+}
+
+impl ChatRuntime for FusedRuntime {
+    async fn submit(&self, req: SubmitRequest) -> Result<SubmitResult, RuntimeError> {
+        let session_id = req.session_id;
+        let now_ms = self.clock.now_ms();
+        let now_unix = now_ms / 1000;
+
+        // ---- 1. cap-token: parse + verify against the root, audience, tool,
+        //         and deny-list.
+        if req.cap_token.0.is_empty() {
+            let err = RuntimeError::CapTokenMissing;
+            self.fire_error(session_id, LifecyclePhase::Submit, &err)
+                .await;
+            return Err(err);
+        }
+        let token = match CapToken::from_base64(&req.cap_token.0, &self.cap_root) {
+            Ok(token) => token,
+            Err(e) => {
+                let err = RuntimeError::CapDenied {
+                    reason: e.to_string(),
+                };
+                self.fire_error(session_id, LifecyclePhase::Submit, &err)
+                    .await;
+                return Err(err);
+            }
+        };
+        let claims = match self.verifier.verify(
+            &token,
+            &self.cap_root,
+            &RequiredCaveats {
+                now_unix,
+                audience: self.audience.clone(),
+                tool: self.tool.clone(),
+                cost: self.cost_units,
+            },
+        ) {
+            Ok(claims) => claims,
+            Err(CapTokenError::Expired) => {
+                let err = RuntimeError::CapTokenExpired;
+                self.fire_error(session_id, LifecyclePhase::Submit, &err)
+                    .await;
+                return Err(err);
+            }
+            Err(other) => {
+                let err = RuntimeError::CapDenied {
+                    reason: other.to_string(),
+                };
+                self.fire_error(session_id, LifecyclePhase::Submit, &err)
+                    .await;
+                return Err(err);
+            }
+        };
+
+        // ---- 2. cedar-policy: authorize the turn.
+        match self.policies.evaluate(&EvaluationContext {
+            principal: self.principal.clone(),
+            action: self.action.clone(),
+            resource: self.resource.clone(),
+            attributes: self.cedar_attributes.clone(),
+        }) {
+            Decision::Allow { .. } => {}
+            Decision::Deny { reason, .. } => {
+                let err = RuntimeError::PolicyDenied { reason };
+                self.fire_error(session_id, LifecyclePhase::Submit, &err)
+                    .await;
+                return Err(err);
+            }
+            Decision::Indeterminate { reason } => {
+                let err = RuntimeError::PolicyDenied {
+                    reason: format!("indeterminate: {reason}"),
+                };
+                self.fire_error(session_id, LifecyclePhase::Submit, &err)
+                    .await;
+                return Err(err);
+            }
+        }
+
+        // ---- 3. cost-gate: bind the verified token to its holder, then reserve
+        //         the projected envelope.
+        let gate_token_id = GateTokenId(claims.token_id);
+        let holder = GateHolderId(claims.subject.0.clone());
+        self.gate.bind_token(gate_token_id, holder);
+        let request_digest = GateSha256::of(&serde_json::to_vec(&req.messages).unwrap_or_default());
+        let reservation = match self
+            .gate
+            .admit(AdmissionRequest {
+                cap_token_id: gate_token_id,
+                projected_envelope: self.envelope,
+                provider_id: self.gate_provider_id.clone(),
+                model_id: self.gate_model_id.clone(),
+                request_digest,
+            })
+            .await
+        {
+            Ok(reservation) => reservation,
+            Err(e) => {
+                let err = map_admission_error(e);
+                self.fire_error(session_id, LifecyclePhase::Submit, &err)
+                    .await;
+                return Err(err);
+            }
+        };
+
+        // ---- 4. pre-submit hooks. A veto aborts (releasing the reservation); a
+        //         replace swaps the request used from here on.
+        let base_request =
+            CompletionRequest::new(req.messages.clone(), self.model.clone(), self.max_tokens);
+        let pre_ctx = PreSubmitCtx {
+            session_id,
+            request: &base_request,
+            cap_token_id: &req.cap_token,
+            attempt: 1,
+        };
+        let request = match self.registry.run_pre_submit(&pre_ctx).await {
+            PreSubmitOutcome::Continue => base_request,
+            PreSubmitOutcome::Replaced { request } => request,
+            PreSubmitOutcome::Vetoed { hook_id, reason } => {
+                self.release(reservation).await;
+                return Err(RuntimeError::VetoedByHook {
+                    hook_id: hook_id.to_string(),
+                    reason,
+                });
+            }
+        };
+
+        // ---- 5. provider: real dispatch.
+        let response = match self.provider.complete(request).await {
+            Ok(response) => response,
+            Err(provider_err) => {
+                self.release(reservation).await;
+                self.fire_error(session_id, LifecyclePhase::Provider, &provider_err)
+                    .await;
+                return Err(map_provider_error(&provider_err));
+            }
+        };
+
+        // ---- 6. receipt: mint, chain onto the prior receipt, sign, persist.
+        let parent_hash = *self.chain_tail.lock();
+        let body = ReceiptBody {
+            receipt_id: uuid::Uuid::new_v4(),
+            parent_hash,
+            verb: self.verb.clone(),
+            issued_at: ardur_receipt::UnixTsMillis(now_ms),
+            subject: ardur_receipt::HolderId(claims.subject.0.clone()),
+            cap_token_id: ardur_receipt::TokenId(claims.token_id.to_string()),
+            payload_digest: Sha256Digest::of(response.content.as_bytes()),
+            cost: runtime_cost_to_receipt(&response.cost),
+        };
+        let signed = match ReceiptSigner::sign(body, &self.receipt_key) {
+            Ok(signed) => signed,
+            Err(e) => {
+                self.release(reservation).await;
+                self.fire_error(session_id, LifecyclePhase::Receipt, &e)
+                    .await;
+                return Err(RuntimeError::Internal(anyhow::anyhow!(
+                    "receipt mint failed: {e}"
+                )));
+            }
+        };
+        // Advance the chain tail to this receipt's JWS hash and persist the line
+        // before observers run, so the chain state is consistent the moment a
+        // post-receipt hook (or a crash) sees the receipt. We set `parent_hash`
+        // from the stored digest rather than via `ReceiptChain::append` because
+        // a restart resumes from a hash, not a reconstructable `SignedReceipt`.
+        *self.chain_tail.lock() = Some(Sha256Digest::of(signed.jws_compact().as_bytes()));
+        if let Err(e) = self.persist_receipt(signed.jws_compact()) {
+            self.fire_error(session_id, LifecyclePhase::Receipt, &e)
+                .await;
+        }
+        let receipt = signed.body().clone();
+
+        // ---- 7. post-receipt hooks (observational; the turn already happened).
+        let post_ctx = PostReceiptCtx {
+            session_id,
+            receipt: &receipt,
+            response: &response,
+            cost: response.cost,
+        };
+        for err in self.registry.run_post_receipt(&post_ctx).await {
+            let _ = err;
+        }
+
+        // ---- 8. cost-gate finalize: post the actual cost, refund the unspent
+        //         delta. A settlement failure auto-releases the hold inside the
+        //         gate, so we never strand the budget and never fail the
+        //         already-receipted turn over it.
+        let actual = runtime_cost_to_gate(&response.cost);
+        let _ = self.gate.finalize(reservation, actual).await;
+
+        // ---- 9. memory: record the turn as a bi-temporal fact. Non-fatal.
+        if let Some(memory) = &self.memory {
+            let record = turn_record(&claims.subject.0, &response, &receipt, now_ms);
+            if let Err(mem_err) = memory.record(record) {
+                self.fire_error(session_id, LifecyclePhase::MemoryWrite, &mem_err)
+                    .await;
+            }
+        }
+
+        // ---- 10. session-journal: append the user + assistant messages. The
+        //          backend fsyncs each entry. Non-fatal.
+        if let Some(journal) = &self.journal {
+            if let Some(prompt) = last_user_message(&req.messages) {
+                if let Err(e) = journal
+                    .append(JournalEntry::UserMessage {
+                        content: prompt.to_string(),
+                        at: now_ms,
+                    })
+                    .await
+                {
+                    self.fire_error(session_id, LifecyclePhase::JournalAppend, &e)
+                        .await;
+                }
+            }
+            if let Err(e) = journal
+                .append(JournalEntry::AssistantMessage {
+                    content: response.content.clone(),
+                    at: now_ms,
+                    receipt_id: ReceiptId(receipt.receipt_id),
+                })
+                .await
+            {
+                self.fire_error(session_id, LifecyclePhase::JournalAppend, &e)
+                    .await;
+            }
+        }
+
+        Ok(SubmitResult {
+            receipt_id: ReceiptId(receipt.receipt_id),
+            response: ChatMessage::assistant(response.content),
+            cost: response.cost,
+        })
+    }
+}
+
+/// Map a cost-gate admission failure onto the runtime's error surface. Every
+/// budget/ceiling rejection is a cost-ceiling outcome; a malformed binding or an
+/// internal fault degrade to their nearest runtime variant.
+fn map_admission_error(err: AdmissionError) -> RuntimeError {
+    match err {
+        AdmissionError::BudgetExhausted { .. }
+        | AdmissionError::PolicyDenied(_)
+        | AdmissionError::ReservationExpired => RuntimeError::CostCeilingExceeded,
+        AdmissionError::CapTokenInvalid => RuntimeError::CapDenied {
+            reason: "cost-gate could not resolve the cap-token to a holder".to_string(),
+        },
+        AdmissionError::ProviderNotAllowed(provider) => {
+            RuntimeError::Internal(anyhow::anyhow!("provider not allowed: {provider:?}"))
+        }
+        AdmissionError::Internal(inner) => RuntimeError::Internal(inner),
+    }
+}
+
+/// Map a provider failure onto the runtime's error surface.
+fn map_provider_error(err: &ProviderError) -> RuntimeError {
+    match err {
+        ProviderError::CostCeilingExceeded => RuntimeError::CostCeilingExceeded,
+        _ => RuntimeError::ProviderUnavailable,
+    }
+}
+
+/// Convert the runtime's `CostTuple` into the receipt crate's (identically
+/// shaped) `CostTuple`.
+fn runtime_cost_to_receipt(cost: &RuntimeCostTuple) -> ardur_receipt::CostTuple {
+    ardur_receipt::CostTuple {
+        tokens_in: cost.tokens_in,
+        tokens_out: cost.tokens_out,
+        cents: cost.cents,
+        wall_ms: cost.wall_ms,
+        attention_score: cost.attention_score,
+    }
+}
+
+/// Widen the runtime's `CostTuple` into the cost gate's, mapping the fractional
+/// attention score onto the gate's integer axis.
+fn runtime_cost_to_gate(cost: &RuntimeCostTuple) -> GateCostTuple {
+    GateCostTuple {
+        tokens_in: cost.tokens_in,
+        tokens_out: cost.tokens_out,
+        cents: cost.cents,
+        wall_ms: cost.wall_ms,
+        attention_score: cost.attention_score as u64,
+    }
+}
+
+/// Build the bi-temporal memory record for a completed turn.
+fn turn_record(
+    subject: &str,
+    response: &CompletionResponse,
+    receipt: &ReceiptBody,
+    now_ms: u64,
+) -> ardur_memory::MemoryRecord {
+    let now = ardur_memory::UnixTsMillis(now_ms);
+    let mut record = ardur_memory::MemoryRecord::new(
+        ardur_memory::HolderId(subject.to_string()),
+        ardur_memory::RecordKind::Observation,
+        serde_json::json!({
+            "response": response.content,
+            "receipt_id": receipt.receipt_id,
+        }),
+        now,
+        now,
+        None,
+        now,
+    );
+    record.source_receipt_id = Some(ardur_memory::ReceiptId(receipt.receipt_id));
+    record
+}
+
+/// The most recent user message in a transcript — the prompt journaled for the
+/// turn.
+fn last_user_message(messages: &[ChatMessage]) -> Option<&str> {
+    messages
+        .iter()
+        .rev()
+        .find(|m| matches!(m.role, Role::User))
+        .map(|m| m.content.as_str())
+}

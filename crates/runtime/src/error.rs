@@ -18,6 +18,32 @@ pub enum RuntimeError {
     #[error("capability token expired")]
     CapTokenExpired,
 
+    /// The capability token was rejected at verification — a forged or malformed
+    /// token, a revoked token, an audience/tool mismatch, or an exhausted budget.
+    /// Carries the verifier's reason. Distinct from [`CapTokenMissing`] (no token
+    /// at all) and [`CapTokenExpired`] (a once-valid token past its expiry): this
+    /// is a present token the authority *declined*. See §11.14 (`ardur-cap-token`)
+    /// and the Phase-2 fused runtime, which verifies the token before any other
+    /// stage runs.
+    ///
+    /// [`CapTokenMissing`]: RuntimeError::CapTokenMissing
+    /// [`CapTokenExpired`]: RuntimeError::CapTokenExpired
+    #[error("capability token denied: {reason}")]
+    CapDenied {
+        /// The human-readable reason the verifier gave for the denial.
+        reason: String,
+    },
+
+    /// A policy decision denied the turn. Carries the deciding engine's reason.
+    /// See §11.0 (`ardur-cedar-policy`): the fused runtime evaluates the turn
+    /// against the Cedar bundle after the cap-token verifies but before any
+    /// budget is reserved, so a `Deny` (or `Indeterminate`) surfaces here.
+    #[error("policy denied: {reason}")]
+    PolicyDenied {
+        /// The human-readable reason the policy engine gave for the denial.
+        reason: String,
+    },
+
     /// Admitting the turn would exceed the session's configured cost ceiling.
     #[error("cost ceiling exceeded")]
     CostCeilingExceeded,

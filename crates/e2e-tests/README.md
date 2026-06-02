@@ -10,10 +10,17 @@ journal persistence, and memory. The coverage gaps and the nine planned
 scenarios are catalogued in
 [`architect/backlog/e2e-test-coverage-gaps.md`](../../architect/backlog/e2e-test-coverage-gaps.md).
 
+Since Phase 2 there is a real fused entry point — `ardur_fused_runtime::FusedRuntime`,
+a `ChatRuntime` that drives all ten stages (cap-token → cedar → cost-gate →
+pre-submit hooks → provider → receipt → post-receipt hooks → finalize → memory →
+journal) behind one `submit`. Scenarios #2–#4 drive *it* rather than assembling
+the crates by hand the way #1 had to before the fused runtime existed.
+
 This crate ships **no public API** (`publish = false`). `src/lib.rs` exists only
 to host `fixtures`, the shared deterministic test helpers (temp roots, the
-cap-token root key, the receipt signing key, the stub provider, a permissive
-Cedar bundle).
+cap-token root key + issuer, the receipt signing key, the stub provider, a
+permissive Cedar bundle, a manual clock, a cap-token mint helper, and a
+pre-wired `fused_builder`).
 
 ## Running
 
@@ -36,6 +43,9 @@ All scenarios use the Anthropic **stub** provider and need no API key.
 
 ## Status
 
-Phase **2.E1 of 9**. Implemented: scenario #1 `cli_full_substrate_turn`.
-Remaining (#2–#9) are tracked in the backlog doc; #7 and #8 unblock after
+Implemented: scenario **#1** `cli_full_substrate_turn`, **#2**
+`cap_revocation_mid_session`, **#3** `cost_ceiling_exhaustion`, **#4**
+`receipt_chain_replay`. #2–#4 run on the Phase-2 `FusedRuntime`.
+
+Remaining (#5–#9) are tracked in the backlog doc; #7 and #8 unblock after
 `cedar-policy` / `injection-defense` reach the call-path surfaces they need.

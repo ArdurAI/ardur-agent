@@ -7,15 +7,32 @@
 //! intent (`dev_cap_root`, `stub_provider`, `permissive_policies`) rather than
 //! a wall of builder boilerplate.
 
-use ardur_cap_token::{BiscuitCapTokenIssuer, KeyPair};
+use std::sync::Arc;
+
+use ardur_cap_token::{
+    BiscuitCapTokenIssuer, CapScope, CapTokenIssuer, HolderId as CapHolderId, KeyPair,
+};
 use ardur_cedar_policy::{CedarPolicyBundle, PolicyBundle, PolicySource};
-use ardur_provider_runtime::{AnthropicProvider, ModelId};
+use ardur_cost_gate::{Clock, CostTuple as GateCostTuple, HolderId as GateHolderId, ManualClock};
+use ardur_fused_runtime::FusedRuntimeBuilder;
+use ardur_provider_runtime::{AnthropicProvider, ModelId, Provider};
 use ardur_receipt::Es256SigningKey;
 use biscuit_auth::PrivateKey;
 use tempfile::TempDir;
 
 /// The model id the stub provider and scenarios complete against.
 pub const TEST_MODEL: &str = "claude-opus-4-8";
+
+/// The SPIFFE-style holder the fused-runtime scenarios run as.
+pub const TEST_HOLDER: &str = "spiffe://ardur/user/e2e";
+/// The audience the fused-runtime cap-tokens are scoped to.
+pub const AUDIENCE: &str = "ardur-cli";
+/// The tool/capability the fused-runtime turns exercise.
+pub const TOOL: &str = "chat.submit";
+/// A fixed "now" (seconds) for the cap-token caveats.
+pub const NOW_UNIX: u64 = 1_750_000_000;
+/// The same instant in milliseconds, for the cost-gate clock + timestamps.
+pub const NOW_MS: u64 = 1_750_000_000_000;
 
 /// A fixed 32-byte Ed25519 seed for the cap-token root key. A constant seed
 /// makes [`dev_cap_root`] return the same root key — and therefore the same
@@ -92,4 +109,70 @@ pub fn permissive_policies() -> CedarPolicyBundle {
         "permit(principal, action, resource);".to_string(),
     ))
     .expect("the permissive policy compiles")
+}
+
+/// A deterministic manual clock pinned at [`NOW_MS`], so the cost-gate's
+/// reservation expiry and the cap-token `now` caveat are race-free.
+#[must_use]
+pub fn dev_clock() -> Arc<dyn Clock> {
+    Arc::new(ManualClock::new(NOW_MS))
+}
+
+/// Mint a cap-token (base64) for [`TEST_HOLDER`], scoped to [`AUDIENCE`] /
+/// [`TOOL`], with the given expiry (seconds) and coarse budget.
+#[must_use]
+pub fn dev_cap_token(expires_unix: u64, budget_remaining: u64) -> String {
+    dev_cap_issuer()
+        .issue(
+            CapHolderId(TEST_HOLDER.to_string()),
+            CapScope {
+                audience: AUDIENCE.to_string(),
+                expires_unix,
+                budget_remaining,
+                tool_allowlist: vec![TOOL.to_string()],
+            },
+        )
+        .expect("the cap-token issues")
+        .to_base64()
+        .expect("the cap-token serializes")
+}
+
+/// A valid (well-funded, unexpired) cap-token for the fused-runtime scenarios.
+#[must_use]
+pub fn dev_valid_cap_token() -> String {
+    dev_cap_token(NOW_UNIX + 3_600, 1_000_000)
+}
+
+/// A [`FusedRuntimeBuilder`] pre-wired with the deterministic cap-token root, the
+/// permissive policy, the deterministic receipt key, the manual clock, the
+/// audience/tool, and a generous budget for [`TEST_HOLDER`]. Scenarios tweak the
+/// budget, envelope, memory, journal, and receipt-log as needed.
+#[must_use]
+pub fn fused_builder(provider: Arc<dyn Provider>) -> FusedRuntimeBuilder {
+    FusedRuntimeBuilder::new(
+        dev_cap_issuer().public_key(),
+        permissive_policies(),
+        provider,
+        dev_receipt_key(),
+        ModelId::new(TEST_MODEL),
+    )
+    .audience(AUDIENCE)
+    .tool(TOOL)
+    .clock(dev_clock())
+    .provision_budget(
+        GateHolderId(TEST_HOLDER.to_string()),
+        GateCostTuple {
+            tokens_in: 1_000_000_000,
+            tokens_out: 1_000_000_000,
+            cents: 1_000_000,
+            wall_ms: 1_000_000_000,
+            attention_score: 1_000_000_000,
+        },
+    )
+}
+
+/// The gate holder id for [`TEST_HOLDER`].
+#[must_use]
+pub fn gate_holder() -> GateHolderId {
+    GateHolderId(TEST_HOLDER.to_string())
 }
