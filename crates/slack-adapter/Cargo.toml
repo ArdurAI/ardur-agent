@@ -1,0 +1,68 @@
+# ardur-slack-adapter — the first real channel adapter behind the §4.0
+# `MessagingGateway` contract.
+#
+# Plan family: §4.1 (Slack adapter Phase 1). Phase 1 = bot-token send via
+# `chat.postMessage`, Events-API inbound with signing-secret HMAC verification +
+# replay protection, and the Slack API error → `GatewayError` mapping. OAuth,
+# threading, file/attachment offload, and reactions are Phase 2.
+#
+# §18.8 keeps this PR scoped to `crates/slack-adapter/**`, the cross-crate
+# scenario in `crates/e2e-tests/**`, and the root manifest.
+
+[package]
+name = "ardur-slack-adapter"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The §4.0 gateway owns every value type a delivery speaks in — the
+# `MessagingGateway` trait this adapter implements, plus `OutgoingMessage` /
+# `IncomingMessage` / `MessageReceipt` / `GatewayError` / `MessageTarget` /
+# `MessageBody`. Re-use rather than redefine so the adapter and the gateway
+# never drift into two schemas.
+ardur-messaging-gateway = { workspace = true }
+# `send_message` / `receive` are async trait methods; `async-trait` boxes the
+# futures so `SlackAdapter` stays object-safe behind `dyn MessagingGateway`.
+async-trait = { workspace = true }
+# Live Slack Web-API client. `rustls-tls` keeps TLS pure-Rust (no native-tls);
+# `json` carries the `chat.postMessage` request/response bodies.
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# `SlackError` is the crate's typed inbound/verify failure surface.
+thiserror = { workspace = true }
+# `SlackError::Internal` escape hatch + the `GatewayError::Internal(#[from]
+# anyhow::Error)` lowering.
+anyhow = { workspace = true }
+# Bot token + signing secret are held as `SecretString` so they never leak
+# through `Debug`/logs.
+secrecy = { workspace = true }
+# Signing-secret verification: HMAC-SHA256 over the Slack request basestring.
+hmac = { workspace = true }
+sha2 = { workspace = true }
+# Constant-time comparison of the computed vs. presented `v0=` signature.
+subtle = { workspace = true }
+# Hex-encode the HMAC digest to Slack's `v0=<hex>` wire form.
+hex = { workspace = true }
+# A parsed inbound message is assigned a fresh v4 correlation id (the workspace
+# pin is v7; opt v4 in on top, as provider-runtime does).
+uuid = { workspace = true, features = ["v4"] }
+
+[dev-dependencies]
+# The trait methods are async; integration tests drive them on a Tokio runtime.
+tokio = { workspace = true }
+# Mocks `chat.postMessage` so the outbound POST (Bearer auth + JSON body, error
+# status mapping) is asserted without a live Slack workspace.
+wiremock = { workspace = true }
+# The signed-event fixtures build their JSON bodies with the `json!` macro.
+serde_json = { workspace = true }
+# Integration tests are separate crates, so they re-declare the deps they name:
+# `secrecy` wraps the test bot token / signing secret, and `hmac`+`sha2`+`hex`
+# recompute a *valid* `v0=` signature in the shared test helper.
+secrecy = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }

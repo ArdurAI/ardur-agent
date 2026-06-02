@@ -40,6 +40,7 @@ ardur-runtime = { workspace = true }
 ardur-session-journals = { workspace = true }
 ardur-tool-registry = { workspace = true }
 ardur-injection-defense = { workspace = true }
+ardur-slack-adapter = { workspace = true }
 
 # `fixtures.rs` is compiled as part of the library, so the helpers it builds
 # (`tempfile::TempDir`, the deterministic biscuit root key) need their crates as
@@ -62,3 +63,10 @@ async-trait = { workspace = true }
 # substrate ids the scenarios assert on.
 uuid = { workspace = true }
 assert_matches = "1"
+# The §4.1 Slack scenario mocks `chat.postMessage`, wraps the test credentials
+# in `SecretString`, and recomputes a genuine `v0=` event signature.
+wiremock = { workspace = true }
+secrecy = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
