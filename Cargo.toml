@@ -58,7 +58,7 @@ sha2 = "0.10"
 # over the request basestring, hex-encoded, compared in constant time. `hmac`
 # pairs with the workspace `sha2`; `subtle` is the constant-time eq; `hex`
 # encodes the digest to Slack's `v0=...` wire form.
-hmac = "0.12"
+hmac = "0.13"
 subtle = "2"
 hex = "0.4"
 # Secret custody for the Slack bot token + signing secret (crates/slack-adapter,
