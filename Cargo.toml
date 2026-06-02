@@ -22,6 +22,7 @@ members = [
     "crates/session-journals",
     "crates/multi-agent",
     "crates/injection-defense",
+    "crates/slack-adapter",
     "crates/e2e-tests",
 ]
 
@@ -51,6 +52,16 @@ chrono = { version = "0.4", features = ["serde"] }
 p256 = { version = "0.13", features = ["ecdsa", "pkcs8", "pem"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 sha2 = "0.10"
+# Slack signing-secret verification (crates/slack-adapter, §4.1): HMAC-SHA256
+# over the request basestring, hex-encoded, compared in constant time. `hmac`
+# pairs with the workspace `sha2`; `subtle` is the constant-time eq; `hex`
+# encodes the digest to Slack's `v0=...` wire form.
+hmac = "0.12"
+subtle = "2"
+hex = "0.4"
+# Secret custody for the Slack bot token + signing secret (crates/slack-adapter,
+# §4.1) — keeps them out of Debug/log output behind `SecretString`.
+secrecy = "0.8"
 base64 = "0.22"
 regex = "1"
 once_cell = "1"
@@ -87,6 +98,10 @@ assert_cmd = "2"
 # Throwaway directories for the file-backed session-journal tests
 # (crates/session-journals dev-dependency, §7.10).
 tempfile = "3"
+# HTTP mock server — stands in for `chat.postMessage` so the Slack adapter's
+# outbound POST is asserted without a live workspace (crates/slack-adapter +
+# crates/e2e-tests dev-dependency, §4.1).
+wiremock = "0.6"
 # Concurrent future joining — `join_all` drives the multi-agent parallel-asks
 # test without spawning (the `?Send` runtime cannot move across threads)
 # (crates/multi-agent dev-dependency, §5.0).
@@ -107,3 +122,4 @@ ardur-tool-registry = { path = "crates/tool-registry" }
 ardur-session-journals = { path = "crates/session-journals" }
 ardur-multi-agent = { path = "crates/multi-agent" }
 ardur-injection-defense = { path = "crates/injection-defense" }
+ardur-slack-adapter = { path = "crates/slack-adapter" }
