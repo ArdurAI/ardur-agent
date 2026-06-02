@@ -22,6 +22,7 @@ members = [
     "crates/session-journals",
     "crates/multi-agent",
     "crates/injection-defense",
+    "crates/fused-runtime",
     "crates/slack-adapter",
     "crates/e2e-tests",
 ]
@@ -122,4 +123,5 @@ ardur-tool-registry = { path = "crates/tool-registry" }
 ardur-session-journals = { path = "crates/session-journals" }
 ardur-multi-agent = { path = "crates/multi-agent" }
 ardur-injection-defense = { path = "crates/injection-defense" }
+ardur-fused-runtime = { path = "crates/fused-runtime" }
 ardur-slack-adapter = { path = "crates/slack-adapter" }

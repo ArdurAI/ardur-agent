@@ -1,0 +1,61 @@
+# ardur-fused-runtime — the Phase-2 single entry point that fuses every Phase-1
+# substrate crate behind one `ChatRuntime::submit`.
+#
+# It sits at the *top* of the dependency graph: it depends on cap-token, cedar,
+# cost-gate, lifecycle-hooks, provider-runtime, receipt, memory, and
+# session-journals, and no substrate crate depends back on it. This is why the
+# fusion lives in its own crate rather than inside any single §X.Y plan-family's
+# crate (`ardur-lifecycle-hooks`'s `HookedRuntime` wires only provider→receipt→
+# memory, and mints genesis-only receipts) — see the crate-root docs for the
+# Option A vs Option B rationale.
+
+[package]
+name = "ardur-fused-runtime"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# §1.0 — the `ChatRuntime` trait this crate implements plus the
+# `SubmitRequest`/`SubmitResult` envelopes and the `RuntimeError` surface (incl.
+# the Phase-2 `CapDenied`/`PolicyDenied` variants a denial maps onto).
+ardur-runtime = { workspace = true }
+# §11.14 — Biscuit cap-token verification (stage 1).
+ardur-cap-token = { workspace = true }
+# §11.0 — the Cedar authorization decision (stage 2).
+ardur-cedar-policy = { workspace = true }
+# §11.14 — the four-stage cost-admission gate (stages 3 + 8).
+ardur-cost-gate = { workspace = true }
+# §11.17 — the hook framework reused for the pre-submit / post-receipt / error /
+# revoke moments (stages 4 + 7). The fused runtime reuses `HookRegistry`'s
+# composition rather than re-deriving them.
+ardur-lifecycle-hooks = { workspace = true }
+# §3.0 — the `Provider` the turn dispatches through (stage 5).
+ardur-provider-runtime = { workspace = true }
+# §11.14 — JWS-ES256 receipt minting + the hash chain (stage 6).
+ardur-receipt = { workspace = true }
+# §7.0 — the bi-temporal memory the completed turn is recorded into (stage 9).
+ardur-memory = { workspace = true }
+# §7.10 — the durable, fsync-ing session journal (stage 10).
+ardur-session-journals = { workspace = true }
+
+async-trait = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+# Non-poisoning interior mutability for the receipt-chain tail.
+parking_lot = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# Decoding persisted JWS payloads back into receipt bodies for cross-restart
+# chain verification (`SignedReceipt::from_parts` is crate-private to receipt).
+base64 = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
+
+[dev-dependencies]
+tokio = { workspace = true }
+tempfile = { workspace = true }
+serde_json = { workspace = true }
+assert_matches = "1"
+biscuit-auth = { workspace = true }

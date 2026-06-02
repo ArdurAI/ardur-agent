@@ -153,7 +153,9 @@ dependencies = [
  "ardur-cedar-policy",
  "ardur-cli",
  "ardur-cost-gate",
+ "ardur-fused-runtime",
  "ardur-injection-defense",
+ "ardur-lifecycle-hooks",
  "ardur-memory",
  "ardur-messaging-gateway",
  "ardur-multi-agent",
@@ -164,6 +166,7 @@ dependencies = [
  "ardur-slack-adapter",
  "ardur-tool-registry",
  "assert_matches",
+ "async-trait",
  "biscuit-auth",
  "hex",
  "hmac",
@@ -175,6 +178,33 @@ dependencies = [
  "tokio",
  "uuid",
  "wiremock",
+]
+
+[[package]]
+name = "ardur-fused-runtime"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "ardur-cap-token",
+ "ardur-cedar-policy",
+ "ardur-cost-gate",
+ "ardur-lifecycle-hooks",
+ "ardur-memory",
+ "ardur-provider-runtime",
+ "ardur-receipt",
+ "ardur-runtime",
+ "ardur-session-journals",
+ "assert_matches",
+ "async-trait",
+ "base64 0.22.1",
+ "biscuit-auth",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]
