@@ -92,7 +92,7 @@ clap = { version = "4", features = ["derive"] }
 # Tracing subscriber — the CLI installs the process-wide log formatter (§2.1).
 tracing-subscriber = "0.3"
 # Interactive line editor backing the chat REPL (crates/cli, §2.1).
-rustyline = "14"
+rustyline = "18"
 # Black-box CLI assertions — drives the built `ardur` binary in integration
 # tests (crates/cli dev-dependency, §2.1).
 assert_cmd = "2"
