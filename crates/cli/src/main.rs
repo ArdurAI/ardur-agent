@@ -21,6 +21,16 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Start an interactive chat session.
+    ///
+    /// By default this runs the full substrate: real LLM calls through the fused
+    /// runtime (cap-token verify, Cedar authorization, cost metering, signed
+    /// receipts, durable journals) over persistent state under `~/.ardur/`.
+    ///
+    /// REAL LLM CALLS COST REAL MONEY. Each session is capped by
+    /// `--budget-cents` (default 1000 = $10); the cap-token, receipt chain, and
+    /// journals persist across runs. With no ANTHROPIC_API_KEY set, the session
+    /// runs offline against a network-free stub provider. Pass `--echo` for the
+    /// legacy in-memory echo runtime — no provider, no cost, no persistent state.
     Chat(ChatArgs),
     /// Print the version and exit.
     Version,
