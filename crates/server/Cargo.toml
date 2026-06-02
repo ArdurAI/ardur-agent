@@ -1,0 +1,76 @@
+# ardur-server — the first deployable Ardur binary.
+#
+# Listens for Slack Events-API webhooks, routes each user message through the
+# fused Phase-2 runtime (cap-token → cedar → cost-gate → provider → receipt →
+# journal → memory), and posts the assistant's reply back to the channel via the
+# Slack adapter. The HTTP surface is two routes: `POST /slack/events` and
+# `GET /healthz`.
+#
+# §18.8 keeps this PR scoped to `crates/server/**`, the cross-crate scenario in
+# `crates/e2e-tests/**`, and the root manifest.
+
+[package]
+name = "ardur-server"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# A library (the boot sequence, the wired `AppState`, and the axum router) plus
+# the thin binary that boots it. Tests drive the library's `build_router` via
+# `tower::ServiceExt::oneshot` — no real socket required.
+[lib]
+name = "ardur_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ardur-server"
+path = "src/bin/ardur-server.rs"
+
+[dependencies]
+# The boot sequence wires every Phase-1/2 substrate crate behind the fused
+# runtime, then fronts it with the Slack adapter.
+ardur-fused-runtime = { workspace = true }
+ardur-slack-adapter = { workspace = true }
+ardur-provider-runtime = { workspace = true }
+ardur-cap-token = { workspace = true }
+ardur-cedar-policy = { workspace = true }
+ardur-cost-gate = { workspace = true }
+ardur-memory = { workspace = true }
+ardur-session-journals = { workspace = true }
+ardur-receipt = { workspace = true }
+ardur-runtime = { workspace = true }
+ardur-messaging-gateway = { workspace = true }
+
+# `ardur-cap-token` re-exports `KeyPair`/`PublicKey` but not `PrivateKey`, and
+# loading the persisted issuer key needs `PrivateKey::from_bytes_hex`. Pulled
+# directly, as `crates/e2e-tests` does for the same reason.
+biscuit-auth = { workspace = true }
+
+# HTTP server + the Slack bot-token / signing-secret custody type.
+axum = { workspace = true }
+tokio = { workspace = true }
+secrecy = { workspace = true }
+
+# Structured logging (env-driven `RUST_LOG`; JSON when `ARDUR_LOG_FORMAT=json`).
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+# The integration tests drive the router in-process with `oneshot`, mock
+# `chat.postMessage` with wiremock, and recompute a genuine `v0=` Slack
+# signature so the signed-request path is exercised without a live workspace.
+tower = { workspace = true }
+wiremock = { workspace = true }
+secrecy = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
