@@ -158,7 +158,7 @@ impl VetoHook {
     }
 }
 
-#[async_trait(?Send)]
+#[async_trait]
 impl LifecycleHook for VetoHook {
     async fn on_pre_submit(&self, _ctx: &PreSubmitCtx<'_>) -> HookDecision {
         HookDecision::Veto {
@@ -195,7 +195,7 @@ impl ReplaceHook {
     }
 }
 
-#[async_trait(?Send)]
+#[async_trait]
 impl LifecycleHook for ReplaceHook {
     async fn on_pre_submit(&self, ctx: &PreSubmitCtx<'_>) -> HookDecision {
         let new_request = CompletionRequest::new(
@@ -231,7 +231,7 @@ impl RedactingHook {
     }
 }
 
-#[async_trait(?Send)]
+#[async_trait]
 impl LifecycleHook for RedactingHook {
     async fn on_pre_submit(&self, ctx: &PreSubmitCtx<'_>) -> HookDecision {
         if !ctx
@@ -292,7 +292,7 @@ impl CapturingPostReceiptHook {
     }
 }
 
-#[async_trait(?Send)]
+#[async_trait]
 impl LifecycleHook for CapturingPostReceiptHook {
     async fn on_post_receipt(&self, ctx: &PostReceiptCtx<'_>) -> Result<(), HookError> {
         *self.captured.lock() = Some(Captured {

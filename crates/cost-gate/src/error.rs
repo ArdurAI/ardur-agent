@@ -4,6 +4,7 @@
 //! the store could not claim becomes a [`AdmissionError::BudgetExhausted`] with
 //! the request/available figures the store does not carry.
 
+use crate::HolderId;
 use crate::types::ProviderId;
 
 /// Why the gate refused (or could not complete) an admission.
@@ -44,6 +45,33 @@ pub enum AdmissionError {
     Internal(anyhow::Error),
 }
 
+/// Why provisioning a holder's budget (request-time top-up) failed.
+///
+/// Distinct from [`AdmissionError`]: provisioning happens *outside* the four
+/// admission stages — it tops a holder up before a later [`admit`] reserves
+/// against the new balance — so its one failure mode (the merge would breach the
+/// configured per-subject cap) is surfaced on its own surface rather than
+/// overloaded onto an admission verdict.
+///
+/// [`admit`]: crate::CostAdmissionGate::admit
+#[derive(Debug, thiserror::Error)]
+pub enum ProvisionError {
+    /// Merging the requested budget into the holder's balance would push it past
+    /// the gate's configured per-subject cap on the named dimension; the balance
+    /// was left unchanged.
+    #[error("provisioning {subject:?} would exceed the per-subject cap on `{dimension}`")]
+    OverCap {
+        /// The holder the top-up targeted.
+        subject: HolderId,
+        /// The cost dimension the merge would have breached.
+        dimension: &'static str,
+    },
+
+    /// An unexpected internal failure from the backing store.
+    #[error("internal provisioning error: {0}")]
+    Internal(anyhow::Error),
+}
+
 /// Why a [`BudgetStore`](crate::BudgetStore) operation failed.
 #[derive(Debug, thiserror::Error)]
 pub enum BudgetError {
@@ -56,6 +84,12 @@ pub enum BudgetError {
     /// the remaining balance can no longer cover the request).
     #[error("lost the race to reserve the budget")]
     RaceLost,
+
+    /// A [`provision_merge`](crate::BudgetStore::provision_merge) was refused
+    /// because the merged balance would exceed the supplied per-subject cap on
+    /// the named dimension; the balance was left unchanged.
+    #[error("provisioning would exceed the per-subject cap on `{0}`")]
+    OverProvisionCap(&'static str),
 
     /// An unexpected internal failure.
     #[error("internal budget-store error: {0}")]

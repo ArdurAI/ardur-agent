@@ -69,5 +69,5 @@ pub use builder::FusedRuntimeBuilder;
 pub use receipts::{
     PersistedReceipt, ReceiptChainError, load_persisted_chain, verify_persisted_chain,
 };
-pub use runtime::FusedRuntime;
+pub use runtime::{FusedRuntime, PerRequestProvisioning};
 pub use shared::{SharedBudget, SharedDenyList};

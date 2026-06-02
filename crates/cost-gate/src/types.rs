@@ -137,6 +137,39 @@ impl CostTuple {
             && self.attention_score >= need.attention_score
     }
 
+    /// Per-dimension saturating addition — the merge applied when a holder's
+    /// budget is topped up (request-time provisioning). Each axis clamps at
+    /// `u64::MAX` rather than wrapping, so a degenerate top-up can never silently
+    /// zero a balance.
+    pub fn saturating_add(&self, rhs: &CostTuple) -> CostTuple {
+        CostTuple {
+            tokens_in: self.tokens_in.saturating_add(rhs.tokens_in),
+            tokens_out: self.tokens_out.saturating_add(rhs.tokens_out),
+            cents: self.cents.saturating_add(rhs.cents),
+            wall_ms: self.wall_ms.saturating_add(rhs.wall_ms),
+            attention_score: self.attention_score.saturating_add(rhs.attention_score),
+        }
+    }
+
+    /// The first dimension on which `self` strictly exceeds `ceiling`, or `None`
+    /// if every dimension is within it. Names the axis so an over-cap rejection
+    /// can report *which* limit a top-up would breach.
+    pub fn first_dimension_over(&self, ceiling: &CostTuple) -> Option<&'static str> {
+        if self.tokens_in > ceiling.tokens_in {
+            Some("tokens_in")
+        } else if self.tokens_out > ceiling.tokens_out {
+            Some("tokens_out")
+        } else if self.cents > ceiling.cents {
+            Some("cents")
+        } else if self.wall_ms > ceiling.wall_ms {
+            Some("wall_ms")
+        } else if self.attention_score > ceiling.attention_score {
+            Some("attention_score")
+        } else {
+            None
+        }
+    }
+
     /// Per-dimension subtraction, or `None` if any dimension would underflow.
     pub fn checked_sub(&self, rhs: &CostTuple) -> Option<CostTuple> {
         Some(CostTuple {

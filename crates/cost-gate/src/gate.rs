@@ -20,7 +20,7 @@ use uuid::Uuid;
 use crate::HolderId;
 use crate::budget::BudgetStore;
 use crate::clock::{Clock, SystemClock};
-use crate::error::{AdmissionError, BudgetError};
+use crate::error::{AdmissionError, BudgetError, ProvisionError};
 use crate::types::{
     AdmissionRequest, CostDelta, CostEnvelope, CostTuple, ProviderId, RefundReceipt, Reservation,
     ReservationHandle, ReservationStatus, UnixTsMillis,
@@ -31,6 +31,21 @@ use crate::types::{
 /// runs stage 4 against that reservation.
 #[async_trait]
 pub trait CostAdmissionGate: Send + Sync {
+    /// Request-time provisioning: top `subject` up by `budget`, creating the
+    /// account if it does not exist yet. The merge policy is **additive** — the
+    /// new budget sums onto whatever balance remains — so a server that tops a
+    /// holder up per turn never discards the holder's unspent budget the way a
+    /// replace would. Idempotent in the sense that the operation is well-defined
+    /// for an already-provisioned subject (it accumulates); it is *not*
+    /// idempotent in the set-once sense. A merge that would breach the gate's
+    /// configured per-subject cap fails with [`ProvisionError::OverCap`] and
+    /// leaves the balance unchanged.
+    async fn provision_for(
+        &self,
+        subject: &HolderId,
+        budget: CostTuple,
+    ) -> Result<(), ProvisionError>;
+
     /// Stages 1–3: project the envelope, check ceilings, and reserve the
     /// envelope against the holder's budget.
     async fn admit(&self, req: AdmissionRequest) -> Result<Reservation, AdmissionError>;
@@ -63,6 +78,7 @@ pub struct InMemoryCostAdmissionGate<B: BudgetStore> {
     token_holders: RwLock<HashMap<crate::types::TokenId, HolderId>>,
     allowed_providers: Option<HashSet<ProviderId>>,
     ceiling: Option<CostEnvelope>,
+    provision_cap: Option<CostTuple>,
     reservations: RwLock<HashMap<Uuid, ReservationRecord>>,
 }
 
@@ -82,6 +98,7 @@ impl<B: BudgetStore> InMemoryCostAdmissionGate<B> {
             token_holders: RwLock::new(HashMap::new()),
             allowed_providers: None,
             ceiling: None,
+            provision_cap: None,
             reservations: RwLock::new(HashMap::new()),
         }
     }
@@ -103,6 +120,15 @@ impl<B: BudgetStore> InMemoryCostAdmissionGate<B> {
     /// dimension is [`AdmissionError::PolicyDenied`].
     pub fn with_ceiling(mut self, ceiling: CostEnvelope) -> Self {
         self.ceiling = Some(ceiling);
+        self
+    }
+
+    /// Cap the *accumulated* balance any single subject may be provisioned to.
+    /// A [`provision_for`](CostAdmissionGate::provision_for) whose additive merge
+    /// would push a subject's balance past this on any dimension is refused with
+    /// [`ProvisionError::OverCap`]. Without this, top-ups are unbounded.
+    pub fn with_provision_cap(mut self, cap: CostTuple) -> Self {
+        self.provision_cap = Some(cap);
         self
     }
 
@@ -139,6 +165,25 @@ fn internal(e: BudgetError) -> AdmissionError {
 
 #[async_trait]
 impl<B: BudgetStore> CostAdmissionGate for InMemoryCostAdmissionGate<B> {
+    async fn provision_for(
+        &self,
+        subject: &HolderId,
+        budget: CostTuple,
+    ) -> Result<(), ProvisionError> {
+        match self
+            .budget
+            .provision_merge(subject, &budget, self.provision_cap.as_ref())
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(BudgetError::OverProvisionCap(dimension)) => Err(ProvisionError::OverCap {
+                subject: subject.clone(),
+                dimension,
+            }),
+            Err(other) => Err(ProvisionError::Internal(anyhow::Error::new(other))),
+        }
+    }
+
     async fn admit(&self, req: AdmissionRequest) -> Result<Reservation, AdmissionError> {
         // Stage 1 — project envelope + resolve the holder from the cap-token.
         let envelope = req.projected_envelope;

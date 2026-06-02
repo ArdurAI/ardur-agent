@@ -104,7 +104,7 @@ impl RecordingHook {
     }
 }
 
-#[async_trait(?Send)]
+#[async_trait]
 impl LifecycleHook for RecordingHook {
     async fn on_pre_submit(&self, ctx: &PreSubmitCtx<'_>) -> HookDecision {
         self.events.lock().push(HookEvent::OnPreSubmit {
