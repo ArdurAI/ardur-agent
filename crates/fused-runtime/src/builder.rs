@@ -2,17 +2,24 @@
 //! pieces, applying sensible Phase-2 defaults so a caller specifies only what it
 //! cares about.
 //!
-//! The four pieces with no reasonable default are required up front
+//! The pieces with no reasonable default are required up front
 //! ([`new`](FusedRuntimeBuilder::new)): the cap-token root key, the policy
 //! bundle, the provider, the receipt signing key, and the model. Everything else
-//! — audience, tool, the Cedar principal/action/resource, the budget, the
-//! projected envelope, the hook registry, memory, journal, and the receipt log —
-//! has a default and an opt-in setter.
+//! — audience, tool, the Cedar action, the principal entity type, the budget,
+//! the projected envelope, the hook registry, memory, journal, and the receipt
+//! log — has a default and an opt-in setter.
+//!
+//! The Cedar **principal** is *not* a builder knob: it is derived per-request
+//! from the verified cap-token subject (the caller may pick its entity *type*
+//! via [`principal_entity_type`](FusedRuntimeBuilder::principal_entity_type),
+//! but never its id), so a runtime authorizes as whoever the cap proved rather
+//! than whoever the caller claims. The Cedar **resource** is likewise derived
+//! per-request, from the session id.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use ardur_cedar_policy::{ActionRef, CedarPolicyBundle, PrincipalRef, ResourceRef};
+use ardur_cedar_policy::{ActionRef, CedarPolicyBundle};
 use ardur_cost_gate::{
     Clock, CostEnvelope, CostTuple as GateCostTuple, HolderId as GateHolderId,
     InMemoryCostAdmissionGate, SystemClock,
@@ -52,9 +59,8 @@ pub struct FusedRuntimeBuilder {
     tool: String,
     cost_units: u64,
     clock: Arc<dyn Clock>,
-    principal: PrincipalRef,
+    principal_entity_type: String,
     action: ActionRef,
-    resource: ResourceRef,
     cedar_attributes: serde_json::Value,
     max_tokens: u32,
     verb: VerbObject,
@@ -89,9 +95,8 @@ impl FusedRuntimeBuilder {
             tool: "chat.submit".to_string(),
             cost_units: 1,
             clock: Arc::new(SystemClock),
-            principal: PrincipalRef("User::agent".to_string()),
+            principal_entity_type: "User".to_string(),
             action: ActionRef("Action::Submit".to_string()),
-            resource: ResourceRef("Turn::current".to_string()),
             cedar_attributes: serde_json::Value::Null,
             max_tokens: 1024,
             verb: VerbObject::new(COMPLETION_VERB)
@@ -137,21 +142,32 @@ impl FusedRuntimeBuilder {
         self
     }
 
-    /// The Cedar principal / action / resource the turn is authorized as.
+    /// The Cedar action the turn is authorized as. Structural to the runtime —
+    /// every `submit` exercises the same action — so it stays builder-configured
+    /// (default `Action::Submit`), unlike the principal (derived per-request from
+    /// the verified cap-token subject) and the resource (derived from the
+    /// session).
     #[must_use]
-    pub fn cedar(
-        mut self,
-        principal: PrincipalRef,
-        action: ActionRef,
-        resource: ResourceRef,
-    ) -> Self {
-        self.principal = principal;
+    pub fn action(mut self, action: ActionRef) -> Self {
         self.action = action;
-        self.resource = resource;
         self
     }
 
-    /// The Cedar resource attributes (the JSON object read as `resource.<key>`).
+    /// The Cedar entity *type* the derived principal is built under (the entity
+    /// *id* is always the verified cap-token subject). Default `"User"`; set
+    /// `"Agent"` (etc.) to map subjects onto a different principal type. This is
+    /// the only principal knob — the caller cannot assert a principal id, so it
+    /// cannot impersonate a subject the cap-token did not prove.
+    #[must_use]
+    pub fn principal_entity_type(mut self, entity_type: impl Into<String>) -> Self {
+        self.principal_entity_type = entity_type.into();
+        self
+    }
+
+    /// Extra Cedar resource attributes (a JSON object read as `resource.<key>`).
+    /// The verified cap-token claims (`audience`, `tools`, `expires_unix`,
+    /// `subject`, `budget_remaining`) are layered on top of these per-request and
+    /// win on any key collision, so a caller cannot shadow a proven fact here.
     #[must_use]
     pub fn cedar_attributes(mut self, attributes: serde_json::Value) -> Self {
         self.cedar_attributes = attributes;
@@ -266,9 +282,8 @@ impl FusedRuntimeBuilder {
             cost_units: self.cost_units,
             clock: self.clock,
             policies: self.policies,
-            principal: self.principal,
+            principal_entity_type: self.principal_entity_type,
             action: self.action,
-            resource: self.resource,
             cedar_attributes: self.cedar_attributes,
             provider: self.provider,
             model: self.model,
