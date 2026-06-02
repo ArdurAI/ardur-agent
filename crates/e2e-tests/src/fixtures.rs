@@ -149,9 +149,22 @@ pub fn dev_valid_cap_token() -> String {
 /// budget, envelope, memory, journal, and receipt-log as needed.
 #[must_use]
 pub fn fused_builder(provider: Arc<dyn Provider>) -> FusedRuntimeBuilder {
+    fused_builder_with_policies(provider, permissive_policies())
+}
+
+/// Like [`fused_builder`], but with a caller-supplied Cedar bundle in the
+/// authorization seam — the one knob scenario §2.E7 varies while everything
+/// else (deterministic cap-token root, permissive cap-token, stub provider,
+/// manual clock, generous budget) stays fixed, so the policy decision is the
+/// sole cause of a turn's outcome.
+#[must_use]
+pub fn fused_builder_with_policies(
+    provider: Arc<dyn Provider>,
+    policies: CedarPolicyBundle,
+) -> FusedRuntimeBuilder {
     FusedRuntimeBuilder::new(
         dev_cap_issuer().public_key(),
-        permissive_policies(),
+        policies,
         provider,
         dev_receipt_key(),
         ModelId::new(TEST_MODEL),
