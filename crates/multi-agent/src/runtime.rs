@@ -15,6 +15,7 @@ use ardur_runtime::{
 };
 
 use crate::agent::SubAgent;
+use crate::child::CapVerifyingRuntime;
 use crate::error::MultiAgentError;
 use crate::types::{
     AgentId, SubAgentHandle, SubAgentRequest, SubAgentResponse, SubAgentSpec, TerminationReason,
@@ -158,8 +159,11 @@ impl<R: ChatRuntime> InMemoryMultiAgentRuntime<R> {
 }
 
 impl InMemoryMultiAgentRuntime<InMemoryRuntime> {
-    /// Build a runtime over the §1.0 in-memory echo runtime — the Phase-1
-    /// default child surface.
+    /// Build a runtime over the §1.0 in-memory echo runtime. This child surface
+    /// trusts any non-empty cap-token — it exercises the spawn/budget/receipt
+    /// contracts but does *not* enforce attenuation at submit time. For the
+    /// §5.1 real wire that authorizes the attenuated token on every turn, use
+    /// [`InMemoryMultiAgentRuntime::verifying`].
     pub fn in_memory(
         parent_cap_token: CapToken,
         root: PublicKey,
@@ -171,6 +175,27 @@ impl InMemoryMultiAgentRuntime<InMemoryRuntime> {
             root,
             parent_receipt_id,
         )
+    }
+}
+
+impl InMemoryMultiAgentRuntime<CapVerifyingRuntime<InMemoryRuntime>> {
+    /// Build a runtime whose child surface is the §5.1 [`CapVerifyingRuntime`]
+    /// wrapping the echo runtime: every turn re-binds the sub-agent's attenuated
+    /// token to `root` and authorizes it for [`CHAT_SUBMIT_TOOL`] under
+    /// `audience` before the echo runs. A sub-agent narrowed away from
+    /// `chat.submit`, pinned to a different audience, or expired is denied at
+    /// [`ask`](MultiAgentRuntime::ask). `audience` must match the audience the
+    /// parent token was issued for.
+    ///
+    /// [`CHAT_SUBMIT_TOOL`]: crate::CHAT_SUBMIT_TOOL
+    pub fn verifying(
+        audience: impl Into<String>,
+        parent_cap_token: CapToken,
+        root: PublicKey,
+        parent_receipt_id: ReceiptId,
+    ) -> Self {
+        let child = CapVerifyingRuntime::new(InMemoryRuntime::new(), root, audience);
+        Self::new(child, parent_cap_token, root, parent_receipt_id)
     }
 }
 
