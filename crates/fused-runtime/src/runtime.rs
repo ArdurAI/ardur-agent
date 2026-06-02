@@ -36,6 +36,10 @@ use ardur_runtime::{
 use ardur_session_journals::{JournalEntry, SessionJournal};
 use parking_lot::Mutex;
 
+use crate::receipts::{PersistedReceipt, load_persisted_chain};
+use crate::reconcile::{
+    ReconciliationAction, ReconciliationError, ReconciliationReport, ReconciliationStrategy,
+};
 use crate::shared::{SharedBudget, SharedDenyList};
 
 /// The receipt verb minted for a completed turn (`verb.object.state.vN`).
@@ -71,6 +75,7 @@ pub struct FusedRuntime {
     pub(crate) journal: Option<Arc<dyn SessionJournal>>,
     pub(crate) chain_tail: Mutex<Option<Sha256Digest>>,
     pub(crate) receipt_log: Option<PathBuf>,
+    pub(crate) reconciliation_strategy: ReconciliationStrategy,
 }
 
 impl FusedRuntime {
@@ -151,6 +156,202 @@ impl FusedRuntime {
         // fsync the line so the chain survives a crash — the same durability
         // contract the session journal makes for its entries.
         file.sync_all()
+    }
+
+    /// The reconciliation strategy this runtime applies in
+    /// [`reconcile_receipts`](Self::reconcile_receipts).
+    #[must_use]
+    pub fn reconciliation_strategy(&self) -> ReconciliationStrategy {
+        self.reconciliation_strategy
+    }
+
+    /// **ARD-17.** Sweep the receipt log against the session journal to detect —
+    /// and, unless `dry_run`, heal — *orphan receipts*: receipts durable in the
+    /// chain that no journal `AssistantMessage` accounts for, the residue of a
+    /// crash in the stage-6→10 window (see [`crate::reconcile`]).
+    ///
+    /// Intended as a **boot step**: a fresh runtime built over a crashed
+    /// runtime's on-disk paths calls this once before serving turns, so the
+    /// journal and the receipt log agree again. [`FusedRuntimeBuilder::build`]
+    /// stays synchronous (it cannot drive the async journal), so this is exposed
+    /// explicitly; [`FusedRuntimeBuilder::build_reconciled`] folds the two into
+    /// one call for callers that want the boot default.
+    ///
+    /// Reconciliation is a no-op (with an empty report) unless **both** a
+    /// receipt log and a journal are configured — neither store alone can have an
+    /// orphan. It is idempotent: a second pass after a successful
+    /// [`AppendSyntheticJournal`](ReconciliationStrategy::AppendSyntheticJournal)
+    /// recovery finds the once-orphaned receipt now journaled, and does nothing.
+    ///
+    /// # Errors
+    ///
+    /// - [`ReconciliationError::ReceiptChain`] if the receipt log cannot be read.
+    /// - [`ReconciliationError::Journal`] if the journal cannot be replayed or
+    ///   (under [`AppendSyntheticJournal`](ReconciliationStrategy::AppendSyntheticJournal))
+    ///   appended to.
+    /// - [`ReconciliationError::Io`] if rewriting a truncated log fails.
+    /// - [`ReconciliationError::Undecidable`] if
+    ///   [`TruncateOrphans`](ReconciliationStrategy::TruncateOrphans) is asked to
+    ///   drop a non-suffix orphan (one a later journaled receipt chains onto),
+    ///   which would break the hash chain.
+    pub async fn reconcile_receipts(
+        &self,
+        dry_run: bool,
+    ) -> Result<ReconciliationReport, ReconciliationError> {
+        // Both stores are required: an orphan is a receipt the journal fails to
+        // account for, so with no journal (or no log) there is nothing to
+        // reconcile. Report an empty, no-orphan sweep.
+        let (Some(journal), Some(receipt_log)) = (&self.journal, &self.receipt_log) else {
+            return Ok(ReconciliationReport {
+                receipt_count: 0,
+                journaled_receipt_count: 0,
+                orphan_receipt_ids: Vec::new(),
+                action: ReconciliationAction::NoOrphans,
+                dry_run,
+            });
+        };
+
+        let chain = load_persisted_chain(receipt_log)?;
+        let session_id = *journal.session_id();
+        let entries = journal.replay(session_id).await?;
+
+        // The set of receipt ids the journal can vouch for: every receipt named
+        // by an AssistantMessage (the entry the pipeline writes at stage 10 to
+        // bind a turn's response to its receipt). A recovery entry appended by a
+        // prior reconciliation is itself an AssistantMessage, so this is what
+        // makes the sweep idempotent.
+        let journaled: std::collections::HashSet<uuid::Uuid> = entries
+            .iter()
+            .filter_map(|e| match e {
+                JournalEntry::AssistantMessage { receipt_id, .. } => Some(receipt_id.0),
+                _ => None,
+            })
+            .collect();
+
+        let orphan_indices: Vec<usize> = chain
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| !journaled.contains(&r.body.receipt_id))
+            .map(|(i, _)| i)
+            .collect();
+        let orphan_receipt_ids: Vec<uuid::Uuid> = orphan_indices
+            .iter()
+            .map(|&i| chain[i].body.receipt_id)
+            .collect();
+
+        let mut report = ReconciliationReport {
+            receipt_count: chain.len(),
+            journaled_receipt_count: journaled.len(),
+            orphan_receipt_ids,
+            action: ReconciliationAction::NoOrphans,
+            dry_run,
+        };
+
+        if orphan_indices.is_empty() {
+            return Ok(report);
+        }
+        if dry_run || self.reconciliation_strategy == ReconciliationStrategy::IgnoreOrphans {
+            report.action = ReconciliationAction::ReportedOnly;
+            return Ok(report);
+        }
+
+        match self.reconciliation_strategy {
+            ReconciliationStrategy::IgnoreOrphans => unreachable!("handled above"),
+            ReconciliationStrategy::AppendSyntheticJournal => {
+                // Heal the journal: one recovery AssistantMessage per orphan,
+                // naming its receipt_id so the next sweep counts it as journaled.
+                // The original assistant text is lost (it was never journaled),
+                // so the content is an explicit recovery marker, not a fabricated
+                // response.
+                let now = self.clock.now_ms();
+                for &i in &orphan_indices {
+                    let rid = chain[i].body.receipt_id;
+                    journal
+                        .append(JournalEntry::AssistantMessage {
+                            content: format!(
+                                "[reconciled] recovered orphan receipt {rid}: its receipt was \
+                                 durably minted (stage 6) but the process crashed before the \
+                                 journal append (stage 10), so the original assistant content is \
+                                 unrecoverable."
+                            ),
+                            at: now,
+                            receipt_id: ReceiptId(rid),
+                        })
+                        .await?;
+                }
+                report.action = ReconciliationAction::AppendedSyntheticJournal {
+                    count: orphan_indices.len(),
+                };
+            }
+            ReconciliationStrategy::TruncateOrphans => {
+                self.truncate_orphan_suffix(receipt_log, &chain, &orphan_indices)?;
+                report.action = ReconciliationAction::TruncatedReceipts {
+                    count: orphan_indices.len(),
+                };
+            }
+        }
+        Ok(report)
+    }
+
+    /// Truncate a contiguous orphan *suffix* from the receipt log, rewriting it
+    /// to the retained prefix and resetting the in-memory chain tail so the next
+    /// turn chains onto the new last receipt.
+    ///
+    /// The orphans must form the maximal tail `first..chain.len()`. If any
+    /// orphan sits *before* a journaled receipt, removing it would break that
+    /// receipt's `parent_hash` linkage — that is
+    /// [`ReconciliationError::Undecidable`], not a silent partial truncation.
+    fn truncate_orphan_suffix(
+        &self,
+        receipt_log: &std::path::Path,
+        chain: &[PersistedReceipt],
+        orphan_indices: &[usize],
+    ) -> Result<(), ReconciliationError> {
+        let first_orphan = orphan_indices[0];
+        let is_contiguous_suffix = orphan_indices.iter().copied().eq(first_orphan..chain.len());
+        if !is_contiguous_suffix {
+            return Err(ReconciliationError::Undecidable {
+                reason: format!(
+                    "{} orphan(s) are not a contiguous tail of the {}-receipt chain — a later \
+                     journaled receipt chains onto an orphan, so truncating would break the hash \
+                     chain. Use AppendSyntheticJournal to recover these in place.",
+                    orphan_indices.len(),
+                    chain.len()
+                ),
+            });
+        }
+
+        // Rewrite the log to the retained prefix (one compact JWS per line), then
+        // fsync — the same write-then-sync_all durability contract persist_receipt
+        // makes. A full rewrite of a freshly-truncated boot-time log is cheap.
+        let retained = &chain[..first_orphan];
+        let mut body = String::new();
+        for receipt in retained {
+            body.push_str(&receipt.jws_compact);
+            body.push('\n');
+        }
+        let tmp = receipt_log.with_extension("jsonl.reconcile-tmp");
+        std::fs::write(&tmp, body.as_bytes()).map_err(ReconciliationError::Io)?;
+        // fsync the temp file's contents before the rename so the truncation is
+        // durable, then atomically replace the log.
+        {
+            use std::io::Write as _;
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&tmp)
+                .map_err(ReconciliationError::Io)?;
+            f.flush().map_err(ReconciliationError::Io)?;
+            f.sync_all().map_err(ReconciliationError::Io)?;
+        }
+        std::fs::rename(&tmp, receipt_log).map_err(ReconciliationError::Io)?;
+
+        // Reset the in-memory chain tail to the new last receipt (or None if the
+        // whole chain was orphaned), so the next turn chains correctly. build()
+        // had seeded it from the now-removed orphan tail.
+        *self.chain_tail.lock() = retained
+            .last()
+            .map(|r| Sha256Digest::of(r.jws_compact.as_bytes()));
+        Ok(())
     }
 }
 
