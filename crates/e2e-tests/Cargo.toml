@@ -1,0 +1,60 @@
+# ardur-e2e-tests — the workspace's cross-crate end-to-end scenario host.
+#
+# Phase 2.E (§19 / architect/backlog/e2e-test-coverage-gaps.md). Unlike the
+# per-crate integration suites — which only prove a crate speaks its own
+# contract — the scenarios here drive a single request through the *fused*
+# Phase-1 substrate (cap-token → cedar → cost-gate → provider → runtime →
+# receipt → journal → memory). This is an internal-only test crate: it ships no
+# public API and is never published.
+#
+# §18.8 keeps this PR scoped to `crates/e2e-tests/**` plus the root manifest.
+
+[package]
+name = "ardur-e2e-tests"
+version = "0.0.0"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# `src/lib.rs` exists only to host the shared `fixtures` module that the
+# `tests/scenario_NN_*.rs` integration targets pull in. The path-deps below back
+# those fixtures and the scenarios; every Phase-1 crate currently on `dev` is
+# listed so a new scenario can wire any of them without touching this manifest.
+[dependencies]
+ardur-cap-token = { workspace = true }
+ardur-cedar-policy = { workspace = true }
+# `ardur-cli` is a binary crate and is *not* declared in `[workspace.dependencies]`
+# (it is no other crate's library dep), so it is pulled in by an explicit path.
+ardur-cli = { path = "../cli" }
+ardur-cost-gate = { workspace = true }
+ardur-memory = { workspace = true }
+ardur-messaging-gateway = { workspace = true }
+ardur-multi-agent = { workspace = true }
+ardur-provider-runtime = { workspace = true }
+ardur-receipt = { workspace = true }
+ardur-runtime = { workspace = true }
+ardur-session-journals = { workspace = true }
+ardur-tool-registry = { workspace = true }
+ardur-injection-defense = { workspace = true }
+
+# `fixtures.rs` is compiled as part of the library, so the helpers it builds
+# (`tempfile::TempDir`, the deterministic biscuit root key) need their crates as
+# regular dependencies rather than dev-dependencies.
+# TODO §E1: `biscuit-auth` is pulled directly because `ardur-cap-token` re-exports
+# `KeyPair`/`PublicKey` but not `PrivateKey`, and a deterministic root key needs
+# `PrivateKey::from_bytes`. Drop this once cap-token exposes a seeded-key
+# constructor.
+biscuit-auth = { workspace = true }
+tempfile = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+parking_lot = { workspace = true }
+# `uuid` builds the genesis receipt's `receipt_id` and is the type behind several
+# substrate ids the scenarios assert on.
+uuid = { workspace = true }
+assert_matches = "1"
