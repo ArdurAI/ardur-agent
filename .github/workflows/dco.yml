@@ -25,7 +25,24 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      # Pre-existing unsigned merge from PR #12; future dev→main syncs should not re-trip on this historical commit.
+      # tim-actions/dco@v1.1.0 has no exclude-commits input, so drop the one
+      # historical SHA (c086428) from the commit list by SHA before the check —
+      # every other commit is still verified. Read the JSON via env (not inline
+      # ${{ }}) so commit messages can't break or inject into the shell.
+      - name: Exclude pre-existing unsigned commit c086428
+        id: filtered_commits
+        env:
+          ALL_COMMITS: ${{ steps.get_pr_commits.outputs.commits }}
+        run: |
+          filtered=$(jq -c '[.[] | select((.sha | startswith("c086428")) | not)]' <<< "$ALL_COMMITS")
+          {
+            echo "commits<<COMMITS_EOF"
+            echo "$filtered"
+            echo "COMMITS_EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Check Signed-off-by on all PR commits
         uses: tim-actions/dco@v1.1.0
         with:
-          commits: ${{ steps.get_pr_commits.outputs.commits }}
+          commits: ${{ steps.filtered_commits.outputs.commits }}
