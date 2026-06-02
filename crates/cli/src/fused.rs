@@ -1,0 +1,220 @@
+//! [`FusedEngine`] — the FusedRuntime-backed substrate a `ardur chat` session
+//! drives by default.
+//!
+//! Where the legacy [`ChatEngine`](crate::ChatEngine) echoes through the §1.0
+//! `InMemoryRuntime` (no provider, no receipt, no journal), this engine wires
+//! the §11.x Phase-2 [`FusedRuntime`]: one [`FusedRuntime::submit`] per turn
+//! runs the full ten-stage pipeline — cap-token verify, Cedar authorization,
+//! cost admission, provider dispatch, signed-and-chained receipt, cost
+//! finalize, memory write, and a durable session journal.
+//!
+//! # Construction
+//!
+//! [`FusedEngine::new`] resolves the provider, loads (or mints) the persistent
+//! keys and policies under `~/.ardur/`, mints a per-session cap-token, and
+//! builds a [`FusedRuntime`] over file-backed receipts + journals:
+//!
+//! - **Provider** — [`AnthropicProvider::from_env`] when `ANTHROPIC_API_KEY` is
+//!   set, else [`AnthropicProvider::stub`] (the engine reports
+//!   [`offline`](FusedEngine::offline) so the REPL can print an offline notice).
+//! - **Budget** — the session holder is provisioned with `budget_cents` on the
+//!   cents axis (and generously on the token/wall/attention axes), and each turn
+//!   reserves a per-turn ceiling (`ARDUR_CLI_PER_TURN_CENTS`, default
+//!   `min(budget_cents, 100)`) so a session of many turns depletes the budget
+//!   gracefully rather than reserving it all on turn one.
+//! - **Cap-token** — minted once at session start for subject
+//!   `cli://localhost-<uid>`, audience `cli`, tool `chat.submit`, expiring one
+//!   hour from process start.
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use ardur_cap_token::{CapScope, CapTokenIssuer, HolderId as CapHolderId};
+use ardur_cost_gate::{CostEnvelope, CostTuple as GateCostTuple, HolderId as GateHolderId};
+use ardur_fused_runtime::FusedRuntimeBuilder;
+use ardur_memory::InMemoryMemoryRuntime;
+use ardur_provider_runtime::{AnthropicProvider, ModelId, Provider};
+use ardur_runtime::{CapTokenRef, ChatMessage, ChatRuntime, SessionId, SubmitRequest};
+use ardur_session_journals::FileSessionJournal;
+
+use crate::config::Config;
+use crate::engine::TurnOutcome;
+use crate::error::CliError;
+use crate::state::StateDirs;
+
+/// The audience the session cap-token is scoped to (matches the runtime's
+/// verifier caveat).
+const AUDIENCE: &str = "cli";
+/// The tool/capability every chat turn exercises.
+const TOOL: &str = "chat.submit";
+/// The session cap-token's lifetime, in seconds (one hour from process start).
+const CAP_TTL_SECS: u64 = 3_600;
+/// The default per-turn cents ceiling when `ARDUR_CLI_PER_TURN_CENTS` is unset,
+/// capped at the session budget so a tiny budget still affords a turn.
+const DEFAULT_PER_TURN_CENTS: u64 = 100;
+
+/// A FusedRuntime-backed chat substrate for one interactive session.
+pub struct FusedEngine {
+    runtime: ardur_fused_runtime::FusedRuntime,
+    cap_token: CapTokenRef,
+    holder: GateHolderId,
+    session_id: SessionId,
+    remaining: Arc<AtomicU64>,
+    offline: bool,
+}
+
+impl FusedEngine {
+    /// Wire a fresh engine: resolve the provider, load/mint the persistent keys
+    /// and Cedar policies, mint the session cap-token, and build the fused
+    /// runtime over file-backed receipts + journals.
+    pub fn new(config: &Config, dirs: &StateDirs, budget_cents: u64) -> Result<Self, CliError> {
+        let model = ModelId::new(&config.model);
+
+        // Prefer a live provider keyed off ANTHROPIC_API_KEY; fall back to the
+        // network-free stub (and flag the session offline) when it is unset.
+        let (provider, offline): (Arc<dyn Provider>, bool) =
+            match AnthropicProvider::from_env(model.clone()) {
+                Ok(live) => (Arc::new(live), false),
+                Err(_) => (Arc::new(AnthropicProvider::stub(model.clone())), true),
+            };
+
+        let issuer = dirs.load_or_create_issuer()?;
+        let cap_root = issuer.public_key();
+        let receipt_key = dirs.load_or_create_receipt_key()?;
+        let policies = dirs.load_cedar_policies()?;
+
+        let subject = dirs.local_subject();
+        let holder = GateHolderId(subject.clone());
+
+        // Mint the per-session cap-token, anchored at process start.
+        let now_unix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let cap = issuer
+            .issue(
+                CapHolderId(subject.clone()),
+                CapScope {
+                    audience: AUDIENCE.to_string(),
+                    expires_unix: now_unix + CAP_TTL_SECS,
+                    // The verifier checks the per-turn cost (1 unit) against this
+                    // ceiling, so it must be at least 1.
+                    budget_remaining: budget_cents.max(1),
+                    tool_allowlist: vec![TOOL.to_string()],
+                },
+            )
+            .map_err(|e| CliError::State(format!("minting the session cap-token: {e}")))?;
+        let cap_token = CapTokenRef(
+            cap.to_base64()
+                .map_err(|e| CliError::State(format!("serializing the session cap-token: {e}")))?,
+        );
+
+        // Per-turn cost ceiling: only the cents axis gates (token/wall/attention
+        // maxes are zero), so the budget depletes one turn's spend at a time.
+        let per_turn_cents = per_turn_cents(budget_cents);
+        let envelope = CostEnvelope {
+            tokens_in_max: 0,
+            tokens_out_max: 0,
+            cents_max: u32::try_from(per_turn_cents).unwrap_or(u32::MAX),
+            wall_ms_max: 0,
+            attention_score_max: 0,
+        };
+
+        let session_id = SessionId::new();
+        let journal = FileSessionJournal::new(&dirs.journals, session_id)
+            .map_err(|e| CliError::State(format!("opening the session journal: {e}")))?;
+        // TODO §7.0: no file-backed `MemoryRuntime` exists yet, so the bi-temporal
+        // memory sink is in-process for now (the `~/.ardur/memory/` dir is created
+        // for the persistent store that replaces this).
+        let memory = InMemoryMemoryRuntime::new();
+
+        let runtime = FusedRuntimeBuilder::new(cap_root, policies, provider, receipt_key, model)
+            .audience(AUDIENCE)
+            .tool(TOOL)
+            .provision_budget(
+                holder.clone(),
+                GateCostTuple {
+                    tokens_in: 1_000_000_000,
+                    tokens_out: 1_000_000_000,
+                    cents: budget_cents,
+                    wall_ms: 1_000_000_000,
+                    attention_score: 1_000_000_000,
+                },
+            )
+            .projected_envelope(envelope)
+            .with_memory(Arc::new(memory))
+            .with_journal(Arc::new(journal))
+            .receipt_log(dirs.receipt_log())
+            .build()
+            .map_err(|e| CliError::State(format!("building the fused runtime: {e}")))?;
+
+        Ok(Self {
+            runtime,
+            cap_token,
+            holder,
+            session_id,
+            remaining: Arc::new(AtomicU64::new(budget_cents)),
+            offline,
+        })
+    }
+
+    /// Whether this session fell back to the network-free stub provider (no
+    /// `ANTHROPIC_API_KEY`).
+    #[must_use]
+    pub fn offline(&self) -> bool {
+        self.offline
+    }
+
+    /// A shared handle to the session's remaining-cents counter — read by the
+    /// prompt indicator and the `/budget` command.
+    #[must_use]
+    pub fn budget_handle(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.remaining)
+    }
+
+    /// The session's remaining budget, in cents.
+    #[must_use]
+    pub fn remaining_cents(&self) -> u64 {
+        self.remaining.load(Ordering::SeqCst)
+    }
+
+    /// Run one chat turn over `messages` through the full fused pipeline, then
+    /// refresh the displayed budget from the cost gate's ledger.
+    pub async fn run_turn(&self, messages: &[ChatMessage]) -> Result<TurnOutcome, CliError> {
+        let result = self
+            .runtime
+            .submit(SubmitRequest {
+                messages: messages.to_vec(),
+                cap_token: self.cap_token.clone(),
+                session_id: self.session_id,
+                requested_provider: None,
+            })
+            .await?;
+
+        let used_cents = result.cost.cents;
+        // Refresh the displayed balance from the same ledger the gate settled
+        // against; fall back to a local decrement if the holder read fails.
+        let remaining_cents = match self.runtime.remaining_budget(&self.holder).await {
+            Some(balance) => balance.cents,
+            None => self.remaining_cents().saturating_sub(used_cents),
+        };
+        self.remaining.store(remaining_cents, Ordering::SeqCst);
+
+        Ok(TurnOutcome {
+            response: result.response.content,
+            used_cents,
+            remaining_cents,
+        })
+    }
+}
+
+/// The per-turn cents ceiling: `ARDUR_CLI_PER_TURN_CENTS` if set and parseable,
+/// else `min(budget_cents, 100)`, clamped to at least 1.
+fn per_turn_cents(budget_cents: u64) -> u64 {
+    std::env::var("ARDUR_CLI_PER_TURN_CENTS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or_else(|| budget_cents.min(DEFAULT_PER_TURN_CENTS))
+        .max(1)
+}

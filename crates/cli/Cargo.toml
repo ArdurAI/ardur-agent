@@ -22,13 +22,25 @@ ardur-runtime = { workspace = true }
 # §11.14 cap-tokens — the CliError::CapToken surface and the verified-token
 # types the chat session authorizes turns against (Phase 2 wiring seam).
 ardur-cap-token = { workspace = true }
-# §11.14 receipts — re-exported here so the chat path can later attach a signed
-# receipt id to each turn (Phase 2).
+# §11.14 receipts — the FusedEngine loads/mints the P-256 receipt signing key
+# the fused runtime chains each turn's signed receipt with.
 ardur-receipt = { workspace = true }
-# §3.0 provider runtime — the ProviderRegistry + Anthropic stub the engine wires.
+# §3.0 provider runtime — the AnthropicProvider (live + stub) the engine wires.
 ardur-provider-runtime = { workspace = true }
 # §11.14 cost gate — the budget store + admission gate every turn routes through.
 ardur-cost-gate = { workspace = true }
+# Phase-2 fused runtime — the FusedRuntime the default chat path drives through
+# its full ten-stage pipeline.
+ardur-fused-runtime = { workspace = true }
+# §11.0 Cedar — the policy bundle the fused runtime authorizes turns against.
+ardur-cedar-policy = { workspace = true }
+# §7.0 memory — the bi-temporal sink stage 9 records each turn into.
+ardur-memory = { workspace = true }
+# §7.10 session journals — the durable per-session journal stage 10 appends to.
+ardur-session-journals = { workspace = true }
+# Ed25519 cap-token issuer key custody: load/persist the issuer private key so
+# the session's cap-token root is stable across runs.
+biscuit-auth = { workspace = true }
 
 # CLI surface.
 clap = { workspace = true }
@@ -53,3 +65,5 @@ assert_cmd = { workspace = true }
 tokio = { workspace = true }
 ardur-runtime = { workspace = true }
 ardur-cost-gate = { workspace = true }
+# A throwaway HOME so the fused state-dir tests never touch the real `~/.ardur`.
+tempfile = { workspace = true }
