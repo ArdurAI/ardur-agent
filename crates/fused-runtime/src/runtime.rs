@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use ardur_cap_token::{
     BiscuitCapTokenVerifier, CapToken, CapTokenError, CapTokenVerifier, PublicKey, RequiredCaveats,
+    VerifiedClaims,
 };
 use ardur_cedar_policy::{
     ActionRef, CedarPolicyBundle, Decision, EvaluationContext, PolicyBundle, PrincipalRef,
@@ -52,9 +53,8 @@ pub struct FusedRuntime {
     pub(crate) cost_units: u64,
     pub(crate) clock: Arc<dyn Clock>,
     pub(crate) policies: CedarPolicyBundle,
-    pub(crate) principal: PrincipalRef,
+    pub(crate) principal_entity_type: String,
     pub(crate) action: ActionRef,
-    pub(crate) resource: ResourceRef,
     pub(crate) cedar_attributes: serde_json::Value,
     pub(crate) provider: Arc<dyn Provider>,
     pub(crate) model: ModelId,
@@ -206,12 +206,21 @@ impl ChatRuntime for FusedRuntime {
             }
         };
 
-        // ---- 2. cedar-policy: authorize the turn.
+        // ---- 2. cedar-policy: authorize the turn. The principal is *derived*
+        //         from the verified cap-token subject (stage 1), not asserted by
+        //         the caller — so the runtime authorizes as whoever the cap
+        //         proved, and a misconfigured caller cannot impersonate another
+        //         subject. The resource is the session the turn acts on; the cap
+        //         claims (audience, tools, expiry, subject, budget) ride as
+        //         resource attributes so policies can reference `resource.<key>`.
+        let principal = derive_principal(&self.principal_entity_type, &claims);
+        let resource = derive_resource(session_id);
+        let attributes = cedar_attributes_from_claims(&self.cedar_attributes, &claims);
         match self.policies.evaluate(&EvaluationContext {
-            principal: self.principal.clone(),
+            principal,
             action: self.action.clone(),
-            resource: self.resource.clone(),
-            attributes: self.cedar_attributes.clone(),
+            resource,
+            attributes,
         }) {
             Decision::Allow { .. } => {}
             Decision::Deny { reason, .. } => {
@@ -403,6 +412,63 @@ fn map_admission_error(err: AdmissionError) -> RuntimeError {
         }
         AdmissionError::Internal(inner) => RuntimeError::Internal(inner),
     }
+}
+
+/// Derive the Cedar principal from a verified cap-token's subject. The entity
+/// *type* (`User`, `Agent`, …) is the one structural knob — it is part of the
+/// runtime's identity model, not the request — while the entity *id* is the
+/// verified subject, quoted so an id carrying `:` or `/` (a SPIFFE URI) is a
+/// single Cedar string literal. The caller never supplies the principal, so it
+/// cannot assert an identity the cap-token did not prove.
+fn derive_principal(entity_type: &str, claims: &VerifiedClaims) -> PrincipalRef {
+    PrincipalRef(format!("{entity_type}::\"{}\"", claims.subject.0))
+}
+
+/// Derive the Cedar resource from the request's session: a turn acts upon the
+/// session it belongs to, and the session id is verified request metadata
+/// already threaded through every stage — so `Session::"<uuid>"` is a concrete,
+/// per-request resource rather than a static placeholder.
+fn derive_resource(session_id: SessionId) -> ResourceRef {
+    ResourceRef(format!("Session::\"{}\"", session_id.0))
+}
+
+/// Project a verified cap-token's claims onto the Cedar resource attributes so
+/// policies can gate on the proven facts (`resource.audience`,
+/// `resource.tools`, `resource.expires_unix`, `resource.subject`,
+/// `resource.budget_remaining`). The cedar-policy crate channels evaluation
+/// attributes through the resource entity (its `Context` is always empty), so
+/// the cap "context" surfaces as `resource.<key>`, not `context.<key>`.
+///
+/// Builder-supplied [`cedar_attributes`](crate::FusedRuntimeBuilder::cedar_attributes)
+/// form the base, but the verified claim keys are layered on top and win on any
+/// collision — a caller cannot shadow a proven fact (e.g. spoof
+/// `resource.audience`) through static attributes.
+fn cedar_attributes_from_claims(
+    base: &serde_json::Value,
+    claims: &VerifiedClaims,
+) -> serde_json::Value {
+    let mut map = match base {
+        serde_json::Value::Object(map) => map.clone(),
+        _ => serde_json::Map::new(),
+    };
+    map.insert("subject".to_string(), claims.subject.0.clone().into());
+    map.insert("audience".to_string(), claims.audience.clone().into());
+    map.insert(
+        "tools".to_string(),
+        serde_json::Value::Array(
+            claims
+                .tool_allowlist
+                .iter()
+                .map(|t| serde_json::Value::String(t.clone()))
+                .collect(),
+        ),
+    );
+    map.insert("expires_unix".to_string(), claims.expires_unix.into());
+    map.insert(
+        "budget_remaining".to_string(),
+        claims.budget_remaining.into(),
+    );
+    serde_json::Value::Object(map)
 }
 
 /// Map a provider failure onto the runtime's error surface.

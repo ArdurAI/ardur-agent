@@ -11,7 +11,10 @@
 //!    deny-list. A rejection is [`RuntimeError::CapDenied`] (or
 //!    [`RuntimeError::CapTokenExpired`] for an expired token).
 //! 2. **cedar-policy** ([`ardur_cedar_policy`]) — evaluate the turn against the
-//!    policy bundle. A `Deny`/`Indeterminate` is [`RuntimeError::PolicyDenied`].
+//!    policy bundle. The principal is *derived* from the stage-1 verified
+//!    cap-token subject (never asserted by the caller) and the resource from the
+//!    session; the cap claims ride as resource attributes. A `Deny`/
+//!    `Indeterminate` is [`RuntimeError::PolicyDenied`].
 //! 3. **cost-gate** ([`ardur_cost_gate`]) — admit the projected envelope against
 //!    the holder's budget. A rejection is [`RuntimeError::CostCeilingExceeded`].
 //! 4. **lifecycle-hooks** ([`ardur_lifecycle_hooks`]) — run the pre-submit hooks;
