@@ -1,0 +1,22 @@
+# Keep the Docker build context tight: Cargo's `target/` alone is GBs, and
+# vault / scratch dirs aren't gitignored inside the build context unless we
+# say so here.
+
+target/
+architect/
+dev-workspace/
+.git/
+.github/
+.claude/
+.obsidian/
+references/
+
+# Strip top-level prose from the build context, then re-include the docs an
+# operator might reference at runtime.
+*.md
+!README.md
+!RUN.md
+
+.DS_Store
+*.swp
+tmp/
