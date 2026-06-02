@@ -5,9 +5,9 @@
 #![allow(dead_code)]
 
 use ardur_multi_agent::{
-    AttenuationRule, BiscuitCapTokenIssuer, CapScope, CapToken, CapTokenIssuer, ChatMessage,
-    CostEnvelope, HolderId, InMemoryMultiAgentRuntime, KeyPair, PublicKey, ReceiptId, SessionId,
-    SubAgentRequest, SubAgentSpec,
+    AttenuationRule, BiscuitCapTokenIssuer, CapScope, CapToken, CapTokenIssuer,
+    CapVerifyingRuntime, ChatMessage, CostEnvelope, HolderId, InMemoryMultiAgentRuntime,
+    InMemoryRuntime, KeyPair, PublicKey, ReceiptId, SessionId, SubAgentRequest, SubAgentSpec,
 };
 
 /// The audience the parent token and every verification request use.
@@ -46,6 +46,25 @@ pub fn runtime_with(
     let (token, root) = parent_token(tools, budget);
     let parent_receipt_id = ReceiptId::new();
     let runtime = InMemoryMultiAgentRuntime::in_memory(token, root, parent_receipt_id);
+    (runtime, parent_receipt_id, root)
+}
+
+/// A §5.1 real-wire runtime over the [`CapVerifyingRuntime`]-wrapped echo child,
+/// seeded with a parent token granting `tools` under [`AUDIENCE`]. Unlike
+/// [`runtime_with`], every turn authorizes the sub-agent's attenuated token, so
+/// attenuation actually gates `ask`. The parent-receipt anchor and issuer root
+/// are returned alongside.
+pub fn verifying_runtime_with(
+    tools: &[&str],
+    budget: u64,
+) -> (
+    InMemoryMultiAgentRuntime<CapVerifyingRuntime<InMemoryRuntime>>,
+    ReceiptId,
+    PublicKey,
+) {
+    let (token, root) = parent_token(tools, budget);
+    let parent_receipt_id = ReceiptId::new();
+    let runtime = InMemoryMultiAgentRuntime::verifying(AUDIENCE, token, root, parent_receipt_id);
     (runtime, parent_receipt_id, root)
 }
 
