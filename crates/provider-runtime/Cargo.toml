@@ -15,6 +15,9 @@ ardur-runtime = { workspace = true }
 # Object-safe `Provider::complete` — async-trait boxes the returned future so
 # `dyn Provider` works as a registry value (§3.0).
 async-trait = { workspace = true }
+# Live Anthropic Messages-API HTTP client (§3.1). rustls-tls keeps TLS
+# pure-Rust; `json` carries the serde request/response bodies.
+reqwest = { workspace = true }
 serde = { workspace = true }
 # `raw_provider_response` carries the untouched upstream JSON; tool-call
 # arguments are JSON too.

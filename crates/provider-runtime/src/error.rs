@@ -9,9 +9,10 @@ use crate::types::ModelId;
 /// vendor error code) is funnelled through [`ProviderError::Upstream`].
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderError {
-    /// The request never reached the provider (DNS, TCP, TLS, timeout).
-    #[error("network failure reaching the provider")]
-    NetworkFailure,
+    /// The request never reached the provider (DNS, TCP, TLS, timeout); carries
+    /// the transport-layer message.
+    #[error("network failure reaching the provider: {0}")]
+    NetworkFailure(String),
 
     /// The provider rejected the call for exceeding a rate limit. `retry_after_ms`
     /// is the back-off the caller should wait before retrying.
@@ -22,9 +23,10 @@ pub enum ProviderError {
     },
 
     /// The request was malformed or violated a provider constraint (bad
-    /// parameter range, empty prompt, unsupported option).
-    #[error("invalid completion request")]
-    InvalidRequest,
+    /// parameter range, empty prompt, unsupported option); carries the
+    /// upstream-reported reason.
+    #[error("invalid completion request: {0}")]
+    InvalidRequest(String),
 
     /// The requested model is unknown to, or not enabled for, this provider.
     #[error("model not available: {0}")]

@@ -1,0 +1,383 @@
+//! Integration tests for the fused [`ChatRuntime`]: the happy path that lights
+//! up every stage, plus one test per rejection seam (cap missing / forged /
+//! expired / revoked, policy deny, cost ceiling, hook veto) and the
+//! request-rewrite, observer, and receipt-chain behaviours.
+
+mod support;
+
+use std::sync::Arc;
+
+use ardur_fused_runtime::{load_persisted_chain, verify_persisted_chain};
+use ardur_lifecycle_hooks::{HookEvent, HookRegistry, RecordingHook};
+use ardur_memory::{HolderId as MemHolderId, InMemoryMemoryRuntime, MemoryRuntime, UnixTsMillis};
+use ardur_receipt::Sha256Digest;
+use ardur_runtime::{CapTokenRef, ChatRuntime, RuntimeError, SessionId};
+use ardur_session_journals::{FileSessionJournal, JournalEntry, SessionJournal};
+
+use support::{
+    EchoProvider, HOLDER, NOW_MS, NOW_UNIX, RedactingHook, VetoHook, deny_all_policy, gate_holder,
+    generous_budget, mint_token, request_for, runtime_builder, runtime_builder_with_policy,
+    user_request, valid_token,
+};
+
+/// The happy path drives every stage and persists to memory, the journal, and
+/// the receipt log.
+#[tokio::test]
+async fn happy_path_runs_every_stage() {
+    let provider = Arc::new(EchoProvider::new());
+    let memory = Arc::new(InMemoryMemoryRuntime::new());
+    let journal_dir = tempfile::tempdir().expect("temp dir");
+    let session_id = SessionId::new();
+    let journal =
+        Arc::new(FileSessionJournal::new(journal_dir.path(), session_id).expect("journal opens"));
+    let receipt_log = tempfile::NamedTempFile::new().expect("receipt log");
+
+    let runtime = runtime_builder(provider.clone())
+        .with_memory(memory.clone())
+        .with_journal(journal.clone())
+        .receipt_log(receipt_log.path())
+        .build()
+        .expect("runtime builds");
+
+    let outcome = runtime
+        .submit(request_for("hello substrate", &valid_token(), session_id))
+        .await
+        .expect("the happy-path turn completes");
+
+    // 5. provider was dispatched and echoed the prompt.
+    assert_eq!(provider.call_count(), 1);
+    assert_eq!(outcome.response.content, "hello substrate");
+
+    // 9. memory recorded exactly one fact for the holder.
+    let visible = memory.current_as_of(&MemHolderId(HOLDER.to_string()), UnixTsMillis(NOW_MS + 1));
+    assert_eq!(visible.len(), 1, "the turn is recorded as one memory fact");
+
+    // 10. the journal persisted the user + assistant messages, replayable.
+    let replayed = journal.replay(session_id).await.expect("journal replays");
+    assert_eq!(replayed.len(), 2);
+    assert!(matches!(replayed[0], JournalEntry::UserMessage { .. }));
+    assert!(matches!(replayed[1], JournalEntry::AssistantMessage { .. }));
+
+    // 6. the receipt log holds one genesis receipt.
+    let chain = load_persisted_chain(receipt_log.path()).expect("chain loads");
+    assert_eq!(chain.len(), 1);
+    assert!(
+        chain[0].body.parent_hash.is_none(),
+        "first receipt is genesis"
+    );
+    verify_persisted_chain(&chain).expect("the single-receipt chain verifies");
+}
+
+/// Stage 1: an empty cap-token is rejected before any provider call.
+#[tokio::test]
+async fn missing_cap_token_is_rejected() {
+    let provider = Arc::new(EchoProvider::new());
+    let runtime = runtime_builder(provider.clone()).build().expect("builds");
+
+    let err = runtime
+        .submit(user_request("hi", ""))
+        .await
+        .expect_err("an empty cap-token must be rejected");
+
+    assert!(matches!(err, RuntimeError::CapTokenMissing));
+    assert_eq!(
+        provider.call_count(),
+        0,
+        "provider not reached on cap failure"
+    );
+}
+
+/// Stage 1: a forged / unparseable cap-token is denied.
+#[tokio::test]
+async fn forged_cap_token_is_denied() {
+    let provider = Arc::new(EchoProvider::new());
+    let runtime = runtime_builder(provider.clone()).build().expect("builds");
+
+    let err = runtime
+        .submit(user_request("hi", "not-a-real-biscuit"))
+        .await
+        .expect_err("a forged cap-token must be denied");
+
+    assert!(matches!(err, RuntimeError::CapDenied { .. }));
+    assert_eq!(provider.call_count(), 0);
+}
+
+/// Stage 1: a once-valid but now-expired cap-token surfaces as `CapTokenExpired`.
+#[tokio::test]
+async fn expired_cap_token_is_denied() {
+    let provider = Arc::new(EchoProvider::new());
+    let runtime = runtime_builder(provider.clone()).build().expect("builds");
+
+    // Expiry one second before the runtime's fixed "now".
+    let expired = mint_token(NOW_UNIX - 1, 1_000_000);
+    let err = runtime
+        .submit(user_request("hi", &expired))
+        .await
+        .expect_err("an expired cap-token must be denied");
+
+    assert!(matches!(err, RuntimeError::CapTokenExpired));
+    assert_eq!(provider.call_count(), 0);
+}
+
+/// Stage 1: a token revoked mid-session is denied on the next turn, and the
+/// revoke fires `on_revoke`.
+#[tokio::test]
+async fn revoked_token_is_denied_next_turn() {
+    let provider = Arc::new(EchoProvider::new());
+    let recorder = Arc::new(RecordingHook::new("rec"));
+    let mut registry = HookRegistry::new();
+    registry.register(recorder.clone());
+
+    let runtime = runtime_builder(provider.clone())
+        .registry(Arc::new(registry))
+        .build()
+        .expect("builds");
+
+    let token = valid_token();
+    let session_id = SessionId::new();
+
+    // First turn succeeds.
+    runtime
+        .submit(request_for("before", &token, session_id))
+        .await
+        .expect("the pre-revocation turn succeeds");
+
+    // Revoke, then the same token is denied.
+    runtime
+        .revoke_cap_token(session_id, CapTokenRef(token.clone()), "compromised")
+        .await
+        .expect("revoke succeeds");
+
+    let err = runtime
+        .submit(request_for("after", &token, session_id))
+        .await
+        .expect_err("a revoked token must be denied");
+    assert!(matches!(err, RuntimeError::CapDenied { .. }));
+    assert_eq!(
+        provider.call_count(),
+        1,
+        "only the pre-revocation turn dispatched"
+    );
+
+    // The revoke fired an `on_revoke` callback.
+    assert!(
+        recorder
+            .events()
+            .iter()
+            .any(|e| matches!(e, HookEvent::OnRevoke { .. })),
+        "on_revoke fired for the revoked token"
+    );
+}
+
+/// Stage 2: a deny-all Cedar bundle blocks the turn with `PolicyDenied`.
+#[tokio::test]
+async fn policy_deny_blocks_turn() {
+    let provider = Arc::new(EchoProvider::new());
+    let runtime = runtime_builder_with_policy(provider.clone(), deny_all_policy())
+        .build()
+        .expect("builds");
+
+    let err = runtime
+        .submit(user_request("hi", &valid_token()))
+        .await
+        .expect_err("a deny-all policy must block the turn");
+
+    assert!(matches!(err, RuntimeError::PolicyDenied { .. }));
+    assert_eq!(
+        provider.call_count(),
+        0,
+        "provider not reached on policy denial"
+    );
+}
+
+/// Stage 3: a budget that cannot cover the envelope is `CostCeilingExceeded`,
+/// before any provider call.
+#[tokio::test]
+async fn cost_ceiling_blocks_underfunded_turn() {
+    let provider = Arc::new(EchoProvider::new());
+    // Re-provision the holder with a balance far below the default envelope.
+    let runtime = runtime_builder(provider.clone())
+        .provision_budget(
+            gate_holder(),
+            ardur_cost_gate::CostTuple {
+                tokens_in: 1,
+                tokens_out: 1,
+                cents: 1,
+                wall_ms: 1,
+                attention_score: 1,
+            },
+        )
+        .build()
+        .expect("builds");
+
+    let err = runtime
+        .submit(user_request("hi", &valid_token()))
+        .await
+        .expect_err("an underfunded turn must be refused");
+
+    assert!(matches!(err, RuntimeError::CostCeilingExceeded));
+    assert_eq!(provider.call_count(), 0);
+}
+
+/// Stage 4: a pre-submit veto blocks the turn *and* releases the reservation it
+/// had already taken at stage 3 (the budget is restored in full).
+#[tokio::test]
+async fn pre_submit_veto_blocks_and_releases_reservation() {
+    let provider = Arc::new(EchoProvider::new());
+    let mut registry = HookRegistry::new();
+    registry.register(Arc::new(VetoHook::new("policy.deny", "blocked")));
+
+    let runtime = runtime_builder(provider.clone())
+        .registry(Arc::new(registry))
+        .build()
+        .expect("builds");
+
+    let err = runtime
+        .submit(user_request("hi", &valid_token()))
+        .await
+        .expect_err("a vetoing hook must block the turn");
+
+    match err {
+        RuntimeError::VetoedByHook { hook_id, reason } => {
+            assert_eq!(hook_id, "policy.deny");
+            assert_eq!(reason, "blocked");
+        }
+        other => panic!("expected VetoedByHook, got {other:?}"),
+    }
+    assert_eq!(provider.call_count(), 0, "veto blocks before the provider");
+
+    // The reservation taken at stage 3 was released — the budget is whole again.
+    let remaining = runtime
+        .remaining_budget(&gate_holder())
+        .await
+        .expect("holder is provisioned");
+    assert_eq!(
+        remaining,
+        generous_budget(),
+        "a vetoed turn strands no reservation"
+    );
+}
+
+/// Stage 4 + 6: a pre-submit replace rewrites the request; the provider sees the
+/// rewritten prompt and the receipt's payload digest covers the rewritten
+/// response.
+#[tokio::test]
+async fn pre_submit_replace_rewrites_request_and_receipt() {
+    let provider = Arc::new(EchoProvider::new());
+    let mut registry = HookRegistry::new();
+    registry.register(Arc::new(RedactingHook::new("redactor")));
+    let receipt_log = tempfile::NamedTempFile::new().expect("receipt log");
+
+    let runtime = runtime_builder(provider.clone())
+        .registry(Arc::new(registry))
+        .receipt_log(receipt_log.path())
+        .build()
+        .expect("builds");
+
+    let outcome = runtime
+        .submit(user_request("my password is SECRET", &valid_token()))
+        .await
+        .expect("the redacted turn completes");
+
+    // The provider saw the redacted prompt, and the echo returns it.
+    let seen = provider.last_request().expect("provider was called");
+    assert!(seen.messages.iter().all(|m| !m.content.contains("SECRET")));
+    assert_eq!(outcome.response.content, "my password is [REDACTED]");
+
+    // The receipt's payload digest covers the redacted response, not the original.
+    let chain = load_persisted_chain(receipt_log.path()).expect("chain loads");
+    assert_eq!(chain.len(), 1);
+    assert_eq!(
+        chain[0].body.payload_digest,
+        Sha256Digest::of(outcome.response.content.as_bytes()),
+        "the receipt digests the post-redaction response"
+    );
+}
+
+/// Stage 7: a post-receipt observer sees the turn, in order after pre-submit.
+#[tokio::test]
+async fn post_receipt_observer_runs_after_pre_submit() {
+    let provider = Arc::new(EchoProvider::new());
+    let recorder = Arc::new(RecordingHook::new("rec"));
+    let mut registry = HookRegistry::new();
+    registry.register(recorder.clone());
+
+    let runtime = runtime_builder(provider.clone())
+        .registry(Arc::new(registry))
+        .build()
+        .expect("builds");
+
+    runtime
+        .submit(user_request("observe me", &valid_token()))
+        .await
+        .expect("the observed turn completes");
+
+    let events = recorder.events();
+    assert!(
+        matches!(events.first(), Some(HookEvent::OnPreSubmit { .. })),
+        "pre-submit fired first"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, HookEvent::OnPostReceipt { .. })),
+        "post-receipt fired after the receipt was minted"
+    );
+}
+
+/// Stage 6: receipts chain across turns — the second receipt's `parent_hash`
+/// is the SHA-256 of the first receipt's JWS.
+#[tokio::test]
+async fn receipts_chain_across_turns() {
+    let provider = Arc::new(EchoProvider::new());
+    let receipt_log = tempfile::NamedTempFile::new().expect("receipt log");
+    let runtime = runtime_builder(provider.clone())
+        .receipt_log(receipt_log.path())
+        .build()
+        .expect("builds");
+
+    let token = valid_token();
+    for prompt in ["turn one", "turn two", "turn three"] {
+        runtime
+            .submit(user_request(prompt, &token))
+            .await
+            .expect("each turn completes");
+    }
+
+    let chain = load_persisted_chain(receipt_log.path()).expect("chain loads");
+    assert_eq!(chain.len(), 3);
+    assert!(chain[0].body.parent_hash.is_none());
+    for i in 1..chain.len() {
+        assert_eq!(
+            chain[i].body.parent_hash,
+            Some(Sha256Digest::of(chain[i - 1].jws_compact.as_bytes())),
+            "receipt {i} chains onto the prior receipt's JWS"
+        );
+    }
+    verify_persisted_chain(&chain).expect("the three-receipt chain verifies");
+}
+
+/// Stage 5: a provider failure releases the reservation and surfaces a runtime
+/// error — the budget is not stranded.
+#[tokio::test]
+async fn provider_failure_releases_reservation() {
+    let provider = Arc::new(support::ErroringProvider::new());
+    let runtime = runtime_builder(provider.clone()).build().expect("builds");
+
+    let err = runtime
+        .submit(user_request("hi", &valid_token()))
+        .await
+        .expect_err("a failing provider surfaces an error");
+    assert!(matches!(err, RuntimeError::ProviderUnavailable));
+    assert_eq!(provider.call_count(), 1, "the provider was reached");
+
+    let remaining = runtime
+        .remaining_budget(&gate_holder())
+        .await
+        .expect("holder is provisioned");
+    assert_eq!(
+        remaining,
+        generous_budget(),
+        "a failed provider call strands no reservation"
+    );
+}

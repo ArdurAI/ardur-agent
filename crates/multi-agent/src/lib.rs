@@ -15,7 +15,12 @@
 //!   §11.14 cap-token by each [`AttenuationRule`] before the sub-agent runs.
 //!   Because Biscuit checks only ever intersect, the child is strictly narrower
 //!   than the parent on every axis — a sub-agent can never widen what it was
-//!   granted.
+//!   granted. The §5.1 [`CapVerifyingRuntime`] gives that narrowing teeth at
+//!   request time: it re-binds the presented token to the issuer root and
+//!   authorizes it for [`CHAT_SUBMIT_TOOL`] on every turn, so a sub-agent whose
+//!   tool, audience, or expiry was attenuated away is actually denied at
+//!   [`submit`](ChatRuntime::submit) rather than merely looking narrower to an
+//!   auditor. Build one with [`InMemoryMultiAgentRuntime::verifying`].
 //! - **Isolated budget.** Each [`SubAgent`] meters its lifetime spend against a
 //!   §11.14 [`CostEnvelope`]; [`MultiAgentRuntime::ask`] reserves a turn's
 //!   declared cost *before* invoking the child, so an over-budget turn returns
@@ -50,11 +55,13 @@
 #![warn(missing_docs)]
 
 mod agent;
+mod child;
 mod error;
 mod runtime;
 mod types;
 
 pub use agent::SubAgent;
+pub use child::{CHAT_SUBMIT_TOOL, CapVerifyingRuntime};
 pub use error::MultiAgentError;
 pub use runtime::{InMemoryMultiAgentRuntime, MultiAgentRuntime};
 pub use types::{
@@ -80,5 +87,6 @@ pub use ardur_cost_gate::CostEnvelope;
 pub use ardur_receipt::{CostTuple, UnixTsMillis};
 /// §1.0 runtime surface: the child chat runtime and the shared turn types.
 pub use ardur_runtime::{
-    CapTokenRef, ChatMessage, ChatRuntime, InMemoryRuntime, ReceiptId, Role, SessionId,
+    CapTokenRef, ChatMessage, ChatRuntime, InMemoryRuntime, ReceiptId, Role, RuntimeError,
+    SessionId,
 };

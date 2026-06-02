@@ -1,15 +1,28 @@
 version: 2
 updates:
-  - package-ecosystem: "cargo"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-    labels:
-      - "dependencies"
-
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
+    target-branch: "dev"
     labels:
       - "dependencies"
+    groups:
+      gha-minor-patch:
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    target-branch: "dev"
+    labels:
+      - "dependencies"
+    groups:
+      cargo-minor-patch:
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
