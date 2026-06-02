@@ -163,6 +163,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "ardur-lifecycle-hooks"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "ardur-memory",
+ "ardur-provider-runtime",
+ "ardur-receipt",
+ "ardur-runtime",
+ "async-trait",
+ "parking_lot",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "ardur-memory"
 version = "0.0.1"
 dependencies = [

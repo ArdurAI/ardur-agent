@@ -10,6 +10,7 @@ resolver = "2"
 members = [
     "crates/cap-token",
     "crates/receipt",
+    "crates/lifecycle-hooks",
     "crates/cedar-policy",
     "crates/memory",
     "crates/runtime",
@@ -94,6 +95,7 @@ futures = "0.3"
 #     cross-crate wiring in Phase 1 references `{ workspace = true }`. ---
 ardur-cap-token = { path = "crates/cap-token" }
 ardur-receipt = { path = "crates/receipt" }
+ardur-lifecycle-hooks = { path = "crates/lifecycle-hooks" }
 ardur-cedar-policy = { path = "crates/cedar-policy" }
 ardur-memory = { path = "crates/memory" }
 ardur-runtime = { path = "crates/runtime" }
