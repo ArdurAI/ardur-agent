@@ -65,15 +65,23 @@ fn bundle(policy: &str) -> CedarPolicyBundle {
         .expect("the scenario policy compiles")
 }
 
+/// The Cedar principal the runtime derives for these subcases: `User::"<subject>"`
+/// where the subject is the holder [`fixtures::dev_valid_cap_token`] is minted for
+/// ([`fixtures::TEST_HOLDER`]). Kept in lock-step with the fixture by the
+/// `debug_assert` in [`explicit_permit_allows_the_turn`].
+const PRINCIPAL: &str = r#"User::"spiffe://ardur/user/e2e""#;
+
 /// Build a fresh fused runtime over `policy` and submit one fixed turn through
 /// it. Everything but the Cedar bundle is the shared, permissive fixture: a
 /// valid well-funded cap-token, the stub provider, the manual clock, and a
 /// generous budget. So the returned outcome is a function of the policy alone.
 ///
-/// The runtime's default Cedar query (set by [`FusedRuntimeBuilder`]) is
-/// `principal = User::agent`, `action = Action::Submit`, `resource =
-/// Turn::current`, with no resource attributes — every policy below is written
-/// against exactly that request.
+/// The runtime *derives* the Cedar query from the verified cap-token: the
+/// principal is [`PRINCIPAL`] (`User::"<subject>"`, the subject
+/// [`fixtures::dev_valid_cap_token`] mints), the action is the builder default
+/// `Action::Submit`, and the resource is `Session::"<session id>"` carrying the
+/// cap claims as attributes. Every policy below is written against exactly that
+/// derived request.
 ///
 /// [`FusedRuntimeBuilder`]: ardur_fused_runtime::FusedRuntimeBuilder
 async fn submit_under(policy: &str) -> Result<SubmitResult, RuntimeError> {
@@ -97,9 +105,17 @@ async fn submit_under(policy: &str) -> Result<SubmitResult, RuntimeError> {
 /// authorization seam said `Allow`; nothing downstream blocks it.
 #[tokio::test]
 async fn explicit_permit_allows_the_turn() {
-    let outcome = submit_under(
-        r#"permit (principal == User::"agent", action == Action::"Submit", resource);"#,
-    )
+    // Guard: PRINCIPAL must stay in lock-step with the cap-token the fixture
+    // mints — the runtime derives the principal id from that subject.
+    debug_assert_eq!(
+        PRINCIPAL,
+        format!("User::{:?}", fixtures::TEST_HOLDER),
+        "the derived principal must match the fixture's cap-token subject"
+    );
+
+    let outcome = submit_under(&format!(
+        r#"permit (principal == {PRINCIPAL}, action == Action::"Submit", resource);"#,
+    ))
     .await
     .expect("a matching permit authorizes the turn");
 
@@ -116,10 +132,10 @@ async fn explicit_permit_allows_the_turn() {
 /// fold, proving the `Deny` arm — not the `Indeterminate` arm — fired.
 #[tokio::test]
 async fn explicit_forbid_overrides_permit_and_denies() {
-    let err = submit_under(
+    let err = submit_under(&format!(
         "permit (principal, action, resource);\n\
-         forbid (principal == User::\"agent\", action == Action::\"Submit\", resource);",
-    )
+         forbid (principal == {PRINCIPAL}, action == Action::\"Submit\", resource);",
+    ))
     .await
     .expect_err("a matching forbid denies the turn");
 
@@ -164,9 +180,10 @@ async fn no_matching_policy_falls_through_to_deny() {
 }
 
 /// Subcase 4 (bonus) — a genuine `Indeterminate`. The lone `permit` is guarded
-/// by `when { resource.tier == "free" }`, but the request carries no resource
-/// attributes, so evaluating `resource.tier` is an *error*, not a non-match.
-/// Cedar reports `Indeterminate`, which the runtime folds to
+/// by `when { resource.tier == "free" }`. The derived resource *does* carry the
+/// cap-claim attributes (`audience`, `tools`, `expires_unix`, …) but no `tier`,
+/// so evaluating `resource.tier` is an *error*, not a non-match. Cedar reports
+/// `Indeterminate`, which the runtime folds to
 /// [`RuntimeError::PolicyDenied`] with an `indeterminate:`-prefixed reason — the
 /// fold direction the brief calls out: an indeterminate evaluation never yields
 /// `Allow`.
