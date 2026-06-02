@@ -4,22 +4,30 @@
 //! Plan family: §2.1 (`plans/2.1-cli-blueprint.md`). §18.8 keeps this PR scoped
 //! to `crates/cli/**` plus the root manifest.
 //!
-//! # Phase 1 (this crate)
+//! # Surface
 //!
-//! - [`run_chat`] — load [`Config`], wire a [`ChatEngine`], and drive a
-//!   `rustyline` REPL: a `/`-prefixed line dispatches through the §1.0
-//!   [`CommandBus`]; anything else is submitted as a chat turn.
+//! - [`run_chat`] — load [`Config`], wire the chat substrate, and drive a REPL:
+//!   a `/`-prefixed line dispatches through the §1.0 [`CommandBus`]; anything
+//!   else is submitted as a chat turn.
 //! - [`register_default_commands`] / [`BudgetCommand`] — the built-in
 //!   `/help`, `/quit`, `/exit`, and `/budget` slash-commands.
-//! - [`ChatEngine`] / [`TurnOutcome`] — the wired runtime + cost-gate + provider
-//!   substrate and the per-turn result.
+//! - [`FusedEngine`] — the **default** substrate: one [`FusedRuntime`] per turn
+//!   runs the full ten-stage pipeline (cap-token verify, Cedar authorization,
+//!   cost admission, real provider dispatch, signed-and-chained receipt, cost
+//!   finalize, memory write, durable journal), over persistent state under
+//!   `~/.ardur/` ([`StateDirs`]).
+//! - [`ChatEngine`] / [`TurnOutcome`] — the legacy `InMemoryRuntime` **echo**
+//!   substrate, retained behind `--echo` for cheap, key-free, cost-free smoke
+//!   testing.
 //! - [`Config`] — `~/.ardur/config.toml` loading with defaults.
 //! - [`CliError`] — the crate's single typed-error surface.
 //!
-//! The interactive `chat` subcommand routes everything through the §1.0
-//! [`InMemoryRuntime`](ardur_runtime::InMemoryRuntime) echo stub and the §3.0
-//! Anthropic stub; the inline `// TODO §2.1 Phase 2:` markers point at the live
-//! provider dispatch, real cap-token minting, and projected cost envelopes.
+//! By default the interactive `chat` subcommand routes turns through the fused
+//! runtime (real LLM + full substrate + persistent state). With no
+//! `ANTHROPIC_API_KEY` set it falls back to the network-free Anthropic stub and
+//! prints an offline notice; `--echo` selects the legacy echo runtime instead.
+//!
+//! [`FusedRuntime`]: ardur_fused_runtime::FusedRuntime
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
@@ -27,8 +35,10 @@ mod commands;
 mod config;
 mod engine;
 mod error;
+mod fused;
+mod state;
 
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 
 use ardur_runtime::{ChatMessage, CommandBus, CommandContext, InMemoryCommandBus, RuntimeError};
@@ -39,6 +49,11 @@ pub use commands::{BudgetCommand, register_default_commands};
 pub use config::{Config, DEFAULT_BUDGET_CENTS, DEFAULT_MODEL};
 pub use engine::{ChatEngine, TurnOutcome};
 pub use error::CliError;
+pub use fused::FusedEngine;
+pub use state::StateDirs;
+
+/// The environment variable overriding the per-session budget, in US cents.
+pub const BUDGET_CENTS_ENV: &str = "ARDUR_CLI_BUDGET_CENTS";
 
 /// Arguments to the `ardur chat` subcommand.
 #[derive(Clone, Debug, Default, clap::Args)]
@@ -46,6 +61,54 @@ pub struct ChatArgs {
     /// Path to the config file (defaults to `~/.ardur/config.toml`).
     #[arg(long, value_name = "PATH")]
     pub config: Option<PathBuf>,
+
+    /// Per-session budget ceiling, in US cents (default 1000 = $10). Overrides
+    /// `ARDUR_CLI_BUDGET_CENTS` and the config file. Real LLM calls cost real
+    /// money — this caps a session's spend.
+    #[arg(long, value_name = "CENTS")]
+    pub budget_cents: Option<u64>,
+
+    /// Use the legacy in-memory echo runtime instead of the full FusedRuntime:
+    /// no provider call, no cost, no persistent state. For cheap smoke testing
+    /// without an API key.
+    #[arg(long)]
+    pub echo: bool,
+}
+
+/// The active chat substrate for a session: the default [`FusedEngine`] or the
+/// legacy [`ChatEngine`] echo runtime (selected by `--echo`). Both expose the
+/// budget handle and per-turn entry the REPL drives.
+enum ActiveEngine {
+    /// The FusedRuntime-backed substrate (default).
+    Fused(Box<FusedEngine>),
+    /// The legacy `InMemoryRuntime` echo substrate (`--echo`).
+    Echo(Box<ChatEngine>),
+}
+
+impl ActiveEngine {
+    /// A shared handle to the session's remaining-cents counter.
+    fn budget_handle(&self) -> std::sync::Arc<std::sync::atomic::AtomicU64> {
+        match self {
+            ActiveEngine::Fused(e) => e.budget_handle(),
+            ActiveEngine::Echo(e) => e.budget_handle(),
+        }
+    }
+
+    /// The session's remaining budget, in cents.
+    fn remaining_cents(&self) -> u64 {
+        match self {
+            ActiveEngine::Fused(e) => e.remaining_cents(),
+            ActiveEngine::Echo(e) => e.remaining_cents(),
+        }
+    }
+
+    /// Run one chat turn over `messages`.
+    async fn run_turn(&self, messages: &[ChatMessage]) -> Result<TurnOutcome, CliError> {
+        match self {
+            ActiveEngine::Fused(e) => e.run_turn(messages).await,
+            ActiveEngine::Echo(e) => e.run_turn(messages).await,
+        }
+    }
 }
 
 /// ANSI bold-cyan wrapping for the prompt.
@@ -62,7 +125,8 @@ pub fn run_chat(args: ChatArgs) -> Result<(), CliError> {
         .with_writer(std::io::stderr)
         .try_init();
 
-    let config = Config::load(args.config)?;
+    let mut config = Config::load(args.config.clone())?;
+    config.budget_cents = resolve_budget_cents(args.budget_cents, config.budget_cents);
     if let Some(path) = Config::default_path() {
         tracing::debug!(config = %config::redacted_summary(&config, &path), "loaded config");
     }
@@ -70,12 +134,38 @@ pub fn run_chat(args: ChatArgs) -> Result<(), CliError> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    runtime.block_on(run_chat_loop(config))
+    runtime.block_on(run_chat_loop(config, args.echo))
 }
 
-/// The async REPL body, driven by [`run_chat`]'s tokio runtime.
-async fn run_chat_loop(config: Config) -> Result<(), CliError> {
-    let engine = ChatEngine::new(&config)?;
+/// Resolve the effective per-session budget: the `--budget-cents` flag wins,
+/// then the [`BUDGET_CENTS_ENV`] environment variable, then the config-file (or
+/// default) value.
+fn resolve_budget_cents(flag: Option<u64>, config_value: u64) -> u64 {
+    flag.or_else(|| {
+        std::env::var(BUDGET_CENTS_ENV)
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+    })
+    .unwrap_or(config_value)
+}
+
+/// The async REPL body, driven by [`run_chat`]'s tokio runtime. Wires the
+/// selected substrate, registers the slash-commands, and reads turns from either
+/// an interactive line-editor (a tty) or piped stdin.
+async fn run_chat_loop(config: Config, echo: bool) -> Result<(), CliError> {
+    let engine = if echo {
+        ActiveEngine::Echo(Box::new(ChatEngine::new(&config)?))
+    } else {
+        let dirs = StateDirs::resolve()?;
+        dirs.create()?;
+        let fused = FusedEngine::new(&config, &dirs, config.budget_cents)?;
+        if fused.offline() {
+            println!(
+                "running in offline mode (stub provider) — set ANTHROPIC_API_KEY for real LLM calls."
+            );
+        }
+        ActiveEngine::Fused(Box::new(fused))
+    };
 
     let mut bus = InMemoryCommandBus::new();
     register_default_commands(&mut bus);
@@ -84,13 +174,29 @@ async fn run_chat_loop(config: Config) -> Result<(), CliError> {
         Box::new(BudgetCommand::new(engine.budget_handle())),
     );
 
-    let mut editor = DefaultEditor::new().map_err(readline_to_cli)?;
     println!(
         "ardur chat — model {} · type /help for commands.",
         config.model
     );
 
     let mut history: Vec<ChatMessage> = Vec::new();
+    // A tty drives the rich line-editor; piped/redirected stdin reads lines
+    // directly so `echo "hi" | ardur chat` (and the integration tests) work.
+    if std::io::stdin().is_terminal() {
+        run_interactive(&engine, &bus, &mut history).await?;
+    } else {
+        run_piped(&engine, &bus, &mut history).await;
+    }
+    Ok(())
+}
+
+/// The interactive REPL over a `rustyline` line-editor.
+async fn run_interactive(
+    engine: &ActiveEngine,
+    bus: &InMemoryCommandBus,
+    history: &mut Vec<ChatMessage>,
+) -> Result<(), CliError> {
+    let mut editor = DefaultEditor::new().map_err(readline_to_cli)?;
     loop {
         let prompt = format!(
             "{PROMPT_ON}[budget: {}c] > {PROMPT_OFF}",
@@ -103,13 +209,8 @@ async fn run_chat_loop(config: Config) -> Result<(), CliError> {
                     continue;
                 }
                 let _ = editor.add_history_entry(line);
-
-                if let Some(rest) = line.strip_prefix('/') {
-                    if dispatch_slash(&bus, rest) {
-                        break; // a quit/exit command was handled
-                    }
-                } else {
-                    run_chat_message(&engine, &mut history, line).await;
+                if handle_line(engine, bus, history, line).await {
+                    break;
                 }
             }
             // Ctrl-C / Ctrl-D leave the chat cleanly.
@@ -121,6 +222,43 @@ async fn run_chat_loop(config: Config) -> Result<(), CliError> {
         }
     }
     Ok(())
+}
+
+/// The non-interactive loop over piped/redirected stdin: one turn per line, no
+/// prompt, until a `/quit` or EOF.
+async fn run_piped(
+    engine: &ActiveEngine,
+    bus: &InMemoryCommandBus,
+    history: &mut Vec<ChatMessage>,
+) {
+    use std::io::BufRead as _;
+    let stdin = std::io::stdin();
+    for line in stdin.lock().lines() {
+        let Ok(line) = line else { break };
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if handle_line(engine, bus, history, line).await {
+            break;
+        }
+    }
+}
+
+/// Handle one input line: dispatch a `/`-command through `bus`, or submit the
+/// line as a chat turn. Returns `true` when the loop should break (a quit/exit).
+async fn handle_line(
+    engine: &ActiveEngine,
+    bus: &InMemoryCommandBus,
+    history: &mut Vec<ChatMessage>,
+    line: &str,
+) -> bool {
+    if let Some(rest) = line.strip_prefix('/') {
+        dispatch_slash(bus, rest)
+    } else {
+        run_chat_message(engine, history, line).await;
+        false
+    }
 }
 
 /// Dispatch a `/`-stripped command line through the bus, printing its output.
@@ -144,7 +282,7 @@ fn dispatch_slash(bus: &InMemoryCommandBus, rest: &str) -> bool {
 
 /// Submit `line` as a chat turn, appending it (and any reply) to `history` and
 /// printing the response with its cost.
-async fn run_chat_message(engine: &ChatEngine, history: &mut Vec<ChatMessage>, line: &str) {
+async fn run_chat_message(engine: &ActiveEngine, history: &mut Vec<ChatMessage>, line: &str) {
     history.push(ChatMessage::user(line));
     match engine.run_turn(history).await {
         Ok(outcome) => {
