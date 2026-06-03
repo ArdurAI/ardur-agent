@@ -12,6 +12,9 @@
 //! | `openrouter`     | `OpenRouterProvider`                 | `ardur-provider-openrouter` |
 //! | `ollama`         | `OllamaProvider` (local **or** cloud)| `ardur-provider-ollama`     |
 //! | `codex`          | `CodexProvider` (subprocess wrap)    | `ardur-provider-codex`      |
+//! | `claude-cli`     | `ClaudeCliProvider` (subprocess wrap)| `ardur-provider-claude-cli` |
+//!
+//! (`claude-cli` also answers to the alias `claude-subscription`.)
 //!
 //! Parsing is case-insensitive; an unset (or empty) value selects the default,
 //! `anthropic`. An **unrecognized** value is a boot misconfiguration: [`select`]
@@ -22,7 +25,8 @@
 //! [`ProviderKind::OpenRouter`]) can still fail *after* a valid selection when
 //! their key is absent — that surfaces as `Err(ProviderError)`, distinct from
 //! the panic on an unknown selector. The credential-free backends
-//! ([`ProviderKind::Ollama`], [`ProviderKind::Codex`]) never fail.
+//! ([`ProviderKind::Ollama`], [`ProviderKind::Codex`], [`ProviderKind::ClaudeCli`])
+//! never fail.
 //!
 //! # Why a standalone crate
 //!
@@ -37,6 +41,7 @@
 use std::fmt;
 use std::sync::Arc;
 
+use ardur_provider_claude_cli::ClaudeCliProvider;
 use ardur_provider_codex::CodexProvider;
 use ardur_provider_ollama::OllamaProvider;
 use ardur_provider_openrouter::OpenRouterProvider;
@@ -64,6 +69,9 @@ pub enum ProviderKind {
     Ollama,
     /// OpenAI Codex CLI subscription, wrapped as a subprocess (§3.3b).
     Codex,
+    /// Claude Code CLI subscription, wrapped as a subprocess (§3.3c). Also
+    /// selected by the alias `claude-subscription`.
+    ClaudeCli,
 }
 
 impl ProviderKind {
@@ -72,11 +80,12 @@ impl ProviderKind {
 
     /// Every recognized selector spelling, in selection order — the canonical
     /// list surfaced in the unknown-value error.
-    pub const ALL: [ProviderKind; 4] = [
+    pub const ALL: [ProviderKind; 5] = [
         ProviderKind::Anthropic,
         ProviderKind::OpenRouter,
         ProviderKind::Ollama,
         ProviderKind::Codex,
+        ProviderKind::ClaudeCli,
     ];
 
     /// The canonical lowercase spelling — matches each backend's `id()`.
@@ -87,6 +96,7 @@ impl ProviderKind {
             ProviderKind::OpenRouter => "openrouter",
             ProviderKind::Ollama => "ollama",
             ProviderKind::Codex => "codex",
+            ProviderKind::ClaudeCli => "claude-cli",
         }
     }
 
@@ -103,6 +113,7 @@ impl ProviderKind {
             "openrouter" => Ok(ProviderKind::OpenRouter),
             "ollama" => Ok(ProviderKind::Ollama),
             "codex" => Ok(ProviderKind::Codex),
+            "claude-cli" | "claude-subscription" => Ok(ProviderKind::ClaudeCli),
             _ => Err(UnknownProvider(raw.to_string())),
         }
     }
@@ -131,13 +142,15 @@ impl ProviderKind {
     /// Returns [`ProviderError`] when a credentialed backend's key is missing
     /// ([`ProviderKind::Anthropic`] / [`ProviderKind::OpenRouter`] →
     /// [`ProviderError::Unauthorized`]). The credential-free backends
-    /// ([`ProviderKind::Ollama`] / [`ProviderKind::Codex`]) never fail.
+    /// ([`ProviderKind::Ollama`] / [`ProviderKind::Codex`] /
+    /// [`ProviderKind::ClaudeCli`]) never fail.
     pub fn build(self, model: ModelId) -> Result<Arc<dyn Provider>, ProviderError> {
         let provider: Arc<dyn Provider> = match self {
             ProviderKind::Anthropic => Arc::new(AnthropicProvider::from_env(model)?),
             ProviderKind::OpenRouter => Arc::new(OpenRouterProvider::from_env(model)?),
             ProviderKind::Ollama => Arc::new(OllamaProvider::from_env()),
             ProviderKind::Codex => Arc::new(CodexProvider::from_env(model)),
+            ProviderKind::ClaudeCli => Arc::new(ClaudeCliProvider::from_env(model)),
         };
         Ok(provider)
     }
@@ -161,7 +174,7 @@ impl fmt::Display for UnknownProvider {
         write!(
             f,
             "unknown {SELECTOR_ENV} value {:?}: supported values are \
-             anthropic (default), openrouter, ollama, codex",
+             anthropic (default), openrouter, ollama, codex, claude-cli",
             self.0
         )
     }
@@ -274,6 +287,28 @@ mod tests {
     }
 
     #[test]
+    fn claude_cli_selects_claude_cli() {
+        // The Claude CLI backend wraps the local `claude` binary; from_env is
+        // infallible (no API key, no probe until a turn runs). Both the canonical
+        // spelling and the `claude-subscription` alias resolve to it.
+        for v in [
+            "claude-cli",
+            "Claude-CLI",
+            "CLAUDE-CLI",
+            "claude-subscription",
+            "  claude-subscription  ",
+        ] {
+            assert_eq!(
+                ProviderKind::resolve(Some(v)).unwrap(),
+                ProviderKind::ClaudeCli,
+                "{v:?} should select claude-cli"
+            );
+        }
+        let provider = select(Some("claude-cli"), model()).expect("claude-cli is infallible");
+        assert_eq!(provider.id().0, "claude-cli");
+    }
+
+    #[test]
     #[should_panic(expected = "supported values are")]
     fn unknown_provider_panics_with_helpful_error() {
         let _ = select(Some("mistral"), model());
@@ -284,7 +319,11 @@ mod tests {
         // The reported id() round-trips with the selector spelling — checked for
         // the credential-free backends (the credentialed ones need a key to
         // construct, so their spelling is asserted via as_str()).
-        for kind in [ProviderKind::Ollama, ProviderKind::Codex] {
+        for kind in [
+            ProviderKind::Ollama,
+            ProviderKind::Codex,
+            ProviderKind::ClaudeCli,
+        ] {
             let provider = kind.build(model()).expect("infallible backend");
             assert_eq!(
                 provider.id().0,
