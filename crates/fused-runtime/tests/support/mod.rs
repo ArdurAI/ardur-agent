@@ -104,6 +104,34 @@ pub fn valid_token() -> String {
     mint_token(NOW_UNIX + 3_600, 1_000_000)
 }
 
+/// Mint a cap-token (base64) for an arbitrary subject / audience / tool
+/// allowlist — the lever the Cedar-derivation tests pull to prove the runtime
+/// authorizes as the *verified* subject (not a caller-asserted principal). The
+/// expiry is well ahead of [`NOW_UNIX`] and the budget is generous, so the token
+/// clears stage-1 verification and the only variable is the claim under test.
+pub fn mint_token_as(subject: &str, audience: &str, tools: &[&str]) -> String {
+    cap_issuer()
+        .issue(
+            CapHolderId(subject.to_string()),
+            CapScope {
+                audience: audience.to_string(),
+                expires_unix: NOW_UNIX + 3_600,
+                budget_remaining: 1_000_000,
+                tool_allowlist: tools.iter().map(|t| (*t).to_string()).collect(),
+            },
+        )
+        .expect("the cap-token issues")
+        .to_base64()
+        .expect("the cap-token serializes")
+}
+
+/// The gate holder id for an arbitrary subject (so a test can provision budget
+/// for the subject its cap-token is minted under — the cost gate keys the
+/// holder on the verified subject).
+pub fn gate_holder_for(subject: &str) -> GateHolderId {
+    GateHolderId(subject.to_string())
+}
+
 /// A deterministic manual clock pinned at [`NOW_MS`].
 pub fn manual_clock() -> Arc<dyn Clock> {
     Arc::new(ManualClock::new(NOW_MS))
@@ -349,7 +377,7 @@ impl VetoHook {
     }
 }
 
-#[async_trait(?Send)]
+#[async_trait]
 impl LifecycleHook for VetoHook {
     async fn on_pre_submit(&self, _ctx: &PreSubmitCtx<'_>) -> HookDecision {
         HookDecision::Veto {
@@ -376,7 +404,7 @@ impl RedactingHook {
     }
 }
 
-#[async_trait(?Send)]
+#[async_trait]
 impl LifecycleHook for RedactingHook {
     async fn on_pre_submit(&self, ctx: &PreSubmitCtx<'_>) -> HookDecision {
         if !ctx

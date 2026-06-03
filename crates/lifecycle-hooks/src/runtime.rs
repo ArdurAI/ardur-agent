@@ -111,7 +111,7 @@ impl HookedRuntime {
         &self,
         session_id: SessionId,
         phase: LifecyclePhase,
-        error: &(dyn std::error::Error + '_),
+        error: &(dyn std::error::Error + Send + Sync + '_),
     ) {
         let ctx = ErrorCtx {
             session_id,

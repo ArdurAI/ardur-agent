@@ -32,6 +32,11 @@ pub enum CliError {
     /// A capability-token operation failed.
     #[error("cap-token error: {0}")]
     CapToken(#[from] CapTokenError),
+
+    /// Persistent session state could not be set up: a `~/.ardur/` key, the
+    /// Cedar bundle, the session cap-token, or the fused-runtime build failed.
+    #[error("state error: {0}")]
+    State(String),
 }
 
 /// Cost-admission failures surface as runtime failures: admitting a turn is part

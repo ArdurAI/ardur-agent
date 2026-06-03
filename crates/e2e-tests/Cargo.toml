@@ -41,6 +41,10 @@ ardur-session-journals = { workspace = true }
 ardur-tool-registry = { workspace = true }
 ardur-injection-defense = { workspace = true }
 ardur-slack-adapter = { workspace = true }
+# `ardur-server` is a binary+library crate and is *not* declared in
+# `[workspace.dependencies]`; the §4.1 server scenario boots its real `AppState`
+# + router, so it is pulled in by an explicit path (as `ardur-cli` is above).
+ardur-server = { path = "../server" }
 
 # `fixtures.rs` is compiled as part of the library, so the helpers it builds
 # (`tempfile::TempDir`, the deterministic biscuit root key) need their crates as
@@ -70,3 +74,7 @@ secrecy = { workspace = true }
 hmac = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
+# The §4.1 server scenario drives `ardur-server`'s real axum router in-process
+# via `tower::ServiceExt::oneshot` — no socket needed.
+axum = { workspace = true }
+tower = { workspace = true }

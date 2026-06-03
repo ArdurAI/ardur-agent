@@ -1,0 +1,90 @@
+//! Shared scaffolding for the `ardur-server` integration tests: deterministic
+//! Slack test credentials, a genuine `v0=` request signer, a [`Config`] over a
+//! tempdir + stub provider, and a `oneshot` helper that drives the router
+//! in-process (no socket).
+
+#![allow(dead_code)] // each test file uses a different subset.
+
+use std::sync::Arc;
+
+use ardur_provider_runtime::{AnthropicProvider, ModelId, Provider};
+use ardur_server::{AppState, Config, LogFormat, build_router};
+use axum::Router;
+use axum::body::Bytes;
+use axum::http::{Request, StatusCode};
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
+use tempfile::TempDir;
+use tower::ServiceExt as _;
+
+type HmacSha256 = Hmac<Sha256>;
+
+/// Test Slack credentials — shared by the signer and the booted adapter.
+pub const BOT_TOKEN: &str = "xoxb-server-test-token";
+pub const SIGNING_SECRET: &str = "server-signing-secret-000000000000";
+pub const APP_ID: &str = "A0SERVERTEST";
+
+/// The current Unix time in seconds, as a string — a fresh Slack request
+/// timestamp that clears the adapter's ±5-minute replay window.
+#[must_use]
+pub fn now_unix_string() -> String {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_secs()
+        .to_string()
+}
+
+/// Recompute the genuine Slack `v0=<hex>` request signature over the basestring.
+#[must_use]
+pub fn sign(timestamp: &str, body: &str) -> String {
+    let basestring = format!("v0:{timestamp}:{body}");
+    let mut mac =
+        HmacSha256::new_from_slice(SIGNING_SECRET.as_bytes()).expect("hmac accepts any key length");
+    mac.update(basestring.as_bytes());
+    format!("v0={}", hex::encode(mac.finalize().into_bytes()))
+}
+
+/// A [`Config`] rooted at `data_dir`, pointing the Slack adapter at `slack_base`
+/// (a wiremock URI) and carrying the test credentials. The Anthropic key is
+/// empty — tests inject the stub provider.
+#[must_use]
+pub fn test_config(data_dir: &TempDir, slack_base: Option<String>) -> Config {
+    Config {
+        anthropic_api_key: String::new(),
+        slack_bot_token: BOT_TOKEN.to_string(),
+        slack_signing_secret: SIGNING_SECRET.to_string(),
+        slack_app_id: APP_ID.to_string(),
+        data_dir: data_dir.path().to_path_buf(),
+        bind_addr: "127.0.0.1:0".to_string(),
+        model: "claude-opus-4-8".to_string(),
+        cost_budget_cents: 10_000,
+        cedar_policy_path: None,
+        slack_base_url: slack_base,
+        log_format: LogFormat::Text,
+    }
+}
+
+/// Boot an [`AppState`] over the deterministic stub provider (no network).
+#[must_use]
+pub fn boot_stub(config: &Config) -> Arc<AppState> {
+    let provider: Arc<dyn Provider> =
+        Arc::new(AnthropicProvider::stub(ModelId::new(&config.model)));
+    AppState::boot(config, provider).expect("AppState boots")
+}
+
+/// Boot the stub-backed router for `config`.
+pub fn boot_router(config: &Config) -> Router {
+    build_router(boot_stub(config))
+}
+
+/// Drive a single request through `router` via `oneshot`, returning the status
+/// and the collected body bytes.
+pub async fn oneshot(router: Router, request: Request<axum::body::Body>) -> (StatusCode, Bytes) {
+    let response = router.oneshot(request).await.expect("router responds");
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body collects");
+    (status, body)
+}
