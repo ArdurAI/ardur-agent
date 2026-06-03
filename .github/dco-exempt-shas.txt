@@ -1,0 +1,8 @@
+# DCO exempt SHAs — frozen 2026-06-02. Append-only by deliberate choice.
+# Pre-policy (before PR #24 merged 2026-06-02 14:02:40 -0500)
+7b49f60
+c086428
+# In-flight at policy enforcement (squash-merged within ~3h of #24)
+77e3a71
+de9ae77
+d82725f
