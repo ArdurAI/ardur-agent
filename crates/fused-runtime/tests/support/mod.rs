@@ -23,7 +23,7 @@ use ardur_provider_runtime::{
 use ardur_receipt::Es256SigningKey;
 use ardur_runtime::{CapTokenRef, ChatMessage, CostTuple, Role, SessionId, SubmitRequest};
 use async_trait::async_trait;
-use biscuit_auth::PrivateKey;
+use biscuit_auth::{Algorithm, PrivateKey};
 use parking_lot::Mutex;
 
 /// The audience every test cap-token is scoped to (and the runtime requires).
@@ -48,8 +48,8 @@ const CAP_ROOT_SEED: [u8; 32] = [
 
 /// The deterministic cap-token issuer (root key from [`CAP_ROOT_SEED`]).
 pub fn cap_issuer() -> BiscuitCapTokenIssuer {
-    let private =
-        PrivateKey::from_bytes(&CAP_ROOT_SEED).expect("CAP_ROOT_SEED is a valid Ed25519 key");
+    let private = PrivateKey::from_bytes(&CAP_ROOT_SEED, Algorithm::Ed25519)
+        .expect("CAP_ROOT_SEED is a valid Ed25519 key");
     BiscuitCapTokenIssuer::new(KeyPair::from(&private))
 }
 

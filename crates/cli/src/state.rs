@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use ardur_cap_token::BiscuitCapTokenIssuer;
 use ardur_cedar_policy::{CedarPolicyBundle, PolicyBundle, PolicySource};
 use ardur_receipt::Es256SigningKey;
-use biscuit_auth::{KeyPair, PrivateKey};
+use biscuit_auth::{Algorithm, KeyPair, PrivateKey};
 
 use crate::error::CliError;
 
@@ -108,7 +108,7 @@ impl StateDirs {
         let path = self.issuer_key_path();
         match std::fs::read(&path) {
             Ok(bytes) => {
-                let private = PrivateKey::from_bytes(&bytes).map_err(|e| {
+                let private = PrivateKey::from_bytes(&bytes, Algorithm::Ed25519).map_err(|e| {
                     CliError::State(format!(
                         "issuer key at {} is malformed: {e}",
                         path.display()
