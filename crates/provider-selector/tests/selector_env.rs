@@ -116,6 +116,17 @@ fn from_env_codex_selects_codex() {
 }
 
 #[test]
+fn from_env_claude_cli_selects_claude_cli() {
+    let _guard = env_lock();
+    let prior_sel = swap("ARDUR_PROVIDER", Some("claude-subscription")); // alias
+
+    let provider = from_env(model()).expect("claude-cli is infallible");
+    assert_eq!(provider.id().0, "claude-cli");
+
+    restore("ARDUR_PROVIDER", prior_sel);
+}
+
+#[test]
 #[should_panic(expected = "supported values are")]
 fn from_env_unknown_provider_panics() {
     let _guard = env_lock();
