@@ -32,6 +32,7 @@ use ardur_session_journals::SessionJournal;
 use parking_lot::Mutex;
 
 use crate::receipts::{ReceiptChainError, load_persisted_chain};
+use crate::reconcile::{ReconciliationError, ReconciliationReport, ReconciliationStrategy};
 use crate::runtime::{COMPLETION_VERB, FusedRuntime};
 use crate::shared::{SharedBudget, SharedDenyList};
 
@@ -73,6 +74,7 @@ pub struct FusedRuntimeBuilder {
     memory: Option<Arc<dyn MemoryRuntime + Send + Sync>>,
     journal: Option<Arc<dyn SessionJournal>>,
     receipt_log: Option<PathBuf>,
+    reconciliation_strategy: ReconciliationStrategy,
 }
 
 impl FusedRuntimeBuilder {
@@ -111,6 +113,7 @@ impl FusedRuntimeBuilder {
             memory: None,
             journal: None,
             receipt_log: None,
+            reconciliation_strategy: ReconciliationStrategy::default(),
         }
     }
 
@@ -262,6 +265,19 @@ impl FusedRuntimeBuilder {
         self
     }
 
+    /// The strategy [`FusedRuntime::reconcile_receipts`] applies to orphan
+    /// receipts at boot (ARD-17). Defaults to
+    /// [`AppendSyntheticJournal`](ReconciliationStrategy::AppendSyntheticJournal)
+    /// — a *visible* recovery that heals the journal and leaves the durable
+    /// receipt chain (the source of truth) intact.
+    ///
+    /// [`FusedRuntime::reconcile_receipts`]: crate::FusedRuntime::reconcile_receipts
+    #[must_use]
+    pub fn reconciliation_strategy(mut self, strategy: ReconciliationStrategy) -> Self {
+        self.reconciliation_strategy = strategy;
+        self
+    }
+
     /// Assemble the runtime. Fails only if a configured [`receipt_log`] exists
     /// but cannot be read back to resume the chain.
     ///
@@ -317,6 +333,31 @@ impl FusedRuntimeBuilder {
             journal: self.journal,
             chain_tail: Mutex::new(chain_tail),
             receipt_log: self.receipt_log,
+            reconciliation_strategy: self.reconciliation_strategy,
         })
+    }
+
+    /// Assemble the runtime **and run an ARD-17 reconciliation sweep** over the
+    /// receipt log + journal before returning it — the boot default that closes
+    /// the orphan-receipt durability gap.
+    ///
+    /// This is the async counterpart to [`build`](Self::build): `build` stays
+    /// synchronous (so the many call sites that do not persist anything are
+    /// unaffected, and out-of-crate callers need no async boot), while a process
+    /// recovering over a crashed peer's on-disk state calls `build_reconciled`
+    /// to heal the journal in one step. With no receipt log or journal
+    /// configured the sweep is a no-op and the report is empty.
+    ///
+    /// # Errors
+    ///
+    /// [`ReconciliationError::ReceiptChain`] if the persisted chain cannot be
+    /// loaded (the same failure [`build`](Self::build) surfaces), plus any
+    /// [`reconcile_receipts`](FusedRuntime::reconcile_receipts) error.
+    pub async fn build_reconciled(
+        self,
+    ) -> Result<(FusedRuntime, ReconciliationReport), ReconciliationError> {
+        let runtime = self.build()?;
+        let report = runtime.reconcile_receipts(false).await?;
+        Ok((runtime, report))
     }
 }

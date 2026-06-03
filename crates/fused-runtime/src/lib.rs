@@ -62,12 +62,16 @@
 
 mod builder;
 mod receipts;
+mod reconcile;
 mod runtime;
 mod shared;
 
 pub use builder::FusedRuntimeBuilder;
 pub use receipts::{
     PersistedReceipt, ReceiptChainError, load_persisted_chain, verify_persisted_chain,
+};
+pub use reconcile::{
+    ReconciliationAction, ReconciliationError, ReconciliationReport, ReconciliationStrategy,
 };
 pub use runtime::{FusedRuntime, PerRequestProvisioning};
 pub use shared::{SharedBudget, SharedDenyList};
