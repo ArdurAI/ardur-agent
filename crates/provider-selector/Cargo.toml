@@ -1,0 +1,37 @@
+# ardur-provider-selector — boot-time provider selection (§3.0 wiring).
+#
+# The four §3.x backends (Anthropic §3.1, OpenRouter §3.2, Ollama §3.3, Codex
+# §3.3b) each implement the same `Provider` trait and each own a `from_env`
+# constructor. This crate is the one place that reads the `ARDUR_PROVIDER`
+# selector and dispatches to the right backend, returning a boxed
+# `Arc<dyn Provider>` the CLI and server wire into the FusedRuntime at boot.
+#
+# It sits ABOVE all four provider crates in the dep graph (it depends on each of
+# them), which is exactly why the selector cannot live in `provider-runtime`:
+# the three peer crates already depend on `provider-runtime`, so a selector
+# there would close a cycle. A leaf crate that depends on all four is the only
+# acyclic home.
+#
+# §18.8 keeps this PR scoped to this crate plus the CLI/server boot paths, the
+# selector tests, the env/runbook docs, and the root manifest.
+
+[package]
+name = "ardur-provider-selector"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The §3.0 provider abstraction every backend speaks — the `Provider` trait we
+# box behind `Arc<dyn Provider>`, the typed `ProviderError` a credentialed
+# `from_env` can fail with, and the `ModelId` the providers default to. Also
+# re-exports the Anthropic backend (§3.1), the default selection.
+ardur-provider-runtime = { workspace = true }
+# The OpenRouter backend (§3.2) — selected by `ARDUR_PROVIDER=openrouter`.
+ardur-provider-openrouter = { workspace = true }
+# The Ollama backend (§3.3) — selected by `ARDUR_PROVIDER=ollama`.
+ardur-provider-ollama = { workspace = true }
+# The Codex subscription backend (§3.3b) — selected by `ARDUR_PROVIDER=codex`.
+ardur-provider-codex = { workspace = true }

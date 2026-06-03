@@ -1,13 +1,13 @@
 //! `ardur-server` — the deployable binary.
 //!
 //! A thin shell over [`ardur_server`]: install tracing, read [`Config`] from the
-//! environment, build the live Anthropic provider, boot the [`AppState`], and
-//! serve the router over a TCP listener until a SIGINT/SIGTERM drains it.
+//! environment, select the provider backend via `ARDUR_PROVIDER`, boot the
+//! [`AppState`], and serve the router over a TCP listener until a SIGINT/SIGTERM
+//! drains it.
 #![forbid(unsafe_code)]
 
-use std::sync::Arc;
-
-use ardur_provider_runtime::{AnthropicProvider, ModelId, Provider};
+use ardur_provider_runtime::ModelId;
+use ardur_provider_selector as provider_selector;
 use ardur_server::{AppState, Config, build_router};
 
 #[tokio::main]
@@ -22,17 +22,19 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    // The live HTTP provider (tests inject a stub instead).
-    let provider: Arc<dyn Provider> = Arc::new(
-        AnthropicProvider::from_env(ModelId::new(&config.model))
-            .map_err(|e| anyhow::anyhow!("building anthropic provider: {e}"))?,
-    );
+    // The live backend, selected by `ARDUR_PROVIDER` (default `anthropic`). An
+    // unknown selector panics here at boot; a valid selection with a missing key
+    // surfaces as an error and aborts startup (tests inject a stub instead).
+    let provider = provider_selector::from_env(ModelId::new(&config.model))
+        .map_err(|e| anyhow::anyhow!("building provider: {e}"))?;
+    let provider_id = provider.id().0.clone();
 
     let state = AppState::boot(&config, provider)?;
     tracing::info!(
         data_dir = %state.data_dir().display(),
         bind = %config.bind_addr,
         model = %config.model,
+        provider = %provider_id,
         budget_cents = config.cost_budget_cents,
         "ardur-server booted"
     );
