@@ -197,6 +197,7 @@ dependencies = [
  "ardur-cap-token",
  "ardur-cedar-policy",
  "ardur-cost-gate",
+ "ardur-injection-defense",
  "ardur-lifecycle-hooks",
  "ardur-memory",
  "ardur-provider-runtime",
@@ -222,6 +223,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "ardur-messaging-gateway",
+ "ardur-runtime",
  "ardur-tool-registry",
  "async-trait",
  "once_cell",

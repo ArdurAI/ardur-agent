@@ -24,6 +24,7 @@ use ardur_cost_gate::{
     Clock, CostEnvelope, CostTuple as GateCostTuple, HolderId as GateHolderId,
     InMemoryCostAdmissionGate, SystemClock,
 };
+use ardur_injection_defense::FilterRegistry;
 use ardur_lifecycle_hooks::HookRegistry;
 use ardur_memory::MemoryRuntime;
 use ardur_provider_runtime::{ModelId, Provider};
@@ -71,6 +72,7 @@ pub struct FusedRuntimeBuilder {
     ceiling: Option<CostEnvelope>,
     provision_cap: Option<GateCostTuple>,
     registry: Arc<HookRegistry>,
+    injection_filters: FilterRegistry,
     memory: Option<Arc<dyn MemoryRuntime + Send + Sync>>,
     journal: Option<Arc<dyn SessionJournal>>,
     receipt_log: Option<PathBuf>,
@@ -110,6 +112,7 @@ impl FusedRuntimeBuilder {
             ceiling: None,
             provision_cap: None,
             registry: Arc::new(HookRegistry::new()),
+            injection_filters: FilterRegistry::new(),
             memory: None,
             journal: None,
             receipt_log: None,
@@ -233,6 +236,21 @@ impl FusedRuntimeBuilder {
         self
     }
 
+    /// Wire an injection-defense [`FilterRegistry`] into stage 4.5 (ARD-48): the
+    /// fused runtime scans every outbound prompt through it after the pre-submit
+    /// hooks and before the provider dispatch. A `Block` verdict aborts the turn
+    /// with [`RuntimeError::InjectionBlocked`](ardur_runtime::RuntimeError::InjectionBlocked)
+    /// (releasing the cost reservation, minting no receipt); an
+    /// `AllowWithSanitization` swaps the provider body for the redacted rewrite.
+    ///
+    /// Defaults to an **empty** registry, which makes stage 4.5 a no-op — so a
+    /// runtime that does not opt in behaves exactly as before this stage existed.
+    #[must_use]
+    pub fn with_injection_filters(mut self, filters: FilterRegistry) -> Self {
+        self.injection_filters = filters;
+        self
+    }
+
     /// Share an externally-held deny-list (so the caller can revoke through its
     /// own handle too). By default the runtime owns a fresh one, reachable via
     /// [`FusedRuntime::revoke_cap_token`].
@@ -329,6 +347,7 @@ impl FusedRuntimeBuilder {
             gate_model_id,
             envelope: self.envelope,
             registry: self.registry,
+            injection_filters: self.injection_filters,
             memory: self.memory,
             journal: self.journal,
             chain_tail: Mutex::new(chain_tail),
