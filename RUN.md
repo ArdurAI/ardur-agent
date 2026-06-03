@@ -33,6 +33,7 @@ startup (`using provider provider=<id>`).
 | `openrouter` | OpenRouter HTTP gateway | `OPENROUTER_API_KEY` |
 | `ollama` | Ollama local daemon **or** hosted cloud | `OLLAMA_BASE_URL` (default `http://localhost:11434`); `OLLAMA_API_KEY` (cloud only — its presence auto-defaults the base URL to `https://ollama.com`) |
 | `codex` | OpenAI Codex CLI (ChatGPT subscription) | `CODEX_BINARY` (default: `codex` on `PATH`), `CODEX_DEFAULT_MODEL`, `CODEX_SANDBOX_MODE` (`read-only` \| `workspace-write` \| `danger-full-access`), `CODEX_WORKING_DIR` |
+| `claude-cli` (alias `claude-subscription`) | Claude Code CLI (Anthropic subscription) | `CLAUDE_CLI_BINARY` (default: `claude` on `PATH`), `CLAUDE_CLI_DEFAULT_MODEL`, `CLAUDE_CLI_PERMISSION_MODE` (`default` \| `acceptEdits` \| `auto` \| `bypassPermissions` \| `dontAsk` \| `plan`), `CLAUDE_CLI_WORKING_DIR`, `CLAUDE_CLI_ALLOWED_TOOLS`. Run `claude login` once; spends the **Agent SDK Credit pool** ($20–$200/mo, plan-dependent), not unbounded |
 
 One-liners (CLI shown; the server reads the same variables from its `.env`):
 
@@ -50,12 +51,16 @@ ARDUR_PROVIDER=ollama OLLAMA_API_KEY=... ardur chat
 
 # Codex — uses your logged-in ChatGPT subscription via the codex CLI
 ARDUR_PROVIDER=codex ardur chat
+
+# Claude CLI — uses your logged-in Anthropic subscription via the claude CLI
+ARDUR_PROVIDER=claude-cli ardur chat
 ```
 
 The Anthropic and OpenRouter backends fail at boot if their API key is missing
 (the CLI then falls back to a network-free stub and prints an offline notice;
-the server aborts). The Ollama and Codex backends need no credentials to wire —
-they fail later, per-turn, if the daemon/binary is unreachable.
+the server aborts). The Ollama, Codex, and Claude-CLI backends need no
+credentials to wire — they fail later, per-turn, if the daemon/binary is
+unreachable or the CLI is not logged in.
 
 ## Slack app setup
 
