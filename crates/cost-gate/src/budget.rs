@@ -38,6 +38,23 @@ pub trait BudgetStore: Send + Sync {
     /// Credit a signed `delta` back to the holder named by `handle` (the
     /// `reserved - actual` refund, or a full credit on release).
     async fn refund(&self, handle: ReservationHandle, delta: CostDelta) -> Result<(), BudgetError>;
+
+    /// Atomically merge `add` into the holder's balance — creating the account
+    /// from zero if it does not exist yet — and return the resulting balance.
+    ///
+    /// This is the request-time **top-up** primitive behind
+    /// [`CostAdmissionGate::provision_for`](crate::CostAdmissionGate::provision_for):
+    /// the merge policy is *additive* (the new budget sums onto the remaining
+    /// balance) so a per-turn top-up never zeroes a holder's unspent budget the
+    /// way an overwrite would. If `cap` is `Some` and the merged balance would
+    /// exceed it on any dimension, the balance is left unchanged and
+    /// [`BudgetError::OverProvisionCap`] names the offending dimension.
+    async fn provision_merge(
+        &self,
+        holder: &HolderId,
+        add: &CostTuple,
+        cap: Option<&CostTuple>,
+    ) -> Result<CostTuple, BudgetError>;
 }
 
 struct Account {
@@ -131,5 +148,30 @@ impl BudgetStore for InMemoryBudgetStore {
         acct.balance = acct.balance.apply_delta(&delta);
         acct.version = acct.version.wrapping_add(1);
         Ok(())
+    }
+
+    async fn provision_merge(
+        &self,
+        holder: &HolderId,
+        add: &CostTuple,
+        cap: Option<&CostTuple>,
+    ) -> Result<CostTuple, BudgetError> {
+        // The whole read-modify-write runs under one write lock, so two
+        // concurrent top-ups for the same holder both land (the balance is the
+        // sum) and a top-up racing a reservation sees a consistent balance.
+        let mut accounts = self.accounts.write();
+        let entry = accounts.entry(holder.clone()).or_insert(Account {
+            balance: CostTuple::ZERO,
+            version: 0,
+        });
+        let merged = entry.balance.saturating_add(add);
+        if let Some(cap) = cap {
+            if let Some(dimension) = merged.first_dimension_over(cap) {
+                return Err(BudgetError::OverProvisionCap(dimension));
+            }
+        }
+        entry.balance = merged;
+        entry.version = entry.version.wrapping_add(1);
+        Ok(merged)
     }
 }

@@ -94,4 +94,13 @@ impl BudgetStore for SharedBudget {
     ) -> Result<(), ardur_cost_gate::BudgetError> {
         self.0.refund(handle, delta).await
     }
+
+    async fn provision_merge(
+        &self,
+        holder: &HolderId,
+        add: &CostTuple,
+        cap: Option<&CostTuple>,
+    ) -> Result<CostTuple, ardur_cost_gate::BudgetError> {
+        self.0.provision_merge(holder, add, cap).await
+    }
 }

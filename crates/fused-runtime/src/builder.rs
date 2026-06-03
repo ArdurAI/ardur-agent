@@ -69,6 +69,7 @@ pub struct FusedRuntimeBuilder {
     deny: SharedDenyList,
     envelope: CostEnvelope,
     ceiling: Option<CostEnvelope>,
+    provision_cap: Option<GateCostTuple>,
     registry: Arc<HookRegistry>,
     memory: Option<Arc<dyn MemoryRuntime + Send + Sync>>,
     journal: Option<Arc<dyn SessionJournal>>,
@@ -107,6 +108,7 @@ impl FusedRuntimeBuilder {
             deny: SharedDenyList::new(),
             envelope: DEFAULT_ENVELOPE,
             ceiling: None,
+            provision_cap: None,
             registry: Arc::new(HookRegistry::new()),
             memory: None,
             journal: None,
@@ -212,6 +214,18 @@ impl FusedRuntimeBuilder {
         self
     }
 
+    /// Cap the accumulated balance any single subject may be provisioned to via
+    /// per-request top-ups. A
+    /// [`PerRequestProvisioning::budget`](crate::PerRequestProvisioning::budget)
+    /// whose additive merge would push a subject past this on any dimension is
+    /// refused with [`RuntimeError::ProvisioningFailed`](ardur_runtime::RuntimeError::ProvisioningFailed).
+    /// Without this, per-request top-ups are unbounded.
+    #[must_use]
+    pub fn provision_cap(mut self, cap: GateCostTuple) -> Self {
+        self.provision_cap = Some(cap);
+        self
+    }
+
     /// Replace the (empty) hook registry.
     #[must_use]
     pub fn registry(mut self, registry: Arc<HookRegistry>) -> Self {
@@ -284,6 +298,9 @@ impl FusedRuntimeBuilder {
             InMemoryCostAdmissionGate::with_clock(self.budget.clone(), self.clock.clone());
         if let Some(ceiling) = self.ceiling {
             gate = gate.with_ceiling(ceiling);
+        }
+        if let Some(cap) = self.provision_cap {
+            gate = gate.with_provision_cap(cap);
         }
 
         let gate_provider_id = ardur_cost_gate::ProviderId(self.provider.id().0);

@@ -45,6 +45,35 @@ use crate::shared::{SharedBudget, SharedDenyList};
 /// The receipt verb minted for a completed turn (`verb.object.state.vN`).
 pub(crate) const COMPLETION_VERB: &str = "llm.completion.minted.v1";
 
+/// Per-request overrides for [`FusedRuntime::submit_with_provisioning`].
+///
+/// Each field defaults to the builder/cap-token-derived value when `None`, so
+/// the empty (`Default`) value reproduces the plain [`submit`](ChatRuntime::submit)
+/// behaviour exactly. This is what lets one boot-time runtime serve a
+/// multi-tenant gateway: per turn it can fund the requesting user's budget,
+/// verify against that user's tenant audience, and (rarely) redirect the budget
+/// holder.
+#[derive(Clone, Debug, Default)]
+pub struct PerRequestProvisioning {
+    /// Budget to provision for the turn's subject *before* admission. `None`
+    /// uses the subject's existing balance (and admission fails with
+    /// [`RuntimeError::CostCeilingExceeded`] if it has none). When `Some`, it is
+    /// merged **additively** onto the existing balance — a per-turn top-up
+    /// accumulates rather than discarding unspent budget — and a merge that
+    /// breaches the gate's configured per-subject cap surfaces as
+    /// [`RuntimeError::ProvisioningFailed`].
+    pub budget: Option<GateCostTuple>,
+    /// The audience the cap-token is verified against for this turn. `None` uses
+    /// the builder default; `Some` lets a single runtime accept cap-tokens
+    /// scoped to different tenant audiences.
+    pub audience: Option<String>,
+    /// The budget-holder subject the turn spends against. `None` derives it from
+    /// the verified cap-token subject (the normal path, so a turn cannot spend
+    /// against a holder the cap did not prove); `Some` overrides it — rare, and
+    /// intended for impersonation-test fixtures.
+    pub subject: Option<GateHolderId>,
+}
+
 /// A [`ChatRuntime`] that fuses every Phase-1 substrate crate behind one
 /// [`submit`](FusedRuntime::submit). Build it with
 /// [`FusedRuntimeBuilder`](crate::FusedRuntimeBuilder).
@@ -123,7 +152,7 @@ impl FusedRuntime {
         &self,
         session_id: SessionId,
         phase: LifecyclePhase,
-        error: &(dyn std::error::Error + '_),
+        error: &(dyn std::error::Error + Send + Sync + '_),
     ) {
         let ctx = ErrorCtx {
             session_id,
@@ -357,6 +386,42 @@ impl FusedRuntime {
 
 impl ChatRuntime for FusedRuntime {
     async fn submit(&self, req: SubmitRequest) -> Result<SubmitResult, RuntimeError> {
+        self.submit_inner(req, PerRequestProvisioning::default())
+            .await
+    }
+}
+
+impl FusedRuntime {
+    /// Submit a turn with per-request provisioning overrides — the multi-tenant
+    /// entry point. Unlike [`submit`](ChatRuntime::submit) (which uses the
+    /// builder's fixed audience and only the budget a holder was provisioned at
+    /// build time), this accepts a [`PerRequestProvisioning`] that can:
+    ///
+    /// - **top the turn's subject up** ([`PerRequestProvisioning::budget`]) so a
+    ///   server can fund a per-user budget on the request itself — the merge is
+    ///   additive, so a top-up accumulates rather than discarding unspent budget;
+    /// - **override the audience** ([`PerRequestProvisioning::audience`]) the
+    ///   cap-token is verified against, so one runtime can serve cap-tokens
+    ///   scoped to different tenant audiences;
+    /// - **override the budget-holder subject**
+    ///   ([`PerRequestProvisioning::subject`]) the turn spends against (rare —
+    ///   normally the subject is derived from the verified cap-token).
+    ///
+    /// All three default to the builder/cap-token-derived values when `None`, so
+    /// `submit(req)` is exactly `submit_with_provisioning(req, Default::default())`.
+    pub async fn submit_with_provisioning(
+        &self,
+        req: SubmitRequest,
+        provisioning: PerRequestProvisioning,
+    ) -> Result<SubmitResult, RuntimeError> {
+        self.submit_inner(req, provisioning).await
+    }
+
+    async fn submit_inner(
+        &self,
+        req: SubmitRequest,
+        provisioning: PerRequestProvisioning,
+    ) -> Result<SubmitResult, RuntimeError> {
         let session_id = req.session_id;
         let now_ms = self.clock.now_ms();
         let now_unix = now_ms / 1000;
@@ -380,12 +445,19 @@ impl ChatRuntime for FusedRuntime {
                 return Err(err);
             }
         };
+        // The audience the cap-token is verified against: the per-request
+        // override if supplied (so one runtime can serve cap-tokens scoped to
+        // different tenant audiences), else the builder default.
+        let audience = provisioning
+            .audience
+            .clone()
+            .unwrap_or_else(|| self.audience.clone());
         let claims = match self.verifier.verify(
             &token,
             &self.cap_root,
             &RequiredCaveats {
                 now_unix,
-                audience: self.audience.clone(),
+                audience,
                 tool: self.tool.clone(),
                 cost: self.cost_units,
             },
@@ -440,11 +512,34 @@ impl ChatRuntime for FusedRuntime {
             }
         }
 
-        // ---- 3. cost-gate: bind the verified token to its holder, then reserve
-        //         the projected envelope.
+        // ---- 3. cost-gate: resolve the budget holder, optionally top it up for
+        //         this request, bind the verified token to it, then reserve the
+        //         projected envelope.
+        //
+        // The holder is the verified cap-token subject (so a turn spends against
+        // whoever the cap proved), unless the caller overrides it — rare, and
+        // reserved for impersonation-test fixtures. If the request carries a
+        // budget, provision it onto the holder *before* admission so a freshly
+        // funded subject can reserve against the new balance; the merge is
+        // additive, so a per-turn top-up accumulates rather than zeroing unspent
+        // budget.
         let gate_token_id = GateTokenId(claims.token_id);
-        let holder = GateHolderId(claims.subject.0.clone());
-        self.gate.bind_token(gate_token_id, holder);
+        let holder = provisioning
+            .subject
+            .clone()
+            .unwrap_or_else(|| GateHolderId(claims.subject.0.clone()));
+        if let Some(budget) = provisioning.budget {
+            if let Err(e) = self.gate.provision_for(&holder, budget).await {
+                let err = RuntimeError::ProvisioningFailed {
+                    subject: holder.0.clone(),
+                    reason: e.to_string(),
+                };
+                self.fire_error(session_id, LifecyclePhase::Submit, &err)
+                    .await;
+                return Err(err);
+            }
+        }
+        self.gate.bind_token(gate_token_id, holder.clone());
         let request_digest = GateSha256::of(&serde_json::to_vec(&req.messages).unwrap_or_default());
         let reservation = match self
             .gate
