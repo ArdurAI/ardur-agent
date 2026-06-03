@@ -5,7 +5,7 @@
 
 #![allow(dead_code)]
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use secrecy::SecretString;
 use sha2::Sha256;
 

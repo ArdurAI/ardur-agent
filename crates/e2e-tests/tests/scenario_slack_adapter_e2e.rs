@@ -19,7 +19,7 @@
 //! [`MessagingGateway`]: ardur_messaging_gateway::MessagingGateway
 //! [`MessagingGateway::send_message`]: ardur_messaging_gateway::MessagingGateway::send_message
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use secrecy::SecretString;
 use sha2::Sha256;
 use uuid::Uuid;
