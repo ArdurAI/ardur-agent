@@ -12,7 +12,7 @@ use ardur_server::{AppState, Config, LogFormat, build_router};
 use axum::Router;
 use axum::body::Bytes;
 use axum::http::{Request, StatusCode};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use tempfile::TempDir;
 use tower::ServiceExt as _;
