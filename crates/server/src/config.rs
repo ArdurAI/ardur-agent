@@ -1,8 +1,9 @@
 //! [`Config`] — the server's startup configuration, read from the environment.
 //!
-//! Every knob has an env var; the secrets ([`anthropic_api_key`], the Slack
-//! credentials) are required and the rest default. [`Config::from_env`] is the
-//! production path; tests build a [`Config`] by hand (with a tempdir
+//! Every knob has an env var; the Slack credentials are always required, the
+//! [`anthropic_api_key`] is required only when the Anthropic backend is selected
+//! (the `ARDUR_PROVIDER` default), and the rest default. [`Config::from_env`] is
+//! the production path; tests build a [`Config`] by hand (with a tempdir
 //! [`data_dir`] and a wiremock [`slack_base_url`]) so the boot sequence runs
 //! without touching the real environment.
 //!
@@ -11,6 +12,8 @@
 //! [`slack_base_url`]: Config::slack_base_url
 
 use std::path::PathBuf;
+
+use ardur_provider_selector::{ProviderKind, SELECTOR_ENV};
 
 /// How the process emits tracing events.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -24,8 +27,10 @@ pub enum LogFormat {
 /// The fully-resolved server configuration.
 #[derive(Clone, Debug)]
 pub struct Config {
-    /// Anthropic API key (`ANTHROPIC_API_KEY`). Used only to build the live
-    /// provider in the binary; tests inject a stub provider and leave this empty.
+    /// Anthropic API key (`ANTHROPIC_API_KEY`). Required only when the Anthropic
+    /// backend is selected (the `ARDUR_PROVIDER` default); empty otherwise. The
+    /// live Anthropic provider reads the key from the environment itself, so this
+    /// field is informational — tests inject a stub provider and leave it empty.
     pub anthropic_api_key: String,
     /// Slack bot token (`SLACK_BOT_TOKEN`) for `chat.postMessage`.
     pub slack_bot_token: String,
@@ -64,13 +69,33 @@ pub struct MissingEnvVar(pub String);
 impl Config {
     /// Read the configuration from the process environment.
     ///
+    /// `ANTHROPIC_API_KEY` is required only when the selected `ARDUR_PROVIDER`
+    /// backend is `anthropic` (the default when unset). For `openrouter`,
+    /// `ollama`, and `codex` it is optional, so a real boot under those backends
+    /// does not demand an Anthropic key. An unrecognized `ARDUR_PROVIDER` is
+    /// treated as non-Anthropic here (the key is not required); the selector
+    /// itself rejects the bad value — with a message listing the supported ones —
+    /// when the binary builds the provider.
+    ///
     /// # Errors
     /// [`MissingEnvVar`] naming the first required variable that is unset or
-    /// empty (`ANTHROPIC_API_KEY`, `SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`,
-    /// `SLACK_APP_ID`).
+    /// empty (`SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`, `SLACK_APP_ID`, and
+    /// `ANTHROPIC_API_KEY` when the Anthropic backend is selected).
     pub fn from_env() -> Result<Self, MissingEnvVar> {
+        // The Anthropic key gates only the Anthropic backend; under any other
+        // selection it is optional (empty when unset).
+        let anthropic_selected = matches!(
+            ProviderKind::resolve(optional(SELECTOR_ENV).as_deref()),
+            Ok(ProviderKind::Anthropic)
+        );
+        let anthropic_api_key = if anthropic_selected {
+            require("ANTHROPIC_API_KEY")?
+        } else {
+            optional("ANTHROPIC_API_KEY").unwrap_or_default()
+        };
+
         Ok(Self {
-            anthropic_api_key: require("ANTHROPIC_API_KEY")?,
+            anthropic_api_key,
             slack_bot_token: require("SLACK_BOT_TOKEN")?,
             slack_signing_secret: require("SLACK_SIGNING_SECRET")?,
             slack_app_id: require("SLACK_APP_ID")?,
