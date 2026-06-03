@@ -48,7 +48,7 @@ mod types;
 
 pub use budget::{BudgetStore, InMemoryBudgetStore};
 pub use clock::{Clock, ManualClock, SystemClock};
-pub use error::{AdmissionError, BudgetError};
+pub use error::{AdmissionError, BudgetError, ProvisionError};
 pub use gate::{CostAdmissionGate, InMemoryCostAdmissionGate};
 pub use types::{
     AdmissionRequest, CostDelta, CostEnvelope, CostTuple, ModelId, ProviderId, RefundReceipt,

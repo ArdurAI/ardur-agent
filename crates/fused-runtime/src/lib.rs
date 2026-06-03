@@ -73,5 +73,5 @@ pub use receipts::{
 pub use reconcile::{
     ReconciliationAction, ReconciliationError, ReconciliationReport, ReconciliationStrategy,
 };
-pub use runtime::FusedRuntime;
+pub use runtime::{FusedRuntime, PerRequestProvisioning};
 pub use shared::{SharedBudget, SharedDenyList};

@@ -377,7 +377,7 @@ impl VetoHook {
     }
 }
 
-#[async_trait(?Send)]
+#[async_trait]
 impl LifecycleHook for VetoHook {
     async fn on_pre_submit(&self, _ctx: &PreSubmitCtx<'_>) -> HookDecision {
         HookDecision::Veto {
@@ -404,7 +404,7 @@ impl RedactingHook {
     }
 }
 
-#[async_trait(?Send)]
+#[async_trait]
 impl LifecycleHook for RedactingHook {
     async fn on_pre_submit(&self, ctx: &PreSubmitCtx<'_>) -> HookDecision {
         if !ctx

@@ -161,13 +161,21 @@ pub struct PostReceiptCtx<'a> {
 /// The view an error hook is shown when a turn fails. `phase` names where the
 /// failure occurred; `error` is the underlying error as a trait object so the
 /// context stays decoupled from any one crate's error type.
+///
+/// The trait object is `Send + Sync` (not a bare `dyn Error`) so an `ErrorCtx`
+/// is itself `Send + Sync` — the property that lets every hook future, and the
+/// registry/runtime futures that await them, be `Send` and so run on a
+/// work-stealing executor (e.g. an axum handler) without a current-thread
+/// bridge. Every runtime error this context carries (`RuntimeError`,
+/// `ProviderError`, `io::Error`, the memory/journal errors) is already
+/// `Send + Sync`, so the tighter bound costs callers nothing.
 pub struct ErrorCtx<'a> {
     /// The session the turn belonged to.
     pub session_id: SessionId,
     /// Which lifecycle moment the failure occurred at.
     pub phase: LifecyclePhase,
     /// The underlying error.
-    pub error: &'a (dyn std::error::Error + 'a),
+    pub error: &'a (dyn std::error::Error + Send + Sync + 'a),
 }
 
 impl std::fmt::Debug for ErrorCtx<'_> {
@@ -198,12 +206,15 @@ pub struct RevokeCtx<'a> {
 /// so a hook implements only the moments it cares about; `hook_id` is the one
 /// required method.
 ///
-/// The trait is `Send + Sync` (a hook is shareable across threads), but its
-/// async callbacks are `?Send`: an [`ErrorCtx`] carries a bare
-/// `&dyn std::error::Error` (not `Sync`), and the in-process registry drives
-/// the chain sequentially within one task, so a `Send` bound on the per-call
-/// future would buy nothing while forcing every error type to be `Sync`.
-#[async_trait(?Send)]
+/// The trait is `Send + Sync` (a hook is shareable across threads) and its async
+/// callbacks return **`Send`** futures (plain `#[async_trait]`). That `Send`
+/// bound is what lets a [`FusedRuntime`](../ardur_fused_runtime/struct.FusedRuntime.html)
+/// `submit` future — which awaits the hook registry — itself be `Send`, so it
+/// runs directly on a work-stealing executor (an axum handler) rather than
+/// behind a current-thread worker bridge. It is affordable because [`ErrorCtx`]
+/// now carries a `Send + Sync` error (the only context that held a bare
+/// `dyn Error`), and every other context view is already `Send + Sync`.
+#[async_trait]
 pub trait LifecycleHook: Send + Sync {
     /// Called before the runtime forwards the request to the provider. A
     /// [`HookDecision::Veto`] blocks the turn; a [`HookDecision::Replace`] swaps

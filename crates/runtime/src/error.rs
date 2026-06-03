@@ -65,6 +65,24 @@ pub enum RuntimeError {
         reason: String,
     },
 
+    /// Provisioning a per-request budget failed before the turn could be
+    /// admitted — e.g. an additive top-up would breach the gate's configured
+    /// per-subject cap. Carries the subject the top-up targeted and the reason.
+    /// See `ardur-fused-runtime`'s `submit_with_provisioning`, which provisions a
+    /// holder's budget on the request itself before the cost gate reserves
+    /// against it. Distinct from [`CostCeilingExceeded`] (the holder *has* a
+    /// budget but it cannot cover the turn): this is the top-up itself being
+    /// refused.
+    ///
+    /// [`CostCeilingExceeded`]: RuntimeError::CostCeilingExceeded
+    #[error("provisioning failed for `{subject}`: {reason}")]
+    ProvisioningFailed {
+        /// The subject the per-request top-up targeted.
+        subject: String,
+        /// The human-readable reason provisioning was refused.
+        reason: String,
+    },
+
     /// No command was registered under the dispatched name.
     #[error("command not found: {0}")]
     CommandNotFound(String),
