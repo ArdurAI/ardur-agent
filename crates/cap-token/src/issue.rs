@@ -57,7 +57,7 @@ impl CapTokenIssuer for BiscuitCapTokenIssuer {
         // that binds the verifier-supplied request facts (`time`/`audience`/
         // `cost`/`tool`). The issued claims travel in the (signed) block
         // context for read-back. Attenuation only ever appends more such checks.
-        let mut builder = biscuit!(
+        let builder = biscuit!(
             r#"
             check if time($t), $t <= {expires};
             check if audience({audience});
@@ -69,9 +69,9 @@ impl CapTokenIssuer for BiscuitCapTokenIssuer {
             budget = budget,
             tools = tool_set,
         );
-        builder.set_context(context);
-
-        let biscuit = builder.build(&self.keypair)?;
+        // biscuit-auth 6: the builder is consuming — `context` takes/returns
+        // `self` (was `set_context(&mut self)` in 5.x).
+        let biscuit = builder.context(context).build(&self.keypair)?;
         Ok(CapToken(biscuit))
     }
 }

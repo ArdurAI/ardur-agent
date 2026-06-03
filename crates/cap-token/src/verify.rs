@@ -3,7 +3,7 @@
 use std::time::{Duration, UNIX_EPOCH};
 
 use biscuit_auth::macros::authorizer;
-use biscuit_auth::{Biscuit, PublicKey};
+use biscuit_auth::{AuthorizerLimits, Biscuit, PublicKey};
 
 use crate::denylist::DenyList;
 use crate::error::{CapTokenError, map_authz_error, map_parse_error};
@@ -65,7 +65,7 @@ impl<D: DenyList> CapTokenVerifier for BiscuitCapTokenVerifier<D> {
         //    the verdict entirely to those checks.
         let now = UNIX_EPOCH + Duration::from_secs(required.now_unix);
         let cost = i64::try_from(required.cost).unwrap_or(i64::MAX);
-        let authorizer = authorizer!(
+        let authorizer_builder = authorizer!(
             r#"
             time({now});
             audience({audience});
@@ -78,7 +78,25 @@ impl<D: DenyList> CapTokenVerifier for BiscuitCapTokenVerifier<D> {
             cost = cost,
             tool = required.tool.clone(),
         );
-        biscuit.authorize(&authorizer).map_err(map_authz_error)?;
+        // biscuit-auth 6: authorization moved off `Biscuit`. Bind the builder to
+        // the token (`build`) then run it (`authorize`); 5.x's
+        // `biscuit.authorize(&authorizer)` no longer exists.
+        let mut authorizer = authorizer_builder
+            .build(&biscuit)
+            .map_err(map_authz_error)?;
+        // The default Datalog `max_time` is 1ms, which the "cheap" CI workers
+        // (macOS especially) routinely blow past under load — a timeout surfaces
+        // as `RunLimit` and is mis-mapped to `Malformed` instead of the real
+        // caveat verdict. A wider ceiling only buys wall-clock; the logical
+        // verdict (which checks pass/fail) is unchanged. biscuit's own test
+        // suite raises this to 10s for the same reason.
+        let limits = AuthorizerLimits {
+            max_time: Duration::from_secs(5),
+            ..AuthorizerLimits::default()
+        };
+        authorizer
+            .authorize_with_limits(limits)
+            .map_err(map_authz_error)?;
 
         // 4. Read back the issued claims from the signed authority context.
         let json = biscuit

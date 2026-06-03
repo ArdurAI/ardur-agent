@@ -17,7 +17,7 @@ use ardur_cost_gate::{Clock, CostTuple as GateCostTuple, HolderId as GateHolderI
 use ardur_fused_runtime::FusedRuntimeBuilder;
 use ardur_provider_runtime::{AnthropicProvider, ModelId, Provider};
 use ardur_receipt::Es256SigningKey;
-use biscuit_auth::PrivateKey;
+use biscuit_auth::{Algorithm, PrivateKey};
 use tempfile::TempDir;
 
 /// The model id the stub provider and scenarios complete against.
@@ -72,7 +72,7 @@ pub fn temp_session_root() -> TempDir {
 // `KeyPair` (re-exported by `ardur-cap-token`).
 #[must_use]
 pub fn dev_cap_root() -> KeyPair {
-    let private = PrivateKey::from_bytes(&CAP_ROOT_SEED)
+    let private = PrivateKey::from_bytes(&CAP_ROOT_SEED, Algorithm::Ed25519)
         .expect("CAP_ROOT_SEED is a valid 32-byte Ed25519 private key");
     KeyPair::from(&private)
 }
