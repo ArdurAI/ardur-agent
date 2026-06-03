@@ -13,8 +13,49 @@ the originating Slack channel.
 - A Slack workspace where you can install a bot app.
 - A Slack bot app with at minimum the `chat:write` scope.
 - The Slack **signing secret** and **bot token** for that app.
-- An Anthropic API key with access to the model you intend to run.
+- Credentials for the model backend you intend to run (see
+  [Selecting a provider](#selecting-a-provider)) — an Anthropic API key by
+  default.
 - Docker + Docker Compose (local dev) or any Docker host (production).
+
+## Selecting a provider
+
+Both `ardur-server` and the `ardur` CLI pick their model backend at boot from
+the `ARDUR_PROVIDER` environment variable. The value is case-insensitive; an
+unset or empty value defaults to `anthropic`. An **unrecognized** value aborts
+the process at boot with a message listing the supported values — a typo never
+silently downgrades to a different backend. The selected provider is logged at
+startup (`using provider provider=<id>`).
+
+| `ARDUR_PROVIDER` | Backend | Required / notable env |
+|---|---|---|
+| `anthropic` (default) | Anthropic Messages API | `ANTHROPIC_API_KEY` |
+| `openrouter` | OpenRouter HTTP gateway | `OPENROUTER_API_KEY` |
+| `ollama` | Ollama local daemon **or** hosted cloud | `OLLAMA_BASE_URL` (default `http://localhost:11434`); `OLLAMA_API_KEY` (cloud only — its presence auto-defaults the base URL to `https://ollama.com`) |
+| `codex` | OpenAI Codex CLI (ChatGPT subscription) | `CODEX_BINARY` (default: `codex` on `PATH`), `CODEX_DEFAULT_MODEL`, `CODEX_SANDBOX_MODE` (`read-only` \| `workspace-write` \| `danger-full-access`), `CODEX_WORKING_DIR` |
+
+One-liners (CLI shown; the server reads the same variables from its `.env`):
+
+```sh
+# Anthropic (default) — equivalent to leaving ARDUR_PROVIDER unset
+ARDUR_PROVIDER=anthropic ANTHROPIC_API_KEY=sk-ant-... ardur chat
+
+# OpenRouter
+ARDUR_PROVIDER=openrouter OPENROUTER_API_KEY=sk-or-... ardur chat
+
+# Ollama — local daemon (no key)
+ARDUR_PROVIDER=ollama ardur chat
+# Ollama — hosted cloud (a key auto-targets https://ollama.com)
+ARDUR_PROVIDER=ollama OLLAMA_API_KEY=... ardur chat
+
+# Codex — uses your logged-in ChatGPT subscription via the codex CLI
+ARDUR_PROVIDER=codex ardur chat
+```
+
+The Anthropic and OpenRouter backends fail at boot if their API key is missing
+(the CLI then falls back to a network-free stub and prints an offline notice;
+the server aborts). The Ollama and Codex backends need no credentials to wire —
+they fail later, per-turn, if the daemon/binary is unreachable.
 
 ## Slack app setup
 
