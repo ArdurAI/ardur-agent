@@ -34,6 +34,9 @@ path = "src/bin/ardur-server.rs"
 ardur-fused-runtime = { workspace = true }
 ardur-slack-adapter = { workspace = true }
 ardur-provider-runtime = { workspace = true }
+# §3.0 provider selection — reads ARDUR_PROVIDER and boxes the chosen backend
+# (anthropic | openrouter | ollama | codex) the bin hands to AppState::boot.
+ardur-provider-selector = { workspace = true }
 ardur-cap-token = { workspace = true }
 ardur-cedar-policy = { workspace = true }
 ardur-cost-gate = { workspace = true }
