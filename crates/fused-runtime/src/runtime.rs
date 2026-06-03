@@ -1,5 +1,7 @@
-//! [`FusedRuntime`] — the fused [`ChatRuntime`] and its ten-stage [`submit`]
-//! pipeline. See the crate root for the stage list and the Option-B rationale.
+//! [`FusedRuntime`] — the fused [`ChatRuntime`] and its multi-stage [`submit`]
+//! pipeline (cap-token → cedar → cost-gate → pre-submit hooks → injection-defense
+//! → provider → receipt → post-receipt hooks → finalize → memory → journal). See
+//! the crate root for the full stage list and the Option-B rationale.
 //!
 //! [`submit`]: FusedRuntime::submit
 
@@ -20,6 +22,7 @@ use ardur_cost_gate::{
     ModelId as GateModelId, ProviderId as GateProviderId, Reservation, Sha256Digest as GateSha256,
     TokenId as GateTokenId,
 };
+use ardur_injection_defense::{ContentSource, FilterRegistry, ScannableContent, Verdict};
 use ardur_lifecycle_hooks::{
     ErrorCtx, HookError, HookRegistry, LifecyclePhase, PostReceiptCtx, PreSubmitCtx,
     PreSubmitOutcome, RevokeCtx,
@@ -44,6 +47,13 @@ use crate::shared::{SharedBudget, SharedDenyList};
 
 /// The receipt verb minted for a completed turn (`verb.object.state.vN`).
 pub(crate) const COMPLETION_VERB: &str = "llm.completion.minted.v1";
+
+/// The `filter_id` reported in [`RuntimeError::InjectionBlocked`] when stage 4.5
+/// blocks. The registry aggregates many filters into one combined verdict (and a
+/// [`CombinedScanResult`](ardur_injection_defense::CombinedScanResult) does not
+/// retain which member filter blocked), so the stage names itself; the matched
+/// signatures live in the error's `reason` and `flags`.
+const INJECTION_FILTER_STAGE_ID: &str = "injection-defense";
 
 /// Per-request overrides for [`FusedRuntime::submit_with_provisioning`].
 ///
@@ -100,6 +110,7 @@ pub struct FusedRuntime {
     pub(crate) gate_model_id: GateModelId,
     pub(crate) envelope: CostEnvelope,
     pub(crate) registry: Arc<HookRegistry>,
+    pub(crate) injection_filters: FilterRegistry,
     pub(crate) memory: Option<Arc<dyn MemoryRuntime + Send + Sync>>,
     pub(crate) journal: Option<Arc<dyn SessionJournal>>,
     pub(crate) chain_tail: Mutex<Option<Sha256Digest>>,
@@ -168,6 +179,66 @@ impl FusedRuntime {
     /// on the gate's TTL regardless.
     async fn release(&self, reservation: Reservation) {
         let _ = self.gate.finalize(reservation, GateCostTuple::ZERO).await;
+    }
+
+    /// **Stage 4.5 (ARD-48).** Scan the outbound completion request's prompt
+    /// through the injection-defense [`FilterRegistry`] and return the request to
+    /// forward to the provider.
+    ///
+    /// - `Allow` → the request is returned unchanged.
+    /// - `AllowWithSanitization` → the most-recent user message is rewritten to
+    ///   the sanitized (redacted) text, so the provider sees the safe rewrite
+    ///   while the raw prompt is preserved everywhere else (notably the journal,
+    ///   which reads the original `req.messages`).
+    /// - `Block` → returns [`RuntimeError::InjectionBlocked`]; the caller releases
+    ///   the cost reservation and aborts before the provider is reached.
+    ///
+    /// An empty registry (the builder default) short-circuits to `Allow` so the
+    /// stage is a true no-op unless the caller opts in via
+    /// [`FusedRuntimeBuilder::with_injection_filters`](crate::FusedRuntimeBuilder::with_injection_filters).
+    /// A scan that itself errors degrades to [`RuntimeError::Internal`] — a fail
+    /// closed posture, since the prompt could not be cleared.
+    ///
+    /// Only the most-recent `User` message is scanned: earlier turns were scanned
+    /// when they were submitted, and the system/assistant transcript is the
+    /// runtime's own, not attacker-controlled inbound content. Tool outputs that
+    /// re-enter as the next turn's input (`ContentSource::ToolReturn`) are scanned
+    /// once tool-use lands — see the `TODO ARD-22` at the call site.
+    async fn scan_outbound_request(
+        &self,
+        mut request: CompletionRequest,
+    ) -> Result<CompletionRequest, RuntimeError> {
+        if self.injection_filters.is_empty() {
+            return Ok(request);
+        }
+        let Some(idx) = request
+            .messages
+            .iter()
+            .rposition(|m| matches!(m.role, Role::User))
+        else {
+            return Ok(request);
+        };
+        let content = ScannableContent::UserMessage {
+            text: request.messages[idx].content.clone(),
+            source: ContentSource::Direct,
+        };
+        let scan = self
+            .injection_filters
+            .scan_all(&content)
+            .await
+            .map_err(|e| RuntimeError::Internal(anyhow::anyhow!("injection scan failed: {e}")))?;
+        match scan.verdict {
+            Verdict::Allow => Ok(request),
+            Verdict::AllowWithSanitization { sanitized } => {
+                request.messages[idx].content = sanitized;
+                Ok(request)
+            }
+            Verdict::Block { reason } => Err(RuntimeError::injection_blocked(
+                INJECTION_FILTER_STAGE_ID,
+                reason,
+                scan.flags,
+            )),
+        }
     }
 
     /// Append a signed receipt's compact JWS to the durable receipt log
@@ -580,6 +651,27 @@ impl FusedRuntime {
                     hook_id: hook_id.to_string(),
                     reason,
                 });
+            }
+        };
+
+        // ---- 4.5 injection-defense: scan the (possibly hook-rewritten) outbound
+        //          prompt before it reaches the provider. `Allow` forwards it
+        //          unchanged; `AllowWithSanitization` swaps the provider body for
+        //          the redacted rewrite (the *raw* prompt still rides through to
+        //          the journal at stage 10, which reads `req.messages`, not this
+        //          local request); `Block` releases the reservation and returns
+        //          `InjectionBlocked` — so the provider, and every billing /
+        //          receipt side effect downstream of it, never runs. An empty
+        //          filter registry (the default) is a no-op short-circuit.
+        //
+        // TODO ARD-22: tool outputs through filter as ToolReturn when tool-use lands.
+        let request = match self.scan_outbound_request(request).await {
+            Ok(request) => request,
+            Err(err) => {
+                self.release(reservation).await;
+                self.fire_error(session_id, LifecyclePhase::Submit, &err)
+                    .await;
+                return Err(err);
             }
         };
 
