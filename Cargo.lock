@@ -166,6 +166,7 @@ dependencies = [
  "ardur-memory",
  "ardur-messaging-gateway",
  "ardur-multi-agent",
+ "ardur-provider-claude-cli",
  "ardur-provider-codex",
  "ardur-provider-ollama",
  "ardur-provider-openrouter",
@@ -301,6 +302,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ardur-provider-claude-cli"
+version = "0.0.1"
+dependencies = [
+ "ardur-provider-runtime",
+ "ardur-runtime",
+ "async-trait",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "ardur-provider-codex"
 version = "0.0.1"
 dependencies = [
@@ -358,6 +371,7 @@ dependencies = [
 name = "ardur-provider-selector"
 version = "0.0.1"
 dependencies = [
+ "ardur-provider-claude-cli",
  "ardur-provider-codex",
  "ardur-provider-ollama",
  "ardur-provider-openrouter",

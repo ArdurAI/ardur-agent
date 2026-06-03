@@ -70,6 +70,10 @@ ardur-provider-ollama = { workspace = true }
 # The §3.3b scenario drives the subprocess Codex provider against an executable
 # shim standing in for the real `codex` CLI — no install, no subscription spend.
 ardur-provider-codex = { workspace = true }
+# The §3.3c scenario drives the subprocess Claude CLI provider against an
+# executable shim standing in for the real `claude` CLI — no install, no
+# subscription spend.
+ardur-provider-claude-cli = { workspace = true }
 # The fused-runtime scenarios implement `Provider` stubs in `tests/support`.
 async-trait = { workspace = true }
 # `uuid` builds the genesis receipt's `receipt_id` and is the type behind several
