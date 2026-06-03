@@ -16,6 +16,7 @@ members = [
     "crates/runtime",
     "crates/cost-gate",
     "crates/provider-runtime",
+    "crates/provider-openrouter",
     "crates/cli",
     "crates/messaging-gateway",
     "crates/tool-registry",
@@ -125,6 +126,7 @@ ardur-memory = { path = "crates/memory" }
 ardur-runtime = { path = "crates/runtime" }
 ardur-cost-gate = { path = "crates/cost-gate" }
 ardur-provider-runtime = { path = "crates/provider-runtime" }
+ardur-provider-openrouter = { path = "crates/provider-openrouter" }
 ardur-messaging-gateway = { path = "crates/messaging-gateway" }
 ardur-tool-registry = { path = "crates/tool-registry" }
 ardur-session-journals = { path = "crates/session-journals" }
