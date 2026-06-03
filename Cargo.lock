@@ -165,6 +165,7 @@ dependencies = [
  "ardur-memory",
  "ardur-messaging-gateway",
  "ardur-multi-agent",
+ "ardur-provider-codex",
  "ardur-provider-ollama",
  "ardur-provider-openrouter",
  "ardur-provider-runtime",
@@ -296,6 +297,18 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "ardur-provider-codex"
+version = "0.0.1"
+dependencies = [
+ "ardur-provider-runtime",
+ "ardur-runtime",
+ "async-trait",
+ "serde_json",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
