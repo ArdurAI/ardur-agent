@@ -18,6 +18,7 @@ members = [
     "crates/provider-runtime",
     "crates/provider-openrouter",
     "crates/provider-ollama",
+    "crates/provider-codex",
     "crates/cli",
     "crates/messaging-gateway",
     "crates/tool-registry",
@@ -129,6 +130,7 @@ ardur-cost-gate = { path = "crates/cost-gate" }
 ardur-provider-runtime = { path = "crates/provider-runtime" }
 ardur-provider-openrouter = { path = "crates/provider-openrouter" }
 ardur-provider-ollama = { path = "crates/provider-ollama" }
+ardur-provider-codex = { path = "crates/provider-codex" }
 ardur-messaging-gateway = { path = "crates/messaging-gateway" }
 ardur-tool-registry = { path = "crates/tool-registry" }
 ardur-session-journals = { path = "crates/session-journals" }
