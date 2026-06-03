@@ -61,6 +61,9 @@ tokio = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 parking_lot = { workspace = true }
+# The §3.2 scenario drives the live-HTTP OpenRouter provider against a wiremock
+# stand-in for OpenRouter's OpenAI-compatible endpoint.
+ardur-provider-openrouter = { workspace = true }
 # The fused-runtime scenarios implement `Provider` stubs in `tests/support`.
 async-trait = { workspace = true }
 # `uuid` builds the genesis receipt's `receipt_id` and is the type behind several
