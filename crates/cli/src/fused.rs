@@ -38,7 +38,7 @@ use ardur_cap_token::{CapScope, CapTokenIssuer, HolderId as CapHolderId};
 use ardur_cost_gate::{CostEnvelope, CostTuple as GateCostTuple, HolderId as GateHolderId};
 use ardur_fused_runtime::FusedRuntimeBuilder;
 use ardur_memory::InMemoryMemoryRuntime;
-use ardur_provider_runtime::{AnthropicProvider, ModelId, Provider};
+use ardur_provider_runtime::{AnthropicProvider, InstrumentedProvider, ModelId, Provider};
 use ardur_provider_selector as provider_selector;
 use ardur_runtime::{CapTokenRef, ChatMessage, ChatRuntime, SessionId, SubmitRequest};
 use ardur_session_journals::FileSessionJournal;
@@ -99,6 +99,12 @@ impl FusedEngine {
                     (stub, true)
                 }
             };
+
+        // Instrument the selected provider so each dispatch emits a `provider.send`
+        // span carrying the OpenTelemetry GenAI semconv attributes; those export to
+        // an OTLP backend when `ARDUR_OTEL_ENABLED=true`, and otherwise route to the
+        // CLI's console subscriber.
+        let provider = InstrumentedProvider::wrap(provider);
 
         let issuer = dirs.load_or_create_issuer()?;
         let cap_root = issuer.public_key();

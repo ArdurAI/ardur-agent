@@ -26,9 +26,24 @@ thiserror = { workspace = true }
 # Workspace pins v7; provider request-correlation ids are v4 (random) per §3.0
 # Phase 1, so opt v4 in on top of the shared pin (Cargo unifies the feature set).
 uuid = { workspace = true, features = ["v4"] }
+# OpenTelemetry GenAI semconv emission. `tracing` opens the per-call
+# `provider.send` span (carrying the `gen_ai.*` attributes); `telemetry.rs`
+# installs the OTLP exporter and bridges the tracing spans onto the
+# OpenTelemetry SDK via `tracing-opentelemetry`. `tracing-subscriber`'s
+# `env-filter` + `registry` build the layered subscriber the bridge plugs into.
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+tracing-opentelemetry = { workspace = true }
+opentelemetry = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+opentelemetry-otlp = { workspace = true }
 
 [dev-dependencies]
 # Integration tests are a separate crate, so they re-declare the deps they name
 # directly. The async `complete` calls need a runtime to poll them.
 tokio = { workspace = true }
 serde_json = { workspace = true }
+# The `genai_spans` integration test captures the emitted `provider.send` span
+# with an in-memory `tracing-subscriber` layer and asserts its `gen_ai.*` fields.
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
