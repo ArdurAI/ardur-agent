@@ -1,5 +1,8 @@
 # Verifies that every commit in a pull request carries a Signed-off-by trailer
 # (Developer Certificate of Origin). See CONTRIBUTING.md.
+#
+# Commits listed in .github/dco-exempt-shas.txt are skipped: these are
+# pre-policy or in-flight commits that predate DCO enforcement (see that file).
 
 name: DCO
 
@@ -16,33 +19,44 @@ jobs:
         with:
           fetch-depth: 0
 
-      # `github.event.pull_request.commits` is the commit *count* (an integer),
-      # not a list — passing it to tim-actions/dco fails with "commits is not
-      # iterable". Fetch the actual commit list first.
-      - name: Get PR commits
-        id: get_pr_commits
-        uses: tim-actions/get-pr-commits@master
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      # Pre-existing unsigned merge from PR #12; future dev→main syncs should not re-trip on this historical commit.
-      # tim-actions/dco@v1.1.0 has no exclude-commits input, so drop the one
-      # historical SHA (c086428) from the commit list by SHA before the check —
-      # every other commit is still verified. Read the JSON via env (not inline
-      # ${{ }}) so commit messages can't break or inject into the shell.
-      - name: Exclude pre-existing unsigned commit c086428
-        id: filtered_commits
-        env:
-          ALL_COMMITS: ${{ steps.get_pr_commits.outputs.commits }}
-        run: |
-          filtered=$(jq -c '[.[] | select((.sha | startswith("c086428")) | not)]' <<< "$ALL_COMMITS")
-          {
-            echo "commits<<COMMITS_EOF"
-            echo "$filtered"
-            echo "COMMITS_EOF"
-          } >> "$GITHUB_OUTPUT"
-
       - name: Check Signed-off-by on all PR commits
-        uses: tim-actions/dco@v1.1.0
-        with:
-          commits: ${{ steps.filtered_commits.outputs.commits }}
+        run: |
+          set -uo pipefail
+
+          # Load exempt short-SHAs (drop comments and blank lines, take 1st field).
+          EXEMPT="$(grep -vE '^[[:space:]]*(#|$)' .github/dco-exempt-shas.txt | awk '{print $1}')"
+
+          BASE="${{ github.event.pull_request.base.sha }}"
+          HEAD="${{ github.event.pull_request.head.sha }}"
+
+          fail=0
+          for sha in $(git rev-list "${BASE}..${HEAD}"); do
+            short="${sha:0:7}"
+
+            exempt=0
+            for e in ${EXEMPT}; do
+              case "${sha}" in
+                "${e}"*) exempt=1; break ;;
+              esac
+            done
+            if [ "${exempt}" -eq 1 ]; then
+              echo "SKIP (exempt): ${short} $(git show -s --format='%s' "${sha}")"
+              continue
+            fi
+
+            if git show -s --format='%B' "${sha}" | grep -qiE '^Signed-off-by: .+ <.+@.+>'; then
+              echo "OK:            ${short} $(git show -s --format='%s' "${sha}")"
+            else
+              echo "MISSING:       ${short} $(git show -s --format='%s' "${sha}")"
+              fail=1
+            fi
+          done
+
+          if [ "${fail}" -ne 0 ]; then
+            echo ""
+            echo "::error::One or more commits are missing a Signed-off-by trailer (DCO)."
+            echo "Add one with: git commit --amend -s   (or git rebase --signoff)."
+            exit 1
+          fi
+          echo ""
+          echo "All PR commits carry Signed-off-by (or are exempt)."
