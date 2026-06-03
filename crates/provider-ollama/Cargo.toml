@@ -1,0 +1,48 @@
+# ardur-provider-ollama — the Ollama local + cloud model backend (§3.3).
+#
+# Ollama (https://ollama.com) runs open models either locally (a daemon on
+# `http://localhost:11434`, no auth) or in Ollama's hosted cloud
+# (`https://ollama.com`, Bearer auth). Both speak the same native
+# `POST /api/chat` endpoint, so a single crate covers both deployments — the
+# only difference is the base URL and whether an API key is sent. This crate is
+# a peer backend to the Anthropic provider (§3.1, a module in
+# `ardur-provider-runtime`) and the OpenRouter gateway (§3.2): it implements the
+# same `Provider` trait, so it slots into the generic `ProviderRegistry` with no
+# catalog change.
+#
+# §18.8 keeps this PR scoped to `crates/provider-ollama/**` plus the E2E
+# scenario and the root manifest.
+
+[package]
+name = "ardur-provider-ollama"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The §3.0 provider abstraction this backend implements — the `Provider` trait,
+# the request/response/usage envelopes, the `RateCard`, and the typed
+# `ProviderError`. We depend on it (one direction); the registry it owns stays
+# generic, so wiring Ollama in is just `registry.register(Arc::new(..))`.
+ardur-provider-runtime = { workspace = true }
+# Shared value types the provider call speaks in — `CostTuple` (the billed
+# cost), `ProviderId` (the registry key), and `Role` (the prompt turn kind).
+ardur-runtime = { workspace = true }
+# Object-safe async `Provider::complete`.
+async-trait = { workspace = true }
+# Live Ollama HTTP client. rustls-tls matches the other backends (no
+# OpenSSL/native-tls system dependency); `json` carries the serde bodies.
+reqwest = { workspace = true }
+serde = { workspace = true }
+# Request/response bodies and the retained raw upstream JSON.
+serde_json = { workspace = true }
+
+[dev-dependencies]
+# The async `complete` calls need a runtime to poll them.
+tokio = { workspace = true }
+# Stands in for the Ollama endpoint so the round-trip is asserted without a
+# running daemon or a cloud key (matches the workspace's HTTP-mock convention).
+wiremock = { workspace = true }
+serde_json = { workspace = true }
