@@ -31,6 +31,10 @@ anyhow = { workspace = true }
 # re-exported so a scannable tool output / channel source shares one schema.
 ardur-tool-registry = { workspace = true }
 ardur-messaging-gateway = { workspace = true }
+# §1.0 — InjectionFlag / FlagCategory are *owned* by the runtime's error surface
+# (so `RuntimeError::InjectionBlocked` can carry them without a dependency cycle)
+# and re-exported through `flag.rs`. See ARD-48 / §18.8.
+ardur-runtime = { workspace = true }
 
 [dev-dependencies]
 # The trait surface is async; integration tests drive it on a Tokio runtime.

@@ -40,6 +40,9 @@ ardur-receipt = { workspace = true }
 ardur-memory = { workspace = true }
 # §7.10 — the durable, fsync-ing session journal (stage 10).
 ardur-session-journals = { workspace = true }
+# §11.16 — the prompt-injection filter registry scanned at stage 4.5 (ARD-48),
+# after the pre-submit hooks and before the provider dispatch.
+ardur-injection-defense = { workspace = true }
 
 async-trait = { workspace = true }
 anyhow = { workspace = true }

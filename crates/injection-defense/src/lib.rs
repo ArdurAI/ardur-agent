@@ -44,8 +44,10 @@
 // TODO §11.16 Phase 2: per-source policies — vary strictness by
 // `ContentSource` (trust `Direct` REPL input more than a `Webhook` payload or
 // a nested `ToolReturn`).
-// TODO §11.16 Phase 2: integrate the filter into the `ChatRuntime::submit`
-// pipeline so every inbound turn is scanned before it reaches a provider.
+// DONE ARD-48: a `FilterRegistry` is wired into `ardur-fused-runtime`'s
+// `FusedRuntime::submit` as stage 4.5 — every outbound prompt is scanned after
+// the pre-submit hooks and before the provider dispatch. Tool-output scanning
+// (the `ToolReturn` path) follows once tool-use lands (TODO ARD-22).
 
 mod content;
 mod error;

@@ -31,7 +31,7 @@ mod session;
 mod types;
 
 pub use command::{Command, CommandBus, CommandContext, CommandResult, InMemoryCommandBus};
-pub use error::RuntimeError;
+pub use error::{FlagCategory, InjectionFlag, RuntimeError};
 pub use runtime::{ChatRuntime, InMemoryRuntime, SubmitRequest, SubmitResult};
 pub use session::Session;
 pub use types::{

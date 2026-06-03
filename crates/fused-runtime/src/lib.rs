@@ -3,8 +3,9 @@
 //!
 //! # What it fuses
 //!
-//! One [`submit`](FusedRuntime::submit) drives the turn through ten stages, in
-//! order, short-circuiting on the first failure:
+//! One [`submit`](FusedRuntime::submit) drives the turn through the stages
+//! below, in order, short-circuiting on the first failure (stage 4.5 is the
+//! injection-defense scan slotted between the pre-submit hooks and the provider):
 //!
 //! 1. **cap-token** ([`ardur_cap_token`]) — parse + verify the request's
 //!    capability token against the root key, the audience, the tool, and the
@@ -20,6 +21,15 @@
 //! 4. **lifecycle-hooks** ([`ardur_lifecycle_hooks`]) — run the pre-submit hooks;
 //!    a `Veto` aborts (and releases the reservation) as
 //!    [`RuntimeError::VetoedByHook`], a `Replace` swaps the request.
+//!    - **stage 4.5 — injection-defense** ([`ardur_injection_defense`], ARD-48):
+//!      scan the (possibly hook-rewritten) outbound prompt through the
+//!      [`FilterRegistry`](ardur_injection_defense::FilterRegistry). A `Block`
+//!      aborts (releasing the reservation, minting no receipt) as
+//!      [`RuntimeError::InjectionBlocked`]; an `AllowWithSanitization` swaps the
+//!      provider body for the redacted rewrite (the raw prompt still rides to the
+//!      journal). Wired via
+//!      [`FusedRuntimeBuilder::with_injection_filters`](crate::FusedRuntimeBuilder::with_injection_filters);
+//!      the default empty registry makes the stage a no-op.
 //! 5. **provider-runtime** ([`ardur_provider_runtime`]) — dispatch the
 //!    completion to the real [`Provider`](ardur_provider_runtime::Provider).
 //! 6. **receipt** ([`ardur_receipt`]) — mint + sign the turn's receipt, chaining
