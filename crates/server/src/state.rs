@@ -53,7 +53,7 @@ use ardur_receipt::Es256SigningKey;
 use ardur_runtime::{CapTokenRef, ChatMessage, ChatRuntime, SessionId, SubmitRequest};
 use ardur_session_journals::{FileSessionJournal, SessionJournal};
 use ardur_slack_adapter::SlackAdapter;
-use biscuit_auth::PrivateKey;
+use biscuit_auth::{Algorithm, PrivateKey};
 use secrecy::SecretString;
 use tokio::sync::mpsc;
 
@@ -401,7 +401,7 @@ fn load_or_mint_issuer(keys_dir: &Path) -> anyhow::Result<BiscuitCapTokenIssuer>
     if path.exists() {
         let hex = std::fs::read_to_string(&path)
             .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?;
-        let private = PrivateKey::from_bytes_hex(hex.trim())
+        let private = PrivateKey::from_bytes_hex(hex.trim(), Algorithm::Ed25519)
             .map_err(|e| anyhow::anyhow!("parsing issuer key {}: {e}", path.display()))?;
         Ok(BiscuitCapTokenIssuer::new(KeyPair::from(&private)))
     } else {
