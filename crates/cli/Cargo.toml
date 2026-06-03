@@ -25,8 +25,12 @@ ardur-cap-token = { workspace = true }
 # §11.14 receipts — the FusedEngine loads/mints the P-256 receipt signing key
 # the fused runtime chains each turn's signed receipt with.
 ardur-receipt = { workspace = true }
-# §3.0 provider runtime — the AnthropicProvider (live + stub) the engine wires.
+# §3.0 provider runtime — the AnthropicProvider (the offline stub fallback) the
+# engine wires when the selected backend is unavailable.
 ardur-provider-runtime = { workspace = true }
+# §3.0 provider selection — reads ARDUR_PROVIDER and boxes the chosen backend
+# (anthropic | openrouter | ollama | codex) at boot.
+ardur-provider-selector = { workspace = true }
 # §11.14 cost gate — the budget store + admission gate every turn routes through.
 ardur-cost-gate = { workspace = true }
 # Phase-2 fused runtime — the FusedRuntime the default chat path drives through
