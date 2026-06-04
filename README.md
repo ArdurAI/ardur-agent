@@ -14,6 +14,18 @@ Ardur gives agents three primitives that make their behavior auditable end to en
 - **Receipt-chain** — an append-only, signed chain of receipts. Every action emits a receipt linked to its predecessor, so the audit trail is tamper-evident and replayable.
 - **Cost-tuple** — a structured cost attached to every operation, making token/money/time/risk budgets observable and enforceable at the substrate level.
 
+## Hybrid retrieval
+
+Foundation crates for retrieving an agent's memories by both meaning and exact
+terms, then fusing the two rankings:
+
+- [`crates/embeddings`](crates/embeddings) — local text embeddings via fastembed
+  (ONNX), the dense half. Default model BGE-small-en-v1.5 (384-dim).
+- [`crates/bm25-index`](crates/bm25-index) — BM25 lexical search via Tantivy, the
+  sparse half. In-memory or file-backed.
+- [`crates/fusion`](crates/fusion) — reciprocal-rank, relative-score, and
+  distance-score fusion (ported from LlamaIndex) to combine the two result lists.
+
 ## Quick links
 
 - Documentation — _coming soon_ (`docs/` in-repo)

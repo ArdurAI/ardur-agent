@@ -1,0 +1,27 @@
+[package]
+name = "ardur-bm25-index"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "BM25 lexical search index backed by Tantivy — in-memory or file-backed."
+
+[dependencies]
+# Tantivy is the BM25 engine: schema, inverted index, query parser, TopDocs.
+# Pinned at 0.22 (the workspace's target); the `mmap` default feature backs the
+# file-backed (persistent) index path.
+tantivy = "0.22"
+# Typed open/index/query failure surface.
+thiserror = { workspace = true }
+# `ScoredDoc` rides receipts / crosses crate boundaries.
+serde = { workspace = true }
+# The add/query surface is async (mirrors the Embedder trait); tantivy itself is
+# synchronous, so the methods await nothing today — the async is API symmetry.
+async-trait = { workspace = true }
+
+[dev-dependencies]
+# Drives the async surface in tests.
+tokio = { workspace = true }
+# Throwaway directories for the persistent-index reopen test.
+tempfile = { workspace = true }

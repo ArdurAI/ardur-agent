@@ -9,6 +9,9 @@
 resolver = "2"
 members = [
     "crates/cap-token",
+    "crates/embeddings",
+    "crates/bm25-index",
+    "crates/fusion",
     "crates/receipt",
     "crates/lifecycle-hooks",
     "crates/cedar-policy",
@@ -135,6 +138,9 @@ futures = "0.3"
 # --- Internal crate path-deps (one per Phase-0 crate). Declared here so
 #     cross-crate wiring in Phase 1 references `{ workspace = true }`. ---
 ardur-cap-token = { path = "crates/cap-token" }
+ardur-embeddings = { path = "crates/embeddings" }
+ardur-bm25-index = { path = "crates/bm25-index" }
+ardur-fusion = { path = "crates/fusion" }
 ardur-receipt = { path = "crates/receipt" }
 ardur-lifecycle-hooks = { path = "crates/lifecycle-hooks" }
 ardur-cedar-policy = { path = "crates/cedar-policy" }
