@@ -311,6 +311,10 @@ fn role_str(role: Role) -> &'static str {
         Role::System => "system",
         Role::User => "user",
         Role::Assistant => "assistant",
+        // §6.0: Ollama's chat API takes tool results under the `tool` role. This
+        // provider does not advertise tools in Phase 1, but a tool transcript
+        // still serializes correctly if one is replayed through it.
+        Role::Tool => "tool",
     }
 }
 

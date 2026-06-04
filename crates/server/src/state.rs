@@ -55,6 +55,7 @@ use ardur_receipt::Es256SigningKey;
 use ardur_runtime::{CapTokenRef, ChatMessage, ChatRuntime, SessionId, SubmitRequest};
 use ardur_session_journals::{FileSessionJournal, SessionJournal};
 use ardur_slack_adapter::SlackAdapter;
+use ardur_tool_registry::ToolRegistry;
 use biscuit_auth::{Algorithm, PrivateKey};
 use secrecy::SecretString;
 use tokio::sync::mpsc;
@@ -131,10 +132,15 @@ impl AppState {
     /// Any I/O failure creating the data directories or reading/writing the
     /// persisted keys, a malformed key file, a Cedar policy that fails to
     /// compile, or a receipt log that cannot be read back to resume the chain.
-    pub fn boot(config: &Config, provider: Arc<dyn Provider>) -> anyhow::Result<Arc<Self>> {
-        // The provider id is surfaced by the MCP `health_check` tool; capture it
-        // before `provider` is moved into the fused-runtime builder below.
-        let provider_id = provider.id().0.clone();
+    pub fn boot(
+        config: &Config,
+        provider: Arc<dyn Provider>,
+        tools: Arc<ToolRegistry>,
+    ) -> anyhow::Result<Arc<Self>> {
+        // `tools` is the §6.0 registry the fused runtime invokes (local tools plus
+        // any remote MCP toolsets the caller connected from
+        // `ARDUR_MCP_REMOTE_SERVERS`). It is also what the MCP surface re-exposes
+        // when `ARDUR_MCP_ENABLED` is set.
 
         // 1. Data-directory layout.
         let data_dir = config.data_dir.clone();
@@ -207,6 +213,7 @@ impl AppState {
         .provision_budget(GateHolderId(GATEWAY_SUBJECT.to_string()), budget)
         .with_memory(memory)
         .with_journal(journal.clone())
+        .with_tools(tools.clone())
         .receipt_log(&receipt_log)
         .build()
         .map_err(|e| anyhow::anyhow!("building fused runtime: {e}"))?;
@@ -236,31 +243,23 @@ impl AppState {
         };
         let work_tx = spawn_worker(processor);
 
-        // 8. The MCP surface (opt-in). Build the registry of locally-exposed
-        //    tools; `build_router` mounts the bearer-gated routes when present.
+        // 8. The MCP surface (opt-in). The same `tools` registry the runtime
+        //    invokes is re-exposed over MCP; `build_router` mounts the
+        //    bearer-gated routes when present.
         let mcp = if config.mcp_enabled {
-            let registry = Arc::new(crate::mcp::example_registry(provider_id, "in-memory"));
             tracing::info!(
-                tools = registry.list().len(),
+                tools = tools.list().len(),
                 prefix = %config.mcp_path_prefix,
                 "MCP surface enabled"
             );
             Some(McpSurface {
-                registry,
+                registry: tools.clone(),
                 bearer_tokens: config.mcp_bearer_tokens.clone(),
                 path_prefix: config.mcp_path_prefix.clone(),
             })
         } else {
             None
         };
-        if !config.mcp_remote_servers.is_empty() {
-            // Client-side plumbing: configured remote servers are surfaced for
-            // the RemoteMcpToolset; turn-time consumption lands in Phase 3.
-            tracing::info!(
-                remotes = config.mcp_remote_servers.len(),
-                "MCP remote servers configured (client-side; not yet wired into turns)"
-            );
-        }
 
         Ok(Arc::new(Self {
             slack,

@@ -6,10 +6,12 @@
 //! drains it.
 #![forbid(unsafe_code)]
 
+use std::sync::Arc;
+
 use ardur_provider_runtime::{InstrumentedProvider, ModelId, TelemetryConfig};
 use ardur_provider_runtime::{init_genai_tracing, shutdown_genai_tracing};
 use ardur_provider_selector as provider_selector;
-use ardur_server::{AppState, Config, build_router};
+use ardur_server::{AppState, Config, MemoryBackend, assemble_tool_registry, build_router};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -48,7 +50,24 @@ async fn main() -> anyhow::Result<()> {
     let provider = InstrumentedProvider::wrap(provider);
     let provider_id = provider.id().0.clone();
 
-    let state = AppState::boot(&config, provider)?;
+    // §6.0: assemble the tool registry the runtime invokes — the local tools plus
+    // any remote MCP toolsets from `ARDUR_MCP_REMOTE_SERVERS`. Connecting happens
+    // here on the long-lived `#[tokio::main]` runtime so the remote MCP client
+    // sessions stay driven for the life of the process.
+    let memory_label = match config.memory_backend {
+        MemoryBackend::InMemory => "in-memory",
+        MemoryBackend::Qdrant => "qdrant",
+    };
+    let tools = Arc::new(
+        assemble_tool_registry(
+            provider_id.clone(),
+            memory_label,
+            &config.mcp_remote_servers,
+        )
+        .await,
+    );
+
+    let state = AppState::boot(&config, provider, tools)?;
     tracing::info!(
         data_dir = %state.data_dir().display(),
         bind = %config.bind_addr,

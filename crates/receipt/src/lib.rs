@@ -36,5 +36,6 @@ pub use error::ReceiptError;
 pub use jws::{ReceiptSigner, ReceiptVerifier, SignedReceipt, VerifiedReceipt};
 pub use keys::{Es256PublicKey, Es256SigningKey, Jwks, JwksKey};
 pub use types::{
-    CostTuple, HolderId, ReceiptBody, Sha256Digest, TokenId, UnixTsMillis, VerbObject,
+    CostTuple, HolderId, ReceiptBody, Sha256Digest, TokenId, ToolCallReceipt, UnixTsMillis,
+    VerbObject,
 };

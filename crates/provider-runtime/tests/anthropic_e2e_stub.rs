@@ -32,6 +32,7 @@ fn full_request() -> CompletionRequest {
             max_cents: Some(100),
             max_total_tokens: Some(4096),
         },
+        tools: Vec::new(),
     }
 }
 

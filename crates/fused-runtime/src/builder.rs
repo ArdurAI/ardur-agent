@@ -18,6 +18,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use ardur_cedar_policy::{ActionRef, CedarPolicyBundle};
 use ardur_cost_gate::{
@@ -30,6 +31,7 @@ use ardur_memory::MemoryRuntime;
 use ardur_provider_runtime::{ModelId, Provider};
 use ardur_receipt::{Es256SigningKey, VerbObject};
 use ardur_session_journals::SessionJournal;
+use ardur_tool_registry::ToolRegistry;
 use parking_lot::Mutex;
 
 use crate::receipts::{ReceiptChainError, load_persisted_chain};
@@ -48,6 +50,34 @@ const DEFAULT_ENVELOPE: CostEnvelope = CostEnvelope {
     wall_ms_max: 600_000,
     attention_score_max: 1_000_000,
 };
+
+/// §6.0 — the default ceiling on tool-requesting provider iterations per turn,
+/// overridable via `ARDUR_TOOL_MAX_ITERATIONS`.
+const DEFAULT_MAX_TOOL_ITERATIONS: u32 = 5;
+/// §6.0 — the default per-tool-call deadline in seconds, overridable via
+/// `ARDUR_TOOL_TIMEOUT_SECS`.
+const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 30;
+
+/// The default max tool iterations, read from `ARDUR_TOOL_MAX_ITERATIONS` (a
+/// positive integer) and otherwise [`DEFAULT_MAX_TOOL_ITERATIONS`].
+fn default_max_tool_iterations() -> u32 {
+    std::env::var("ARDUR_TOOL_MAX_ITERATIONS")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_MAX_TOOL_ITERATIONS)
+}
+
+/// The default per-call tool timeout, read from `ARDUR_TOOL_TIMEOUT_SECS` (a
+/// positive integer number of seconds) and otherwise [`DEFAULT_TOOL_TIMEOUT_SECS`].
+fn default_tool_timeout() -> Duration {
+    let secs = std::env::var("ARDUR_TOOL_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_TOOL_TIMEOUT_SECS);
+    Duration::from_secs(secs)
+}
 
 /// Builder for [`FusedRuntime`]. See the module docs for the default policy.
 pub struct FusedRuntimeBuilder {
@@ -77,6 +107,9 @@ pub struct FusedRuntimeBuilder {
     journal: Option<Arc<dyn SessionJournal>>,
     receipt_log: Option<PathBuf>,
     reconciliation_strategy: ReconciliationStrategy,
+    tools: Arc<ToolRegistry>,
+    max_tool_iterations: u32,
+    tool_timeout: Duration,
 }
 
 impl FusedRuntimeBuilder {
@@ -117,6 +150,9 @@ impl FusedRuntimeBuilder {
             journal: None,
             receipt_log: None,
             reconciliation_strategy: ReconciliationStrategy::default(),
+            tools: Arc::new(ToolRegistry::new()),
+            max_tool_iterations: default_max_tool_iterations(),
+            tool_timeout: default_tool_timeout(),
         }
     }
 
@@ -251,6 +287,39 @@ impl FusedRuntimeBuilder {
         self
     }
 
+    /// **§6.0.** Wire the tool registry the tool-execution stage advertises to the
+    /// provider and invokes. Defaults to an **empty** registry, which makes the
+    /// loop run exactly once — so a runtime that does not opt into tools behaves
+    /// as it did before this stage existed.
+    #[must_use]
+    pub fn with_tools(mut self, tools: Arc<ToolRegistry>) -> Self {
+        self.tools = tools;
+        self
+    }
+
+    /// **§6.0.** The maximum number of tool-requesting provider iterations a turn
+    /// may run before aborting with
+    /// [`RuntimeError::ToolLoopExhausted`](ardur_runtime::RuntimeError::ToolLoopExhausted).
+    /// Defaults to `ARDUR_TOOL_MAX_ITERATIONS` (else 5). A value of 0 is ignored
+    /// in favour of the default, so the loop always runs at least once.
+    #[must_use]
+    pub fn max_tool_iterations(mut self, max: u32) -> Self {
+        if max > 0 {
+            self.max_tool_iterations = max;
+        }
+        self
+    }
+
+    /// **§6.0.** The per-tool-call deadline. A tool that overruns it aborts the
+    /// turn with
+    /// [`RuntimeError::ToolTimeout`](ardur_runtime::RuntimeError::ToolTimeout).
+    /// Defaults to `ARDUR_TOOL_TIMEOUT_SECS` seconds (else 30).
+    #[must_use]
+    pub fn tool_timeout(mut self, timeout: Duration) -> Self {
+        self.tool_timeout = timeout;
+        self
+    }
+
     /// Share an externally-held deny-list (so the caller can revoke through its
     /// own handle too). By default the runtime owns a fresh one, reachable via
     /// [`FusedRuntime::revoke_cap_token`].
@@ -353,6 +422,9 @@ impl FusedRuntimeBuilder {
             chain_tail: Mutex::new(chain_tail),
             receipt_log: self.receipt_log,
             reconciliation_strategy: self.reconciliation_strategy,
+            tools: self.tools,
+            max_tool_iterations: self.max_tool_iterations,
+            tool_timeout: self.tool_timeout,
         })
     }
 

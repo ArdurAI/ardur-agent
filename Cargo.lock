@@ -370,6 +370,7 @@ dependencies = [
  "ardur-receipt",
  "ardur-runtime",
  "ardur-session-journals",
+ "ardur-tool-registry",
  "assert_matches",
  "async-trait",
  "base64 0.22.1",
@@ -590,6 +591,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "uuid",

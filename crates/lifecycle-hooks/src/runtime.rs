@@ -223,6 +223,9 @@ fn mint_receipt(req: &SubmitRequest, response: &CompletionResponse) -> ReceiptBo
         cap_token_id: ardur_receipt::TokenId(req.cap_token.0.clone()),
         payload_digest: Sha256Digest::of(response.content.as_bytes()),
         cost: to_receipt_cost(response.cost),
+        // This Phase-1 hooked runtime does not execute tools; the §6.0
+        // tool-call receipts are minted by the fused runtime.
+        tool_calls: Vec::new(),
     }
 }
 

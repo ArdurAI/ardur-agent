@@ -163,6 +163,38 @@ pub enum RuntimeError {
         flags: Vec<InjectionFlag>,
     },
 
+    /// The model requested a tool the runtime's registry does not know. Carries
+    /// the unknown tool name. See §6.0: the fused runtime's tool-execution stage
+    /// looks each model-requested call up in its tool registry (local tools plus
+    /// the remote MCP toolsets) and aborts the turn here when a name has no
+    /// match, rather than silently dropping the call.
+    #[error("unknown tool: {tool}")]
+    UnknownTool {
+        /// The tool name the model asked for that no registered tool answers to.
+        tool: String,
+    },
+
+    /// The tool-call loop ran its full budget of iterations and the model was
+    /// still requesting more tools. Carries the iteration count reached. See
+    /// §6.0: each provider round that requests tools counts against
+    /// `max_tool_call_iterations` (env `ARDUR_TOOL_MAX_ITERATIONS`); exhausting
+    /// it without the model settling on a final answer aborts here.
+    #[error("tool-call loop exhausted after {iterations} iteration(s)")]
+    ToolLoopExhausted {
+        /// How many provider iterations ran before the loop was aborted.
+        iterations: u32,
+    },
+
+    /// A tool invocation exceeded its per-call timeout. Carries the tool name.
+    /// See §6.0: each tool runs under a deadline (env `ARDUR_TOOL_TIMEOUT_SECS`);
+    /// a tool that overruns it aborts the turn (releasing the cost reservation)
+    /// rather than blocking the pipeline indefinitely.
+    #[error("tool timed out: {tool}")]
+    ToolTimeout {
+        /// The tool whose invocation exceeded the per-call deadline.
+        tool: String,
+    },
+
     /// No command was registered under the dispatched name.
     #[error("command not found: {0}")]
     CommandNotFound(String),
