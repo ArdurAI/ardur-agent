@@ -19,6 +19,9 @@
 //! - [`ToolRegistry`] — id→tool resolution keyed by [`ToolId`], with lookup by
 //!   id and by required capability.
 //! - [`EchoTool`] — a capability-free sample tool that returns its input.
+//! - [`SkillTool`] / [`SkillLoader`] / [`Skill`] (§8.X) — load filesystem
+//!   `SKILL.md` documents (YAML frontmatter + Markdown body) and expose each as
+//!   a [`Tool`].
 //! - [`ToolError`] / [`RegistryError`] — the crate's typed-error surfaces.
 //!
 //! [`CapTokenRef`], [`SessionId`], and [`CostTuple`] are re-exported from
@@ -48,6 +51,7 @@ mod error;
 mod health;
 mod mcp;
 mod registry;
+mod skills;
 mod tool;
 
 pub use capability::Capability;
@@ -58,6 +62,7 @@ pub use mcp::{
     ArdurMcpServer, RemoteMcpTool, RemoteMcpToolset, bearer_token_allowed, extract_bearer_token,
 };
 pub use registry::ToolRegistry;
+pub use skills::{Skill, SkillError, SkillFrontmatter, SkillLoader, SkillTool};
 pub use tool::{InvocationId, Tool, ToolContext, ToolExample, ToolId, ToolOutput, ToolSchema};
 
 // Shared value types owned by §1.0; re-exported so the tool layer and the

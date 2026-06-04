@@ -84,6 +84,10 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 # Serialization.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# YAML frontmatter parsing for filesystem SKILL.md skills (crates/tool-registry,
+# §8.X). serde_yaml is archived upstream but remains the de-facto serde YAML
+# deserializer; the frontmatter parsed here is small, trusted, author-authored.
+serde_yaml = "0.9"
 # Async runtime (crates/runtime, §1.0).
 tokio = { version = "1", features = ["full"] }
 # HTTP server framework backing the `ardur-server` binary (crates/server): the

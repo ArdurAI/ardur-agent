@@ -62,6 +62,7 @@ async fn main() -> anyhow::Result<()> {
         assemble_tool_registry(
             provider_id.clone(),
             memory_label,
+            &config.skills_dirs,
             &config.mcp_remote_servers,
         )
         .await,

@@ -83,6 +83,7 @@ async fn server_routes_signed_slack_message_through_runtime_to_chat_post_message
         mcp_bearer_tokens: Vec::new(),
         mcp_path_prefix: "/mcp".to_string(),
         mcp_remote_servers: Vec::new(),
+        skills_dirs: Vec::new(),
         memory_backend: MemoryBackend::InMemory,
         qdrant_url: None,
     };
