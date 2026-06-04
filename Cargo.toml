@@ -36,6 +36,7 @@ members = [
     "crates/channel-matrix",
     "crates/server",
     "crates/e2e-tests",
+    "crates/eval-harness",
 ]
 
 [workspace.package]

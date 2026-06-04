@@ -1,0 +1,9 @@
+id: cost_budget
+description: A short factual turn should stay well under a tight cost ceiling.
+prompt: "Reply with just the word: ok"
+expected:
+  contains: ["ok"]
+  cost_under: 0.01
+max_tokens: 50
+max_turns: 1
+timeout_secs: 30

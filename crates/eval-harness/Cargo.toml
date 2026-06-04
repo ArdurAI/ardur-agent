@@ -1,0 +1,56 @@
+# ardur-eval — a standalone Tau-Bench-style evaluation harness for Ardur.
+#
+# Plan family: §12.9. This is NOT part of `ardur-server` — it is a separate CLI
+# binary (`ardur-eval`) that POSTs scenario prompts to a *running* ardur-server
+# URL and grades the responses against declarative matchers. The runner
+# abstracts over the server URL, so when the server's chat endpoint lands the
+# harness just works (see crate README for the assumed `/chat` contract).
+#
+# §18.8 keeps this PR scoped to `crates/eval-harness/**` + the root manifest.
+
+[package]
+name = "ardur-eval"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "ardur-eval"
+path = "src/main.rs"
+
+[lib]
+name = "ardur_eval"
+path = "src/lib.rs"
+
+[dependencies]
+# Scenario files are YAML; results serialize to JSON. `serde_yaml` parses the
+# scenario format, `serde_json` emits the machine-readable result report.
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = "0.9"
+# HTTP client used by the runner to POST prompts at the server under test.
+# `rustls-tls` keeps TLS pure-Rust (no native-tls); `json` carries the bodies.
+reqwest = { workspace = true }
+# The runner's POST + poll is async; the CLI drives it on a Tokio runtime.
+tokio = { workspace = true }
+# Declarative matchers compile `regex` patterns once per grade.
+regex = { workspace = true }
+# `ardur-eval`'s subcommands: run / list / new.
+clap = { workspace = true }
+# Typed error surface for scenario parsing + runner failures.
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+# Integration tests drive the runner + CLI on a Tokio runtime.
+tokio = { workspace = true }
+# Mock HTTP server stands in for the ardur-server `/chat` endpoint so the runner
+# is graded end-to-end without a live server.
+wiremock = { workspace = true }
+# Black-box CLI assertions — drives the built `ardur-eval` binary.
+assert_cmd = { workspace = true }
+# Throwaway scenario directories for the CLI + list tests.
+tempfile = { workspace = true }
+serde_json = { workspace = true }
