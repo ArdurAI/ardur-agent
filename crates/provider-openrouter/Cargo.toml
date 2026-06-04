@@ -30,11 +30,16 @@ ardur-runtime = { workspace = true }
 # Object-safe async `Provider::complete`.
 async-trait = { workspace = true }
 # Live OpenRouter HTTP client. rustls-tls matches the Anthropic backend (no
-# OpenSSL/native-tls system dependency); `json` carries the serde bodies.
-reqwest = { workspace = true }
+# OpenSSL/native-tls system dependency); `json` carries the serde bodies. The
+# `stream` feature unlocks `Response::bytes_stream`, the byte feed the §3.2b SSE
+# parser drains the `data: {…}\n\n` chunks from.
+reqwest = { workspace = true, features = ["stream"] }
 serde = { workspace = true }
 # Request/response bodies and the retained raw upstream JSON.
 serde_json = { workspace = true }
+# `Stream`/`StreamExt` for the `stream_chat` return type and `stream::unfold`
+# (the stateful SSE-decode loop) / `stream::once` (the connect-error stream).
+futures = { workspace = true }
 
 [dev-dependencies]
 # The async `complete` calls need a runtime to poll them.
