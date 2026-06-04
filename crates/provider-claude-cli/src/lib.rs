@@ -504,6 +504,11 @@ fn build_transcript(messages: &[ardur_runtime::ChatMessage]) -> String {
             Role::System => systems.push(m.content.as_str()),
             Role::User => dialogue.push(format!("User: {}", m.content)),
             Role::Assistant => dialogue.push(format!("Assistant: {}", m.content)),
+            // §6.0: the `claude` CLI orchestrates its own tools, so this provider
+            // is skipped for the runtime tool-call loop (P1). A replayed tool
+            // result still renders as a labelled line so the transcript is
+            // intelligible rather than dropped.
+            Role::Tool => dialogue.push(format!("Tool result: {}", m.content)),
         }
     }
     let mut out = String::new();

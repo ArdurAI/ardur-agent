@@ -23,8 +23,8 @@ use rmcp::transport::streamable_http_server::session::local::LocalSessionManager
 use rmcp::transport::{StreamableHttpServerConfig, StreamableHttpService};
 
 use ardur_tool_registry::{
-    ArdurMcpServer, EchoTool, HealthCheckTool, ToolRegistry, bearer_token_allowed,
-    extract_bearer_token,
+    ArdurMcpServer, EchoTool, HealthCheckTool, RemoteMcpToolset, Tool, ToolRegistry,
+    bearer_token_allowed, extract_bearer_token,
 };
 
 /// The two example tools the server advertises over MCP: a trivial `echo`
@@ -47,6 +47,62 @@ pub fn example_registry(
     registry
         .register(Box::new(HealthCheckTool::new(provider, memory_backend)))
         .expect("health_check id is unique");
+    registry
+}
+
+/// **§6.0.** Connect each configured remote MCP server and collect the tools it
+/// advertises, ready to register into the runtime's registry. `servers` is the
+/// parsed `ARDUR_MCP_REMOTE_SERVERS` list (`name`, `url`); a server that fails
+/// to connect or list is logged and skipped rather than aborting boot, so one
+/// dead remote does not take the agent down.
+///
+/// Must be awaited on a long-lived runtime (the binary's `#[tokio::main]`): the
+/// returned tools hold the live MCP client sessions, whose background drivers
+/// run on the runtime this is awaited on.
+pub async fn connect_remote_tools(servers: &[(String, String)]) -> Vec<Box<dyn Tool>> {
+    let mut tools: Vec<Box<dyn Tool>> = Vec::new();
+    for (name, url) in servers {
+        match RemoteMcpToolset::connect(url.clone(), None).await {
+            Ok(toolset) => match toolset.into_tools().await {
+                Ok(mut remote) => {
+                    tracing::info!(
+                        server = %name,
+                        url = %url,
+                        count = remote.len(),
+                        "connected remote MCP toolset"
+                    );
+                    tools.append(&mut remote);
+                }
+                Err(e) => tracing::warn!(
+                    server = %name, url = %url, error = %e,
+                    "listing remote MCP tools failed; skipping this server"
+                ),
+            },
+            Err(e) => tracing::warn!(
+                server = %name, url = %url, error = %e,
+                "connecting remote MCP server failed; skipping this server"
+            ),
+        }
+    }
+    tools
+}
+
+/// **§6.0.** Assemble the tool registry the fused runtime invokes: the local
+/// tools ([`example_registry`]) plus every tool from the configured remote MCP
+/// servers (`ARDUR_MCP_REMOTE_SERVERS`). A remote tool whose id collides with an
+/// already-registered one is logged and skipped (first registration wins).
+pub async fn assemble_tool_registry(
+    provider: impl Into<String>,
+    memory_backend: impl Into<String>,
+    servers: &[(String, String)],
+) -> ToolRegistry {
+    let mut registry = example_registry(provider, memory_backend);
+    for tool in connect_remote_tools(servers).await {
+        let id = tool.id();
+        if let Err(e) = registry.register(tool) {
+            tracing::warn!(tool = %id, error = %e, "skipping remote MCP tool with a conflicting id");
+        }
+    }
     registry
 }
 

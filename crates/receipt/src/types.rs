@@ -176,6 +176,28 @@ pub struct CostTuple {
     pub attention_score: f64,
 }
 
+/// One tool invocation a turn made, recorded on its [`ReceiptBody`] for audit.
+///
+/// The tool's arguments and output are not carried inline — only their SHA-256
+/// digests, mirroring [`ReceiptBody::payload_digest`]'s tamper-evidence posture
+/// — alongside the cost the call billed, so a turn's tool spend reconciles
+/// against its receipted total (§6.0).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ToolCallReceipt {
+    /// The provider-assigned id of the call this records.
+    pub call_id: String,
+    /// The tool that was invoked.
+    pub tool_name: String,
+    /// SHA-256 of the JSON arguments the model passed.
+    pub arguments_digest: Sha256Digest,
+    /// SHA-256 of the JSON output the tool returned.
+    pub output_digest: Sha256Digest,
+    /// Cost the invocation billed (folded into the turn's total [`cost`]).
+    ///
+    /// [`cost`]: ReceiptBody::cost
+    pub cost: CostTuple,
+}
+
 /// The unsigned body of a receipt — the canonical payload that gets signed
 /// into a [`crate::SignedReceipt`] and hash-chained into a receipt log.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -198,4 +220,10 @@ pub struct ReceiptBody {
     pub payload_digest: Sha256Digest,
     /// Cost incurred by the action.
     pub cost: CostTuple,
+    /// The tool calls this turn made, if any (§6.0). Additive: `#[serde(default)]`
+    /// so receipts written before this field load with an empty list, and
+    /// `skip_serializing_if` keeps a no-tool receipt's bytes (and therefore its
+    /// signature and chain hash) identical to a pre-§6.0 one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ToolCallReceipt>,
 }

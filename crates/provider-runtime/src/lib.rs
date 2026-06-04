@@ -55,10 +55,12 @@ pub use rate_card::RateCard;
 pub use registry::ProviderRegistry;
 pub use telemetry::{TelemetryConfig, TelemetryError, init_genai_tracing, shutdown_genai_tracing};
 pub use types::{
-    CompletionRequest, CompletionResponse, CostEnvelope, FinishReason, ModelId, RequestId,
-    ToolCall, Usage,
+    CompletionRequest, CompletionResponse, CostEnvelope, FinishReason, ModelId, RequestId, ToolDef,
+    Usage,
 };
 
 // Shared value types owned by §1.0; re-exported so provider and runtime never
-// drift into two incompatible schemas.
-pub use ardur_runtime::{ChatMessage, CostTuple, ProviderId, Role};
+// drift into two incompatible schemas. `ToolCall` is hoisted into `ardur-runtime`
+// (so `ChatMessage` can carry it without a cycle) and re-exported here so existing
+// `ardur_provider_runtime::ToolCall` references keep resolving.
+pub use ardur_runtime::{ChatMessage, CostTuple, ProviderId, Role, ToolCall};

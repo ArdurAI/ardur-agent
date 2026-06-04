@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use ardur_provider_runtime::{AnthropicProvider, ModelId, Provider};
-use ardur_server::{AppState, Config, LogFormat, MemoryBackend, build_router};
+use ardur_server::{AppState, Config, LogFormat, MemoryBackend, build_router, example_registry};
 use axum::Router;
 use axum::body::Bytes;
 use axum::http::{Request, StatusCode};
@@ -92,7 +92,8 @@ pub fn test_config_with_mcp(
 pub fn boot_stub(config: &Config) -> Arc<AppState> {
     let provider: Arc<dyn Provider> =
         Arc::new(AnthropicProvider::stub(ModelId::new(&config.model)));
-    AppState::boot(config, provider).expect("AppState boots")
+    let tools = Arc::new(example_registry("stub", "in-memory"));
+    AppState::boot(config, provider, tools).expect("AppState boots")
 }
 
 /// Boot the stub-backed router for `config`.

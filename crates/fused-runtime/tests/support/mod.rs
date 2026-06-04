@@ -423,6 +423,8 @@ impl LifecycleHook for RedactingHook {
             .map(|m| ChatMessage {
                 role: m.role,
                 content: m.content.replace("SECRET", "[REDACTED]"),
+                tool_calls: m.tool_calls.clone(),
+                tool_call_id: m.tool_call_id.clone(),
             })
             .collect();
         HookDecision::Replace { new_request }

@@ -35,5 +35,5 @@ pub use error::{FlagCategory, InjectionFlag, RuntimeError};
 pub use runtime::{ChatRuntime, InMemoryRuntime, SubmitRequest, SubmitResult};
 pub use session::Session;
 pub use types::{
-    CapTokenRef, ChatMessage, CostTuple, ProviderId, ReceiptId, Role, SessionId, TurnId,
+    CapTokenRef, ChatMessage, CostTuple, ProviderId, ReceiptId, Role, SessionId, ToolCall, TurnId,
 };

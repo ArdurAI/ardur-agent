@@ -6,7 +6,7 @@
 //! are re-exported from `ardur-runtime` (see the crate root) rather than
 //! redefined here.
 
-use ardur_runtime::ChatMessage;
+use ardur_runtime::{ChatMessage, ToolCall};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -88,16 +88,24 @@ impl CostEnvelope {
     }
 }
 
-/// A model-requested tool invocation, surfaced via
-/// [`FinishReason::ToolUse`].
+/// A tool advertised to the provider so the model may request it (surfacing as
+/// [`FinishReason::ToolUse`]).
+///
+/// The runtime builds one per registered tool from its tool-registry schema and
+/// threads them on [`CompletionRequest::tools`]; a provider that supports tool
+/// use serializes them into its wire format (Anthropic's `tools`, the
+/// OpenAI-compatible `tools`). An empty `tools` array (the default) reproduces a
+/// no-tool request byte-for-byte, so a provider that never sees a tool behaves
+/// exactly as before this field existed.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ToolCall {
-    /// Provider-assigned id of this call, echoed back when returning the result.
-    pub id: String,
-    /// Name of the tool the model wants to run.
+pub struct ToolDef {
+    /// The tool's stable name (its registry id), echoed back in a
+    /// [`ToolCall`](ardur_runtime::ToolCall).
     pub name: String,
-    /// Arguments the model passed, as raw JSON.
-    pub arguments: serde_json::Value,
+    /// A one-line, model-facing description of what the tool does.
+    pub description: String,
+    /// JSON Schema of the arguments the tool accepts.
+    pub input_schema: serde_json::Value,
 }
 
 /// Why a completion stopped generating.
@@ -132,11 +140,16 @@ pub struct CompletionRequest {
     pub stop_sequences: Vec<String>,
     /// The cost ceiling the caller authorizes for this request.
     pub requested_cost_envelope: CostEnvelope,
+    /// Tools the model may request on this call. Empty (the default) means no
+    /// tools are advertised, and the serialized request is identical to one
+    /// built before this field existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<ToolDef>,
 }
 
 impl CompletionRequest {
     /// Build a request against `model` with a fresh [`RequestId`], an unbounded
-    /// [`CostEnvelope`], `temperature` 1.0, and no stop sequences.
+    /// [`CostEnvelope`], `temperature` 1.0, no stop sequences, and no tools.
     pub fn new(messages: Vec<ChatMessage>, model: ModelId, max_tokens: u32) -> Self {
         Self {
             request_id: RequestId::new(),
@@ -146,7 +159,15 @@ impl CompletionRequest {
             temperature: 1.0,
             stop_sequences: Vec::new(),
             requested_cost_envelope: CostEnvelope::unbounded(),
+            tools: Vec::new(),
         }
+    }
+
+    /// Advertise `tools` to the provider on this request (builder-style).
+    #[must_use]
+    pub fn with_tools(mut self, tools: Vec<ToolDef>) -> Self {
+        self.tools = tools;
+        self
     }
 }
 
