@@ -37,6 +37,10 @@ const TOUCHED: &[&str] = &[
     "ARDUR_COST_BUDGET_CENTS",
     "ARDUR_CEDAR_POLICY_PATH",
     "ARDUR_LOG_FORMAT",
+    "ARDUR_MCP_ENABLED",
+    "ARDUR_MCP_BEARER_TOKENS",
+    "ARDUR_MCP_PATH_PREFIX",
+    "ARDUR_MCP_REMOTE_SERVERS",
 ];
 
 fn set(key: &str, value: &str) {
@@ -149,6 +153,62 @@ fn from_env_unknown_provider_does_not_require_anthropic_key() {
     let config =
         Config::from_env().expect("an unknown provider must not require an anthropic key here");
     assert_eq!(config.anthropic_api_key, "");
+}
+
+#[test]
+fn from_env_mcp_disabled_by_default() {
+    let _guard = env_lock();
+    let _env = CleanEnv::new().with_slack();
+    set("ARDUR_PROVIDER", "ollama");
+
+    let config = Config::from_env().expect("boots with MCP unset");
+    assert!(
+        !config.mcp_enabled,
+        "MCP is off unless ARDUR_MCP_ENABLED=true"
+    );
+    assert!(config.mcp_bearer_tokens.is_empty());
+    assert_eq!(config.mcp_path_prefix, "/mcp");
+    assert!(config.mcp_remote_servers.is_empty());
+}
+
+#[test]
+fn from_env_mcp_enabled_requires_bearer_tokens() {
+    let _guard = env_lock();
+    let _env = CleanEnv::new().with_slack();
+    set("ARDUR_PROVIDER", "ollama");
+    set("ARDUR_MCP_ENABLED", "true"); // ARDUR_MCP_BEARER_TOKENS deliberately unset
+
+    let err = Config::from_env().expect_err("enabled MCP must require a bearer allowlist");
+    assert!(
+        err.to_string().contains("ARDUR_MCP_BEARER_TOKENS"),
+        "error should name the missing token list, got: {err}"
+    );
+}
+
+#[test]
+fn from_env_mcp_parses_tokens_prefix_and_remotes() {
+    let _guard = env_lock();
+    let _env = CleanEnv::new().with_slack();
+    set("ARDUR_PROVIDER", "ollama");
+    set("ARDUR_MCP_ENABLED", "true");
+    set("ARDUR_MCP_BEARER_TOKENS", "tok-a, tok-b ,tok-c");
+    set("ARDUR_MCP_PATH_PREFIX", "/tools");
+    set(
+        "ARDUR_MCP_REMOTE_SERVERS",
+        "alpha=http://a.local/mcp, beta=http://b.local/mcp",
+    );
+
+    let config = Config::from_env().expect("MCP config parses");
+    assert!(config.mcp_enabled);
+    assert_eq!(config.mcp_bearer_tokens, vec!["tok-a", "tok-b", "tok-c"]);
+    assert_eq!(config.mcp_path_prefix, "/tools");
+    assert_eq!(
+        config.mcp_remote_servers,
+        vec![
+            ("alpha".to_string(), "http://a.local/mcp".to_string()),
+            ("beta".to_string(), "http://b.local/mcp".to_string()),
+        ]
+    );
 }
 
 #[test]

@@ -45,12 +45,18 @@
 mod capability;
 mod echo;
 mod error;
+mod health;
+mod mcp;
 mod registry;
 mod tool;
 
 pub use capability::Capability;
 pub use echo::EchoTool;
 pub use error::{RegistryError, ToolError};
+pub use health::HealthCheckTool;
+pub use mcp::{
+    ArdurMcpServer, RemoteMcpTool, RemoteMcpToolset, bearer_token_allowed, extract_bearer_token,
+};
 pub use registry::ToolRegistry;
 pub use tool::{InvocationId, Tool, ToolContext, ToolExample, ToolId, ToolOutput, ToolSchema};
 
