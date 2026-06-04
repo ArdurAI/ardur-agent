@@ -44,7 +44,9 @@ use ardur_cap_token::{
     BiscuitCapTokenIssuer, CapScope, CapTokenIssuer, HolderId as CapHolderId, KeyPair,
 };
 use ardur_cedar_policy::{ActionRef, CedarPolicyBundle, PolicyBundle, PolicySource};
+use ardur_channel_discord::DiscordChannel;
 use ardur_channel_matrix::MatrixChannel;
+use ardur_channel_telegram::TelegramChannel;
 use ardur_cost_gate::{CostEnvelope, CostTuple as GateCostTuple, HolderId as GateHolderId};
 use ardur_fused_runtime::{FusedRuntime, FusedRuntimeBuilder};
 use ardur_memory::{InMemoryMemoryRuntime, MemoryRuntime};
@@ -107,6 +109,14 @@ pub struct AppState {
     /// [`Processor`] through the same `OnceLock`, so setting it here makes the
     /// reply path visible to the worker too. Empty when Matrix is disabled.
     matrix: Arc<OnceLock<Arc<MatrixChannel>>>,
+    /// The Discord channel, once [`attach_discord`](AppState::attach_discord)
+    /// wires it (only when `ARDUR_CHANNEL_DISCORD=true`). Same `OnceLock`-shared
+    /// reply path as Matrix.
+    discord: Arc<OnceLock<Arc<DiscordChannel>>>,
+    /// The Telegram channel, once [`attach_telegram`](AppState::attach_telegram)
+    /// wires it (only when `ARDUR_CHANNEL_TELEGRAM=true`). Same `OnceLock`-shared
+    /// reply path as Matrix.
+    telegram: Arc<OnceLock<Arc<TelegramChannel>>>,
 }
 
 /// The data [`build_router`](crate::build_router) needs to mount the §6.0 MCP
@@ -234,10 +244,14 @@ impl AppState {
         //    replied to through the Matrix channel; it stays empty unless
         //    `attach_matrix` later fills it.
         let matrix: Arc<OnceLock<Arc<MatrixChannel>>> = Arc::new(OnceLock::new());
+        let discord: Arc<OnceLock<Arc<DiscordChannel>>> = Arc::new(OnceLock::new());
+        let telegram: Arc<OnceLock<Arc<TelegramChannel>>> = Arc::new(OnceLock::new());
         let processor = Processor {
             runtime,
             slack: slack.clone(),
             matrix: matrix.clone(),
+            discord: discord.clone(),
+            telegram: telegram.clone(),
             issuer,
             cap_budget_remaining: config.cost_budget_cents,
         };
@@ -268,6 +282,8 @@ impl AppState {
             data_dir,
             mcp,
             matrix,
+            discord,
+            telegram,
         }))
     }
 
@@ -297,23 +313,39 @@ impl AppState {
         // Drain inbound Matrix messages onto the worker queue — the same path a
         // verified Slack message takes, so the fused turn runs identically and
         // the worker routes the reply back through Matrix by channel-id scheme.
-        let work_tx = self.work_tx.clone();
-        tokio::spawn(async move {
-            loop {
-                match matrix.receive().await {
-                    Ok(incoming) => {
-                        if work_tx.send(incoming).is_err() {
-                            tracing::error!("turn worker is gone; stopping matrix forwarder");
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!(error = %e, "matrix receive failed; stopping forwarder");
-                        break;
-                    }
-                }
-            }
-        });
+        spawn_inbound_forwarder("matrix", self.work_tx.clone(), matrix);
+    }
+
+    /// Wire a connected Discord channel into the running server: record it for
+    /// the worker's reply path, start its gateway loop, and forward each inbound
+    /// Discord message onto the same work queue Slack uses.
+    ///
+    /// Called by the binary after [`boot`](Self::boot) when
+    /// `ARDUR_CHANNEL_DISCORD=true`. Must run inside a Tokio runtime. Calling it
+    /// more than once is a no-op for the reply slot (the first channel wins).
+    pub async fn attach_discord(&self, discord: Arc<DiscordChannel>) {
+        if self.discord.set(discord.clone()).is_err() {
+            tracing::warn!("discord channel already attached; ignoring the second attach");
+            return;
+        }
+        discord.start().await;
+        spawn_inbound_forwarder("discord", self.work_tx.clone(), discord);
+    }
+
+    /// Wire a connected Telegram channel into the running server: record it for
+    /// the worker's reply path, start its long-poll dispatcher, and forward each
+    /// inbound Telegram message onto the same work queue Slack uses.
+    ///
+    /// Called by the binary after [`boot`](Self::boot) when
+    /// `ARDUR_CHANNEL_TELEGRAM=true`. Must run inside a Tokio runtime. Calling it
+    /// more than once is a no-op for the reply slot (the first channel wins).
+    pub fn attach_telegram(&self, telegram: Arc<TelegramChannel>) {
+        if self.telegram.set(telegram.clone()).is_err() {
+            tracing::warn!("telegram channel already attached; ignoring the second attach");
+            return;
+        }
+        telegram.start();
+        spawn_inbound_forwarder("telegram", self.work_tx.clone(), telegram);
     }
 
     /// The Slack adapter, for inbound event verification in the HTTP handler.
@@ -350,16 +382,47 @@ struct Processor {
     /// The Matrix channel, shared with [`AppState`]; `None` until attached. Used
     /// to post the reply when a turn originated on Matrix (`matrix://…`).
     matrix: Arc<OnceLock<Arc<MatrixChannel>>>,
+    /// The Discord channel; used to reply when a turn originated on Discord
+    /// (`discord://…`). `None` until attached.
+    discord: Arc<OnceLock<Arc<DiscordChannel>>>,
+    /// The Telegram channel; used to reply when a turn originated on Telegram
+    /// (`telegram://…`). `None` until attached.
+    telegram: Arc<OnceLock<Arc<TelegramChannel>>>,
     issuer: BiscuitCapTokenIssuer,
     cap_budget_remaining: u64,
+}
+
+/// Which channel backend a turn originated on — decided by the namespaced
+/// channel-id scheme, and used to route the reply back to the same backend.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Origin {
+    Slack,
+    Matrix,
+    Discord,
+    Telegram,
+}
+
+impl Origin {
+    /// Classify a namespaced channel id by its `scheme://` prefix.
+    fn of(channel_id: &str) -> Self {
+        if channel_id.starts_with("matrix://") {
+            Origin::Matrix
+        } else if channel_id.starts_with("discord://") {
+            Origin::Discord
+        } else if channel_id.starts_with("telegram://") {
+            Origin::Telegram
+        } else {
+            Origin::Slack
+        }
+    }
 }
 
 impl Processor {
     /// Run one inbound message through the fused runtime and post the reply.
     async fn handle(&self, incoming: IncomingMessage) {
         // The channel-id scheme tells us which backend to reply through; the
-        // last path segment is the provider's own channel/room id.
-        let is_matrix = incoming.channel_id.0.starts_with("matrix://");
+        // last path segment is the provider's own channel/room/chat id.
+        let origin = Origin::of(&incoming.channel_id.0);
         let channel = channel_from_id(&incoming.channel_id.0);
         let user = incoming.sender.0.clone();
         let Some(text) = message_text(&incoming.body) else {
@@ -385,7 +448,7 @@ impl Processor {
         match self.runtime.submit(request).await {
             Ok(result) => {
                 let reply = result.response.content;
-                match self.post_reply(is_matrix, &channel, &reply).await {
+                match self.post_reply(origin, &channel, &reply).await {
                     Ok(id) => tracing::info!(
                         %user,
                         %channel,
@@ -401,7 +464,7 @@ impl Processor {
             Err(e) => {
                 tracing::error!(%user, %channel, error = %e, "turn failed");
                 let apology = format!("Sorry, that turn failed: {e}");
-                if let Err(post_err) = self.post_reply(is_matrix, &channel, &apology).await {
+                if let Err(post_err) = self.post_reply(origin, &channel, &apology).await {
                     tracing::error!(
                         %user, %channel, error = %post_err, "failed to post failure notice"
                     );
@@ -410,28 +473,47 @@ impl Processor {
         }
     }
 
-    /// Post `text` to `channel`, routing to the Matrix or Slack backend by the
-    /// turn's origin. Returns the provider's message id on success.
+    /// Post `text` to `channel`, routing to the backend the turn originated on.
+    /// Returns the provider's message id on success.
     async fn post_reply(
         &self,
-        is_matrix: bool,
+        origin: Origin,
         channel: &str,
         text: &str,
     ) -> anyhow::Result<String> {
-        if is_matrix {
-            let matrix = self
-                .matrix
-                .get()
-                .ok_or_else(|| anyhow::anyhow!("matrix reply requested but no channel attached"))?;
-            matrix
-                .send_text(channel, text)
-                .await
-                .map_err(|e| anyhow::anyhow!(e.to_string()))
-        } else {
-            self.slack
+        match origin {
+            Origin::Slack => self
+                .slack
                 .post_message(channel, text, None)
                 .await
-                .map_err(|e| anyhow::anyhow!(e.to_string()))
+                .map_err(|e| anyhow::anyhow!(e.to_string())),
+            Origin::Matrix => {
+                let matrix = self.matrix.get().ok_or_else(|| {
+                    anyhow::anyhow!("matrix reply requested but no channel attached")
+                })?;
+                matrix
+                    .send_text(channel, text)
+                    .await
+                    .map_err(|e| anyhow::anyhow!(e.to_string()))
+            }
+            Origin::Discord => {
+                let discord = self.discord.get().ok_or_else(|| {
+                    anyhow::anyhow!("discord reply requested but no channel attached")
+                })?;
+                discord
+                    .send_text(channel, text)
+                    .await
+                    .map_err(|e| anyhow::anyhow!(e.to_string()))
+            }
+            Origin::Telegram => {
+                let telegram = self.telegram.get().ok_or_else(|| {
+                    anyhow::anyhow!("telegram reply requested but no channel attached")
+                })?;
+                telegram
+                    .send_text(channel, text)
+                    .await
+                    .map_err(|e| anyhow::anyhow!(e.to_string()))
+            }
         }
     }
 
@@ -478,6 +560,36 @@ fn spawn_worker(processor: Processor) -> mpsc::UnboundedSender<IncomingMessage> 
         })
         .expect("spawning the ardur-turn-worker thread");
     tx
+}
+
+/// Spawn a task that drains inbound messages from a channel adapter onto the
+/// turn-worker queue — the same path a verified Slack message takes, so the
+/// fused turn runs identically regardless of origin. The loop ends when the
+/// worker is gone or the channel's `receive` errors. `label` names the channel
+/// in log lines.
+fn spawn_inbound_forwarder<G>(
+    label: &'static str,
+    work_tx: mpsc::UnboundedSender<IncomingMessage>,
+    channel: Arc<G>,
+) where
+    G: MessagingGateway + Send + Sync + 'static,
+{
+    tokio::spawn(async move {
+        loop {
+            match channel.receive().await {
+                Ok(incoming) => {
+                    if work_tx.send(incoming).is_err() {
+                        tracing::error!(channel = label, "turn worker is gone; stopping forwarder");
+                        break;
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(channel = label, error = %e, "channel receive failed; stopping forwarder");
+                    break;
+                }
+            }
+        }
+    });
 }
 
 /// The per-turn cost envelope the gate reserves (then refunds to actual). All
