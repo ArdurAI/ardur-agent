@@ -41,6 +41,7 @@ mod state;
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 
+use ardur_provider_runtime::{TelemetryConfig, init_genai_tracing, shutdown_genai_tracing};
 use ardur_runtime::{ChatMessage, CommandBus, CommandContext, InMemoryCommandBus, RuntimeError};
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
@@ -118,12 +119,26 @@ const PROMPT_OFF: &str = "\x1b[0m";
 /// Run the interactive chat REPL: load config, wire the engine, register the
 /// slash-commands, and loop reading lines until `/quit`, EOF, or interrupt.
 pub fn run_chat(args: ChatArgs) -> Result<(), CliError> {
-    // Logs go to stderr so they never interleave with the REPL's stdout. A
-    // second `try_init` (e.g. from a test in-process) is a no-op rather than a
-    // panic.
-    let _ = tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .try_init();
+    // Telemetry: when `ARDUR_OTEL_ENABLED=true`, stand up the OpenTelemetry GenAI
+    // pipeline (OTLP exporter + layered subscriber) so provider spans export to an
+    // OTLP backend; otherwise install the plain stderr console subscriber. Only
+    // one process-wide subscriber may be set, so these are mutually exclusive. A
+    // second `try_init` (e.g. a test calling in-process) is a no-op, not a panic.
+    let telemetry = TelemetryConfig::from_env();
+    if telemetry.enabled {
+        init_genai_tracing(telemetry.clone())
+            .map_err(|e| CliError::State(format!("initializing OpenTelemetry tracing: {e}")))?;
+        tracing::info!(
+            otlp_endpoint = %telemetry.otlp_endpoint,
+            service_name = %telemetry.service_name,
+            "OpenTelemetry GenAI tracing enabled"
+        );
+    } else {
+        // Logs go to stderr so they never interleave with the REPL's stdout.
+        let _ = tracing_subscriber::fmt()
+            .with_writer(std::io::stderr)
+            .try_init();
+    }
 
     let mut config = Config::load(args.config.clone())?;
     config.budget_cents = resolve_budget_cents(args.budget_cents, config.budget_cents);
@@ -134,7 +149,12 @@ pub fn run_chat(args: ChatArgs) -> Result<(), CliError> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    runtime.block_on(run_chat_loop(config, args.echo))
+    let result = runtime.block_on(run_chat_loop(config, args.echo));
+
+    // Flush any buffered OpenTelemetry spans before returning (a no-op when
+    // telemetry was never initialized).
+    shutdown_genai_tracing();
+    result
 }
 
 /// Resolve the effective per-session budget: the `--budget-cents` flag wins,

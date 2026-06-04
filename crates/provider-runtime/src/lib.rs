@@ -20,6 +20,12 @@
 //! - [`RateCard`] — versioned pricing that turns [`Usage`] into a billed
 //!   [`CostTuple`].
 //! - [`ProviderError`] — the crate's single typed-error surface.
+//! - [`InstrumentedProvider`] — a transparent decorator that wraps each
+//!   [`Provider::complete`] in a `provider.send` `tracing` span carrying the
+//!   OpenTelemetry GenAI semantic-convention attributes (`gen_ai.*`).
+//! - [`telemetry`] — the OTLP exporter + subscriber that ship those spans to any
+//!   OTLP backend (Langfuse / Phoenix / Arize / Jaeger), via
+//!   [`init_genai_tracing`] / [`shutdown_genai_tracing`].
 //!
 //! [`ChatMessage`], [`Role`], [`ProviderId`], and [`CostTuple`] are re-exported
 //! from `ardur-runtime` so the runtime and the provider layer share one schema
@@ -34,16 +40,20 @@
 
 mod anthropic;
 mod error;
+mod instrument;
 mod provider;
 mod rate_card;
 mod registry;
+pub mod telemetry;
 mod types;
 
 pub use anthropic::AnthropicProvider;
 pub use error::ProviderError;
+pub use instrument::InstrumentedProvider;
 pub use provider::Provider;
 pub use rate_card::RateCard;
 pub use registry::ProviderRegistry;
+pub use telemetry::{TelemetryConfig, TelemetryError, init_genai_tracing, shutdown_genai_tracing};
 pub use types::{
     CompletionRequest, CompletionResponse, CostEnvelope, FinishReason, ModelId, RequestId,
     ToolCall, Usage,
