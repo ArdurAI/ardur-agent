@@ -24,10 +24,20 @@
 //!   the `usage.cost` OpenRouter reports (USD → whole US cents; `0` when
 //!   absent — Phase 1 does not reconstruct cost from a rate card).
 //!
-//! # Not in Phase 1
+//! # Phase 2b — streaming
 //!
-//! - **Streaming** — every request sends `stream: false`;
-//!   [`Provider::supports_streaming`] is `false`. (Phase 2.)
+//! [`OpenRouterProvider::stream_chat`] runs a completion over OpenRouter's
+//! OpenAI-compatible SSE stream (`stream: true`), yielding an
+//! [`OpenRouterChunk`] feed: content deltas, incremental tool-call fragments
+//! (reassembled by a [`ToolCallAccumulator`]), a terminal [`OpenRouterChunk::Done`]
+//! finish reason, and the final token [`Usage`]. The streamed `Provider::complete`
+//! path is unchanged (it stays `stream: false`).
+//!
+//! [`Provider::supports_streaming`] stays `false` for now: the uniform
+//! `Provider::stream` trait method (the §3.0 streaming lane) has not landed yet,
+//! so OpenRouter streaming is reachable only through the inherent `stream_chat`.
+//! A follow-up flips the flag and implements the trait method once that lane
+//! merges.
 //!
 //! § 6.0 added tool use: the request advertises `tools`, an assistant turn that
 //! requested tools replays its `tool_calls`, a [`Role::Tool`] result becomes a
@@ -47,7 +57,11 @@ use ardur_provider_runtime::{
 };
 use ardur_runtime::{ChatMessage, CostTuple, ProviderId, Role};
 use async_trait::async_trait;
+use futures::Stream;
 use serde::Deserialize;
+
+mod streaming;
+pub use streaming::{OpenRouterChunk, ToolCallAccumulator, ToolCallDelta};
 
 /// The registry key this backend answers to.
 const PROVIDER_ID: &str = "openrouter";
@@ -175,6 +189,71 @@ impl OpenRouterProvider {
     pub fn model_id(&self) -> &ModelId {
         &self.model_id
     }
+
+    /// Run a completion over OpenRouter's SSE stream (§3.2b), returning a stream
+    /// of [`OpenRouterChunk`] events.
+    ///
+    /// The request is sent with `stream: true` and
+    /// `stream_options.include_usage: true`, so the upstream emits the
+    /// OpenAI-compatible `data: {…}\n\n` event feed and a final usage chunk. The
+    /// returned stream interleaves content deltas, incremental tool-call
+    /// fragments (also stitched into the assembled calls delivered on
+    /// [`OpenRouterChunk::Done`]), the finish reason, and the final
+    /// [`OpenRouterChunk::Usage`]; it ends at the upstream `[DONE]` marker.
+    ///
+    /// A failure to connect, an empty API key, or a non-2xx status surfaces as a
+    /// single terminal `Err` item rather than panicking — callers handle errors
+    /// uniformly by inspecting each yielded `Result`. **Cancellation is by
+    /// drop**: dropping the returned stream drops the underlying HTTP body and
+    /// closes the connection.
+    ///
+    /// This is the OpenRouter-specific streaming surface; the uniform
+    /// `Provider::stream` trait method is a follow-up (see the crate docs).
+    pub async fn stream_chat(
+        &self,
+        req: CompletionRequest,
+    ) -> impl Stream<Item = Result<OpenRouterChunk, ProviderError>> + Send {
+        if self.config.api_key.is_empty() {
+            return error_stream(ProviderError::Unauthorized);
+        }
+
+        let body = build_stream_request_body(&req);
+        let send = self
+            .client
+            .post(self.config.completions_url())
+            .bearer_auth(&self.config.api_key)
+            .header("HTTP-Referer", &self.config.referer)
+            .header("X-Title", &self.config.title)
+            .timeout(self.config.request_timeout)
+            .json(&body)
+            .send()
+            .await;
+
+        let resp = match send {
+            Ok(resp) => resp,
+            Err(e) => return error_stream(ProviderError::NetworkFailure(e.to_string())),
+        };
+
+        let status = resp.status();
+        if status.is_success() {
+            return Box::pin(streaming::into_chunk_stream(resp));
+        }
+
+        // Drain the error body and map it through the same taxonomy as `complete`.
+        let retry_after_ms = parse_retry_after_ms(resp.headers());
+        let code = status.as_u16();
+        let body = resp.text().await.unwrap_or_default();
+        error_stream(map_http_error(code, retry_after_ms, &body, &req.model))
+    }
+}
+
+/// A terminal one-item stream carrying a connect-time error, boxed so it shares
+/// the concrete return type of [`OpenRouterProvider::stream_chat`]'s success
+/// path.
+fn error_stream(
+    err: ProviderError,
+) -> std::pin::Pin<Box<dyn Stream<Item = Result<OpenRouterChunk, ProviderError>> + Send>> {
+    Box::pin(futures::stream::once(async move { Err(err) }))
 }
 
 #[async_trait]
@@ -253,9 +332,30 @@ fn openrouter_passthrough_rate_card() -> RateCard {
 /// inline in the `messages` array. An assistant turn that requested tools
 /// replays its `tool_calls` (arguments re-encoded as the JSON *string* OpenAI
 /// expects), and a [`Role::Tool`] result becomes a `tool` message keyed by
-/// `tool_call_id` (§6.0). `stop`, `tools` are omitted when empty; `stream` is
-/// pinned `false` — Phase 1 is non-streaming.
+/// `tool_call_id` (§6.0). `stop`, `tools` are omitted when empty. `stream` is
+/// `false` — the non-streaming [`Provider::complete`] path (see
+/// [`build_stream_request_body`] for the §3.2b streaming body).
 fn build_request_body(req: &CompletionRequest) -> serde_json::Value {
+    request_body(req, false)
+}
+
+/// The streaming request body (§3.2b): identical to [`build_request_body`] but
+/// `stream: true` with `stream_options.include_usage: true`, so OpenRouter emits
+/// the SSE event feed and a final usage chunk before `[DONE]`.
+fn build_stream_request_body(req: &CompletionRequest) -> serde_json::Value {
+    let mut body = request_body(req, true);
+    body.as_object_mut()
+        .expect("json! object literal is always a map")
+        .insert(
+            "stream_options".to_string(),
+            serde_json::json!({ "include_usage": true }),
+        );
+    body
+}
+
+/// Shared body builder for both the non-streaming and streaming paths; `stream`
+/// pins the OpenAI `stream` flag.
+fn request_body(req: &CompletionRequest, stream: bool) -> serde_json::Value {
     let messages: Vec<serde_json::Value> = req.messages.iter().map(openrouter_message).collect();
 
     let mut body = serde_json::json!({
@@ -263,7 +363,7 @@ fn build_request_body(req: &CompletionRequest) -> serde_json::Value {
         "messages": messages,
         "max_tokens": req.max_tokens,
         "temperature": req.temperature,
-        "stream": false,
+        "stream": stream,
     });
     let map = body
         .as_object_mut()
