@@ -126,6 +126,53 @@ It contains:
 Back the whole volume up regularly. The receipt chain is content-addressed
 and append-only; a corrupted or missing journal entry breaks replay.
 
+## MCP (Model Context Protocol)
+
+ardur speaks MCP both ways, built on the official [`rmcp`](https://crates.io/crates/rmcp)
+Rust SDK: it **serves** its local tools to any MCP client, and can **consume**
+tools from remote MCP servers.
+
+The surface is off by default. Enable it with:
+
+```bash
+ARDUR_MCP_ENABLED=true
+ARDUR_MCP_BEARER_TOKENS=token-one,token-two   # required when enabled
+ARDUR_MCP_PATH_PREFIX=/mcp                     # default
+# client side: consume remote servers (name=url,…)
+# ARDUR_MCP_REMOTE_SERVERS=weather=https://mcp.example.com/mcp/weather
+```
+
+**Server.** When enabled, the Streamable-HTTP transport mounts at
+`<prefix>/{server_name}` (e.g. `POST /mcp/ardur`), handling the MCP
+`GET`/`POST`/`DELETE` methods. The example deployment exposes two tools:
+
+| Tool | Purpose |
+|---|---|
+| `echo` | returns its input arguments unchanged (round-trip check) |
+| `health_check` | reports uptime, selected provider, and memory backend |
+
+**Auth.** Every MCP request must carry `Authorization: Bearer <token>` matching
+`ARDUR_MCP_BEARER_TOKENS` (constant-time compare); anything else is `401`. The
+bearer allowlist is the security boundary — the transport's default loopback-only
+DNS-rebinding guard is lifted so remote clients can connect, so **front the
+endpoint with your own TLS/ingress.**
+
+Quick check against a running server:
+
+```bash
+curl -sS http://localhost:3000/mcp/ardur \
+  -H 'Authorization: Bearer token-one' \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"curl","version":"1"}}}'
+# omit the Authorization header → 401
+```
+
+**Client.** `ARDUR_MCP_REMOTE_SERVERS` is parsed and surfaced for the
+`RemoteMcpToolset` (the client half). Wiring discovered remote tools into live
+turns lands once the runtime gains a tool-execution stage (§6.0 Phase 3); today
+the client is exercised end-to-end by the test suite.
+
 ## Monitoring
 
 - `GET /healthz` — returns `200 OK` once the runtime is initialized.
