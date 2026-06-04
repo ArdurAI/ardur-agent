@@ -1,0 +1,72 @@
+# ardur-channel-matrix — the second real channel adapter behind the §4.0
+# `MessagingGateway` contract (alongside the Slack adapter).
+#
+# Plan family: §4.X (Matrix channel adapter Phase 1). Matrix is an open,
+# federated, Rust-native protocol — a natural fit for self-hosted ardur
+# deployments. Phase 1 = bot-style access-token auth, a persistent sqlite
+# state/crypto store, `sync`-driven inbound `m.room.message` events forwarded
+# through the gateway, plaintext outbound `room.send`, room-allowlist gating,
+# and self-echo loop prevention. OAuth/password login, threading, attachment
+# offload, and interactive device verification are later phases.
+#
+# §18.8 keeps this PR scoped to `crates/channel-matrix/**`, the boot wiring in
+# `crates/server/**`, the cross-crate scenario in `crates/e2e-tests/**`, the
+# `.env.example` / `RUN.md` docs, and the root manifest.
+
+[package]
+name = "ardur-channel-matrix"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The §4.0 gateway owns every value type a delivery speaks in — the
+# `MessagingGateway` trait this adapter implements, plus `OutgoingMessage` /
+# `IncomingMessage` / `MessageReceipt` / `GatewayError` / `MessageTarget` /
+# `MessageBody`. Re-use rather than redefine so the adapter and the gateway
+# never drift into two schemas.
+ardur-messaging-gateway = { workspace = true }
+# The official Matrix client-server SDK from matrix-org/matrix-rust-sdk.
+# Pinned to 0.18 (latest as of 2026-06; the brief's guessed 0.8 predated several
+# releases). `default-features = false` drops `automatic-room-key-forwarding`
+# (key-sharing to other devices — not needed for a single-device bot); we re-add
+# exactly what Phase 1 needs:
+#   - `e2e-encryption` — decrypt messages in encrypted rooms (the common case
+#     for modern Matrix rooms); pairs with the crypto store below.
+#   - `bundled-sqlite` — persistent sqlite state + crypto store, compiling the
+#     sqlite amalgamation in-tree so neither CI runner needs a system libsqlite3.
+# 0.18 has no `rustls-tls`/`native-tls` feature: it pins reqwest with a pure-Rust
+# rustls backend directly, so TLS works with no extra system dependency and no
+# feature to opt into (the brief's `rustls-tls` was for an older release line).
+matrix-sdk = { version = "0.18", default-features = false, features = [
+    "e2e-encryption",
+    "bundled-sqlite",
+] }
+# `send_message` / `receive` are async trait methods; `async-trait` boxes the
+# futures so `MatrixChannel` stays object-safe behind `dyn MessagingGateway`.
+async-trait = { workspace = true }
+# The sync loop and the inbound-forwarding task are spawned onto Tokio.
+tokio = { workspace = true }
+# Structured logging for the sync lifecycle, dropped messages, and join events.
+tracing = { workspace = true }
+# `MatrixError` is the crate's typed config/connect/send failure surface.
+thiserror = { workspace = true }
+# `MatrixError::into_gateway_error` lowers config-time failures onto
+# `GatewayError::Internal(#[from] anyhow::Error)` — same escape hatch the Slack
+# adapter uses at the trait boundary.
+anyhow = { workspace = true }
+# Mirrors the Slack adapter: the gateway value types derive serde, and the
+# config struct is serde-friendly for callers that load it from a file.
+serde = { workspace = true }
+# A parsed inbound message is assigned a fresh v4 correlation id (the workspace
+# pin is v7; opt v4 in on top, as the Slack adapter and provider-runtime do).
+uuid = { workspace = true, features = ["v4"] }
+# The access token is held as `SecretString` so it never leaks through
+# `Debug`/logs — same custody pattern as the Slack bot token.
+secrecy = { workspace = true }
+
+[dev-dependencies]
+# The trait methods are async; unit tests that touch them run on a Tokio runtime.
+tokio = { workspace = true }
