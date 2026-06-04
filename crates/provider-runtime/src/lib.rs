@@ -8,7 +8,10 @@
 //!
 //! - [`Provider`] — the object-safe trait every backend implements: an async
 //!   [`Provider::complete`], plus [`Provider::id`],
-//!   [`Provider::supports_streaming`], and [`Provider::rate_card`].
+//!   [`Provider::supports_streaming`], and [`Provider::rate_card`]. §3.1b adds
+//!   [`Provider::stream`] — an incremental [`StreamEvent`] feed
+//!   ([`ProviderStream`]) with a default impl that wraps one `complete()` call,
+//!   so a provider opts into real streaming by overriding it.
 //! - [`CompletionRequest`] / [`CompletionResponse`] — the call envelopes, with
 //!   the [`FinishReason`] taxonomy, [`Usage`] token counts, and the
 //!   [`CostEnvelope`] budget ceiling.
@@ -44,6 +47,7 @@ mod instrument;
 mod provider;
 mod rate_card;
 mod registry;
+mod stream;
 pub mod telemetry;
 mod types;
 
@@ -53,6 +57,7 @@ pub use instrument::InstrumentedProvider;
 pub use provider::Provider;
 pub use rate_card::RateCard;
 pub use registry::ProviderRegistry;
+pub use stream::{ProviderStream, StreamEvent};
 pub use telemetry::{TelemetryConfig, TelemetryError, init_genai_tracing, shutdown_genai_tracing};
 pub use types::{
     CompletionRequest, CompletionResponse, CostEnvelope, FinishReason, ModelId, RequestId, ToolDef,

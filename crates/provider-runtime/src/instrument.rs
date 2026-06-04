@@ -25,6 +25,7 @@ use tracing::Instrument;
 use crate::error::ProviderError;
 use crate::provider::Provider;
 use crate::rate_card::RateCard;
+use crate::stream::ProviderStream;
 use crate::types::{CompletionRequest, CompletionResponse, FinishReason};
 
 /// A [`Provider`] decorator that opens a `provider.send` span — carrying the
@@ -99,6 +100,14 @@ impl Provider for InstrumentedProvider {
         }
         .instrument(span)
         .await
+    }
+
+    /// Delegate streaming straight to the inner provider, so wrapping at boot
+    /// preserves a backend's real SSE path (§3.1b) rather than silently
+    /// collapsing it to the `complete`-based default. (Per-chunk span enrichment
+    /// is a Phase-2 follow-up; for now the inner stream is returned untouched.)
+    async fn stream(&self, req: CompletionRequest) -> Result<ProviderStream, ProviderError> {
+        self.inner.stream(req).await
     }
 
     fn id(&self) -> ProviderId {
