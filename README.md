@@ -18,6 +18,18 @@ What makes Ardur different from the other personal AI agents:
 
 Early. Under active design. Plan corpus + architecture are extensive; the runtime is being built now. APIs unstable, expect breaking changes.
 
+## Hybrid retrieval
+
+Foundation crates for retrieving an agent's memories by both meaning and exact
+terms, then fusing the two rankings:
+
+- [`crates/embeddings`](crates/embeddings) — local text embeddings via fastembed
+  (ONNX), the dense half. Default model BGE-small-en-v1.5 (384-dim).
+- [`crates/bm25-index`](crates/bm25-index) — BM25 lexical search via Tantivy, the
+  sparse half. In-memory or file-backed.
+- [`crates/fusion`](crates/fusion) — reciprocal-rank, relative-score, and
+  distance-score fusion (ported from LlamaIndex) to combine the two result lists.
+
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).
