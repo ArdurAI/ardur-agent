@@ -8,10 +8,10 @@
 //!
 //! [Messages API]: https://docs.anthropic.com/en/api/messages
 //
-// TODO §3.0 Phase 2: token streaming (server-sent events), `tool_use` content
-// blocks parsed into [`ToolCall`]s, and multi-turn cost projection at admission.
+// TODO §3.0 Phase 2: token streaming (server-sent events) and multi-turn cost
+// projection at admission. (§6.0 added `tool_use` request/response wiring.)
 
-use ardur_runtime::{CostTuple, ProviderId, Role};
+use ardur_runtime::{ChatMessage, CostTuple, ProviderId, Role, ToolCall};
 use async_trait::async_trait;
 use serde::Deserialize;
 
@@ -171,21 +171,63 @@ impl Provider for AnthropicProvider {
 ///
 /// System messages flatten into the top-level `system` field (joined with blank
 /// lines when there are several); user/assistant turns become the `messages`
-/// array. `system` and `stop_sequences` are omitted when empty.
+/// array. An assistant turn that requested tools serializes its calls as
+/// `tool_use` content blocks (§6.0), and a run of [`Role::Tool`] results becomes
+/// one user turn of `tool_result` blocks (the Messages-API shape, which requires
+/// tool results to ride in a user message). `system`, `stop_sequences`, and
+/// `tools` are omitted when empty — so a no-tool request is byte-identical to
+/// the pre-§6.0 body.
 fn build_request_body(req: &CompletionRequest) -> serde_json::Value {
-    let mut messages = Vec::with_capacity(req.messages.len());
+    let mut messages: Vec<serde_json::Value> = Vec::with_capacity(req.messages.len());
     let mut system_parts = Vec::new();
-    for m in &req.messages {
+    let msgs = &req.messages;
+    let mut i = 0;
+    while i < msgs.len() {
+        let m = &msgs[i];
         match m.role {
-            Role::System => system_parts.push(m.content.clone()),
-            Role::User => messages.push(serde_json::json!({
-                "role": "user",
-                "content": m.content,
-            })),
-            Role::Assistant => messages.push(serde_json::json!({
-                "role": "assistant",
-                "content": m.content,
-            })),
+            Role::System => {
+                system_parts.push(m.content.clone());
+                i += 1;
+            }
+            Role::User => {
+                messages.push(serde_json::json!({
+                    "role": "user",
+                    "content": m.content,
+                }));
+                i += 1;
+            }
+            Role::Assistant => {
+                messages.push(assistant_message(m));
+                i += 1;
+            }
+            Role::Tool => {
+                // Coalesce the run of consecutive tool results into one user turn
+                // of `tool_result` blocks (each keyed to the `tool_use` id it
+                // answers), so a multi-tool round trips in a single user message.
+                let mut blocks: Vec<serde_json::Value> = Vec::new();
+                while i < msgs.len() && matches!(msgs[i].role, Role::Tool) {
+                    let t = &msgs[i];
+                    let mut block = serde_json::json!({
+                        "type": "tool_result",
+                        "content": t.content,
+                    });
+                    if let Some(id) = &t.tool_call_id {
+                        block
+                            .as_object_mut()
+                            .expect("json! object literal is always a map")
+                            .insert(
+                                "tool_use_id".to_string(),
+                                serde_json::Value::String(id.clone()),
+                            );
+                    }
+                    blocks.push(block);
+                    i += 1;
+                }
+                messages.push(serde_json::json!({
+                    "role": "user",
+                    "content": blocks,
+                }));
+            }
         }
     }
 
@@ -210,7 +252,49 @@ fn build_request_body(req: &CompletionRequest) -> serde_json::Value {
             serde_json::json!(req.stop_sequences),
         );
     }
+    if !req.tools.is_empty() {
+        let tools: Vec<serde_json::Value> = req
+            .tools
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "name": t.name,
+                    "description": t.description,
+                    "input_schema": t.input_schema,
+                })
+            })
+            .collect();
+        map.insert("tools".to_string(), serde_json::Value::Array(tools));
+    }
     body
+}
+
+/// Serialize an assistant turn. A plain turn is `{role, content: <text>}`; a turn
+/// that requested tools becomes a content-block array of the optional leading
+/// `text` block followed by one `tool_use` block per [`ToolCall`].
+fn assistant_message(m: &ChatMessage) -> serde_json::Value {
+    if m.tool_calls.is_empty() {
+        return serde_json::json!({
+            "role": "assistant",
+            "content": m.content,
+        });
+    }
+    let mut blocks: Vec<serde_json::Value> = Vec::new();
+    if !m.content.is_empty() {
+        blocks.push(serde_json::json!({ "type": "text", "text": m.content }));
+    }
+    for call in &m.tool_calls {
+        blocks.push(serde_json::json!({
+            "type": "tool_use",
+            "id": call.id,
+            "name": call.name,
+            "input": call.arguments,
+        }));
+    }
+    serde_json::json!({
+        "role": "assistant",
+        "content": blocks,
+    })
 }
 
 /// Parse the `retry-after` header (whole seconds) into milliseconds, defaulting
@@ -268,14 +352,21 @@ struct MessagesResponse {
     usage: ApiUsage,
 }
 
-/// One block of the response `content` array. Phase 1 only consumes `text`
-/// blocks; `tool_use` blocks are surfaced via the finish reason but not parsed.
+/// One block of the response `content` array. `text` blocks fold into the
+/// completion content; `tool_use` blocks (carrying `id`, `name`, and the JSON
+/// `input`) decode into [`ToolCall`]s the runtime dispatches (§6.0).
 #[derive(Deserialize)]
 struct ContentBlock {
     #[serde(rename = "type")]
     block_type: String,
     #[serde(default)]
     text: Option<String>,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    input: Option<serde_json::Value>,
 }
 
 /// The `usage` object the provider bills against.
@@ -302,14 +393,28 @@ impl MessagesResponse {
             tokens_out: self.usage.output_tokens,
         };
 
+        // Decode any `tool_use` blocks into the calls the runtime will dispatch.
+        let tool_calls: Vec<ToolCall> = self
+            .content
+            .iter()
+            .filter(|b| b.block_type == "tool_use")
+            .filter_map(|b| match (&b.id, &b.name) {
+                (Some(id), Some(name)) => Some(ToolCall {
+                    id: id.clone(),
+                    name: name.clone(),
+                    arguments: b.input.clone().unwrap_or(serde_json::Value::Null),
+                }),
+                _ => None,
+            })
+            .collect();
+
         let finish_reason = match self.stop_reason.as_deref() {
             Some("end_turn") | None => FinishReason::Stop,
             Some("max_tokens") => FinishReason::MaxTokens,
             Some("stop_sequence") => {
                 FinishReason::StopSequence(self.stop_sequence.unwrap_or_default())
             }
-            // TODO §3.0 Phase 2: parse `tool_use` content blocks into ToolCalls.
-            Some("tool_use") => FinishReason::ToolUse(Vec::new()),
+            Some("tool_use") => FinishReason::ToolUse(tool_calls),
             Some(other) => FinishReason::Error(format!("unknown stop_reason: {other}")),
         };
 

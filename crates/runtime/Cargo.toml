@@ -9,6 +9,9 @@ repository.workspace = true
 [dependencies]
 anyhow = { workspace = true }
 serde = { workspace = true }
+# `ToolCall::arguments` and the tool transcript carry raw JSON, so the runtime's
+# shared value types speak `serde_json::Value` directly.
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 # Workspace pins v7 (time-ordered session/turn ids); receipt-id placeholders
 # are v4 per §1.0 Phase 1, so opt v4 in on top of the shared pin (Cargo unifies

@@ -31,7 +31,8 @@ async fn server_boots_with_ollama_provider_selection() {
 
     // The whole substrate boots over the selected provider without panicking,
     // and lays down the persistent state directory layout.
-    let state = AppState::boot(&config, provider).expect("AppState boots over ollama");
+    let tools = std::sync::Arc::new(ardur_server::example_registry("ollama", "in-memory"));
+    let state = AppState::boot(&config, provider, tools).expect("AppState boots over ollama");
     assert_eq!(state.data_dir(), dir.path());
     for sub in ["memory", "journals", "receipts", "keys"] {
         assert!(
@@ -52,6 +53,7 @@ async fn server_boots_with_codex_provider_selection() {
         select(Some("codex"), ModelId::new(&config.model)).expect("codex selection is infallible");
     assert_eq!(provider.id().0, "codex");
 
-    let state = AppState::boot(&config, provider).expect("AppState boots over codex");
+    let tools = std::sync::Arc::new(ardur_server::example_registry("codex", "in-memory"));
+    let state = AppState::boot(&config, provider, tools).expect("AppState boots over codex");
     assert_eq!(state.data_dir(), dir.path());
 }

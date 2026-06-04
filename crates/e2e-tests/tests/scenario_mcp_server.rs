@@ -50,7 +50,8 @@ async fn spawn_server(bearer: &str) -> String {
     };
     let provider: Arc<dyn Provider> =
         Arc::new(AnthropicProvider::stub(ModelId::new(&config.model)));
-    let state = AppState::boot(&config, provider).expect("server boots with MCP enabled");
+    let tools = Arc::new(ardur_server::example_registry("stub", "in-memory"));
+    let state = AppState::boot(&config, provider, tools).expect("server boots with MCP enabled");
     let router = build_router(state);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
