@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use ardur_provider_runtime::{AnthropicProvider, ModelId, Provider};
-use ardur_server::{AppState, Config, LogFormat, build_router};
+use ardur_server::{AppState, Config, LogFormat, MemoryBackend, build_router};
 use axum::Router;
 use axum::body::Bytes;
 use axum::http::{Request, StatusCode};
@@ -66,6 +66,8 @@ pub fn test_config(data_dir: &TempDir, slack_base: Option<String>) -> Config {
         mcp_bearer_tokens: Vec::new(),
         mcp_path_prefix: "/mcp".to_string(),
         mcp_remote_servers: Vec::new(),
+        memory_backend: MemoryBackend::InMemory,
+        qdrant_url: None,
     }
 }
 

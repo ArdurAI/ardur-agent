@@ -62,6 +62,36 @@ the server aborts). The Ollama, Codex, and Claude-CLI backends need no
 credentials to wire — they fail later, per-turn, if the daemon/binary is
 unreachable or the CLI is not logged in.
 
+## Selecting a memory backend
+
+`ardur-server` picks its bi-temporal memory substrate at boot from the
+`ARDUR_MEMORY` environment variable. An unset or empty value defaults to
+`in_memory`.
+
+| `ARDUR_MEMORY` | Backend | Required / notable env |
+|---|---|---|
+| `in_memory` (default) | In-process §7.0 Phase 1 store | none — **lost on restart** |
+| `qdrant` | Durable, Qdrant-backed §7.0 Phase 2 store | `QDRANT_URL` (**required**); `QDRANT_API_KEY` (cloud only), `QDRANT_COLLECTION` (default `ardur_memory`), `QDRANT_VECTOR_DIM` (default `384`) |
+
+The default `in_memory` store is fast but volatile: every fact is gone when the
+process restarts. The `qdrant` backend upserts each bi-temporal record as a
+Qdrant point so memory survives a restart (or a pod reschedule). When
+`ARDUR_MEMORY=qdrant`, `QDRANT_URL` is **required** — a missing URL aborts at
+config-load (the same conditional shape as `ANTHROPIC_API_KEY` under the
+Anthropic provider) rather than failing silently at first use.
+
+```sh
+# Durable memory against a local Qdrant (gRPC on 6334).
+docker run -p 6333:6333 -p 6334:6334 qdrant/qdrant
+ARDUR_MEMORY=qdrant QDRANT_URL=http://localhost:6334 ardur-server
+```
+
+The collection (Cosine distance, the configured dim) and its payload indexes
+(`subject`, `channel_id`, `session_id`) are created automatically on first boot
+if absent. Phase 1 stores a placeholder vector per record (reads use payload
+filters, not vector search); semantic recall via real embeddings is a later
+phase.
+
 ## Slack app setup
 
 1. Create a Slack app at https://api.slack.com/apps → **From scratch**.
@@ -118,7 +148,7 @@ It contains:
 
 | Path | Purpose |
 |---|---|
-| `memory/` | bi-temporal memory store (per-session + global) |
+| `memory/` | bi-temporal memory store (per-session + global) — used only by the default `in_memory` backend; with `ARDUR_MEMORY=qdrant` the durable store lives in Qdrant, not on this volume |
 | `journals/` | append-only session journals (replay source of truth) |
 | `receipts/` | signed receipt chain (JWS-ES256) |
 | `keys/` | issuer keys — **`keys/issuer.pem` is the root of trust for the receipt chain. Back this up. Losing it invalidates every prior receipt.** |
@@ -249,7 +279,10 @@ deployment for anything sensitive:
   journal append and receipt sign is still single-phase. A crash in the
   window can leave an orphan receipt.
 - **ARD-19** — Runtime ↔ memory wiring is still partial; some recall paths
-  bypass the bi-temporal store.
+  bypass the bi-temporal store. A durable Qdrant memory backend
+  (`ARDUR_MEMORY=qdrant`) now persists writes across restarts, but Phase 1
+  stores a placeholder vector (no semantic recall yet) and the runtime's recall
+  side is unchanged.
 - **ARD-48** — Injection-defense not yet wired into the FusedRuntime
   pipeline; the standalone crate exists but does not gate provider calls.
 - **ARD-21** — Dependabot triage queue is unmanaged; pin reviews land
