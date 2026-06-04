@@ -37,6 +37,7 @@ members = [
     "crates/channel-discord",
     "crates/channel-telegram",
     "crates/server",
+    "crates/admin-ui",
     "crates/e2e-tests",
 ]
 
@@ -98,6 +99,18 @@ tokio = { version = "1", features = ["full"] }
 # integration tests (no real listener needed).
 axum = "0.7"
 tower = { version = "0.5", features = ["util"] }
+# Compile-time HTML templating for the `ardur-admin` observability dashboard
+# (crates/admin-ui, §13.X). maud renders HTML from a Rust macro — no template
+# files, no runtime template engine, a single proc-macro dependency — and its
+# `axum` feature makes `Markup` an `IntoResponse` directly. Chosen over askama
+# (needs a templates dir + build step) and tera (a runtime engine, explicitly
+# excluded) because it is the lightest server-rendering option for a read-only
+# dashboard.
+maud = { version = "0.26", features = ["axum"] }
+# In-process axum test harness — `axum-test::TestServer` drives the admin-ui
+# router without binding a port, backing the endpoint integration tests
+# (crates/admin-ui dev-dependency, §13.X).
+axum-test = "16"
 # Tracing & observability.
 tracing = "0.1"
 # OpenTelemetry GenAI semantic-convention emission (crates/provider-runtime
