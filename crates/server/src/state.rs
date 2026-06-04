@@ -46,7 +46,8 @@ use ardur_cap_token::{
 use ardur_cedar_policy::{ActionRef, CedarPolicyBundle, PolicyBundle, PolicySource};
 use ardur_cost_gate::{CostEnvelope, CostTuple as GateCostTuple, HolderId as GateHolderId};
 use ardur_fused_runtime::{FusedRuntime, FusedRuntimeBuilder};
-use ardur_memory::InMemoryMemoryRuntime;
+use ardur_memory::{InMemoryMemoryRuntime, MemoryRuntime};
+use ardur_memory_qdrant::{QdrantMemoryConfig, QdrantMemoryRuntime};
 use ardur_messaging_gateway::{IncomingMessage, MessageBody};
 use ardur_provider_runtime::{ModelId, Provider};
 use ardur_receipt::Es256SigningKey;
@@ -57,7 +58,7 @@ use biscuit_auth::{Algorithm, PrivateKey};
 use secrecy::SecretString;
 use tokio::sync::mpsc;
 
-use crate::config::Config;
+use crate::config::{Config, MemoryBackend};
 
 /// The audience every session cap-token is scoped to — and the single audience
 /// the fused runtime verifies against (it is fixed at build time, so it cannot
@@ -149,13 +150,27 @@ impl AppState {
         // 3. Policy: the operator's file if configured + present, else built-in.
         let policy = load_policy(config.cedar_policy_path.as_deref())?;
 
-        // 4. Substrate sinks.
-        //    `// TODO Phase 3:` memory has no on-disk backing yet — the §7.0
-        //    crate ships only `InMemoryMemoryRuntime`. The `memory/` dir is
-        //    created for the future pgvector/durable backend; today facts live
-        //    in-process and do not survive a restart.
+        // 4. Substrate sinks. Memory is selected by `ARDUR_MEMORY`: the
+        //    in-process §7.0 Phase 1 store (default — fast, lost on restart) or
+        //    the durable Qdrant-backed §7.0 Phase 2 store. Both implement the
+        //    same `MemoryRuntime`, so the runtime builder is agnostic. The
+        //    `memory/` dir is still created for any future file-backed store.
         let _ = &memory_dir;
-        let memory = Arc::new(InMemoryMemoryRuntime::new());
+        let memory: Arc<dyn MemoryRuntime + Send + Sync> = match config.memory_backend {
+            MemoryBackend::InMemory => Arc::new(InMemoryMemoryRuntime::new()),
+            MemoryBackend::Qdrant => {
+                // The collection/dim/api-key knobs come from `QDRANT_*`; the URL
+                // is overridden from the validated `Config::qdrant_url` when set.
+                let mut qcfg = QdrantMemoryConfig::from_env();
+                if let Some(url) = &config.qdrant_url {
+                    qcfg = qcfg.with_url(url.clone());
+                }
+                Arc::new(
+                    QdrantMemoryRuntime::connect_and_init(qcfg)
+                        .map_err(|e| anyhow::anyhow!("connecting qdrant memory: {e}"))?,
+                )
+            }
+        };
 
         // One journal per process boot. The fused runtime appends every turn's
         // user + assistant messages here (fsynced per entry).

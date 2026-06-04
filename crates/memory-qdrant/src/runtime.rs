@@ -1,0 +1,492 @@
+//! [`QdrantMemoryRuntime`] — the durable, Qdrant-backed [`MemoryRuntime`].
+//!
+//! Every bi-temporal record is upserted as a Qdrant point (id = the record's
+//! UUID, vector = a placeholder embedding, payload = [`QdrantPayload`]). Reads
+//! scroll the relevant points and apply the *same* bi-temporal "as-of" predicate
+//! the in-process store uses, so the read semantics are identical — the only
+//! difference is that the data survives a process restart.
+//!
+//! ## Sync trait over an async client
+//!
+//! [`MemoryRuntime`] is synchronous (its reads are even infallible), while the
+//! Qdrant client is async. The runtime therefore owns a small multi-threaded
+//! Tokio runtime and bridges each call through [`block_on`](QdrantMemoryRuntime::block_on).
+//! When invoked from *inside* an ambient Tokio runtime (e.g. the fused runtime's
+//! turn, or the server boot under `#[tokio::main]`), it uses
+//! [`tokio::task::block_in_place`] so it does not deadlock the caller's runtime;
+//! otherwise it blocks on its own runtime directly.
+
+use std::collections::HashMap;
+
+use ardur_memory::{
+    HolderId, InvalidationReason, MemoryError, MemoryRecord, MemoryRuntime, RecordId, Result,
+    UnixTsMillis,
+};
+use qdrant_client::Payload;
+use qdrant_client::Qdrant;
+use qdrant_client::qdrant::{
+    Condition, CreateCollectionBuilder, CreateFieldIndexCollectionBuilder, Distance, FieldType,
+    Filter, GetPointsBuilder, PointStruct, ScrollPointsBuilder, UpsertPointsBuilder, Value,
+    VectorParamsBuilder,
+};
+use uuid::Uuid;
+
+use crate::config::QdrantMemoryConfig;
+use crate::payload::QdrantPayload;
+use crate::snapshot::{MemorySnapshot, SnapshotReceiptSink};
+
+/// The far end of an open-ended valid interval — mirrors the in-process store.
+const FOREVER: UnixTsMillis = UnixTsMillis(u64::MAX);
+
+/// An upper bound on points pulled per scroll. A single subject's correction
+/// history is tiny in practice; `// TODO §7.0 Phase 2`: paginate the scroll
+/// cursor for subjects with very long histories.
+const SCROLL_LIMIT: u32 = 16_384;
+
+/// A durable [`MemoryRuntime`] backed by a Qdrant collection.
+pub struct QdrantMemoryRuntime {
+    client: Qdrant,
+    config: QdrantMemoryConfig,
+    rt: tokio::runtime::Runtime,
+}
+
+impl QdrantMemoryRuntime {
+    /// Connect to Qdrant per `config` (no collection I/O yet — call
+    /// [`init`](QdrantMemoryRuntime::init) to create the collection).
+    ///
+    /// # Errors
+    /// [`MemoryError::Backend`] if the Tokio bridge runtime cannot be built or
+    /// the Qdrant client cannot be constructed from the configured URL/key.
+    pub fn connect(config: QdrantMemoryConfig) -> Result<Self> {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .map_err(|e| MemoryError::Backend(format!("building tokio runtime: {e}")))?;
+
+        let mut builder = Qdrant::from_url(&config.url);
+        if let Some(key) = &config.api_key {
+            builder = builder.api_key(key.clone());
+        }
+        let client = builder
+            .build()
+            .map_err(|e| MemoryError::Backend(format!("building qdrant client: {e}")))?;
+
+        Ok(Self { client, config, rt })
+    }
+
+    /// Connect and then [`init`](QdrantMemoryRuntime::init) the collection — the
+    /// convenience the server boot uses.
+    ///
+    /// # Errors
+    /// Any error from [`connect`](QdrantMemoryRuntime::connect) or
+    /// [`init`](QdrantMemoryRuntime::init).
+    pub fn connect_and_init(config: QdrantMemoryConfig) -> Result<Self> {
+        let this = Self::connect(config)?;
+        this.init()?;
+        Ok(this)
+    }
+
+    /// Create the collection (Cosine distance, the configured dim) and its
+    /// payload indexes (`subject`, `channel_id`, `session_id`) if they are not
+    /// already present. Idempotent — safe to call on every boot.
+    ///
+    /// # Errors
+    /// [`MemoryError::Backend`] on any Qdrant transport or collection error.
+    pub fn init(&self) -> Result<()> {
+        self.block_on(async {
+            let exists = self
+                .client
+                .collection_exists(&self.config.collection_name)
+                .await
+                .map_err(|e| MemoryError::Backend(format!("collection_exists: {e}")))?;
+            if !exists {
+                self.client
+                    .create_collection(
+                        CreateCollectionBuilder::new(&self.config.collection_name).vectors_config(
+                            VectorParamsBuilder::new(
+                                self.config.vector_dim as u64,
+                                Distance::Cosine,
+                            ),
+                        ),
+                    )
+                    .await
+                    .map_err(|e| MemoryError::Backend(format!("create_collection: {e}")))?;
+
+                for field in ["subject", "channel_id", "session_id"] {
+                    self.client
+                        .create_field_index(CreateFieldIndexCollectionBuilder::new(
+                            &self.config.collection_name,
+                            field,
+                            FieldType::Keyword,
+                        ))
+                        .await
+                        .map_err(|e| {
+                            MemoryError::Backend(format!("create index on {field}: {e}"))
+                        })?;
+                }
+            }
+            Ok(())
+        })
+    }
+
+    /// Take a Qdrant snapshot of the collection and record it as a
+    /// [`MemorySnapshot`] event on `chain`, returning the snapshot id.
+    ///
+    /// # Errors
+    /// [`MemoryError::Backend`] if the snapshot request fails or Qdrant returns
+    /// no snapshot description.
+    pub fn snapshot_into_receipt<S: SnapshotReceiptSink>(&self, chain: &mut S) -> Result<String> {
+        let snapshot = self.create_snapshot()?;
+        let id = snapshot.snapshot_id.clone();
+        chain.append_memory_snapshot(snapshot);
+        Ok(id)
+    }
+
+    /// Take a Qdrant snapshot of the collection, returning the [`MemorySnapshot`]
+    /// descriptor (its id + the wall-clock instant it was taken).
+    ///
+    /// # Errors
+    /// [`MemoryError::Backend`] if the snapshot request fails or Qdrant returns
+    /// no snapshot name.
+    pub fn create_snapshot(&self) -> Result<MemorySnapshot> {
+        let name = self.block_on(async {
+            let resp = self
+                .client
+                .create_snapshot(&self.config.collection_name)
+                .await
+                .map_err(|e| MemoryError::Backend(format!("create_snapshot: {e}")))?;
+            resp.snapshot_description
+                .and_then(|d| {
+                    let name = d.name;
+                    if name.is_empty() { None } else { Some(name) }
+                })
+                .ok_or_else(|| {
+                    MemoryError::Backend("create_snapshot returned no snapshot name".to_string())
+                })
+        })?;
+        Ok(MemorySnapshot {
+            snapshot_id: name,
+            ts: now_ms(),
+        })
+    }
+
+    /// Drop the backing collection — test hygiene so a gated suite starts from a
+    /// clean slate. Succeeds even if the collection does not exist.
+    ///
+    /// # Errors
+    /// [`MemoryError::Backend`] on a Qdrant transport error.
+    pub fn delete_collection(&self) -> Result<()> {
+        self.block_on(async {
+            self.client
+                .delete_collection(&self.config.collection_name)
+                .await
+                .map(|_| ())
+                .map_err(|e| MemoryError::Backend(format!("delete_collection: {e}")))
+        })
+    }
+
+    /// The config this runtime was built with.
+    #[must_use]
+    pub fn config(&self) -> &QdrantMemoryConfig {
+        &self.config
+    }
+
+    // ---- internals -------------------------------------------------------
+
+    /// Build the Qdrant point for a record: id = the record UUID, vector = the
+    /// placeholder embedding, payload = the projected [`QdrantPayload`].
+    fn point_for(&self, rec: &MemoryRecord) -> Result<PointStruct> {
+        let payload = QdrantPayload::from_record(rec)?;
+        let value = serde_json::to_value(&payload)
+            .map_err(|e| MemoryError::Backend(format!("serialize payload: {e}")))?;
+        let payload: Payload = Payload::try_from(value)
+            .map_err(|e| MemoryError::Backend(format!("payload to qdrant: {e}")))?;
+        let vector = placeholder_embedding(self.config.vector_dim);
+        Ok(PointStruct::new(rec.record_id.to_string(), vector, payload))
+    }
+
+    /// Upsert one point, blocking on the bridge runtime.
+    fn upsert(&self, point: PointStruct) -> Result<()> {
+        self.block_on(async {
+            self.client
+                .upsert_points(
+                    UpsertPointsBuilder::new(&self.config.collection_name, vec![point]).wait(true),
+                )
+                .await
+                .map(|_| ())
+                .map_err(|e| MemoryError::Backend(format!("upsert_points: {e}")))
+        })
+    }
+
+    /// Scroll every point matching `filter` and reconstruct the records from the
+    /// carried `record_json`. A point whose payload cannot be reconstructed is
+    /// skipped (logged) rather than failing the whole read.
+    fn scroll_records(&self, filter: Filter) -> Result<Vec<MemoryRecord>> {
+        let points = self.block_on(async {
+            self.client
+                .scroll(
+                    ScrollPointsBuilder::new(&self.config.collection_name)
+                        .filter(filter)
+                        .limit(SCROLL_LIMIT)
+                        .with_payload(true)
+                        .with_vectors(false),
+                )
+                .await
+                .map_err(|e| MemoryError::Backend(format!("scroll: {e}")))
+        })?;
+
+        Ok(points
+            .result
+            .into_iter()
+            .filter_map(|p| record_from_payload(&p.payload))
+            .collect())
+    }
+
+    /// Fetch a single record by its UUID (the point id), if present.
+    fn get_record(&self, id: Uuid) -> Result<Option<MemoryRecord>> {
+        let points = self.block_on(async {
+            self.client
+                .get_points(
+                    GetPointsBuilder::new(
+                        &self.config.collection_name,
+                        vec![id.to_string().into()],
+                    )
+                    .with_payload(true)
+                    .with_vectors(false),
+                )
+                .await
+                .map_err(|e| MemoryError::Backend(format!("get_points: {e}")))
+        })?;
+        Ok(points
+            .result
+            .into_iter()
+            .find_map(|p| record_from_payload(&p.payload)))
+    }
+
+    /// Block on `fut`, cooperating with an ambient Tokio runtime when present.
+    fn block_on<F: std::future::Future>(&self, fut: F) -> F::Output {
+        match tokio::runtime::Handle::try_current() {
+            // Inside an ambient runtime: tell it we are about to block this
+            // worker, then drive `fut` on our own runtime. Requires the ambient
+            // runtime to be multi-threaded (the server's `#[tokio::main]` and the
+            // gated tests use a multi-thread flavor).
+            Ok(_) => tokio::task::block_in_place(|| self.rt.block_on(fut)),
+            Err(_) => self.rt.block_on(fut),
+        }
+    }
+}
+
+impl MemoryRuntime for QdrantMemoryRuntime {
+    fn record(&self, rec: MemoryRecord) -> Result<RecordId> {
+        let id = rec.record_id;
+        let point = self.point_for(&rec)?;
+        self.upsert(point)?;
+        Ok(RecordId(id))
+    }
+
+    fn at_time(&self, subject: &HolderId, as_of: UnixTsMillis) -> Vec<MemoryRecord> {
+        let filter = Filter::must([Condition::matches("subject", subject.0.clone())]);
+        match self.scroll_records(filter) {
+            Ok(records) => live_at(&records, as_of),
+            Err(e) => {
+                tracing::warn!(error = %e, subject = %subject.0, "qdrant at_time read failed");
+                Vec::new()
+            }
+        }
+    }
+
+    fn history_of(&self, record_id: RecordId) -> Vec<MemoryRecord> {
+        let root = match self.get_record(record_id.0) {
+            Ok(Some(rec)) => rec.correction_chain_root,
+            Ok(None) => return Vec::new(),
+            Err(e) => {
+                tracing::warn!(error = %e, "qdrant history_of root lookup failed");
+                return Vec::new();
+            }
+        };
+        let filter = Filter::must([Condition::matches(
+            "correction_chain_root",
+            root.to_string(),
+        )]);
+        match self.scroll_records(filter) {
+            Ok(mut records) => {
+                // Scroll order is unspecified; approximate insertion order with
+                // the transaction-time axis so a chain reads oldest-first.
+                records.sort_by_key(|r| r.recorded_at);
+                records
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "qdrant history_of scroll failed");
+                Vec::new()
+            }
+        }
+    }
+
+    fn invalidate(
+        &self,
+        record_id: RecordId,
+        at: UnixTsMillis,
+        reason: InvalidationReason,
+    ) -> Result<()> {
+        let target = self
+            .get_record(record_id.0)?
+            .ok_or(MemoryError::NotFound(record_id.0))?;
+        let tombstone = tombstone_for(&target, at, reason);
+        // Reuse the upsert path; the tombstone is just another point.
+        self.record(tombstone).map(|_| ())
+    }
+}
+
+/// The placeholder embedding for Phase 1: a unit vector (`[1, 0, 0, …]`). Reads
+/// scroll by payload filter rather than vector search, so the vector's content
+/// does not affect correctness; a unit vector (rather than all-zeros) keeps it
+/// valid under Cosine distance. `// TODO §7.0 Phase 2`: embed `predicate + object`
+/// with the real model so semantic recall lands.
+fn placeholder_embedding(dim: usize) -> Vec<f32> {
+    let mut v = vec![0.0_f32; dim];
+    if let Some(first) = v.first_mut() {
+        *first = 1.0;
+    }
+    v
+}
+
+/// Reconstruct a record from a retrieved point's payload (`record_json`).
+fn record_from_payload(payload: &HashMap<String, Value>) -> Option<MemoryRecord> {
+    let raw = payload.get("record_json")?.as_str()?;
+    match serde_json::from_str(raw) {
+        Ok(rec) => Some(rec),
+        Err(e) => {
+            tracing::warn!(error = %e, "skipping point with unreadable record_json");
+            None
+        }
+    }
+}
+
+/// The bi-temporal "as-of" view over a set of a single subject's records — the
+/// same predicate the in-process [`ardur_memory::InMemoryMemoryRuntime`] applies:
+/// live data rows within their valid interval whose correction chain has not been
+/// cut off at or before `as_of`.
+fn live_at(records: &[MemoryRecord], as_of: UnixTsMillis) -> Vec<MemoryRecord> {
+    // First pass: the earliest invalidation cutoff per correction chain.
+    let mut cutoff: HashMap<Uuid, UnixTsMillis> = HashMap::new();
+    for r in records {
+        if let Some(t) = r.invalidation_time {
+            cutoff
+                .entry(r.correction_chain_root)
+                .and_modify(|e| {
+                    if t < *e {
+                        *e = t;
+                    }
+                })
+                .or_insert(t);
+        }
+    }
+
+    // Second pass: live data rows still within their valid interval and not yet
+    // cut off by their chain's invalidation.
+    records
+        .iter()
+        .filter(|r| r.invalidation_time.is_none())
+        .filter(|r| r.valid_from <= as_of && as_of < r.valid_to.unwrap_or(FOREVER))
+        .filter(|r| match cutoff.get(&r.correction_chain_root) {
+            Some(cut) => *cut > as_of,
+            None => true,
+        })
+        .cloned()
+        .collect()
+}
+
+/// Build the invalidation tombstone for `target` — a new row inheriting the
+/// target's correction chain with `invalidation_time = at`. Mirrors the
+/// in-process store's `invalidate`.
+fn tombstone_for(
+    target: &MemoryRecord,
+    at: UnixTsMillis,
+    reason: InvalidationReason,
+) -> MemoryRecord {
+    MemoryRecord {
+        record_id: Uuid::new_v4(),
+        subject: target.subject.clone(),
+        kind: target.kind,
+        payload: serde_json::json!({
+            "invalidates": target.record_id,
+            "reason": reason,
+        }),
+        event_time: at,
+        valid_from: at,
+        valid_to: None,
+        invalidation_time: Some(at),
+        recorded_at: at,
+        source_receipt_id: target.source_receipt_id,
+        correction_chain_root: target.correction_chain_root,
+    }
+}
+
+/// The current wall clock in milliseconds since the Unix epoch (for snapshot
+/// timestamps). Falls back to `0` if the system clock is before the epoch.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ardur_memory::{HolderId, RecordKind};
+
+    fn fact(
+        subject: &str,
+        payload: serde_json::Value,
+        t: u64,
+        valid_to: Option<u64>,
+    ) -> MemoryRecord {
+        MemoryRecord::new(
+            HolderId::from(subject),
+            RecordKind::Preference,
+            payload,
+            UnixTsMillis(t),
+            UnixTsMillis(t),
+            valid_to.map(UnixTsMillis),
+            UnixTsMillis(t),
+        )
+    }
+
+    #[test]
+    fn placeholder_embedding_is_a_unit_vector_of_the_right_dim() {
+        let v = placeholder_embedding(4);
+        assert_eq!(v, vec![1.0, 0.0, 0.0, 0.0]);
+        assert!(placeholder_embedding(0).is_empty());
+    }
+
+    #[test]
+    fn live_at_honors_valid_interval_and_chain_cutoff() {
+        let user = "user:live-at";
+        let f1 = fact(user, serde_json::json!("tea"), 1_000, None);
+        let f2 = fact(user, serde_json::json!("coffee"), 2_000, None);
+        let tomb = tombstone_for(&f1, UnixTsMillis(2_000), InvalidationReason::Superseded);
+        let all = vec![f1.clone(), f2.clone(), tomb];
+
+        // Before f1 is valid: nothing.
+        assert!(live_at(&all, UnixTsMillis(999)).is_empty());
+        // Between f1 and the cutoff: tea.
+        let mid = live_at(&all, UnixTsMillis(1_500));
+        assert_eq!(mid.len(), 1);
+        assert_eq!(mid[0].payload, serde_json::json!("tea"));
+        // After the cutoff: coffee only (f1's chain is cut at 2_000, exclusive).
+        let now = live_at(&all, UnixTsMillis(3_000));
+        assert_eq!(now.len(), 1);
+        assert_eq!(now[0].payload, serde_json::json!("coffee"));
+    }
+
+    #[test]
+    fn tombstone_inherits_chain_and_carries_cutoff() {
+        let f1 = fact("user:tomb", serde_json::json!("v1"), 1_000, None);
+        let tomb = tombstone_for(&f1, UnixTsMillis(2_000), InvalidationReason::UserCorrection);
+        assert_eq!(tomb.correction_chain_root, f1.correction_chain_root);
+        assert_eq!(tomb.invalidation_time, Some(UnixTsMillis(2_000)));
+        assert_ne!(tomb.record_id, f1.record_id);
+    }
+}

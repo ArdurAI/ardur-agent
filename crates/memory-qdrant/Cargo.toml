@@ -1,0 +1,42 @@
+# ardur-memory-qdrant — a durable, Qdrant-backed implementation of the §7.0
+# `MemoryRuntime` trait.
+#
+# The §7.0 Phase 1 store (`ardur-memory::InMemoryMemoryRuntime`) lives only in
+# process and does not survive a restart. This crate is the first §7.0 Phase 2
+# durable backend: every bi-temporal record is upserted as a Qdrant point so the
+# memory substrate survives a process (or pod) restart. It implements the *same*
+# `MemoryRuntime` trait, so the fused runtime and the server select it behind the
+# existing `Arc<dyn MemoryRuntime + Send + Sync>` seam with no call-site changes.
+#
+# §18.8 keeps the owning PR scoped to `crates/memory-qdrant/**`, the additive
+# `crates/memory/**` error variant, the `crates/server/**` config wiring, the
+# `crates/e2e-tests/**` scenario, and the root manifest.
+
+[package]
+name = "ardur-memory-qdrant"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The trait + value types this crate implements against.
+ardur-memory = { workspace = true }
+# The Qdrant gRPC client (collections, points, payload filters, snapshots).
+qdrant-client = { workspace = true }
+# A blocking bridge: the `MemoryRuntime` trait is synchronous, the Qdrant client
+# is async, so the runtime owns a small Tokio runtime to `block_on` each call.
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# `v4` (random) ids for invalidation tombstones — matches `ardur-memory`.
+uuid = { workspace = true, features = ["v4"] }
+# Reads are infallible by contract, so a backend error on a read is logged and
+# swallowed (an empty result) rather than surfaced.
+tracing = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
+tokio = { workspace = true }

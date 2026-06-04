@@ -32,6 +32,9 @@ ardur-cost-gate = { workspace = true }
 ardur-fused-runtime = { workspace = true }
 ardur-lifecycle-hooks = { workspace = true }
 ardur-memory = { workspace = true }
+# The durable Qdrant memory backend — the `scenario_qdrant_memory_persistence`
+# scenario drives a fused turn through it, then reconnects to prove durability.
+ardur-memory-qdrant = { workspace = true }
 ardur-messaging-gateway = { workspace = true }
 ardur-multi-agent = { workspace = true }
 ardur-provider-runtime = { workspace = true }

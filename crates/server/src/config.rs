@@ -24,6 +24,16 @@ pub enum LogFormat {
     Json,
 }
 
+/// Which memory substrate the server boots behind the `MemoryRuntime` seam.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MemoryBackend {
+    /// The in-process §7.0 Phase 1 store — fast, but lost on restart (default).
+    InMemory,
+    /// The durable, Qdrant-backed §7.0 Phase 2 store (`ardur-memory-qdrant`),
+    /// selected with `ARDUR_MEMORY=qdrant`; requires `QDRANT_URL`.
+    Qdrant,
+}
+
 /// The fully-resolved server configuration.
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -75,6 +85,16 @@ pub struct Config {
     /// for the client side; consumed once the runtime gains a tool-execution
     /// stage (`// TODO §6.0 Phase 3`).
     pub mcp_remote_servers: Vec<(String, String)>,
+    /// Which memory substrate to boot (`ARDUR_MEMORY`, default `in_memory`).
+    pub memory_backend: MemoryBackend,
+    /// The Qdrant endpoint (`QDRANT_URL`) — required only when the Qdrant memory
+    /// backend is selected, mirroring how [`anthropic_api_key`] gates the
+    /// Anthropic provider. The full Qdrant config (collection, dim, api key) is
+    /// read by `ardur-memory-qdrant`'s own `from_env`; this field exists so the
+    /// missing-URL failure surfaces at config time rather than at first use.
+    ///
+    /// [`anthropic_api_key`]: Config::anthropic_api_key
+    pub qdrant_url: Option<String>,
 }
 
 /// A required environment variable was unset or empty.
@@ -93,10 +113,15 @@ impl Config {
     /// itself rejects the bad value — with a message listing the supported ones —
     /// when the binary builds the provider.
     ///
+    /// `QDRANT_URL` follows the same conditional shape: it is required only when
+    /// `ARDUR_MEMORY=qdrant` selects the durable Qdrant memory backend (the
+    /// default `in_memory` backend needs no Qdrant).
+    ///
     /// # Errors
     /// [`MissingEnvVar`] naming the first required variable that is unset or
-    /// empty (`SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`, `SLACK_APP_ID`, and
-    /// `ANTHROPIC_API_KEY` when the Anthropic backend is selected).
+    /// empty (`SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`, `SLACK_APP_ID`,
+    /// `ANTHROPIC_API_KEY` when the Anthropic backend is selected, and
+    /// `QDRANT_URL` when the Qdrant memory backend is selected).
     pub fn from_env() -> Result<Self, MissingEnvVar> {
         // The Anthropic key gates only the Anthropic backend; under any other
         // selection it is optional (empty when unset).
@@ -117,6 +142,20 @@ impl Config {
         if mcp_enabled && mcp_bearer_tokens.is_empty() {
             return Err(MissingEnvVar("ARDUR_MCP_BEARER_TOKENS".to_string()));
         }
+
+        // The memory backend selector. `QDRANT_URL` is required only when the
+        // Qdrant backend is selected — the same conditional shape as the
+        // Anthropic key above. Under the default `in_memory` backend it is
+        // optional (and ignored).
+        let memory_backend = match optional("ARDUR_MEMORY").as_deref() {
+            Some("qdrant") => MemoryBackend::Qdrant,
+            _ => MemoryBackend::InMemory,
+        };
+        let qdrant_url = if memory_backend == MemoryBackend::Qdrant {
+            Some(require("QDRANT_URL")?)
+        } else {
+            optional("QDRANT_URL")
+        };
 
         Ok(Self {
             anthropic_api_key,
@@ -143,6 +182,8 @@ impl Config {
             mcp_remote_servers: parse_remote_servers(
                 optional("ARDUR_MCP_REMOTE_SERVERS").as_deref(),
             ),
+            memory_backend,
+            qdrant_url,
         })
     }
 }

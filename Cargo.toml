@@ -16,6 +16,7 @@ members = [
     "crates/lifecycle-hooks",
     "crates/cedar-policy",
     "crates/memory",
+    "crates/memory-qdrant",
     "crates/runtime",
     "crates/cost-gate",
     "crates/provider-runtime",
@@ -111,6 +112,9 @@ thiserror = "2"
 uuid = { version = "1", features = ["v7", "serde"] }
 # Non-poisoning sync primitives for the in-process memory store (crates/memory, §7.0).
 parking_lot = "0.12"
+# Qdrant gRPC client backing the durable memory store (crates/memory-qdrant, §7.0
+# Phase 2). Pinned to the 1.18 line, matching the Qdrant server release track.
+qdrant-client = "1.18"
 # Async trait methods — object-safe `Provider` trait (crates/provider-runtime,
 # §3.0) and the cost-admission gate + budget store (crates/cost-gate, §11.14).
 async-trait = "0.1"
@@ -152,6 +156,7 @@ ardur-receipt = { path = "crates/receipt" }
 ardur-lifecycle-hooks = { path = "crates/lifecycle-hooks" }
 ardur-cedar-policy = { path = "crates/cedar-policy" }
 ardur-memory = { path = "crates/memory" }
+ardur-memory-qdrant = { path = "crates/memory-qdrant" }
 ardur-runtime = { path = "crates/runtime" }
 ardur-cost-gate = { path = "crates/cost-gate" }
 ardur-provider-runtime = { path = "crates/provider-runtime" }
