@@ -12,6 +12,7 @@
 //! [`build_router`](crate::build_router) merges it into the top-level router when
 //! the MCP surface is enabled.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use axum::Router;
@@ -23,8 +24,8 @@ use rmcp::transport::streamable_http_server::session::local::LocalSessionManager
 use rmcp::transport::{StreamableHttpServerConfig, StreamableHttpService};
 
 use ardur_tool_registry::{
-    ArdurMcpServer, EchoTool, HealthCheckTool, RemoteMcpToolset, Tool, ToolRegistry,
-    bearer_token_allowed, extract_bearer_token,
+    ArdurMcpServer, EchoTool, HealthCheckTool, RemoteMcpToolset, SkillLoader, SkillTool, Tool,
+    ToolRegistry, bearer_token_allowed, extract_bearer_token,
 };
 
 /// The two example tools the server advertises over MCP: a trivial `echo`
@@ -87,16 +88,46 @@ pub async fn connect_remote_tools(servers: &[(String, String)]) -> Vec<Box<dyn T
     tools
 }
 
+/// **§8.X.** Load every filesystem `SKILL.md` skill under each directory in
+/// `skills_dirs` (`ARDUR_SKILLS_DIRS`) and register it as a [`SkillTool`]. A
+/// directory that cannot be read, or a skill whose id collides with an
+/// already-registered tool, is logged and skipped — one bad skill or path never
+/// aborts boot.
+pub fn register_skills<P: AsRef<Path>>(registry: &mut ToolRegistry, skills_dirs: &[P]) {
+    for dir in skills_dirs {
+        let dir = dir.as_ref();
+        let skills = match SkillLoader::load_directory(dir) {
+            Ok(skills) => skills,
+            Err(e) => {
+                tracing::warn!(dir = %dir.display(), error = %e, "skipping unreadable skills directory");
+                continue;
+            }
+        };
+        for skill in skills {
+            let id = skill.frontmatter.name.clone();
+            if let Err(e) = registry.register(Box::new(SkillTool::new(skill))) {
+                tracing::warn!(skill = %id, error = %e, "skipping skill with a conflicting tool id");
+            } else {
+                tracing::info!(skill = %id, dir = %dir.display(), "registered filesystem skill");
+            }
+        }
+    }
+}
+
 /// **§6.0.** Assemble the tool registry the fused runtime invokes: the local
-/// tools ([`example_registry`]) plus every tool from the configured remote MCP
-/// servers (`ARDUR_MCP_REMOTE_SERVERS`). A remote tool whose id collides with an
-/// already-registered one is logged and skipped (first registration wins).
-pub async fn assemble_tool_registry(
+/// tools ([`example_registry`]), every filesystem skill under `skills_dirs`
+/// (`ARDUR_SKILLS_DIRS`, §8.X), and every tool from the configured remote MCP
+/// servers (`ARDUR_MCP_REMOTE_SERVERS`). A skill or remote tool whose id
+/// collides with an already-registered one is logged and skipped (first
+/// registration wins).
+pub async fn assemble_tool_registry<P: AsRef<Path>>(
     provider: impl Into<String>,
     memory_backend: impl Into<String>,
+    skills_dirs: &[P],
     servers: &[(String, String)],
 ) -> ToolRegistry {
     let mut registry = example_registry(provider, memory_backend);
+    register_skills(&mut registry, skills_dirs);
     for tool in connect_remote_tools(servers).await {
         let id = tool.id();
         if let Err(e) = registry.register(tool) {

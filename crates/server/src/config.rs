@@ -90,6 +90,11 @@ pub struct Config {
     /// for the client side; consumed once the runtime gains a tool-execution
     /// stage (`// TODO §6.0 Phase 3`).
     pub mcp_remote_servers: Vec<(String, String)>,
+    /// Directories to load filesystem `SKILL.md` skills from
+    /// (`ARDUR_SKILLS_DIRS`, comma-separated). Each is a collection of
+    /// `<name>/SKILL.md` skill sub-directories; every discovered skill is
+    /// registered as a tool the runtime can invoke (§8.X). Empty when unset.
+    pub skills_dirs: Vec<PathBuf>,
     /// Which memory substrate to boot (`ARDUR_MEMORY`, default `in_memory`).
     pub memory_backend: MemoryBackend,
     /// The Qdrant endpoint (`QDRANT_URL`) — required only when the Qdrant memory
@@ -200,6 +205,10 @@ impl Config {
             mcp_remote_servers: parse_remote_servers(
                 optional("ARDUR_MCP_REMOTE_SERVERS").as_deref(),
             ),
+            skills_dirs: parse_csv(optional("ARDUR_SKILLS_DIRS").as_deref())
+                .into_iter()
+                .map(PathBuf::from)
+                .collect(),
             memory_backend,
             qdrant_url,
         })

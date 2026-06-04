@@ -45,6 +45,7 @@ async fn spawn_server(bearer: &str) -> String {
         mcp_bearer_tokens: vec![bearer.to_string()],
         mcp_path_prefix: "/mcp".to_string(),
         mcp_remote_servers: Vec::new(),
+        skills_dirs: Vec::new(),
         memory_backend: ardur_server::MemoryBackend::InMemory,
         qdrant_url: None,
     };
