@@ -18,6 +18,11 @@ async-trait = { workspace = true }
 serde = { workspace = true }
 # Tool input/output payloads and JSON-Schema documents are untyped JSON.
 serde_json = { workspace = true }
+# §8.X — SKILL.md frontmatter is YAML; parsed into `SkillFrontmatter`.
+serde_yaml = { workspace = true }
+# §8.X — the skill loader warns (not fails) on a malformed SKILL.md so one bad
+# skill never blocks the rest.
+tracing = { workspace = true }
 thiserror = { workspace = true }
 # `ToolError::Internal` carries an opaque execution failure verbatim.
 anyhow = { workspace = true }
@@ -40,3 +45,6 @@ serde_json = { workspace = true }
 # listener via the rmcp Streamable-HTTP tower service mounted on axum, then
 # connects a `RemoteMcpToolset` back to it.
 axum = { workspace = true }
+# §8.X — the skill-loader integration tests stage SKILL.md trees in a throwaway
+# directory.
+tempfile = { workspace = true }

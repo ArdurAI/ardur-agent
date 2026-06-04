@@ -271,8 +271,9 @@ final answer (§6.0). Each round runs the full pipeline — cost-gate admission,
 injection-defense scanning of the tool output, and a signed receipt that records
 the calls — so tool use is governed and audited like the rest of a turn.
 
-The tools available in a turn are the local ones (`echo`, `health_check`) plus
-any from `ARDUR_MCP_REMOTE_SERVERS`. Two safeguards bound the loop:
+The tools available in a turn are the local ones (`echo`, `health_check`), any
+filesystem **skills** (see **Skills** below), plus any from
+`ARDUR_MCP_REMOTE_SERVERS`. Two safeguards bound the loop:
 
 ```bash
 ARDUR_TOOL_MAX_ITERATIONS=5    # provider rounds that may request tools (default 5)
@@ -289,6 +290,40 @@ Provider support (Phase 1): **anthropic** (Messages API `tool_use`) and
 **openrouter** (OpenAI-compatible `tools`/`tool_calls`). The `codex` and
 `claude` CLI providers orchestrate their own tools internally, so the runtime
 loop does not drive tools through them.
+
+## Skills (SKILL.md)
+
+A **skill** is a folder holding a `SKILL.md`: YAML frontmatter (`name`,
+`description`, optional `metadata`) followed by a Markdown body of instructions
+(§8.X). Point `ARDUR_SKILLS_DIRS` at one or more directories of skill folders and
+each discovered skill registers as a tool — its `name` becomes the tool id, its
+`description` the tool description, and invoking it returns the body:
+
+```bash
+ARDUR_SKILLS_DIRS=./examples/skills,/etc/ardur/skills
+```
+
+Each listed directory is a *collection* of `<name>/SKILL.md` skill folders:
+
+```
+examples/skills/
+  git-commit-message/
+    SKILL.md
+    conventions.md        # referenced from the body as @./conventions.md
+  code-review/
+    SKILL.md
+```
+
+**Progressive disclosure.** A body may reference sibling files with `@./file.md`
+markers. By default they pass through un-inlined (the model only pays for the
+body); a caller inlines specific ones on demand with the tool's `expand`
+argument, e.g. `{"expand": ["conventions.md"]}`.
+
+**Validation.** `name` and `description` are required — a `SKILL.md` missing
+either is skipped with a warning. Unknown frontmatter fields are ignored, so a
+newer skill schema still loads. A skill whose `name` collides with an
+already-registered tool is skipped (first registration wins). Two example skills
+ship under `examples/skills/`.
 
 ## Monitoring
 

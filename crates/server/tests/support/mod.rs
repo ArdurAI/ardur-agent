@@ -67,6 +67,7 @@ pub fn test_config(data_dir: &TempDir, slack_base: Option<String>) -> Config {
         mcp_bearer_tokens: Vec::new(),
         mcp_path_prefix: "/mcp".to_string(),
         mcp_remote_servers: Vec::new(),
+        skills_dirs: Vec::new(),
         memory_backend: MemoryBackend::InMemory,
         qdrant_url: None,
     }
