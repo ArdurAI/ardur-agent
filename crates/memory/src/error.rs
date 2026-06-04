@@ -29,4 +29,12 @@ pub enum MemoryError {
     /// kind-specific shape invariant. Carries a human-readable reason.
     #[error("malformed memory record: {0}")]
     Malformed(String),
+
+    /// A persistence backend (the §7.0 Phase 2 durable stores — e.g. the
+    /// Qdrant-backed `ardur-memory-qdrant`) failed to complete an operation:
+    /// a transport error, a collection that could not be created, or a payload
+    /// that did not round-trip. Carries a human-readable reason. The in-process
+    /// [`crate::InMemoryMemoryRuntime`] never returns this.
+    #[error("memory backend error: {0}")]
+    Backend(String),
 }
