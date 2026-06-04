@@ -1,10 +1,16 @@
 //! [`QdrantMemoryRuntime`] — the durable, Qdrant-backed [`MemoryRuntime`].
 //!
 //! Every bi-temporal record is upserted as a Qdrant point (id = the record's
-//! UUID, vector = a placeholder embedding, payload = [`QdrantPayload`]). Reads
-//! scroll the relevant points and apply the *same* bi-temporal "as-of" predicate
-//! the in-process store uses, so the read semantics are identical — the only
-//! difference is that the data survives a process restart.
+//! UUID, vector = the real embedding of its [`searchable_text`] when an
+//! [`Embedder`] is attached — else a placeholder — payload = [`QdrantPayload`]).
+//! The bi-temporal `at_time`/`history_of` reads scroll by payload filter and
+//! apply the *same* "as-of" predicate the in-process store uses, so those read
+//! semantics are identical; vector *search* ([`search_vectors`]) is the new dense
+//! recall surface the hybrid retriever fuses with BM25.
+//!
+//! [`Embedder`]: ardur_embeddings::Embedder
+//! [`searchable_text`]: crate::searchable_text
+//! [`search_vectors`]: QdrantMemoryRuntime::search_vectors
 //!
 //! ## Sync trait over an async client
 //!
@@ -17,7 +23,9 @@
 //! otherwise it blocks on its own runtime directly.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
+use ardur_embeddings::Embedder;
 use ardur_memory::{
     HolderId, InvalidationReason, MemoryError, MemoryRecord, MemoryRuntime, RecordId, Result,
     UnixTsMillis,
@@ -26,13 +34,13 @@ use qdrant_client::Payload;
 use qdrant_client::Qdrant;
 use qdrant_client::qdrant::{
     Condition, CreateCollectionBuilder, CreateFieldIndexCollectionBuilder, Distance, FieldType,
-    Filter, GetPointsBuilder, PointStruct, ScrollPointsBuilder, UpsertPointsBuilder, Value,
-    VectorParamsBuilder,
+    Filter, GetPointsBuilder, PointStruct, ScrollPointsBuilder, SearchPointsBuilder,
+    UpsertPointsBuilder, Value, VectorParamsBuilder,
 };
 use uuid::Uuid;
 
 use crate::config::QdrantMemoryConfig;
-use crate::payload::QdrantPayload;
+use crate::payload::{QdrantPayload, searchable_text};
 use crate::snapshot::{MemorySnapshot, SnapshotReceiptSink};
 
 /// The far end of an open-ended valid interval — mirrors the in-process store.
@@ -48,6 +56,12 @@ pub struct QdrantMemoryRuntime {
     client: Qdrant,
     config: QdrantMemoryConfig,
     rt: tokio::runtime::Runtime,
+    /// The model that turns a record's [`searchable_text`] into its stored
+    /// vector. `None` keeps the legacy placeholder embedding (reads still work,
+    /// since they scroll by payload filter; only vector *search* is meaningless).
+    /// Attach a real model with [`with_embedder`](Self::with_embedder) for
+    /// semantic recall.
+    embedder: Option<Arc<dyn Embedder>>,
 }
 
 impl QdrantMemoryRuntime {
@@ -72,7 +86,26 @@ impl QdrantMemoryRuntime {
             .build()
             .map_err(|e| MemoryError::Backend(format!("building qdrant client: {e}")))?;
 
-        Ok(Self { client, config, rt })
+        Ok(Self {
+            client,
+            config,
+            rt,
+            embedder: None,
+        })
+    }
+
+    /// Attach the embedding model used to vectorise each record's
+    /// [`searchable_text`] on [`record`](MemoryRuntime::record).
+    ///
+    /// The collection's vector dimension is realigned to the embedder's output
+    /// dimension, so call this **before** [`init`](Self::init) — otherwise the
+    /// collection is created at the config dim and a later embed of a different
+    /// dimension is rejected by Qdrant.
+    #[must_use]
+    pub fn with_embedder(mut self, embedder: Arc<dyn Embedder>) -> Self {
+        self.config.vector_dim = embedder.dimension();
+        self.embedder = Some(embedder);
+        self
     }
 
     /// Connect and then [`init`](QdrantMemoryRuntime::init) the collection — the
@@ -195,15 +228,99 @@ impl QdrantMemoryRuntime {
     // ---- internals -------------------------------------------------------
 
     /// Build the Qdrant point for a record: id = the record UUID, vector = the
-    /// placeholder embedding, payload = the projected [`QdrantPayload`].
+    /// real embedding of its [`searchable_text`] (or the placeholder when no
+    /// embedder is attached), payload = the projected [`QdrantPayload`].
     fn point_for(&self, rec: &MemoryRecord) -> Result<PointStruct> {
         let payload = QdrantPayload::from_record(rec)?;
         let value = serde_json::to_value(&payload)
             .map_err(|e| MemoryError::Backend(format!("serialize payload: {e}")))?;
         let payload: Payload = Payload::try_from(value)
             .map_err(|e| MemoryError::Backend(format!("payload to qdrant: {e}")))?;
-        let vector = placeholder_embedding(self.config.vector_dim);
+        let vector = self.embed_record(rec)?;
         Ok(PointStruct::new(rec.record_id.to_string(), vector, payload))
+    }
+
+    /// The stored vector for a record: the embedding of its
+    /// [`searchable_text`](crate::searchable_text) when an [`Embedder`] is
+    /// attached, else the legacy placeholder (a unit vector).
+    fn embed_record(&self, rec: &MemoryRecord) -> Result<Vec<f32>> {
+        match &self.embedder {
+            Some(embedder) => self.embed_text(embedder, searchable_text(rec)),
+            None => Ok(placeholder_embedding(self.config.vector_dim)),
+        }
+    }
+
+    /// Embed a single text through `embedder`, bridging its async surface onto the
+    /// runtime's blocking client.
+    fn embed_text(&self, embedder: &Arc<dyn Embedder>, text: String) -> Result<Vec<f32>> {
+        let mut out = self
+            .block_on(embedder.embed(vec![text]))
+            .map_err(|e| MemoryError::Backend(format!("embed: {e}")))?;
+        out.pop()
+            .ok_or_else(|| MemoryError::Backend("embedder returned no vector".to_string()))
+    }
+
+    /// Vector-search the collection with `query_vector`, returning up to `top_k`
+    /// hits as `(record, similarity)` pairs ordered by similarity descending.
+    ///
+    /// This is the dense half of hybrid retrieval. Each hit carries the full
+    /// reconstructed [`MemoryRecord`] (from the point's `record_json` payload), so
+    /// no second fetch is needed to hydrate it. A point whose payload cannot be
+    /// reconstructed is skipped.
+    ///
+    /// # Errors
+    /// [`MemoryError::Backend`] on a Qdrant transport or search error.
+    pub fn search_vectors(
+        &self,
+        query_vector: Vec<f32>,
+        top_k: u64,
+    ) -> Result<Vec<(MemoryRecord, f32)>> {
+        if top_k == 0 {
+            return Ok(Vec::new());
+        }
+        let resp = self.block_on(async {
+            self.client
+                .search_points(
+                    SearchPointsBuilder::new(&self.config.collection_name, query_vector, top_k)
+                        .with_payload(true),
+                )
+                .await
+                .map_err(|e| MemoryError::Backend(format!("search_points: {e}")))
+        })?;
+        Ok(resp
+            .result
+            .into_iter()
+            .filter_map(|p| record_from_payload(&p.payload).map(|r| (r, p.score)))
+            .collect())
+    }
+
+    /// Embed `query` (requires an attached [`Embedder`]) and
+    /// [`search_vectors`](Self::search_vectors) with the result.
+    ///
+    /// # Errors
+    /// [`MemoryError::Backend`] if no embedder is attached, the embed fails, or the
+    /// search fails.
+    pub fn search_text(&self, query: &str, top_k: u64) -> Result<Vec<(MemoryRecord, f32)>> {
+        let embedder = self.embedder.as_ref().ok_or_else(|| {
+            MemoryError::Backend("search_text requires an attached embedder".to_string())
+        })?;
+        let vector = self.embed_text(embedder, query.to_string())?;
+        self.search_vectors(vector, top_k)
+    }
+
+    /// Fetch a single record by its [`RecordId`] (the point id), if present — the
+    /// public hydration hook a hybrid retriever uses to resolve a fused id.
+    ///
+    /// # Errors
+    /// [`MemoryError::Backend`] on a Qdrant transport error.
+    pub fn fetch_record(&self, id: RecordId) -> Result<Option<MemoryRecord>> {
+        self.get_record(id.0)
+    }
+
+    /// Whether a real embedder is attached (vs. the placeholder vector).
+    #[must_use]
+    pub fn has_embedder(&self) -> bool {
+        self.embedder.is_some()
     }
 
     /// Upsert one point, blocking on the bridge runtime.
@@ -338,11 +455,12 @@ impl MemoryRuntime for QdrantMemoryRuntime {
     }
 }
 
-/// The placeholder embedding for Phase 1: a unit vector (`[1, 0, 0, …]`). Reads
-/// scroll by payload filter rather than vector search, so the vector's content
-/// does not affect correctness; a unit vector (rather than all-zeros) keeps it
-/// valid under Cosine distance. `// TODO §7.0 Phase 2`: embed `predicate + object`
-/// with the real model so semantic recall lands.
+/// The fallback embedding used when no [`Embedder`] is attached: a unit vector
+/// (`[1, 0, 0, …]`). The bi-temporal `at_time`/`history_of` reads scroll by
+/// payload filter, so the vector's content does not affect *their* correctness;
+/// a unit vector (rather than all-zeros) keeps the point valid under Cosine
+/// distance. Attach a model with [`QdrantMemoryRuntime::with_embedder`] for the
+/// real semantic vector.
 fn placeholder_embedding(dim: usize) -> Vec<f32> {
     let mut v = vec![0.0_f32; dim];
     if let Some(first) = v.first_mut() {
