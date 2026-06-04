@@ -132,6 +132,41 @@ and append-only; a corrupted or missing journal entry breaks replay.
 - Structured logs are emitted to stdout (JSON when `ARDUR_LOG_FORMAT=json`).
 - Set `RUST_LOG=info,ardur=debug` for verbose ardur-internal tracing.
 
+## Observability (OpenTelemetry GenAI)
+
+Every provider call is wrapped in a `provider.send` tracing span carrying the
+[OpenTelemetry GenAI semantic-convention](https://opentelemetry.io/docs/specs/semconv/gen-ai/)
+attributes — `gen_ai.system`, `gen_ai.request.model`,
+`gen_ai.usage.input_tokens` / `output_tokens`, `gen_ai.response.finish_reasons`,
+`error.type`, and friends. Export them to any OTLP-native backend (Langfuse,
+Arize Phoenix, Arize, Jaeger, Grafana Tempo, …) for token-usage dashboards,
+latency tracing, and per-call drill-down — for free, across **every** provider
+(anthropic / openrouter / ollama / codex / claude-cli).
+
+Disabled by default. To enable, set:
+
+```bash
+ARDUR_OTEL_ENABLED=true
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317   # OTLP/gRPC (default)
+OTEL_SERVICE_NAME=ardur-agent                       # optional; defaults to ardur-agent
+```
+
+`OTEL_EXPORTER_OTLP_ENDPOINT` and `OTEL_SERVICE_NAME` are the standard OTel
+variables — point them at your collector and the spans flow there. When OTel is
+disabled the same spans still emit to the console subscriber; only the OTLP
+export is gated. Both `ardur-server` and the `ardur` CLI honor these variables
+and flush buffered spans on graceful shutdown.
+
+Point it at a backend in seconds:
+
+- **Jaeger** — `docker run -p 4317:4317 -p 16686:16686 jaegertracing/all-in-one`,
+  then browse <http://localhost:16686>.
+- **Arize Phoenix** — `docker run -p 6006:6006 -p 4317:4317 arizephoenix/phoenix`,
+  then browse <http://localhost:6006>.
+- **Langfuse** — run an OTLP collector that forwards to Langfuse's OTLP ingest
+  endpoint, or point `OTEL_EXPORTER_OTLP_ENDPOINT` at a Langfuse-compatible
+  collector.
+
 ## Cost ceilings
 
 `ARDUR_COST_BUDGET_CENTS=10000` caps a single session at $100 of provider
