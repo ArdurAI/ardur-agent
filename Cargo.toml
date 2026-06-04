@@ -38,6 +38,7 @@ members = [
     "crates/channel-telegram",
     "crates/server",
     "crates/e2e-tests",
+    "crates/eval-harness",
 ]
 
 [workspace.package]
