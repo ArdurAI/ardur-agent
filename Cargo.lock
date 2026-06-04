@@ -441,6 +441,9 @@ dependencies = [
 name = "ardur-memory-qdrant"
 version = "0.0.1"
 dependencies = [
+ "ardur-bm25-index",
+ "ardur-embeddings",
+ "ardur-fusion",
  "ardur-memory",
  "qdrant-client",
  "serde",
