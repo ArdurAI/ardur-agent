@@ -165,6 +165,61 @@ enable it with `ARDUR_CHANNEL_MATRIX=true`.
 Inbound Matrix messages run through the same fused turn pipeline as Slack, and
 replies are posted back into the originating room.
 
+## Discord channel (optional)
+
+ardur can run a Discord bot alongside Slack. The adapter
+(`crates/channel-discord`, built on `serenity` 0.12) is **off by default**;
+enable it with `ARDUR_CHANNEL_DISCORD=true`.
+
+1. **Create an application + bot** at <https://discord.com/developers/applications>.
+   Copy the **Application ID** (General Information) and the **Bot Token**
+   (Bot → Reset Token).
+2. **Enable the privileged Message Content intent** (Bot → Privileged Gateway
+   Intents → Message Content Intent). Without it, inbound message `content`
+   arrives empty and the bot sees nothing to answer.
+3. **Configure the env** (see `.env.example`):
+   ```sh
+   ARDUR_CHANNEL_DISCORD=true
+   DISCORD_BOT_TOKEN=…
+   DISCORD_APPLICATION_ID=123456789012345678
+   DISCORD_ALLOWED_CHANNELS=        # optional: restrict to specific channel ids
+   ```
+   When `ARDUR_CHANNEL_DISCORD=true`, `DISCORD_BOT_TOKEN` and
+   `DISCORD_APPLICATION_ID` are required at startup (the boot fails fast if
+   either is missing).
+4. **Invite the bot** to your server with the `bot` scope and the *Send
+   Messages* / *Read Message History* permissions, then talk to it in any
+   channel it can see. To restrict it, set `DISCORD_ALLOWED_CHANNELS` to a
+   comma-separated list of channel ids; messages elsewhere are dropped.
+
+The bot drops its own messages (its user id equals its application id), so it
+never answers itself.
+
+## Telegram channel (optional)
+
+ardur can run a Telegram bot alongside Slack. The adapter
+(`crates/channel-telegram`, built on `teloxide` 0.17) is **off by default**;
+enable it with `ARDUR_CHANNEL_TELEGRAM=true`.
+
+1. **Create a bot** by talking to [@BotFather](https://t.me/BotFather)
+   (`/newbot`). Copy the `<id>:<secret>` token it gives you.
+2. **Configure the env** (see `.env.example`):
+   ```sh
+   ARDUR_CHANNEL_TELEGRAM=true
+   TELEGRAM_BOT_TOKEN=123456:ABC-DEF…
+   TELEGRAM_ALLOWED_CHATS=          # optional: restrict to specific chat ids
+   ```
+   When `ARDUR_CHANNEL_TELEGRAM=true`, `TELEGRAM_BOT_TOKEN` is required at
+   startup. Only **one** process may long-poll a given bot token at a time
+   (Telegram returns `409 Conflict` otherwise).
+3. **Start a chat** with the bot or add it to a group. Telegram chat ids are
+   signed (negative for groups/supergroups, positive for private chats); use
+   [@userinfobot](https://t.me/userinfobot) to find one. To restrict the bot,
+   set `TELEGRAM_ALLOWED_CHATS` to a comma-separated list of chat ids.
+
+Inbound Discord and Telegram messages run through the same fused turn pipeline
+as Slack, and replies are posted back into the originating channel/chat.
+
 ## Local development
 
 ```sh

@@ -44,6 +44,11 @@ const TOUCHED: &[&str] = &[
     "ARDUR_MEMORY",
     "QDRANT_URL",
     "ARDUR_CHANNEL_MATRIX",
+    "ARDUR_CHANNEL_DISCORD",
+    "DISCORD_BOT_TOKEN",
+    "DISCORD_APPLICATION_ID",
+    "ARDUR_CHANNEL_TELEGRAM",
+    "TELEGRAM_BOT_TOKEN",
 ];
 
 fn set(key: &str, value: &str) {
@@ -254,6 +259,72 @@ fn from_env_qdrant_selected_with_url_loads() {
     let config = Config::from_env().expect("qdrant + a URL loads");
     assert_eq!(config.memory_backend, MemoryBackend::Qdrant);
     assert_eq!(config.qdrant_url.as_deref(), Some("http://localhost:6334"));
+}
+
+#[test]
+fn from_env_discord_disabled_by_default() {
+    let _guard = env_lock();
+    let _env = CleanEnv::new().with_slack();
+    set("ARDUR_PROVIDER", "ollama");
+
+    let config = Config::from_env().expect("boots with the discord channel unset");
+    assert!(
+        !config.channel_discord,
+        "discord is off unless ARDUR_CHANNEL_DISCORD is truthy"
+    );
+}
+
+#[test]
+fn from_env_discord_enabled_requires_credentials() {
+    let _guard = env_lock();
+    let _env = CleanEnv::new().with_slack();
+    set("ARDUR_PROVIDER", "ollama");
+    set("ARDUR_CHANNEL_DISCORD", "true"); // DISCORD_* deliberately unset
+
+    let err = Config::from_env().expect_err("enabled discord must require its credentials");
+    assert!(
+        err.to_string().contains("DISCORD_BOT_TOKEN"),
+        "error should name the missing discord token, got: {err}"
+    );
+}
+
+#[test]
+fn from_env_discord_enabled_with_credentials_loads() {
+    let _guard = env_lock();
+    let _env = CleanEnv::new().with_slack();
+    set("ARDUR_PROVIDER", "ollama");
+    set("ARDUR_CHANNEL_DISCORD", "true");
+    set("DISCORD_BOT_TOKEN", "discord-token");
+    set("DISCORD_APPLICATION_ID", "123456789012345678");
+
+    let config = Config::from_env().expect("discord + credentials loads");
+    assert!(config.channel_discord);
+}
+
+#[test]
+fn from_env_telegram_enabled_requires_token() {
+    let _guard = env_lock();
+    let _env = CleanEnv::new().with_slack();
+    set("ARDUR_PROVIDER", "ollama");
+    set("ARDUR_CHANNEL_TELEGRAM", "1"); // TELEGRAM_BOT_TOKEN deliberately unset
+
+    let err = Config::from_env().expect_err("enabled telegram must require its token");
+    assert!(
+        err.to_string().contains("TELEGRAM_BOT_TOKEN"),
+        "error should name the missing telegram token, got: {err}"
+    );
+}
+
+#[test]
+fn from_env_telegram_enabled_with_token_loads() {
+    let _guard = env_lock();
+    let _env = CleanEnv::new().with_slack();
+    set("ARDUR_PROVIDER", "ollama");
+    set("ARDUR_CHANNEL_TELEGRAM", "yes");
+    set("TELEGRAM_BOT_TOKEN", "123:telegram-token");
+
+    let config = Config::from_env().expect("telegram + token loads");
+    assert!(config.channel_telegram);
 }
 
 #[test]
