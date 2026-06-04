@@ -98,6 +98,40 @@ fn str_field(rec: &MemoryRecord, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The natural-language text a record is embedded and lexically-indexed on.
+///
+/// Hybrid retrieval needs *one* string per record to feed both the dense
+/// embedder and the sparse BM25 index. We prefer the structured fact form —
+/// `predicate object` lifted out of the payload — because that is the semantic
+/// core of a memory; when neither is present (a free-form observation, a
+/// tombstone), we fall back to the payload rendered as text so the record is
+/// still searchable. A bare JSON string payload is used verbatim (no enclosing
+/// quotes), and any other JSON shape is rendered with `to_string`.
+#[must_use]
+pub fn searchable_text(rec: &MemoryRecord) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(predicate) = rec.payload.get("predicate").and_then(|v| v.as_str()) {
+        parts.push(predicate.to_string());
+    }
+    if let Some(object) = rec.payload.get("object") {
+        parts.push(render(object));
+    }
+    if parts.is_empty() {
+        render(&rec.payload)
+    } else {
+        parts.join(" ")
+    }
+}
+
+/// Render a JSON value as plain text: a string verbatim, anything else via
+/// `to_string` (so an object/number/array still contributes searchable tokens).
+fn render(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,5 +215,54 @@ mod tests {
         // Round-trip still reconstructs the record exactly.
         let back: QdrantPayload = serde_json::from_value(json).expect("deserializes");
         assert_eq!(back.into_record().expect("reconstructs"), rec);
+    }
+
+    #[test]
+    fn searchable_text_prefers_predicate_and_object() {
+        let rec = sample_record();
+        // predicate "prefers" + object "coffee".
+        assert_eq!(searchable_text(&rec), "prefers coffee");
+    }
+
+    #[test]
+    fn searchable_text_falls_back_to_payload_when_unstructured() {
+        // A bare string payload is used verbatim (no JSON quotes).
+        let s = MemoryRecord::new(
+            HolderId::from("user:s"),
+            RecordKind::Observation,
+            serde_json::json!("the deploy finished at noon"),
+            UnixTsMillis(1),
+            UnixTsMillis(1),
+            None,
+            UnixTsMillis(1),
+        );
+        assert_eq!(searchable_text(&s), "the deploy finished at noon");
+
+        // An object payload with no predicate/object renders as JSON text.
+        let o = MemoryRecord::new(
+            HolderId::from("user:o"),
+            RecordKind::Observation,
+            serde_json::json!({ "note": "no predicate here" }),
+            UnixTsMillis(1),
+            UnixTsMillis(1),
+            None,
+            UnixTsMillis(1),
+        );
+        let text = searchable_text(&o);
+        assert!(text.contains("note") && text.contains("no predicate here"));
+    }
+
+    #[test]
+    fn searchable_text_renders_non_string_object() {
+        let rec = MemoryRecord::new(
+            HolderId::from("user:num"),
+            RecordKind::Fact,
+            serde_json::json!({ "predicate": "age", "object": 42 }),
+            UnixTsMillis(1),
+            UnixTsMillis(1),
+            None,
+            UnixTsMillis(1),
+        );
+        assert_eq!(searchable_text(&rec), "age 42");
     }
 }

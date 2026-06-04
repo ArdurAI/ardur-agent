@@ -71,7 +71,7 @@ unreachable or the CLI is not logged in.
 | `ARDUR_MEMORY` | Backend | Required / notable env |
 |---|---|---|
 | `in_memory` (default) | In-process §7.0 Phase 1 store | none — **lost on restart** |
-| `qdrant` | Durable, Qdrant-backed §7.0 Phase 2 store | `QDRANT_URL` (**required**); `QDRANT_API_KEY` (cloud only), `QDRANT_COLLECTION` (default `ardur_memory`), `QDRANT_VECTOR_DIM` (default `384`) |
+| `qdrant` | Durable, Qdrant-backed §7.0 Phase 2 store | `QDRANT_URL` (**required**); `QDRANT_API_KEY` (cloud only), `QDRANT_COLLECTION` (default `ardur_memory`), `QDRANT_VECTOR_DIM` (default `384`), `EMBED_MODEL` (default `bge-small-en-v1.5`) |
 
 The default `in_memory` store is fast but volatile: every fact is gone when the
 process restarts. The `qdrant` backend upserts each bi-temporal record as a
@@ -88,9 +88,24 @@ ARDUR_MEMORY=qdrant QDRANT_URL=http://localhost:6334 ardur-server
 
 The collection (Cosine distance, the configured dim) and its payload indexes
 (`subject`, `channel_id`, `session_id`) are created automatically on first boot
-if absent. Phase 1 stores a placeholder vector per record (reads use payload
-filters, not vector search); semantic recall via real embeddings is a later
-phase.
+if absent.
+
+### Embeddings + hybrid retrieval
+
+The Qdrant store embeds each record's searchable text (its `predicate object`,
+falling back to the payload text) through a local [`fastembed`](crates/embeddings)
+model — no API key, the model is downloaded once and cached on disk. `EMBED_MODEL`
+selects it (`bge-small-en-v1.5` default / `gte-base-en-v1.5` / `all-minilm-l6-v2`);
+the collection's vector dim is realigned to the model automatically, so
+`QDRANT_VECTOR_DIM` only matters for a store left without an embedder (which keeps
+the legacy placeholder vector — bi-temporal reads still work, only vector *search*
+is meaningless).
+
+`HybridMemoryRetriever` (in `ardur-memory-qdrant`) layers **dense** vector search
+and **sparse** BM25 lexical search over the same store and fuses them with
+reciprocal-rank fusion — see that crate's `README.md`. It is a library surface;
+the server's `ARDUR_MEMORY` seam still selects between the in-process and the
+durable Qdrant `MemoryRuntime`.
 
 ## Slack app setup
 
@@ -323,10 +338,11 @@ deployment for anything sensitive:
   journal append and receipt sign is still single-phase. A crash in the
   window can leave an orphan receipt.
 - **ARD-19** — Runtime ↔ memory wiring is still partial; some recall paths
-  bypass the bi-temporal store. A durable Qdrant memory backend
-  (`ARDUR_MEMORY=qdrant`) now persists writes across restarts, but Phase 1
-  stores a placeholder vector (no semantic recall yet) and the runtime's recall
-  side is unchanged.
+  bypass the bi-temporal store. The durable Qdrant memory backend
+  (`ARDUR_MEMORY=qdrant`) persists writes across restarts and now embeds records
+  with a real local model (`EMBED_MODEL`), and `HybridMemoryRetriever` adds fused
+  dense + sparse recall — but the runtime's recall side does not yet call the
+  hybrid surface, so semantic recall is not wired into the turn path.
 - **ARD-48** — Injection-defense not yet wired into the FusedRuntime
   pipeline; the standalone crate exists but does not gate provider calls.
 - **ARD-21** — Dependabot triage queue is unmanaged; pin reviews land
