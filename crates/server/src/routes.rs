@@ -21,11 +21,24 @@ use ardur_slack_adapter::{SlackError, SlackEvent, SlackHeaders};
 use crate::state::AppState;
 
 /// Build the application router over the shared [`AppState`].
+///
+/// Always mounts `POST /slack/events` and `GET /healthz`. When the MCP surface
+/// is enabled (see [`AppState::mcp`]), the bearer-gated MCP routes are merged in
+/// at the configured path prefix.
 pub fn build_router(state: Arc<AppState>) -> Router {
-    Router::new()
+    let mut router = Router::new()
         .route("/slack/events", post(slack_events))
-        .route("/healthz", get(healthz))
-        .with_state(state)
+        .route("/healthz", get(healthz));
+
+    if let Some(mcp) = state.mcp() {
+        router = router.merge(crate::build_mcp_router(
+            mcp.registry.clone(),
+            mcp.bearer_tokens.clone(),
+            &mcp.path_prefix,
+        ));
+    }
+
+    router.with_state(state)
 }
 
 /// `GET /healthz` — always 200 with build metadata.

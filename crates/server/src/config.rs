@@ -59,6 +59,22 @@ pub struct Config {
     pub slack_base_url: Option<String>,
     /// How tracing events are formatted (`ARDUR_LOG_FORMAT`).
     pub log_format: LogFormat,
+    /// Whether the §6.0 MCP surface is mounted (`ARDUR_MCP_ENABLED`, default
+    /// `false`). When `true`, [`mcp_bearer_tokens`](Self::mcp_bearer_tokens) is
+    /// required.
+    pub mcp_enabled: bool,
+    /// The bearer-token allowlist gating the MCP routes
+    /// (`ARDUR_MCP_BEARER_TOKENS`, comma-separated). Required when
+    /// [`mcp_enabled`](Self::mcp_enabled) is set; empty otherwise.
+    pub mcp_bearer_tokens: Vec<String>,
+    /// URL path prefix the MCP routes mount under (`ARDUR_MCP_PATH_PREFIX`,
+    /// default `/mcp`). The per-server endpoint is `<prefix>/{server_name}`.
+    pub mcp_path_prefix: String,
+    /// Remote MCP servers to consume tools from (`ARDUR_MCP_REMOTE_SERVERS`,
+    /// `name1=url1,name2=url2,…`), as `(name, url)` pairs. Parsed and surfaced
+    /// for the client side; consumed once the runtime gains a tool-execution
+    /// stage (`// TODO §6.0 Phase 3`).
+    pub mcp_remote_servers: Vec<(String, String)>,
 }
 
 /// A required environment variable was unset or empty.
@@ -94,6 +110,14 @@ impl Config {
             optional("ANTHROPIC_API_KEY").unwrap_or_default()
         };
 
+        // The MCP surface is opt-in; when enabled it requires a non-empty bearer
+        // allowlist (mirrors the Anthropic-key conditional-requirement pattern).
+        let mcp_enabled = optional("ARDUR_MCP_ENABLED").as_deref() == Some("true");
+        let mcp_bearer_tokens = parse_csv(optional("ARDUR_MCP_BEARER_TOKENS").as_deref());
+        if mcp_enabled && mcp_bearer_tokens.is_empty() {
+            return Err(MissingEnvVar("ARDUR_MCP_BEARER_TOKENS".to_string()));
+        }
+
         Ok(Self {
             anthropic_api_key,
             slack_bot_token: require("SLACK_BOT_TOKEN")?,
@@ -112,8 +136,41 @@ impl Config {
                 Some("json") => LogFormat::Json,
                 _ => LogFormat::Text,
             },
+            mcp_enabled,
+            mcp_bearer_tokens,
+            mcp_path_prefix: optional("ARDUR_MCP_PATH_PREFIX")
+                .unwrap_or_else(|| "/mcp".to_string()),
+            mcp_remote_servers: parse_remote_servers(
+                optional("ARDUR_MCP_REMOTE_SERVERS").as_deref(),
+            ),
         })
     }
+}
+
+/// Parse a comma-separated token list, trimming whitespace and dropping empties.
+fn parse_csv(value: Option<&str>) -> Vec<String> {
+    value
+        .into_iter()
+        .flat_map(|v| v.split(','))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
+/// Parse `name1=url1,name2=url2,…` into `(name, url)` pairs, skipping malformed
+/// entries (those without a single `=`).
+fn parse_remote_servers(value: Option<&str>) -> Vec<(String, String)> {
+    value
+        .into_iter()
+        .flat_map(|v| v.split(','))
+        .filter_map(|entry| {
+            let entry = entry.trim();
+            let (name, url) = entry.split_once('=')?;
+            let (name, url) = (name.trim(), url.trim());
+            (!name.is_empty() && !url.is_empty()).then(|| (name.to_string(), url.to_string()))
+        })
+        .collect()
 }
 
 /// Read a required env var, mapping an unset/empty value to [`MissingEnvVar`].

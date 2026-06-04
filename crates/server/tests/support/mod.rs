@@ -62,6 +62,25 @@ pub fn test_config(data_dir: &TempDir, slack_base: Option<String>) -> Config {
         cedar_policy_path: None,
         slack_base_url: slack_base,
         log_format: LogFormat::Text,
+        mcp_enabled: false,
+        mcp_bearer_tokens: Vec::new(),
+        mcp_path_prefix: "/mcp".to_string(),
+        mcp_remote_servers: Vec::new(),
+    }
+}
+
+/// A [`Config`] like [`test_config`] but with the MCP surface enabled and gated
+/// by `bearer_tokens`.
+#[must_use]
+pub fn test_config_with_mcp(
+    data_dir: &TempDir,
+    slack_base: Option<String>,
+    bearer_tokens: Vec<String>,
+) -> Config {
+    Config {
+        mcp_enabled: true,
+        mcp_bearer_tokens: bearer_tokens,
+        ..test_config(data_dir, slack_base)
     }
 }
 
