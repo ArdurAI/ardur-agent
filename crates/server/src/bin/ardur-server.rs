@@ -6,13 +6,29 @@
 //! drains it.
 #![forbid(unsafe_code)]
 
-use ardur_provider_runtime::ModelId;
+use ardur_provider_runtime::{InstrumentedProvider, ModelId, TelemetryConfig};
+use ardur_provider_runtime::{init_genai_tracing, shutdown_genai_tracing};
 use ardur_provider_selector as provider_selector;
 use ardur_server::{AppState, Config, build_router};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    init_tracing();
+    // When `ARDUR_OTEL_ENABLED=true`, stand up the OpenTelemetry GenAI pipeline
+    // (OTLP exporter + the layered subscriber) so provider spans export to any
+    // OTLP backend; otherwise install the plain console subscriber. Only one
+    // process-wide subscriber may be set, so these are mutually exclusive.
+    let telemetry = TelemetryConfig::from_env();
+    if telemetry.enabled {
+        init_genai_tracing(telemetry.clone())
+            .map_err(|e| anyhow::anyhow!("initializing OpenTelemetry tracing: {e}"))?;
+        tracing::info!(
+            otlp_endpoint = %telemetry.otlp_endpoint,
+            service_name = %telemetry.service_name,
+            "OpenTelemetry GenAI tracing enabled"
+        );
+    } else {
+        init_tracing();
+    }
 
     let config = match Config::from_env() {
         Ok(config) => config,
@@ -25,8 +41,11 @@ async fn main() -> anyhow::Result<()> {
     // The live backend, selected by `ARDUR_PROVIDER` (default `anthropic`). An
     // unknown selector panics here at boot; a valid selection with a missing key
     // surfaces as an error and aborts startup (tests inject a stub instead).
+    // Wrap it in `InstrumentedProvider` so every dispatch emits a `provider.send`
+    // span with the GenAI semconv attributes — for free, regardless of backend.
     let provider = provider_selector::from_env(ModelId::new(&config.model))
         .map_err(|e| anyhow::anyhow!("building provider: {e}"))?;
+    let provider = InstrumentedProvider::wrap(provider);
     let provider_id = provider.id().0.clone();
 
     let state = AppState::boot(&config, provider)?;
@@ -54,6 +73,9 @@ async fn main() -> anyhow::Result<()> {
     if let Err(e) = state.journal().close().await {
         tracing::warn!(error = %e, "journal close failed during shutdown");
     }
+    // Flush any buffered OpenTelemetry spans before exit (a no-op when telemetry
+    // was never initialized).
+    shutdown_genai_tracing();
     tracing::info!("ardur-server shut down cleanly");
     Ok(())
 }
