@@ -1,0 +1,22 @@
+[package]
+name = "ardur-embeddings"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Local text embeddings via fastembed (ONNX) — the dense half of hybrid retrieval."
+
+[dependencies]
+# fastembed runs the embedding model locally (ONNX Runtime under the hood) — no
+# network call per embed, only a one-time model download cached on disk.
+fastembed = "4"
+# Object-safe async `Embedder` trait (the hybrid retriever awaits dense + sparse
+# halves through one surface).
+async-trait = { workspace = true }
+# Typed init / embed failure surface.
+thiserror = { workspace = true }
+
+[dev-dependencies]
+# Drives the async `Embedder` surface in tests.
+tokio = { workspace = true }
