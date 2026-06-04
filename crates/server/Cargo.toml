@@ -45,6 +45,11 @@ ardur-session-journals = { workspace = true }
 ardur-receipt = { workspace = true }
 ardur-runtime = { workspace = true }
 ardur-messaging-gateway = { workspace = true }
+# §6.0 Phase 2 — the tool registry + its MCP bridge. The server exposes ardur's
+# tools over MCP (`ArdurMcpServer` mounted on the Streamable-HTTP transport) and
+# gates the surface with the registry's bearer-token allowlist helpers.
+ardur-tool-registry = { workspace = true }
+rmcp = { workspace = true }
 
 # `ardur-cap-token` re-exports `KeyPair`/`PublicKey` but not `PrivateKey`, and
 # loading the persisted issuer key needs `PrivateKey::from_bytes_hex`. Pulled

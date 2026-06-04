@@ -95,3 +95,8 @@ hex = { workspace = true }
 # via `tower::ServiceExt::oneshot` — no socket needed.
 axum = { workspace = true }
 tower = { workspace = true }
+# The §6.0 MCP scenario serves the real `ardur-server` router over a loopback
+# socket and exercises the bearer gate with a raw `reqwest` POST (the no-token
+# 401 path); the `RemoteMcpToolset` client drives the authorized tools/list +
+# tools/call round-trip.
+reqwest = { workspace = true }

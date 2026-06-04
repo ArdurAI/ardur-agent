@@ -21,9 +21,11 @@
 #![warn(missing_docs)]
 
 mod config;
+mod mcp;
 mod routes;
 mod state;
 
 pub use config::{Config, LogFormat, MissingEnvVar};
+pub use mcp::{build_mcp_router, example_registry};
 pub use routes::build_router;
-pub use state::{AUDIENCE, AppState, CAP_TTL_SECS, GATEWAY_SUBJECT, TOOL};
+pub use state::{AUDIENCE, AppState, CAP_TTL_SECS, GATEWAY_SUBJECT, McpSurface, TOOL};

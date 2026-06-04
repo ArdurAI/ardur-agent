@@ -78,6 +78,10 @@ async fn server_routes_signed_slack_message_through_runtime_to_chat_post_message
         cedar_policy_path: None,
         slack_base_url: Some(server.uri()),
         log_format: LogFormat::Text,
+        mcp_enabled: false,
+        mcp_bearer_tokens: Vec::new(),
+        mcp_path_prefix: "/mcp".to_string(),
+        mcp_remote_servers: Vec::new(),
     };
     let provider: Arc<dyn Provider> =
         Arc::new(AnthropicProvider::stub(ModelId::new(&config.model)));

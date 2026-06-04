@@ -98,6 +98,19 @@ pub struct AppState {
     work_tx: mpsc::UnboundedSender<IncomingMessage>,
     journal: Arc<dyn SessionJournal>,
     data_dir: PathBuf,
+    mcp: Option<McpSurface>,
+}
+
+/// The data [`build_router`](crate::build_router) needs to mount the §6.0 MCP
+/// surface: the registry of locally-exposed tools, the bearer allowlist, and the
+/// URL path prefix. `None` when `ARDUR_MCP_ENABLED` is unset.
+pub struct McpSurface {
+    /// The tools exposed over MCP (echo + health-check).
+    pub registry: Arc<ardur_tool_registry::ToolRegistry>,
+    /// The bearer tokens admitted to the MCP routes.
+    pub bearer_tokens: Vec<String>,
+    /// The URL path prefix the MCP routes mount under.
+    pub path_prefix: String,
 }
 
 impl AppState {
@@ -112,6 +125,10 @@ impl AppState {
     /// persisted keys, a malformed key file, a Cedar policy that fails to
     /// compile, or a receipt log that cannot be read back to resume the chain.
     pub fn boot(config: &Config, provider: Arc<dyn Provider>) -> anyhow::Result<Arc<Self>> {
+        // The provider id is surfaced by the MCP `health_check` tool; capture it
+        // before `provider` is moved into the fused-runtime builder below.
+        let provider_id = provider.id().0.clone();
+
         // 1. Data-directory layout.
         let data_dir = config.data_dir.clone();
         let memory_dir = data_dir.join("memory");
@@ -193,12 +210,45 @@ impl AppState {
         };
         let work_tx = spawn_worker(processor);
 
+        // 8. The MCP surface (opt-in). Build the registry of locally-exposed
+        //    tools; `build_router` mounts the bearer-gated routes when present.
+        let mcp = if config.mcp_enabled {
+            let registry = Arc::new(crate::mcp::example_registry(provider_id, "in-memory"));
+            tracing::info!(
+                tools = registry.list().len(),
+                prefix = %config.mcp_path_prefix,
+                "MCP surface enabled"
+            );
+            Some(McpSurface {
+                registry,
+                bearer_tokens: config.mcp_bearer_tokens.clone(),
+                path_prefix: config.mcp_path_prefix.clone(),
+            })
+        } else {
+            None
+        };
+        if !config.mcp_remote_servers.is_empty() {
+            // Client-side plumbing: configured remote servers are surfaced for
+            // the RemoteMcpToolset; turn-time consumption lands in Phase 3.
+            tracing::info!(
+                remotes = config.mcp_remote_servers.len(),
+                "MCP remote servers configured (client-side; not yet wired into turns)"
+            );
+        }
+
         Ok(Arc::new(Self {
             slack,
             work_tx,
             journal,
             data_dir,
+            mcp,
         }))
+    }
+
+    /// The MCP surface to mount, if `ARDUR_MCP_ENABLED` was set at boot.
+    #[must_use]
+    pub fn mcp(&self) -> Option<&McpSurface> {
+        self.mcp.as_ref()
     }
 
     /// The Slack adapter, for inbound event verification in the HTTP handler.
