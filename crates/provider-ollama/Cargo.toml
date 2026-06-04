@@ -33,8 +33,14 @@ ardur-runtime = { workspace = true }
 # Object-safe async `Provider::complete`.
 async-trait = { workspace = true }
 # Live Ollama HTTP client. rustls-tls matches the other backends (no
-# OpenSSL/native-tls system dependency); `json` carries the serde bodies.
-reqwest = { workspace = true }
+# OpenSSL/native-tls system dependency); `json` carries the serde bodies. The
+# `stream` feature (additive over the workspace default) enables
+# `Response::bytes_stream`, which §3.4b's NDJSON token streaming reads chunk by
+# chunk.
+reqwest = { workspace = true, features = ["stream"] }
+# `StreamExt`/`unfold` build the NDJSON line stream over the raw byte stream;
+# dropping that `Stream` is how a caller cancels an in-flight generation (§3.4b).
+futures = { workspace = true }
 serde = { workspace = true }
 # Request/response bodies and the retained raw upstream JSON.
 serde_json = { workspace = true }
@@ -46,3 +52,6 @@ tokio = { workspace = true }
 # running daemon or a cloud key (matches the workspace's HTTP-mock convention).
 wiremock = { workspace = true }
 serde_json = { workspace = true }
+# `StreamExt`/`stream::iter` drive the NDJSON chunk stream in the streaming
+# tests (collecting tokens, asserting the done marker, feeding synthetic chunks).
+futures = { workspace = true }

@@ -26,12 +26,36 @@
 //!   `prompt_eval_count` / `eval_count`; Ollama bills no dollar cost, so the
 //!   call is always priced at `0` cents.
 //!
-//! # Not in Phase 1
+//! # Phase 2 — NDJSON streaming (§3.4b)
 //!
-//! - **Streaming** — every request sends `stream: false`;
-//!   [`Provider::supports_streaming`] is `false`. (Phase 2.)
+//! Ollama streams a completion as **newline-delimited JSON**: one JSON object
+//! per generated chunk, each a partial token, terminated by a final object with
+//! `"done": true` that carries the run's `prompt_eval_count` / `eval_count`.
+//! Both `POST /api/chat` and `POST /api/generate` stream this way (chat puts the
+//! token under `message.content`, generate under `response`), so a single
+//! [`OllamaChatChunk`] decodes either.
+//!
+//! - [`OllamaProvider::stream_ndjson`] (chat) and
+//!   [`OllamaProvider::stream_ndjson_generate`] (generate) return a concrete
+//!   `impl Stream<Item = Result<OllamaChatChunk, ProviderError>>` — one item per
+//!   NDJSON line, the upstream HTTP handshake / non-2xx already resolved before
+//!   the stream yields.
+//! - [`OllamaProvider::stream_events`] layers the local [`StreamEvent`] surface
+//!   over that: a [`StreamEvent::Token`] per chunk and a terminal
+//!   [`StreamEvent::Done`] whose [`StreamSummary`] folds the final chunk's token
+//!   counts into a [`Usage`] / [`CostTuple`] ledger (always `0` cents — Ollama is
+//!   free). [`StreamEvent`] is defined here, minimally; once the shared
+//!   provider-runtime `StreamEvent` lands the two are reconciled in a follow-up.
+//! - **Cancellation** is the natural drop of the returned stream: dropping it
+//!   drops the underlying `reqwest` byte stream, which closes the connection and
+//!   stops the generation upstream — no explicit abort handle needed.
+//!
+//! [`Provider::supports_streaming`] is `true` accordingly.
+//!
+//! # Not yet
+//!
 //! - **Tool-call parsing** — the message's `tool_calls` field is not decoded
-//!   yet. (Phase 2.)
+//!   yet.
 //!
 //! [Ollama]: https://ollama.com
 //! [`ModelId`]: ardur_provider_runtime::ModelId
@@ -46,6 +70,7 @@ use ardur_provider_runtime::{
 };
 use ardur_runtime::{CostTuple, ProviderId, Role};
 use async_trait::async_trait;
+use futures::stream::{Stream, StreamExt};
 use serde::Deserialize;
 
 /// The registry key this backend answers to.
@@ -154,6 +179,11 @@ impl OllamaConfig {
     fn chat_url(&self) -> String {
         format!("{}/api/chat", self.base_url.trim_end_matches('/'))
     }
+
+    /// The `/api/generate` endpoint URL for this config's base.
+    fn generate_url(&self) -> String {
+        format!("{}/api/generate", self.base_url.trim_end_matches('/'))
+    }
 }
 
 impl Default for OllamaConfig {
@@ -199,12 +229,103 @@ impl OllamaProvider {
     pub fn model_id(&self) -> &ModelId {
         &self.config.default_model
     }
+
+    /// Stream a chat completion as NDJSON token chunks from `POST /api/chat`.
+    ///
+    /// Returns a concrete `impl Stream` yielding one [`OllamaChatChunk`] per
+    /// newline-delimited JSON object Ollama emits — each a partial token, the
+    /// last one carrying `done: true` and the run's final token counts. The
+    /// upstream handshake and any non-2xx status are resolved *before* the stream
+    /// is returned, so an `Err` here is a connect/HTTP failure (mapped exactly as
+    /// [`Provider::complete`] maps it); errors *mid-stream* surface as an `Err`
+    /// item. Drop the returned stream to cancel the generation (§3.4b): that
+    /// drops the underlying byte stream and closes the connection.
+    pub async fn stream_ndjson(
+        &self,
+        req: CompletionRequest,
+    ) -> Result<impl Stream<Item = Result<OllamaChatChunk, ProviderError>> + Unpin, ProviderError>
+    {
+        let body = build_request_body(&req, true);
+        self.open_ndjson(self.config.chat_url(), body, req.model)
+            .await
+    }
+
+    /// Stream a completion as NDJSON token chunks from `POST /api/generate`.
+    ///
+    /// The same wire shape as [`stream_ndjson`](Self::stream_ndjson), but against
+    /// the prompt-completion endpoint: the request's messages are flattened into
+    /// a single `prompt`, and each chunk's token rides under `response` rather
+    /// than `message.content` (both decoded by [`OllamaChatChunk`]).
+    pub async fn stream_ndjson_generate(
+        &self,
+        req: CompletionRequest,
+    ) -> Result<impl Stream<Item = Result<OllamaChatChunk, ProviderError>> + Unpin, ProviderError>
+    {
+        let body = build_generate_body(&req, true);
+        self.open_ndjson(self.config.generate_url(), body, req.model)
+            .await
+    }
+
+    /// Stream a chat completion as higher-level [`StreamEvent`]s.
+    ///
+    /// Wraps [`stream_ndjson`](Self::stream_ndjson): each non-terminal chunk
+    /// becomes a [`StreamEvent::Token`], and the `done` chunk becomes a
+    /// [`StreamEvent::Done`] whose [`StreamSummary`] folds the final
+    /// `prompt_eval_count` / `eval_count` into a [`Usage`] / [`CostTuple`] ledger
+    /// (always `0` cents — Ollama is free).
+    pub async fn stream_events(
+        &self,
+        req: CompletionRequest,
+    ) -> Result<impl Stream<Item = Result<StreamEvent, ProviderError>> + Unpin, ProviderError> {
+        let chunks = self.stream_ndjson(req).await?;
+        Ok(into_events(chunks))
+    }
+
+    /// Open an NDJSON stream against `url` with `body`, returning the parsed
+    /// chunk stream once the upstream status is known to be 2xx. Shared by the
+    /// chat and generate streaming entry points; `model` is only used to map a
+    /// 404 onto [`ProviderError::ModelNotAvailable`].
+    async fn open_ndjson(
+        &self,
+        url: String,
+        body: serde_json::Value,
+        model: ModelId,
+    ) -> Result<impl Stream<Item = Result<OllamaChatChunk, ProviderError>> + Unpin, ProviderError>
+    {
+        // No per-request timeout on the stream: the timeout caps a whole request
+        // including body read, which would cut off a long generation. Cancellation
+        // is the caller dropping the stream instead.
+        let mut request = self.client.post(url).json(&body);
+        if let Some(key) = &self.config.api_key {
+            request = request.bearer_auth(key);
+        }
+
+        let resp = request
+            .send()
+            .await
+            .map_err(|e| map_send_error(e, &self.config.base_url))?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let retry_after_ms = parse_retry_after_ms(resp.headers());
+            let code = status.as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(map_http_error(code, retry_after_ms, &body, &model));
+        }
+
+        // Map reqwest transport errors to the crate taxonomy up front so the
+        // NDJSON parser stays decoupled from `reqwest` (and unit-testable with
+        // synthetic chunk streams). `Box::pin` makes the byte stream `Unpin`.
+        let bytes = resp.bytes_stream().map(|r| r.map_err(map_stream_error));
+        Ok(parse_ndjson(Box::pin(bytes)))
+    }
 }
 
 #[async_trait]
 impl Provider for OllamaProvider {
     async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
-        let body = build_request_body(&req);
+        // The non-streaming path pins `stream: false` — a single buffered reply.
+        let body = build_request_body(&req, false);
 
         let mut request = self
             .client
@@ -244,8 +365,9 @@ impl Provider for OllamaProvider {
     }
 
     fn supports_streaming(&self) -> bool {
-        // Phase 2: flip to `true` once the NDJSON streaming path lands.
-        false
+        // §3.4b: the NDJSON streaming path (`stream_ndjson` / `stream_events`)
+        // has landed.
+        true
     }
 
     fn rate_card(&self) -> &RateCard {
@@ -272,9 +394,10 @@ fn ollama_zero_rate_card() -> RateCard {
 /// Ollama keeps `system` turns inline in the `messages` array (like the OpenAI
 /// shape), so every role maps one-to-one. Sampling knobs live under `options`:
 /// `temperature` and `num_predict` (Ollama's name for the output-token cap),
-/// plus `stop` when the request carries stop sequences. `stream` is pinned
-/// `false` — Phase 1 is non-streaming.
-fn build_request_body(req: &CompletionRequest) -> serde_json::Value {
+/// plus `stop` when the request carries stop sequences. `stream` is the caller's
+/// choice: [`Provider::complete`] passes `false` (one buffered reply), the
+/// §3.4b streaming path passes `true` (NDJSON token chunks).
+fn build_request_body(req: &CompletionRequest, stream: bool) -> serde_json::Value {
     let messages: Vec<serde_json::Value> = req
         .messages
         .iter()
@@ -286,6 +409,38 @@ fn build_request_body(req: &CompletionRequest) -> serde_json::Value {
         })
         .collect();
 
+    serde_json::json!({
+        "model": req.model.0,
+        "messages": messages,
+        "stream": stream,
+        "options": build_options(req),
+    })
+}
+
+/// Serialize a [`CompletionRequest`] into Ollama's `/api/generate` request body.
+///
+/// `/api/generate` is the single-prompt completion endpoint (no chat roles), so
+/// the request's messages are flattened into one newline-joined `prompt`. The
+/// `options` and `stream` flag carry over from [`build_request_body`].
+fn build_generate_body(req: &CompletionRequest, stream: bool) -> serde_json::Value {
+    let prompt = req
+        .messages
+        .iter()
+        .map(|m| m.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    serde_json::json!({
+        "model": req.model.0,
+        "prompt": prompt,
+        "stream": stream,
+        "options": build_options(req),
+    })
+}
+
+/// The shared `options` object: `temperature`, `num_predict` (Ollama's name for
+/// the output-token cap), and `stop` when the request carries stop sequences.
+fn build_options(req: &CompletionRequest) -> serde_json::Value {
     let mut options = serde_json::json!({
         "temperature": req.temperature,
         "num_predict": req.max_tokens,
@@ -296,13 +451,7 @@ fn build_request_body(req: &CompletionRequest) -> serde_json::Value {
             .expect("json! object literal is always a map")
             .insert("stop".to_string(), serde_json::json!(req.stop_sequences));
     }
-
-    serde_json::json!({
-        "model": req.model.0,
-        "messages": messages,
-        "stream": false,
-        "options": options,
-    })
+    options
 }
 
 /// The `messages` role wire string for a [`Role`].
@@ -342,6 +491,14 @@ fn map_send_error(e: reqwest::Error, base_url: &str) -> ProviderError {
     } else {
         ProviderError::NetworkFailure(e.to_string())
     }
+}
+
+/// Map a reqwest failure that occurs *mid-stream* (after a 2xx handshake, while
+/// pulling NDJSON bytes) onto the crate's error taxonomy. A timeout or dropped
+/// connection here is a transport failure, so it surfaces as a
+/// [`NetworkFailure`](ProviderError::NetworkFailure).
+fn map_stream_error(e: reqwest::Error) -> ProviderError {
+    ProviderError::NetworkFailure(e.to_string())
 }
 
 /// Map a non-2xx Ollama response onto the crate's [`ProviderError`] taxonomy.
@@ -433,6 +590,234 @@ fn map_finish_reason(reason: Option<&str>) -> FinishReason {
     }
 }
 
+// ---------------------------------------------------------------------------
+// §3.4b — NDJSON streaming
+// ---------------------------------------------------------------------------
+
+/// One newline-delimited JSON object from an Ollama streaming response.
+///
+/// Ollama emits one of these per generated chunk. A non-terminal chunk carries a
+/// partial token (under `message.content` for `/api/chat`, under `response` for
+/// `/api/generate`) with `done: false`; the final chunk has `done: true`, an
+/// empty token, a `done_reason`, and the run's `prompt_eval_count` /
+/// `eval_count`. Every field is optional so either endpoint's shape decodes.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[non_exhaustive]
+pub struct OllamaChatChunk {
+    /// The model that produced the chunk (echoed back by Ollama).
+    #[serde(default)]
+    pub model: Option<String>,
+    /// The chat token, for `/api/chat` (`message.content`).
+    #[serde(default)]
+    pub message: Option<ChunkMessage>,
+    /// The completion token, for `/api/generate` (`response`).
+    #[serde(default)]
+    pub response: Option<String>,
+    /// Whether this is the terminal chunk.
+    #[serde(default)]
+    pub done: bool,
+    /// Why generation stopped — set on the terminal chunk (`"stop"`, `"length"`).
+    #[serde(default)]
+    pub done_reason: Option<String>,
+    /// Prompt tokens evaluated → billed as input. Present on the final chunk.
+    #[serde(default)]
+    pub prompt_eval_count: Option<u32>,
+    /// Tokens generated → billed as output. Present on the final chunk.
+    #[serde(default)]
+    pub eval_count: Option<u32>,
+}
+
+/// The assistant message inside a chat [`OllamaChatChunk`].
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ChunkMessage {
+    /// The partial token text. Empty/absent on the terminal chunk.
+    #[serde(default)]
+    pub content: Option<String>,
+}
+
+impl OllamaChatChunk {
+    /// The token text this chunk carries, from whichever endpoint shape applies
+    /// (`message.content` for chat, `response` for generate). `""` when neither
+    /// is set (e.g. the terminal chunk).
+    #[must_use]
+    pub fn token(&self) -> &str {
+        if let Some(content) = self.message.as_ref().and_then(|m| m.content.as_deref()) {
+            return content;
+        }
+        self.response.as_deref().unwrap_or("")
+    }
+
+    /// Whether this is the terminal (`done: true`) chunk.
+    #[must_use]
+    pub fn is_done(&self) -> bool {
+        self.done
+    }
+
+    /// The token-count ledger from this chunk — meaningful on the terminal
+    /// chunk, which is the one Ollama stamps the counts onto.
+    #[must_use]
+    pub fn usage(&self) -> Usage {
+        Usage {
+            tokens_in: self.prompt_eval_count.unwrap_or(0),
+            tokens_out: self.eval_count.unwrap_or(0),
+        }
+    }
+
+    /// The [`FinishReason`] for this chunk's `done_reason`.
+    #[must_use]
+    pub fn finish_reason(&self) -> FinishReason {
+        map_finish_reason(self.done_reason.as_deref())
+    }
+}
+
+/// A high-level event in an Ollama token stream (see
+/// [`OllamaProvider::stream_events`]).
+///
+/// Defined here, minimally, while this crate's streaming PR stays self-contained.
+/// Once the shared provider-runtime `StreamEvent` lands, this is reconciled with
+/// it in a follow-up; the lane coordinator owns that unification.
+#[derive(Clone, Debug, PartialEq)]
+pub enum StreamEvent {
+    /// An incremental token chunk.
+    Token(String),
+    /// The terminal event, carrying the run's final usage/cost ledger.
+    Done(StreamSummary),
+}
+
+/// The terminal ledger of a token stream: the final token counts folded into a
+/// [`Usage`] and a [`CostTuple`] (always `0` cents — Ollama is free), plus the
+/// finish reason.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StreamSummary {
+    /// Final input/output token counts for the run.
+    pub usage: Usage,
+    /// The billed cost — token counts carried through, `0` cents.
+    pub cost: CostTuple,
+    /// Why generation stopped.
+    pub finish_reason: FinishReason,
+}
+
+/// The zero-dollar [`CostTuple`] for a stream's final `usage` — token counts
+/// carried through, `0` cents (Ollama bills no dollar cost).
+fn zero_cost(usage: Usage) -> CostTuple {
+    CostTuple {
+        tokens_in: u64::from(usage.tokens_in),
+        tokens_out: u64::from(usage.tokens_out),
+        cents: 0,
+        wall_ms: 0,
+        attention_score: 0.0,
+    }
+}
+
+/// Map a parsed-chunk stream onto the higher-level [`StreamEvent`] surface: a
+/// [`Token`](StreamEvent::Token) per chunk, a [`Done`](StreamEvent::Done) for
+/// the terminal one.
+fn into_events<S>(chunks: S) -> impl Stream<Item = Result<StreamEvent, ProviderError>>
+where
+    S: Stream<Item = Result<OllamaChatChunk, ProviderError>>,
+{
+    chunks.map(|res| {
+        res.map(|chunk| {
+            if chunk.is_done() {
+                let usage = chunk.usage();
+                StreamEvent::Done(StreamSummary {
+                    usage,
+                    cost: zero_cost(usage),
+                    finish_reason: chunk.finish_reason(),
+                })
+            } else {
+                StreamEvent::Token(chunk.token().to_string())
+            }
+        })
+    })
+}
+
+/// Parser state for [`parse_ndjson`]: the byte source, a carry buffer for a
+/// partial line that spans chunk boundaries, and whether the source is drained.
+struct NdjsonState<S> {
+    stream: S,
+    buf: Vec<u8>,
+    finished: bool,
+}
+
+/// Turn a stream of raw byte chunks into a stream of parsed [`OllamaChatChunk`]s,
+/// one per newline-delimited JSON line.
+///
+/// Network chunk boundaries do not align with line boundaries, so bytes are
+/// buffered until a `\n` completes a line; a trailing line with no newline (e.g.
+/// at end-of-stream) is still parsed. A malformed line is an `Err` item; a
+/// transport error from the source is forwarded as an `Err` item and ends the
+/// stream. Decoupled from `reqwest` (the source yields
+/// `Result<_, ProviderError>`) so it is unit-testable with synthetic chunks.
+///
+/// The result is boxed (a `BoxStream`) so it is `Unpin` — callers can drive it
+/// with `StreamExt::next` directly, and dropping it is the cancellation path.
+fn parse_ndjson<S, B>(
+    stream: S,
+) -> impl Stream<Item = Result<OllamaChatChunk, ProviderError>> + Unpin
+where
+    S: Stream<Item = Result<B, ProviderError>> + Unpin + Send + 'static,
+    B: AsRef<[u8]> + Send + 'static,
+{
+    let state = NdjsonState {
+        stream,
+        buf: Vec::new(),
+        finished: false,
+    };
+    futures::stream::unfold(state, |mut state| async move {
+        loop {
+            // Emit a complete buffered line if one is available.
+            if let Some(pos) = state.buf.iter().position(|&b| b == b'\n') {
+                let line: Vec<u8> = state.buf.drain(..=pos).collect();
+                let trimmed = trim_line(&line);
+                if trimmed.is_empty() {
+                    continue;
+                }
+                return Some((parse_chunk(trimmed), state));
+            }
+            // No newline buffered. If the source is drained, flush a trailing
+            // partial line (if any) once, then end.
+            if state.finished {
+                if state.buf.is_empty() {
+                    return None;
+                }
+                let line = std::mem::take(&mut state.buf);
+                let trimmed = trim_line(&line);
+                if trimmed.is_empty() {
+                    return None;
+                }
+                return Some((parse_chunk(trimmed), state));
+            }
+            // Pull more bytes.
+            match state.stream.next().await {
+                Some(Ok(bytes)) => state.buf.extend_from_slice(bytes.as_ref()),
+                Some(Err(e)) => {
+                    state.finished = true;
+                    return Some((Err(e), state));
+                }
+                None => state.finished = true,
+            }
+        }
+    })
+    .boxed()
+}
+
+/// Strip a single trailing `\n` and/or `\r` from a buffered line.
+fn trim_line(line: &[u8]) -> &[u8] {
+    let mut end = line.len();
+    while end > 0 && (line[end - 1] == b'\n' || line[end - 1] == b'\r') {
+        end -= 1;
+    }
+    &line[..end]
+}
+
+/// Deserialize one NDJSON line into an [`OllamaChatChunk`], mapping a JSON error
+/// onto [`ProviderError::Upstream`].
+fn parse_chunk(bytes: &[u8]) -> Result<OllamaChatChunk, ProviderError> {
+    serde_json::from_slice(bytes)
+        .map_err(|e| ProviderError::Upstream(format!("malformed NDJSON stream chunk: {e}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -452,7 +837,7 @@ mod tests {
         req.temperature = 0.5;
         req.stop_sequences = vec!["STOP".to_string()];
 
-        let body = build_request_body(&req);
+        let body = build_request_body(&req, false);
         assert_eq!(body["model"], "llama3.2");
         assert_eq!(body["stream"], false);
         assert_eq!(body["options"]["num_predict"], 128);
@@ -468,7 +853,7 @@ mod tests {
         use ardur_runtime::ChatMessage;
         let req =
             CompletionRequest::new(vec![ChatMessage::user("hi")], ModelId::new("llama3.2"), 16);
-        let body = build_request_body(&req);
+        let body = build_request_body(&req, false);
         assert!(
             body["options"].get("stop").is_none(),
             "no stop key when none requested"
@@ -590,10 +975,91 @@ mod tests {
     }
 
     #[test]
-    fn provider_id_is_ollama_and_not_streaming() {
+    fn provider_id_is_ollama_and_streaming() {
         let provider = OllamaProvider::new(OllamaConfig::new());
         assert_eq!(provider.id(), ProviderId("ollama".to_string()));
-        assert!(!provider.supports_streaming());
+        // §3.4b: the NDJSON streaming path is live.
+        assert!(provider.supports_streaming());
         assert_eq!(provider.model_id().0, DEFAULT_MODEL);
+    }
+
+    #[test]
+    fn generate_url_appends_endpoint() {
+        let cfg = OllamaConfig::new().base_url("http://localhost:11434/");
+        assert_eq!(cfg.generate_url(), "http://localhost:11434/api/generate");
+    }
+
+    #[test]
+    fn stream_request_body_sets_stream_true() {
+        use ardur_runtime::ChatMessage;
+        let req =
+            CompletionRequest::new(vec![ChatMessage::user("hi")], ModelId::new("llama3.2"), 32);
+        let body = build_request_body(&req, true);
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["options"]["num_predict"], 32);
+    }
+
+    #[test]
+    fn generate_body_flattens_messages_to_prompt() {
+        use ardur_runtime::ChatMessage;
+        let req = CompletionRequest::new(
+            vec![ChatMessage::system("be terse"), ChatMessage::user("hi")],
+            ModelId::new("llama3.2"),
+            16,
+        );
+        let body = build_generate_body(&req, true);
+        assert_eq!(body["prompt"], "be terse\nhi");
+        assert_eq!(body["stream"], true);
+        assert!(body.get("messages").is_none(), "generate has no messages");
+    }
+
+    #[test]
+    fn chunk_token_reads_chat_then_generate_shape() {
+        // Chat shape: token under message.content.
+        let chat: OllamaChatChunk = serde_json::from_value(serde_json::json!({
+            "message": {"content": "he"},
+            "done": false
+        }))
+        .unwrap();
+        assert_eq!(chat.token(), "he");
+        assert!(!chat.is_done());
+
+        // Generate shape: token under response.
+        let generated: OllamaChatChunk = serde_json::from_value(serde_json::json!({
+            "response": "llo",
+            "done": false
+        }))
+        .unwrap();
+        assert_eq!(generated.token(), "llo");
+
+        // Terminal chunk: no token, counts present.
+        let done: OllamaChatChunk = serde_json::from_value(serde_json::json!({
+            "done": true,
+            "done_reason": "stop",
+            "prompt_eval_count": 9,
+            "eval_count": 4
+        }))
+        .unwrap();
+        assert!(done.is_done());
+        assert_eq!(done.token(), "");
+        assert_eq!(
+            done.usage(),
+            Usage {
+                tokens_in: 9,
+                tokens_out: 4
+            }
+        );
+        assert!(matches!(done.finish_reason(), FinishReason::Stop));
+    }
+
+    #[test]
+    fn zero_cost_carries_tokens_and_zero_cents() {
+        let cost = zero_cost(Usage {
+            tokens_in: 7,
+            tokens_out: 3,
+        });
+        assert_eq!(cost.tokens_in, 7);
+        assert_eq!(cost.tokens_out, 3);
+        assert_eq!(cost.cents, 0);
     }
 }
