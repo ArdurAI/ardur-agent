@@ -34,6 +34,8 @@ members = [
     "crates/fused-runtime",
     "crates/slack-adapter",
     "crates/channel-matrix",
+    "crates/channel-discord",
+    "crates/channel-telegram",
     "crates/server",
     "crates/e2e-tests",
 ]
@@ -178,4 +180,6 @@ ardur-injection-defense = { path = "crates/injection-defense" }
 ardur-fused-runtime = { path = "crates/fused-runtime" }
 ardur-slack-adapter = { path = "crates/slack-adapter" }
 ardur-channel-matrix = { path = "crates/channel-matrix" }
+ardur-channel-discord = { path = "crates/channel-discord" }
+ardur-channel-telegram = { path = "crates/channel-telegram" }
 ardur-server = { path = "crates/server" }

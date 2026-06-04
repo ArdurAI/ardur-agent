@@ -36,6 +36,11 @@ ardur-slack-adapter = { workspace = true }
 # The §4.X Matrix channel adapter — a second `MessagingGateway` backend the boot
 # sequence wires alongside Slack when `ARDUR_CHANNEL_MATRIX=true`.
 ardur-channel-matrix = { workspace = true }
+# The §4.Y Discord + Telegram channel adapters — further `MessagingGateway`
+# backends wired alongside Slack when `ARDUR_CHANNEL_DISCORD` /
+# `ARDUR_CHANNEL_TELEGRAM` are set.
+ardur-channel-discord = { workspace = true }
+ardur-channel-telegram = { workspace = true }
 ardur-provider-runtime = { workspace = true }
 # §3.0 provider selection — reads ARDUR_PROVIDER and boxes the chosen backend
 # (anthropic | openrouter | ollama | codex) the bin hands to AppState::boot.
