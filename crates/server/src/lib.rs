@@ -26,6 +26,9 @@ mod routes;
 mod state;
 
 pub use config::{Config, LogFormat, MemoryBackend, MissingEnvVar};
-pub use mcp::{assemble_tool_registry, build_mcp_router, connect_remote_tools, example_registry};
+pub use mcp::{
+    assemble_tool_registry, build_mcp_router, connect_remote_tools, example_registry,
+    register_skills,
+};
 pub use routes::build_router;
 pub use state::{AUDIENCE, AppState, CAP_TTL_SECS, GATEWAY_SUBJECT, McpSurface, TOOL};
