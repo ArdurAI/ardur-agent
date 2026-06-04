@@ -18,9 +18,22 @@ pub struct QdrantMemoryConfig {
     /// default `ardur_memory`).
     pub collection_name: String,
     /// The dimensionality of the stored vectors (`QDRANT_VECTOR_DIM`, default
-    /// `384`). Must match the embedding model once real embeddings land; see the
-    /// `// TODO §7.0 Phase 2` placeholder embedding in `runtime.rs`.
+    /// `384`). Must match the embedding model: when an [`Embedder`] is attached
+    /// with [`QdrantMemoryRuntime::with_embedder`] the dim is realigned to the
+    /// embedder's output dimension automatically.
+    ///
+    /// [`Embedder`]: ardur_embeddings::Embedder
+    /// [`QdrantMemoryRuntime::with_embedder`]: crate::QdrantMemoryRuntime::with_embedder
     pub vector_dim: usize,
+    /// Which local embedding model the durable store should embed with
+    /// (`EMBED_MODEL`, e.g. `bge-small-en-v1.5`). `None` keeps the legacy
+    /// placeholder-vector behaviour; a caller resolves this to a concrete
+    /// [`Embedder`] (via [`ardur_embeddings::ModelChoice`]) and attaches it with
+    /// [`QdrantMemoryRuntime::with_embedder`].
+    ///
+    /// [`Embedder`]: ardur_embeddings::Embedder
+    /// [`QdrantMemoryRuntime::with_embedder`]: crate::QdrantMemoryRuntime::with_embedder
+    pub default_embed_model: Option<String>,
 }
 
 impl Default for QdrantMemoryConfig {
@@ -30,6 +43,7 @@ impl Default for QdrantMemoryConfig {
             api_key: None,
             collection_name: "ardur_memory".to_string(),
             vector_dim: 384,
+            default_embed_model: None,
         }
     }
 }
@@ -57,6 +71,7 @@ impl QdrantMemoryConfig {
         if let Some(dim) = non_empty("QDRANT_VECTOR_DIM").and_then(|v| v.parse().ok()) {
             cfg.vector_dim = dim;
         }
+        cfg.default_embed_model = non_empty("EMBED_MODEL");
         cfg
     }
 
@@ -87,6 +102,13 @@ impl QdrantMemoryConfig {
         self.vector_dim = dim;
         self
     }
+
+    /// Set the default embedding-model name (the `EMBED_MODEL` wire form).
+    #[must_use]
+    pub fn with_default_embed_model(mut self, model: impl Into<String>) -> Self {
+        self.default_embed_model = Some(model.into());
+        self
+    }
 }
 
 /// Read an environment variable, treating an unset *or* empty value as absent.
@@ -105,6 +127,7 @@ mod tests {
         assert_eq!(cfg.api_key, None);
         assert_eq!(cfg.collection_name, "ardur_memory");
         assert_eq!(cfg.vector_dim, 384);
+        assert_eq!(cfg.default_embed_model, None);
         // `new()` is the same as `default()`.
         assert_eq!(QdrantMemoryConfig::new(), cfg);
     }
@@ -115,11 +138,13 @@ mod tests {
             .with_url("http://qdrant.internal:6334")
             .with_api_key("secret")
             .with_collection_name("custom")
-            .with_vector_dim(1024);
+            .with_vector_dim(1024)
+            .with_default_embed_model("gte-base-en-v1.5");
         assert_eq!(cfg.url, "http://qdrant.internal:6334");
         assert_eq!(cfg.api_key.as_deref(), Some("secret"));
         assert_eq!(cfg.collection_name, "custom");
         assert_eq!(cfg.vector_dim, 1024);
+        assert_eq!(cfg.default_embed_model.as_deref(), Some("gte-base-en-v1.5"));
     }
 
     // `from_env`'s defaults-then-overrides behaviour is exercised in

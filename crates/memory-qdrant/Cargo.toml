@@ -23,10 +23,20 @@ repository.workspace = true
 [dependencies]
 # The trait + value types this crate implements against.
 ardur-memory = { workspace = true }
-# The Qdrant gRPC client (collections, points, payload filters, snapshots).
+# The dense half of hybrid retrieval: local fastembed model behind the object-safe
+# `Embedder` trait. `record` embeds each fact's searchable text; `search` embeds
+# the query.
+ardur-embeddings = { workspace = true }
+# The sparse half: a BM25 lexical index. The hybrid retriever writes every record
+# here too and fuses its hits with the vector hits.
+ardur-bm25-index = { workspace = true }
+# Rank/score fusion — reciprocal-rank fusion combines the dense + sparse lists.
+ardur-fusion = { workspace = true }
+# The Qdrant gRPC client (collections, points, payload filters, snapshots, ANN).
 qdrant-client = { workspace = true }
 # A blocking bridge: the `MemoryRuntime` trait is synchronous, the Qdrant client
 # is async, so the runtime owns a small Tokio runtime to `block_on` each call.
+# `sync` brings in the `Mutex` guarding the BM25 index across its async commit.
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
