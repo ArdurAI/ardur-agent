@@ -145,6 +145,22 @@ pub struct CompletionRequest {
     /// built before this field existed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<ToolDef>,
+    /// Whether the caller prefers incremental delivery via
+    /// [`Provider::stream`](crate::Provider::stream). A dispatcher reads this to
+    /// choose `stream()` over [`complete`](crate::Provider::complete) when the
+    /// provider [`supports_streaming`](crate::Provider::supports_streaming); it
+    /// never changes the non-streaming wire body. `false` (the default) is
+    /// skipped on serialization, so a request built before this field existed
+    /// round-trips byte-for-byte.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub stream: bool,
+}
+
+/// `skip_serializing_if` predicate keeping a `false` `stream` flag out of the
+/// serialized [`CompletionRequest`], so stored receipts/journals stay identical
+/// to the pre-§3.1b shape.
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 impl CompletionRequest {
@@ -160,6 +176,7 @@ impl CompletionRequest {
             stop_sequences: Vec::new(),
             requested_cost_envelope: CostEnvelope::unbounded(),
             tools: Vec::new(),
+            stream: false,
         }
     }
 
@@ -167,6 +184,15 @@ impl CompletionRequest {
     #[must_use]
     pub fn with_tools(mut self, tools: Vec<ToolDef>) -> Self {
         self.tools = tools;
+        self
+    }
+
+    /// Mark this request as preferring streamed delivery (builder-style). Sets
+    /// the [`stream`](Self::stream) hint a dispatcher reads to pick
+    /// [`Provider::stream`](crate::Provider::stream).
+    #[must_use]
+    pub fn streaming(mut self) -> Self {
+        self.stream = true;
         self
     }
 }

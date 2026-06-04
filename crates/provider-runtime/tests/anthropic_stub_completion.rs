@@ -43,7 +43,7 @@ async fn empty_key_is_unauthorized() {
 }
 
 #[test]
-fn reports_phase_1_capabilities() {
+fn reports_capabilities() {
     let provider = AnthropicProvider::new("sk-test", ModelId::new("claude-opus-4-8"));
 
     assert_eq!(
@@ -51,8 +51,8 @@ fn reports_phase_1_capabilities() {
         ardur_provider_runtime::ProviderId("anthropic".to_string())
     );
     assert!(
-        !provider.supports_streaming(),
-        "Phase 1 stub does not stream"
+        provider.supports_streaming(),
+        "§3.1b: the SSE streaming path is live"
     );
     assert_eq!(provider.rate_card().version_id, "anthropic-2026-q2-v1");
     assert_eq!(provider.model_id(), &ModelId::new("claude-opus-4-8"));
