@@ -76,6 +76,10 @@ ardur-provider-codex = { workspace = true }
 ardur-provider-claude-cli = { workspace = true }
 # The fused-runtime scenarios implement `Provider` stubs in `tests/support`.
 async-trait = { workspace = true }
+# The OTel scenario captures the GenAI `provider.send` span with an in-memory
+# `tracing-subscriber` layer and asserts its hierarchy + `gen_ai.*` attributes.
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 # `uuid` builds the genesis receipt's `receipt_id` and is the type behind several
 # substrate ids the scenarios assert on.
 uuid = { workspace = true }
