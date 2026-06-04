@@ -43,6 +43,7 @@ const TOUCHED: &[&str] = &[
     "ARDUR_MCP_REMOTE_SERVERS",
     "ARDUR_MEMORY",
     "QDRANT_URL",
+    "ARDUR_CHANNEL_MATRIX",
 ];
 
 fn set(key: &str, value: &str) {

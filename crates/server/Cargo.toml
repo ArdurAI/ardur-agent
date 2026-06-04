@@ -33,6 +33,9 @@ path = "src/bin/ardur-server.rs"
 # runtime, then fronts it with the Slack adapter.
 ardur-fused-runtime = { workspace = true }
 ardur-slack-adapter = { workspace = true }
+# The §4.X Matrix channel adapter — a second `MessagingGateway` backend the boot
+# sequence wires alongside Slack when `ARDUR_CHANNEL_MATRIX=true`.
+ardur-channel-matrix = { workspace = true }
 ardur-provider-runtime = { workspace = true }
 # §3.0 provider selection — reads ARDUR_PROVIDER and boxes the chosen backend
 # (anthropic | openrouter | ollama | codex) the bin hands to AppState::boot.

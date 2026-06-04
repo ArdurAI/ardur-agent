@@ -33,6 +33,7 @@ members = [
     "crates/injection-defense",
     "crates/fused-runtime",
     "crates/slack-adapter",
+    "crates/channel-matrix",
     "crates/server",
     "crates/e2e-tests",
 ]
@@ -172,4 +173,5 @@ ardur-multi-agent = { path = "crates/multi-agent" }
 ardur-injection-defense = { path = "crates/injection-defense" }
 ardur-fused-runtime = { path = "crates/fused-runtime" }
 ardur-slack-adapter = { path = "crates/slack-adapter" }
+ardur-channel-matrix = { path = "crates/channel-matrix" }
 ardur-server = { path = "crates/server" }

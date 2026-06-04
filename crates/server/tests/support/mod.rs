@@ -61,6 +61,7 @@ pub fn test_config(data_dir: &TempDir, slack_base: Option<String>) -> Config {
         cost_budget_cents: 10_000,
         cedar_policy_path: None,
         slack_base_url: slack_base,
+        channel_matrix: false,
         log_format: LogFormat::Text,
         mcp_enabled: false,
         mcp_bearer_tokens: Vec::new(),
