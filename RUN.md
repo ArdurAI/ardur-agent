@@ -257,10 +257,38 @@ curl -sS http://localhost:3000/mcp/ardur \
 # omit the Authorization header → 401
 ```
 
-**Client.** `ARDUR_MCP_REMOTE_SERVERS` is parsed and surfaced for the
-`RemoteMcpToolset` (the client half). Wiring discovered remote tools into live
-turns lands once the runtime gains a tool-execution stage (§6.0 Phase 3); today
-the client is exercised end-to-end by the test suite.
+**Client.** `ARDUR_MCP_REMOTE_SERVERS` (`name=url,…`) is connected at boot: each
+server's tools join the runtime's tool registry alongside the local ones, so the
+model can call them in a turn (see **Tool use** below). A remote server that
+fails to connect or list is logged and skipped — one dead remote does not take
+the agent down.
+
+## Tool use
+
+When a provider's completion comes back requesting tool calls, the runtime
+**invokes** the tools and loops the results back to the model until it produces a
+final answer (§6.0). Each round runs the full pipeline — cost-gate admission,
+injection-defense scanning of the tool output, and a signed receipt that records
+the calls — so tool use is governed and audited like the rest of a turn.
+
+The tools available in a turn are the local ones (`echo`, `health_check`) plus
+any from `ARDUR_MCP_REMOTE_SERVERS`. Two safeguards bound the loop:
+
+```bash
+ARDUR_TOOL_MAX_ITERATIONS=5    # provider rounds that may request tools (default 5)
+ARDUR_TOOL_TIMEOUT_SECS=30     # per-tool-call deadline (default 30)
+```
+
+A turn that keeps requesting tools past the iteration ceiling aborts with a
+`tool-call loop exhausted` error; a tool that overruns its deadline aborts with a
+`tool timed out` error (releasing the cost reservation in both cases). An unknown
+tool name, or a tool output that trips the injection filter, likewise aborts the
+turn before it can affect the conversation.
+
+Provider support (Phase 1): **anthropic** (Messages API `tool_use`) and
+**openrouter** (OpenAI-compatible `tools`/`tool_calls`). The `codex` and
+`claude` CLI providers orchestrate their own tools internally, so the runtime
+loop does not drive tools through them.
 
 ## Monitoring
 

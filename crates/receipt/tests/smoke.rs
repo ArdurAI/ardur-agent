@@ -23,6 +23,7 @@ fn sample_body(verb: &str) -> ReceiptBody {
             wall_ms: 1_200,
             attention_score: 0.5,
         },
+        tool_calls: Vec::new(),
     }
 }
 

@@ -41,8 +41,12 @@ ardur-memory = { workspace = true }
 # §7.10 — the durable, fsync-ing session journal (stage 10).
 ardur-session-journals = { workspace = true }
 # §11.16 — the prompt-injection filter registry scanned at stage 4.5 (ARD-48),
-# after the pre-submit hooks and before the provider dispatch.
+# after the pre-submit hooks and before the provider dispatch, and over tool
+# output before it re-enters the context (§6.0).
 ardur-injection-defense = { workspace = true }
+# §6.0 — the tool registry the tool-execution stage looks up and invokes (local
+# tools plus the remote MCP toolsets).
+ardur-tool-registry = { workspace = true }
 
 async-trait = { workspace = true }
 anyhow = { workspace = true }
@@ -55,6 +59,9 @@ serde_json = { workspace = true }
 # chain verification (`SignedReceipt::from_parts` is crate-private to receipt).
 base64 = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
+# §6.0 — per-tool-call timeout (`tokio::time::timeout`) in the tool-execution
+# loop. Driven by the caller's runtime (the server worker, tests' #[tokio::test]).
+tokio = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

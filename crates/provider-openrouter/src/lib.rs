@@ -28,9 +28,11 @@
 //!
 //! - **Streaming** — every request sends `stream: false`;
 //!   [`Provider::supports_streaming`] is `false`. (Phase 2.)
-//! - **Tool-call parsing** — a `tool_calls` finish reason surfaces as
-//!   [`FinishReason::ToolUse`] with an empty call list; the blocks are not
-//!   decoded yet. (Phase 2.)
+//!
+//! § 6.0 added tool use: the request advertises `tools`, an assistant turn that
+//! requested tools replays its `tool_calls`, a [`Role::Tool`] result becomes a
+//! `tool` message, and a `tool_calls` finish reason decodes into
+//! [`FinishReason::ToolUse`] with the parsed calls.
 //!
 //! [OpenRouter]: https://openrouter.ai
 //! [`ModelId`]: ardur_provider_runtime::ModelId
@@ -41,9 +43,9 @@ use std::time::Duration;
 
 use ardur_provider_runtime::{
     CompletionRequest, CompletionResponse, FinishReason, ModelId, Provider, ProviderError,
-    RateCard, Usage,
+    RateCard, ToolCall, Usage,
 };
-use ardur_runtime::{CostTuple, ProviderId, Role};
+use ardur_runtime::{ChatMessage, CostTuple, ProviderId, Role};
 use async_trait::async_trait;
 use serde::Deserialize;
 
@@ -248,20 +250,13 @@ fn openrouter_passthrough_rate_card() -> RateCard {
 /// Serialize a [`CompletionRequest`] into the OpenAI chat-completions body.
 ///
 /// Unlike the Anthropic Messages API, the OpenAI shape keeps `system` turns
-/// inline in the `messages` array, so every role maps one-to-one. `stop` is
-/// omitted when there are no stop sequences. `stream` is pinned `false` — Phase
-/// 1 is non-streaming.
+/// inline in the `messages` array. An assistant turn that requested tools
+/// replays its `tool_calls` (arguments re-encoded as the JSON *string* OpenAI
+/// expects), and a [`Role::Tool`] result becomes a `tool` message keyed by
+/// `tool_call_id` (§6.0). `stop`, `tools` are omitted when empty; `stream` is
+/// pinned `false` — Phase 1 is non-streaming.
 fn build_request_body(req: &CompletionRequest) -> serde_json::Value {
-    let messages: Vec<serde_json::Value> = req
-        .messages
-        .iter()
-        .map(|m| {
-            serde_json::json!({
-                "role": role_str(m.role),
-                "content": m.content,
-            })
-        })
-        .collect();
+    let messages: Vec<serde_json::Value> = req.messages.iter().map(openrouter_message).collect();
 
     let mut body = serde_json::json!({
         "model": req.model.0,
@@ -276,7 +271,64 @@ fn build_request_body(req: &CompletionRequest) -> serde_json::Value {
     if !req.stop_sequences.is_empty() {
         map.insert("stop".to_string(), serde_json::json!(req.stop_sequences));
     }
+    if !req.tools.is_empty() {
+        let tools: Vec<serde_json::Value> = req
+            .tools
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "type": "function",
+                    "function": {
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.input_schema,
+                    },
+                })
+            })
+            .collect();
+        map.insert("tools".to_string(), serde_json::Value::Array(tools));
+    }
     body
+}
+
+/// Serialize one [`ChatMessage`] into an OpenAI `messages` entry. A plain turn
+/// is `{role, content}`; an assistant turn carrying tool calls adds a
+/// `tool_calls` array; a [`Role::Tool`] result is a `tool` message keyed by the
+/// `tool_call_id` it answers.
+fn openrouter_message(m: &ChatMessage) -> serde_json::Value {
+    match m.role {
+        Role::Tool => serde_json::json!({
+            "role": "tool",
+            "tool_call_id": m.tool_call_id.clone().unwrap_or_default(),
+            "content": m.content,
+        }),
+        Role::Assistant if !m.tool_calls.is_empty() => {
+            let tool_calls: Vec<serde_json::Value> = m
+                .tool_calls
+                .iter()
+                .map(|c| {
+                    serde_json::json!({
+                        "id": c.id,
+                        "type": "function",
+                        "function": {
+                            "name": c.name,
+                            // OpenAI carries the arguments as a JSON-encoded string.
+                            "arguments": serde_json::to_string(&c.arguments).unwrap_or_default(),
+                        },
+                    })
+                })
+                .collect();
+            serde_json::json!({
+                "role": "assistant",
+                "content": m.content,
+                "tool_calls": tool_calls,
+            })
+        }
+        _ => serde_json::json!({
+            "role": role_str(m.role),
+            "content": m.content,
+        }),
+    }
 }
 
 /// The OpenAI/`messages` role wire string for a [`Role`].
@@ -285,6 +337,7 @@ fn role_str(role: Role) -> &'static str {
         Role::System => "system",
         Role::User => "user",
         Role::Assistant => "assistant",
+        Role::Tool => "tool",
     }
 }
 
@@ -368,11 +421,32 @@ struct Choice {
 }
 
 /// The assistant message inside a [`Choice`]. `content` is optional because a
-/// tool-call-only turn carries `null`.
+/// tool-call-only turn carries `null`; `tool_calls` carries the requested calls
+/// (§6.0).
 #[derive(Default, Deserialize)]
 struct Message {
     #[serde(default)]
     content: Option<String>,
+    #[serde(default)]
+    tool_calls: Vec<ApiToolCall>,
+}
+
+/// One entry of an assistant message's `tool_calls` array (OpenAI shape).
+#[derive(Deserialize)]
+struct ApiToolCall {
+    #[serde(default)]
+    id: String,
+    function: ApiToolFunction,
+}
+
+/// The `function` object inside an [`ApiToolCall`]: the tool name and its
+/// arguments as a JSON-encoded string.
+#[derive(Deserialize)]
+struct ApiToolFunction {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    arguments: String,
 }
 
 /// The `usage` object OpenRouter bills against. `cost` is the dollar cost of the
@@ -393,12 +467,28 @@ impl ChatCompletion {
     /// from OpenRouter's reported `usage.cost` (USD → whole cents), `0` when the
     /// field is absent.
     fn into_completion(self, raw: serde_json::Value) -> CompletionResponse {
-        let first = self.choices.into_iter().next();
-        let content = first
-            .as_ref()
-            .and_then(|c| c.message.content.clone())
-            .unwrap_or_default();
-        let finish_reason = map_finish_reason(first.and_then(|c| c.finish_reason).as_deref());
+        let (content, tool_calls, finish_raw) = match self.choices.into_iter().next() {
+            Some(choice) => {
+                let content = choice.message.content.clone().unwrap_or_default();
+                // OpenAI carries each call's arguments as a JSON-encoded string;
+                // decode it back to a value, defaulting to null if it is empty
+                // or malformed.
+                let tool_calls: Vec<ToolCall> = choice
+                    .message
+                    .tool_calls
+                    .iter()
+                    .map(|tc| ToolCall {
+                        id: tc.id.clone(),
+                        name: tc.function.name.clone(),
+                        arguments: serde_json::from_str(&tc.function.arguments)
+                            .unwrap_or(serde_json::Value::Null),
+                    })
+                    .collect();
+                (content, tool_calls, choice.finish_reason)
+            }
+            None => (String::new(), Vec::new(), None),
+        };
+        let finish_reason = map_finish_reason(finish_raw.as_deref(), tool_calls);
 
         let (usage, cents) = match self.usage {
             Some(u) => {
@@ -429,14 +519,14 @@ impl ChatCompletion {
     }
 }
 
-/// Map the OpenAI `finish_reason` onto the crate's [`FinishReason`]. A missing
-/// reason (`null`) is treated as a natural stop.
-fn map_finish_reason(reason: Option<&str>) -> FinishReason {
+/// Map the OpenAI `finish_reason` onto the crate's [`FinishReason`], carrying the
+/// already-decoded `tool_calls` into the `tool_calls` arm. A missing reason
+/// (`null`) is treated as a natural stop.
+fn map_finish_reason(reason: Option<&str>, tool_calls: Vec<ToolCall>) -> FinishReason {
     match reason {
         Some("stop") | None => FinishReason::Stop,
         Some("length") => FinishReason::MaxTokens,
-        // Phase 2: decode the `tool_calls` blocks into ToolCalls.
-        Some("tool_calls") => FinishReason::ToolUse(Vec::new()),
+        Some("tool_calls") => FinishReason::ToolUse(tool_calls),
         Some("content_filter") => {
             FinishReason::Error("generation halted by content filter".to_string())
         }
@@ -543,22 +633,95 @@ mod tests {
     #[test]
     fn finish_reason_mapping() {
         assert!(matches!(
-            map_finish_reason(Some("stop")),
+            map_finish_reason(Some("stop"), Vec::new()),
             FinishReason::Stop
         ));
-        assert!(matches!(map_finish_reason(None), FinishReason::Stop));
         assert!(matches!(
-            map_finish_reason(Some("length")),
+            map_finish_reason(None, Vec::new()),
+            FinishReason::Stop
+        ));
+        assert!(matches!(
+            map_finish_reason(Some("length"), Vec::new()),
             FinishReason::MaxTokens
         ));
+        // The decoded calls flow straight into the ToolUse variant.
+        let calls = vec![ToolCall {
+            id: "call_1".to_string(),
+            name: "echo".to_string(),
+            arguments: serde_json::json!({"msg": "hi"}),
+        }];
         assert!(matches!(
-            map_finish_reason(Some("tool_calls")),
-            FinishReason::ToolUse(_)
+            map_finish_reason(Some("tool_calls"), calls),
+            FinishReason::ToolUse(c) if c.len() == 1 && c[0].name == "echo"
         ));
         assert!(matches!(
-            map_finish_reason(Some("content_filter")),
+            map_finish_reason(Some("content_filter"), Vec::new()),
             FinishReason::Error(_)
         ));
+    }
+
+    #[test]
+    fn response_parsing_decodes_tool_calls() {
+        let raw = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_abc",
+                        "type": "function",
+                        "function": {"name": "echo", "arguments": "{\"msg\":\"hi\"}"}
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        });
+        let parsed: ChatCompletion = serde_json::from_value(raw.clone()).unwrap();
+        let resp = parsed.into_completion(raw);
+        match resp.finish_reason {
+            FinishReason::ToolUse(calls) => {
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].id, "call_abc");
+                assert_eq!(calls[0].name, "echo");
+                assert_eq!(calls[0].arguments, serde_json::json!({"msg": "hi"}));
+            }
+            other => panic!("expected ToolUse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn request_body_serializes_tools_and_tool_messages() {
+        use ardur_provider_runtime::ToolDef;
+        use ardur_runtime::ChatMessage;
+        let calls = vec![ToolCall {
+            id: "call_1".to_string(),
+            name: "echo".to_string(),
+            arguments: serde_json::json!({"msg": "hi"}),
+        }];
+        let mut req = CompletionRequest::new(
+            vec![
+                ChatMessage::user("call echo"),
+                ChatMessage::assistant_tool_calls("", calls),
+                ChatMessage::tool_result("call_1", "{\"msg\":\"hi\"}"),
+            ],
+            ModelId::new("openai/gpt-4o"),
+            64,
+        );
+        req.tools = vec![ToolDef {
+            name: "echo".to_string(),
+            description: "echoes".to_string(),
+            input_schema: serde_json::json!({"type": "object"}),
+        }];
+        let body = build_request_body(&req);
+        assert_eq!(body["tools"][0]["type"], "function");
+        assert_eq!(body["tools"][0]["function"]["name"], "echo");
+        assert_eq!(body["messages"][1]["tool_calls"][0]["id"], "call_1");
+        assert_eq!(
+            body["messages"][1]["tool_calls"][0]["function"]["name"],
+            "echo"
+        );
+        assert_eq!(body["messages"][2]["role"], "tool");
+        assert_eq!(body["messages"][2]["tool_call_id"], "call_1");
     }
 
     #[test]

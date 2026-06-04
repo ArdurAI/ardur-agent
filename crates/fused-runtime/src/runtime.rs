@@ -5,8 +5,10 @@
 //!
 //! [`submit`]: FusedRuntime::submit
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use ardur_cap_token::{
     BiscuitCapTokenVerifier, CapToken, CapTokenError, CapTokenVerifier, PublicKey, RequiredCaveats,
@@ -29,14 +31,17 @@ use ardur_lifecycle_hooks::{
 };
 use ardur_memory::MemoryRuntime;
 use ardur_provider_runtime::{
-    CompletionRequest, CompletionResponse, ModelId, Provider, ProviderError,
+    CompletionRequest, CompletionResponse, FinishReason, ModelId, Provider, ProviderError, ToolDef,
 };
-use ardur_receipt::{Es256SigningKey, ReceiptBody, ReceiptSigner, Sha256Digest, VerbObject};
+use ardur_receipt::{
+    Es256SigningKey, ReceiptBody, ReceiptSigner, Sha256Digest, ToolCallReceipt, VerbObject,
+};
 use ardur_runtime::{
     CapTokenRef, ChatMessage, ChatRuntime, CostTuple as RuntimeCostTuple, ReceiptId, Role,
-    RuntimeError, SessionId, SubmitRequest, SubmitResult,
+    RuntimeError, SessionId, SubmitRequest, SubmitResult, ToolCall,
 };
 use ardur_session_journals::{JournalEntry, SessionJournal};
+use ardur_tool_registry::{InvocationId, ToolContext, ToolError, ToolId, ToolRegistry};
 use parking_lot::Mutex;
 
 use crate::receipts::{PersistedReceipt, load_persisted_chain};
@@ -116,6 +121,15 @@ pub struct FusedRuntime {
     pub(crate) chain_tail: Mutex<Option<Sha256Digest>>,
     pub(crate) receipt_log: Option<PathBuf>,
     pub(crate) reconciliation_strategy: ReconciliationStrategy,
+    /// §6.0 — the tools the model may call, advertised to the provider and
+    /// looked up to invoke. Empty (the builder default) means the loop runs once
+    /// and tool-use responses surface as the final answer.
+    pub(crate) tools: Arc<ToolRegistry>,
+    /// §6.0 — the maximum number of provider iterations that may request tools
+    /// before the turn aborts with [`RuntimeError::ToolLoopExhausted`].
+    pub(crate) max_tool_iterations: u32,
+    /// §6.0 — the per-tool-call deadline.
+    pub(crate) tool_timeout: Duration,
 }
 
 impl FusedRuntime {
@@ -233,6 +247,77 @@ impl FusedRuntime {
                 request.messages[idx].content = sanitized;
                 Ok(request)
             }
+            Verdict::Block { reason } => Err(RuntimeError::injection_blocked(
+                INJECTION_FILTER_STAGE_ID,
+                reason,
+                scan.flags,
+            )),
+        }
+    }
+
+    /// **§6.0.** The tools advertised to the provider this turn — one
+    /// [`ToolDef`] per registered tool, projected from its registry schema. An
+    /// empty registry yields an empty list, so the request is byte-identical to
+    /// a pre-tool one and the loop settles on the first provider response.
+    fn tool_defs(&self) -> Vec<ToolDef> {
+        self.tools
+            .list()
+            .into_iter()
+            .map(|t| {
+                let schema = t.schema();
+                ToolDef {
+                    name: t.id().0,
+                    description: schema.description.clone(),
+                    input_schema: schema.input_schema.clone(),
+                }
+            })
+            .collect()
+    }
+
+    /// **§6.0.** The ambient context a tool invocation runs against. The cwd is
+    /// the process working directory and the env is empty — Phase-1 tools (echo,
+    /// health-check, remote MCP) do not consult either; the cost budget is the
+    /// per-turn envelope's cents ceiling.
+    fn tool_context(&self, cap_token: &CapTokenRef, session_id: SessionId) -> ToolContext {
+        ToolContext {
+            cap_token: cap_token.clone(),
+            session_id,
+            invocation_id: InvocationId::new(),
+            cwd: std::env::current_dir().unwrap_or_default(),
+            env: HashMap::new(),
+            cost_budget_cents: self.envelope.cents_max,
+        }
+    }
+
+    /// **§6.0 (ARD-22).** Scan a tool's output through the injection-defense
+    /// registry before it re-enters the transcript as the next provider call's
+    /// input — a `ToolReturn`-sourced scan, since a tool (especially a remote
+    /// MCP one) is attacker-influenced content, not the runtime's own.
+    ///
+    /// An empty registry short-circuits to allow. A `Block` verdict surfaces as
+    /// [`RuntimeError::InjectionBlocked`]; `AllowWithSanitization` is treated as
+    /// allow here (the structured JSON output is not rewritten in place in P1).
+    async fn scan_tool_output(
+        &self,
+        tool_name: &str,
+        output: &serde_json::Value,
+    ) -> Result<(), RuntimeError> {
+        if self.injection_filters.is_empty() {
+            return Ok(());
+        }
+        let content = ScannableContent::ToolOutput {
+            tool_id: ToolId::new(tool_name),
+            output: output.clone(),
+        };
+        let scan = self
+            .injection_filters
+            .scan_all(&content)
+            .await
+            .map_err(|e| {
+                RuntimeError::Internal(anyhow::anyhow!("tool-output injection scan failed: {e}"))
+            })?;
+        match scan.verdict {
+            Verdict::Allow | Verdict::AllowWithSanitization { .. } => Ok(()),
             Verdict::Block { reason } => Err(RuntimeError::injection_blocked(
                 INJECTION_FILTER_STAGE_ID,
                 reason,
@@ -583,17 +668,16 @@ impl FusedRuntime {
             }
         }
 
-        // ---- 3. cost-gate: resolve the budget holder, optionally top it up for
-        //         this request, bind the verified token to it, then reserve the
-        //         projected envelope.
+        // ---- 3. cost-gate setup (once): resolve the budget holder and, if the
+        //         request carries a budget, top it up *before* admission, then
+        //         bind the verified token to the holder. The per-iteration
+        //         `admit`/`finalize` happen inside the tool-call loop below — each
+        //         provider round (the initial call plus one per tool round trip)
+        //         reserves and settles its own envelope.
         //
         // The holder is the verified cap-token subject (so a turn spends against
         // whoever the cap proved), unless the caller overrides it — rare, and
-        // reserved for impersonation-test fixtures. If the request carries a
-        // budget, provision it onto the holder *before* admission so a freshly
-        // funded subject can reserve against the new balance; the merge is
-        // additive, so a per-turn top-up accumulates rather than zeroing unspent
-        // budget.
+        // reserved for impersonation-test fixtures.
         let gate_token_id = GateTokenId(claims.token_id);
         let holder = provisioning
             .subject
@@ -611,42 +695,26 @@ impl FusedRuntime {
             }
         }
         self.gate.bind_token(gate_token_id, holder.clone());
-        let request_digest = GateSha256::of(&serde_json::to_vec(&req.messages).unwrap_or_default());
-        let reservation = match self
-            .gate
-            .admit(AdmissionRequest {
-                cap_token_id: gate_token_id,
-                projected_envelope: self.envelope,
-                provider_id: self.gate_provider_id.clone(),
-                model_id: self.gate_model_id.clone(),
-                request_digest,
-            })
-            .await
-        {
-            Ok(reservation) => reservation,
-            Err(e) => {
-                let err = map_admission_error(e);
-                self.fire_error(session_id, LifecyclePhase::Submit, &err)
-                    .await;
-                return Err(err);
-            }
-        };
 
-        // ---- 4. pre-submit hooks. A veto aborts (releasing the reservation); a
-        //         replace swaps the request used from here on.
+        // The tools advertised to the provider every iteration of this turn.
+        let tool_defs = self.tool_defs();
+
+        // ---- 4. pre-submit hooks (once, on the initial request). A veto aborts;
+        //         a replace swaps the request the loop starts from. No cost
+        //         reservation is held yet, so a veto needs no release.
         let base_request =
-            CompletionRequest::new(req.messages.clone(), self.model.clone(), self.max_tokens);
+            CompletionRequest::new(req.messages.clone(), self.model.clone(), self.max_tokens)
+                .with_tools(tool_defs.clone());
         let pre_ctx = PreSubmitCtx {
             session_id,
             request: &base_request,
             cap_token_id: &req.cap_token,
             attempt: 1,
         };
-        let request = match self.registry.run_pre_submit(&pre_ctx).await {
+        let initial = match self.registry.run_pre_submit(&pre_ctx).await {
             PreSubmitOutcome::Continue => base_request,
             PreSubmitOutcome::Replaced { request } => request,
             PreSubmitOutcome::Vetoed { hook_id, reason } => {
-                self.release(reservation).await;
                 return Err(RuntimeError::VetoedByHook {
                     hook_id: hook_id.to_string(),
                     reason,
@@ -654,108 +722,258 @@ impl FusedRuntime {
             }
         };
 
-        // ---- 4.5 injection-defense: scan the (possibly hook-rewritten) outbound
-        //          prompt before it reaches the provider. `Allow` forwards it
-        //          unchanged; `AllowWithSanitization` swaps the provider body for
-        //          the redacted rewrite (the *raw* prompt still rides through to
-        //          the journal at stage 10, which reads `req.messages`, not this
-        //          local request); `Block` releases the reservation and returns
-        //          `InjectionBlocked` — so the provider, and every billing /
-        //          receipt side effect downstream of it, never runs. An empty
-        //          filter registry (the default) is a no-op short-circuit.
-        //
-        // TODO ARD-22: tool outputs through filter as ToolReturn when tool-use lands.
-        let request = match self.scan_outbound_request(request).await {
-            Ok(request) => request,
-            Err(err) => {
-                self.release(reservation).await;
-                self.fire_error(session_id, LifecyclePhase::Submit, &err)
-                    .await;
-                return Err(err);
-            }
-        };
+        // The working transcript the loop grows with each tool round trip, plus
+        // the request knobs (a hook may have rewritten temperature / stops) that
+        // ride onto every iteration's request.
+        let mut messages = initial.messages;
+        let temperature = initial.temperature;
+        let stop_sequences = initial.stop_sequences;
+        let requested_cost_envelope = initial.requested_cost_envelope;
 
-        // ---- 5. provider: real dispatch.
-        let response = match self.provider.complete(request).await {
-            Ok(response) => response,
-            Err(provider_err) => {
-                self.release(reservation).await;
-                self.fire_error(session_id, LifecyclePhase::Provider, &provider_err)
-                    .await;
-                return Err(map_provider_error(&provider_err));
-            }
-        };
+        // ---- 5–10 + tool execution: the tool-call loop. Each iteration runs the
+        //          full per-call pipeline — injection scan, cost-gate admit,
+        //          provider dispatch, tool execution (with the tool output scanned
+        //          and the model's calls recorded on the receipt), receipt mint,
+        //          finalize, memory, and journal — then either settles on a final
+        //          answer (no tool calls), continues with the tool results folded
+        //          back in, or aborts with `ToolLoopExhausted`.
+        let mut iteration: u32 = 0;
+        let mut total_cost = RuntimeCostTuple::default();
 
-        // ---- 6. receipt: mint, chain onto the prior receipt, sign, persist.
-        let parent_hash = *self.chain_tail.lock();
-        let body = ReceiptBody {
-            receipt_id: uuid::Uuid::new_v4(),
-            parent_hash,
-            verb: self.verb.clone(),
-            issued_at: ardur_receipt::UnixTsMillis(now_ms),
-            subject: ardur_receipt::HolderId(claims.subject.0.clone()),
-            cap_token_id: ardur_receipt::TokenId(claims.token_id.to_string()),
-            payload_digest: Sha256Digest::of(response.content.as_bytes()),
-            cost: runtime_cost_to_receipt(&response.cost),
-        };
-        let signed = match ReceiptSigner::sign(body, &self.receipt_key) {
-            Ok(signed) => signed,
-            Err(e) => {
-                self.release(reservation).await;
+        let (receipt, final_content) = loop {
+            iteration += 1;
+
+            // Build this iteration's request from the current transcript + tools.
+            let mut iter_request =
+                CompletionRequest::new(messages.clone(), self.model.clone(), self.max_tokens);
+            iter_request.temperature = temperature;
+            iter_request.stop_sequences = stop_sequences.clone();
+            iter_request.requested_cost_envelope = requested_cost_envelope;
+            iter_request.tools = tool_defs.clone();
+
+            // 4.5 injection-defense: scan the most recent user message (tool
+            // outputs are scanned at the point they are produced, below). No
+            // reservation is held yet, so a block needs no release.
+            let iter_request = match self.scan_outbound_request(iter_request).await {
+                Ok(request) => request,
+                Err(err) => {
+                    self.fire_error(session_id, LifecyclePhase::Submit, &err)
+                        .await;
+                    return Err(err);
+                }
+            };
+
+            // 3'. cost-gate admit (per iteration).
+            let request_digest =
+                GateSha256::of(&serde_json::to_vec(&iter_request.messages).unwrap_or_default());
+            let reservation = match self
+                .gate
+                .admit(AdmissionRequest {
+                    cap_token_id: gate_token_id,
+                    projected_envelope: self.envelope,
+                    provider_id: self.gate_provider_id.clone(),
+                    model_id: self.gate_model_id.clone(),
+                    request_digest,
+                })
+                .await
+            {
+                Ok(reservation) => reservation,
+                Err(e) => {
+                    let err = map_admission_error(e);
+                    self.fire_error(session_id, LifecyclePhase::Submit, &err)
+                        .await;
+                    return Err(err);
+                }
+            };
+
+            // 5. provider dispatch.
+            let response = match self.provider.complete(iter_request).await {
+                Ok(response) => response,
+                Err(provider_err) => {
+                    self.release(reservation).await;
+                    self.fire_error(session_id, LifecyclePhase::Provider, &provider_err)
+                        .await;
+                    return Err(map_provider_error(&provider_err));
+                }
+            };
+
+            // The tool calls (if any) the model requested this round.
+            let requested: Vec<ToolCall> = match &response.finish_reason {
+                FinishReason::ToolUse(calls) => calls.clone(),
+                _ => Vec::new(),
+            };
+            let wants_tools = !requested.is_empty();
+            // The loop is bounded: once we have made `max_tool_iterations`
+            // provider calls and the model still wants tools, we abort rather
+            // than execute another round.
+            let exhausted = wants_tools && iteration >= self.max_tool_iterations;
+
+            // Tool execution: invoke each requested tool (unless we are aborting),
+            // scan its output, record it on the receipt, and stage the result
+            // message for the next iteration.
+            let mut tool_receipts: Vec<ToolCallReceipt> = Vec::new();
+            let mut tool_messages: Vec<ChatMessage> = Vec::new();
+            let mut tool_cost = RuntimeCostTuple::default();
+            if wants_tools && !exhausted {
+                for call in &requested {
+                    let Some(tool) = self.tools.get(&ToolId::new(&call.name)) else {
+                        self.release(reservation).await;
+                        let err = RuntimeError::UnknownTool {
+                            tool: call.name.clone(),
+                        };
+                        self.fire_error(session_id, LifecyclePhase::Provider, &err)
+                            .await;
+                        return Err(err);
+                    };
+                    let ctx = self.tool_context(&req.cap_token, session_id);
+                    let output = match tokio::time::timeout(
+                        self.tool_timeout,
+                        tool.invoke(&ctx, call.arguments.clone()),
+                    )
+                    .await
+                    {
+                        Ok(Ok(output)) => output,
+                        Ok(Err(tool_err)) => {
+                            self.release(reservation).await;
+                            let err = map_tool_error(tool_err, &call.name);
+                            self.fire_error(session_id, LifecyclePhase::Provider, &err)
+                                .await;
+                            return Err(err);
+                        }
+                        Err(_elapsed) => {
+                            self.release(reservation).await;
+                            let err = RuntimeError::ToolTimeout {
+                                tool: call.name.clone(),
+                            };
+                            self.fire_error(session_id, LifecyclePhase::Provider, &err)
+                                .await;
+                            return Err(err);
+                        }
+                    };
+
+                    // Scan the tool output before it re-enters the context.
+                    if let Err(err) = self.scan_tool_output(&call.name, &output.content).await {
+                        self.release(reservation).await;
+                        self.fire_error(session_id, LifecyclePhase::Submit, &err)
+                            .await;
+                        return Err(err);
+                    }
+
+                    tool_cost = add_cost(tool_cost, &output.cost);
+                    tool_receipts.push(ToolCallReceipt {
+                        call_id: call.id.clone(),
+                        tool_name: call.name.clone(),
+                        arguments_digest: Sha256Digest::of(
+                            &serde_json::to_vec(&call.arguments).unwrap_or_default(),
+                        ),
+                        output_digest: Sha256Digest::of(
+                            &serde_json::to_vec(&output.content).unwrap_or_default(),
+                        ),
+                        cost: runtime_cost_to_receipt(&output.cost),
+                    });
+                    tool_messages.push(ChatMessage::tool_result(
+                        &call.id,
+                        tool_output_text(&output.content),
+                    ));
+                }
+            } else if exhausted {
+                // Record the model's requested calls for audit even though the
+                // loop aborts without executing them (the provider call that asked
+                // for them did happen and is being receipted + billed below).
+                for call in &requested {
+                    tool_receipts.push(ToolCallReceipt {
+                        call_id: call.id.clone(),
+                        tool_name: call.name.clone(),
+                        arguments_digest: Sha256Digest::of(
+                            &serde_json::to_vec(&call.arguments).unwrap_or_default(),
+                        ),
+                        output_digest: Sha256Digest::of(b""),
+                        cost: runtime_cost_to_receipt(&RuntimeCostTuple::default()),
+                    });
+                }
+            }
+
+            // 6. receipt: mint over the provider response, recording the tool
+            //    calls and the combined (provider + tool) cost, chained onto the
+            //    prior receipt.
+            let combined_cost = add_cost(response.cost, &tool_cost);
+            let parent_hash = *self.chain_tail.lock();
+            let body = ReceiptBody {
+                receipt_id: uuid::Uuid::new_v4(),
+                parent_hash,
+                verb: self.verb.clone(),
+                issued_at: ardur_receipt::UnixTsMillis(now_ms),
+                subject: ardur_receipt::HolderId(claims.subject.0.clone()),
+                cap_token_id: ardur_receipt::TokenId(claims.token_id.to_string()),
+                payload_digest: Sha256Digest::of(response.content.as_bytes()),
+                cost: runtime_cost_to_receipt(&combined_cost),
+                tool_calls: tool_receipts,
+            };
+            let signed = match ReceiptSigner::sign(body, &self.receipt_key) {
+                Ok(signed) => signed,
+                Err(e) => {
+                    self.release(reservation).await;
+                    self.fire_error(session_id, LifecyclePhase::Receipt, &e)
+                        .await;
+                    return Err(RuntimeError::Internal(anyhow::anyhow!(
+                        "receipt mint failed: {e}"
+                    )));
+                }
+            };
+            *self.chain_tail.lock() = Some(Sha256Digest::of(signed.jws_compact().as_bytes()));
+            if let Err(e) = self.persist_receipt(signed.jws_compact()) {
                 self.fire_error(session_id, LifecyclePhase::Receipt, &e)
                     .await;
-                return Err(RuntimeError::Internal(anyhow::anyhow!(
-                    "receipt mint failed: {e}"
-                )));
             }
-        };
-        // Advance the chain tail to this receipt's JWS hash and persist the line
-        // before observers run, so the chain state is consistent the moment a
-        // post-receipt hook (or a crash) sees the receipt. We set `parent_hash`
-        // from the stored digest rather than via `ReceiptChain::append` because
-        // a restart resumes from a hash, not a reconstructable `SignedReceipt`.
-        *self.chain_tail.lock() = Some(Sha256Digest::of(signed.jws_compact().as_bytes()));
-        if let Err(e) = self.persist_receipt(signed.jws_compact()) {
-            self.fire_error(session_id, LifecyclePhase::Receipt, &e)
-                .await;
-        }
-        let receipt = signed.body().clone();
+            let receipt = signed.body().clone();
 
-        // ---- 7. post-receipt hooks (observational; the turn already happened).
-        let post_ctx = PostReceiptCtx {
-            session_id,
-            receipt: &receipt,
-            response: &response,
-            cost: response.cost,
-        };
-        for err in self.registry.run_post_receipt(&post_ctx).await {
-            let _ = err;
-        }
-
-        // ---- 8. cost-gate finalize: post the actual cost, refund the unspent
-        //         delta. A settlement failure auto-releases the hold inside the
-        //         gate, so we never strand the budget and never fail the
-        //         already-receipted turn over it.
-        let actual = runtime_cost_to_gate(&response.cost);
-        let _ = self.gate.finalize(reservation, actual).await;
-
-        // ---- 9. memory: record the turn as a bi-temporal fact. Non-fatal.
-        if let Some(memory) = &self.memory {
-            let record = turn_record(&claims.subject.0, &response, &receipt, now_ms);
-            if let Err(mem_err) = memory.record(record) {
-                self.fire_error(session_id, LifecyclePhase::MemoryWrite, &mem_err)
-                    .await;
+            // 7. post-receipt hooks (observational; the call already happened).
+            let post_ctx = PostReceiptCtx {
+                session_id,
+                receipt: &receipt,
+                response: &response,
+                cost: response.cost,
+            };
+            for err in self.registry.run_post_receipt(&post_ctx).await {
+                let _ = err;
             }
-        }
 
-        // ---- 10. session-journal: append the user + assistant messages. The
-        //          backend fsyncs each entry. Non-fatal.
-        if let Some(journal) = &self.journal {
-            if let Some(prompt) = last_user_message(&req.messages) {
+            // 8. cost-gate finalize: settle this iteration against the combined
+            //    actual (provider + the tools it triggered).
+            let actual = runtime_cost_to_gate(&combined_cost);
+            let _ = self.gate.finalize(reservation, actual).await;
+
+            // 9. memory: record this round as a bi-temporal fact. Non-fatal.
+            if let Some(memory) = &self.memory {
+                let record = turn_record(&claims.subject.0, &response, &receipt, now_ms);
+                if let Err(mem_err) = memory.record(record) {
+                    self.fire_error(session_id, LifecyclePhase::MemoryWrite, &mem_err)
+                        .await;
+                }
+            }
+
+            // 10. session-journal: append the original user prompt once (on the
+            //     first iteration) and this round's assistant message. Non-fatal.
+            if let Some(journal) = &self.journal {
+                if iteration == 1 {
+                    if let Some(prompt) = last_user_message(&req.messages) {
+                        if let Err(e) = journal
+                            .append(JournalEntry::UserMessage {
+                                content: prompt.to_string(),
+                                at: now_ms,
+                            })
+                            .await
+                        {
+                            self.fire_error(session_id, LifecyclePhase::JournalAppend, &e)
+                                .await;
+                        }
+                    }
+                }
                 if let Err(e) = journal
-                    .append(JournalEntry::UserMessage {
-                        content: prompt.to_string(),
+                    .append(JournalEntry::AssistantMessage {
+                        content: response.content.clone(),
                         at: now_ms,
+                        receipt_id: ReceiptId(receipt.receipt_id),
                     })
                     .await
                 {
@@ -763,23 +981,35 @@ impl FusedRuntime {
                         .await;
                 }
             }
-            if let Err(e) = journal
-                .append(JournalEntry::AssistantMessage {
-                    content: response.content.clone(),
-                    at: now_ms,
-                    receipt_id: ReceiptId(receipt.receipt_id),
-                })
-                .await
-            {
-                self.fire_error(session_id, LifecyclePhase::JournalAppend, &e)
-                    .await;
+
+            total_cost = add_cost(total_cost, &combined_cost);
+
+            // Termination: a response with no tool calls is the final answer; a
+            // tool-wanting response at the iteration ceiling aborts; otherwise we
+            // fold the assistant's tool-call turn and the tool results into the
+            // transcript and loop.
+            if !wants_tools {
+                break (receipt, response.content);
             }
-        }
+            if exhausted {
+                let err = RuntimeError::ToolLoopExhausted {
+                    iterations: iteration,
+                };
+                self.fire_error(session_id, LifecyclePhase::Provider, &err)
+                    .await;
+                return Err(err);
+            }
+            messages.push(ChatMessage::assistant_tool_calls(
+                response.content.clone(),
+                requested,
+            ));
+            messages.extend(tool_messages);
+        };
 
         Ok(SubmitResult {
             receipt_id: ReceiptId(receipt.receipt_id),
-            response: ChatMessage::assistant(response.content),
-            cost: response.cost,
+            response: ChatMessage::assistant(final_content),
+            cost: total_cost,
         })
     }
 }
@@ -864,6 +1094,40 @@ fn map_provider_error(err: &ProviderError) -> RuntimeError {
     match err {
         ProviderError::CostCeilingExceeded => RuntimeError::CostCeilingExceeded,
         _ => RuntimeError::ProviderUnavailable,
+    }
+}
+
+/// Sum two runtime cost tuples dimension-wise (saturating on the integer axes),
+/// used to fold each tool call's cost into a turn's provider cost (§6.0).
+fn add_cost(a: RuntimeCostTuple, b: &RuntimeCostTuple) -> RuntimeCostTuple {
+    RuntimeCostTuple {
+        tokens_in: a.tokens_in.saturating_add(b.tokens_in),
+        tokens_out: a.tokens_out.saturating_add(b.tokens_out),
+        cents: a.cents.saturating_add(b.cents),
+        wall_ms: a.wall_ms.saturating_add(b.wall_ms),
+        attention_score: a.attention_score + b.attention_score,
+    }
+}
+
+/// Map a tool-registry failure onto the runtime's error surface. A tool that
+/// reported its own timeout maps to [`RuntimeError::ToolTimeout`]; everything
+/// else degrades to [`RuntimeError::Internal`] carrying the tool name.
+fn map_tool_error(err: ToolError, tool: &str) -> RuntimeError {
+    match err {
+        ToolError::Timeout => RuntimeError::ToolTimeout {
+            tool: tool.to_string(),
+        },
+        other => RuntimeError::Internal(anyhow::anyhow!("tool `{tool}` failed: {other}")),
+    }
+}
+
+/// Render a tool's JSON output as the text content of its `tool_result` message.
+/// A JSON string is unwrapped to its inner text; anything else is its compact
+/// JSON rendering.
+fn tool_output_text(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
     }
 }
 
