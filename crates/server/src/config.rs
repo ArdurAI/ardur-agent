@@ -67,6 +67,11 @@ pub struct Config {
     /// Override for the Slack Web-API base URL — `None` in production (the
     /// adapter's default), `Some(mock.uri())` in tests.
     pub slack_base_url: Option<String>,
+    /// Whether to start the Matrix channel adapter alongside Slack
+    /// (`ARDUR_CHANNEL_MATRIX`, default `false`). When `true`, the `MATRIX_*`
+    /// credentials are required at config-load (the bin constructs
+    /// `MatrixChannel::from_env` at boot); the adapter itself re-reads them.
+    pub channel_matrix: bool,
     /// How tracing events are formatted (`ARDUR_LOG_FORMAT`).
     pub log_format: LogFormat,
     /// Whether the §6.0 MCP surface is mounted (`ARDUR_MCP_ENABLED`, default
@@ -157,6 +162,18 @@ impl Config {
             optional("QDRANT_URL")
         };
 
+        // The Matrix adapter is opt-in; when enabled, its credentials are
+        // required at config-load (mirroring the Anthropic-key conditional) so a
+        // misconfigured boot fails here rather than mid-startup.
+        let channel_matrix = optional("ARDUR_CHANNEL_MATRIX")
+            .as_deref()
+            .is_some_and(is_truthy);
+        if channel_matrix {
+            require("MATRIX_HOMESERVER_URL")?;
+            require("MATRIX_USER_ID")?;
+            require("MATRIX_ACCESS_TOKEN")?;
+        }
+
         Ok(Self {
             anthropic_api_key,
             slack_bot_token: require("SLACK_BOT_TOKEN")?,
@@ -171,6 +188,7 @@ impl Config {
                 .unwrap_or(10_000),
             cedar_policy_path: optional("ARDUR_CEDAR_POLICY_PATH").map(PathBuf::from),
             slack_base_url: None,
+            channel_matrix,
             log_format: match optional("ARDUR_LOG_FORMAT").as_deref() {
                 Some("json") => LogFormat::Json,
                 _ => LogFormat::Text,
@@ -212,6 +230,15 @@ fn parse_remote_servers(value: Option<&str>) -> Vec<(String, String)> {
             (!name.is_empty() && !url.is_empty()).then(|| (name.to_string(), url.to_string()))
         })
         .collect()
+}
+
+/// Whether a string is a truthy flag value: `true`/`1`/`yes`/`on`
+/// (case-insensitive). Anything else (including unset) is false.
+fn is_truthy(raw: &str) -> bool {
+    matches!(
+        raw.trim().to_ascii_lowercase().as_str(),
+        "true" | "1" | "yes" | "on"
+    )
 }
 
 /// Read a required env var, mapping an unset/empty value to [`MissingEnvVar`].

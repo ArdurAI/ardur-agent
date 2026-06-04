@@ -106,6 +106,50 @@ phase.
 5. Invite the bot to the channel(s) you want it to listen on
    (`/invite @ardur`).
 
+## Matrix channel (optional second channel)
+
+ardur can run a Matrix bot alongside Slack. Matrix is an open, federated,
+Rust-native protocol — a good fit for self-hosted deployments. The adapter
+(`crates/channel-matrix`, built on `matrix-sdk` 0.18) is **off by default**;
+enable it with `ARDUR_CHANNEL_MATRIX=true`.
+
+1. **Provision a bot account** on your homeserver (e.g. matrix.org or a
+   self-hosted Synapse/Conduit). Register a user such as `@ardur-bot:your.hs`.
+2. **Mint an access token** for the bot (access-token auth is preferred over a
+   password for bots). Either from a client (Element → Settings → Help & About →
+   Access Token) or via the login API:
+   ```sh
+   curl -XPOST https://your.hs/_matrix/client/v3/login \
+     -d '{"type":"m.login.password","identifier":{"type":"m.id.user","user":"ardur-bot"},"password":"…"}'
+   # copy the "access_token" (and "device_id") from the response
+   ```
+3. **Configure the env** (see `.env.example`):
+   ```sh
+   ARDUR_CHANNEL_MATRIX=true
+   MATRIX_HOMESERVER_URL=https://your.hs
+   MATRIX_USER_ID=@ardur-bot:your.hs
+   MATRIX_ACCESS_TOKEN=syt_…
+   MATRIX_DEVICE_ID=ARDUR_BOT            # use the device_id from step 2 for E2EE
+   MATRIX_STATE_DIR=/var/lib/ardur/matrix-state
+   MATRIX_AUTO_JOIN_INVITES=true
+   MATRIX_ALLOWED_ROOMS=                 # optional: restrict to specific room ids
+   ```
+   When `ARDUR_CHANNEL_MATRIX=true`, the three `MATRIX_*` credentials are
+   required at startup (the boot fails fast if any is missing).
+4. **Opt into rooms.** With `MATRIX_AUTO_JOIN_INVITES=true`, invite the bot to a
+   room and it joins automatically. To restrict it, set `MATRIX_ALLOWED_ROOMS`
+   to a comma-separated list of room ids (`!abc:your.hs,!def:your.hs`); messages
+   from rooms outside the list are dropped. An empty value means all rooms.
+5. **End-to-end encryption.** The adapter is built with E2EE on. For encrypted
+   rooms, give the bot a **stable `MATRIX_DEVICE_ID`** and a durable
+   `MATRIX_STATE_DIR` (it holds the sqlite crypto store — treat it as a secret),
+   and **verify the bot's device** from a trusted session on first run.
+   Otherwise messages in encrypted rooms may be undecryptable until keys are
+   shared. See `crates/channel-matrix/README.md` for the full caveat.
+
+Inbound Matrix messages run through the same fused turn pipeline as Slack, and
+replies are posted back into the originating room.
+
 ## Local development
 
 ```sh

@@ -103,3 +103,6 @@ tower = { workspace = true }
 # 401 path); the `RemoteMcpToolset` client drives the authorized tools/list +
 # tools/call round-trip.
 reqwest = { workspace = true }
+# The §4.X Matrix scenario drives a fused turn from a Matrix-shaped inbound
+# message; its gated-live half connects a real `MatrixChannel`.
+ardur-channel-matrix = { workspace = true }
