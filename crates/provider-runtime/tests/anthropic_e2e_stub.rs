@@ -33,6 +33,7 @@ fn full_request() -> CompletionRequest {
             max_total_tokens: Some(4096),
         },
         tools: Vec::new(),
+        stream: false,
     }
 }
 
