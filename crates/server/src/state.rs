@@ -37,18 +37,19 @@
 //! the runtime (or an injectable shared budget store).
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ardur_cap_token::{
     BiscuitCapTokenIssuer, CapScope, CapTokenIssuer, HolderId as CapHolderId, KeyPair,
 };
 use ardur_cedar_policy::{ActionRef, CedarPolicyBundle, PolicyBundle, PolicySource};
+use ardur_channel_matrix::MatrixChannel;
 use ardur_cost_gate::{CostEnvelope, CostTuple as GateCostTuple, HolderId as GateHolderId};
 use ardur_fused_runtime::{FusedRuntime, FusedRuntimeBuilder};
 use ardur_memory::{InMemoryMemoryRuntime, MemoryRuntime};
 use ardur_memory_qdrant::{QdrantMemoryConfig, QdrantMemoryRuntime};
-use ardur_messaging_gateway::{IncomingMessage, MessageBody};
+use ardur_messaging_gateway::{IncomingMessage, MessageBody, MessagingGateway};
 use ardur_provider_runtime::{ModelId, Provider};
 use ardur_receipt::Es256SigningKey;
 use ardur_runtime::{CapTokenRef, ChatMessage, ChatRuntime, SessionId, SubmitRequest};
@@ -100,6 +101,11 @@ pub struct AppState {
     journal: Arc<dyn SessionJournal>,
     data_dir: PathBuf,
     mcp: Option<McpSurface>,
+    /// The Matrix channel, once [`attach_matrix`](AppState::attach_matrix) wires
+    /// it (only when `ARDUR_CHANNEL_MATRIX=true`). Shared with the worker's
+    /// [`Processor`] through the same `OnceLock`, so setting it here makes the
+    /// reply path visible to the worker too. Empty when Matrix is disabled.
+    matrix: Arc<OnceLock<Arc<MatrixChannel>>>,
 }
 
 /// The data [`build_router`](crate::build_router) needs to mount the §6.0 MCP
@@ -216,10 +222,15 @@ impl AppState {
         }
         let slack = Arc::new(slack);
 
-        // 7. The turn-processing worker (see module docs on why a thread).
+        // 7. The turn-processing worker (see module docs on why a thread). The
+        //    Matrix slot is shared with the worker so a Matrix-origin turn can be
+        //    replied to through the Matrix channel; it stays empty unless
+        //    `attach_matrix` later fills it.
+        let matrix: Arc<OnceLock<Arc<MatrixChannel>>> = Arc::new(OnceLock::new());
         let processor = Processor {
             runtime,
             slack: slack.clone(),
+            matrix: matrix.clone(),
             issuer,
             cap_budget_remaining: config.cost_budget_cents,
         };
@@ -257,6 +268,7 @@ impl AppState {
             journal,
             data_dir,
             mcp,
+            matrix,
         }))
     }
 
@@ -264,6 +276,45 @@ impl AppState {
     #[must_use]
     pub fn mcp(&self) -> Option<&McpSurface> {
         self.mcp.as_ref()
+    }
+
+    /// Wire a connected Matrix channel into the running server: record it for the
+    /// worker's reply path, start its sync loop, and spawn a task that forwards
+    /// each inbound Matrix message onto the same work queue Slack uses.
+    ///
+    /// Called by the binary after [`boot`](Self::boot) when
+    /// `ARDUR_CHANNEL_MATRIX=true`. Must run inside a Tokio runtime (the bin's
+    /// `#[tokio::main]`), since it spawns the sync and forwarding tasks. Calling
+    /// it more than once is a no-op for the reply slot (the first channel wins).
+    pub fn attach_matrix(&self, matrix: Arc<MatrixChannel>) {
+        // Share the channel with the worker's `Processor` (same `OnceLock`).
+        if self.matrix.set(matrix.clone()).is_err() {
+            tracing::warn!("matrix channel already attached; ignoring the second attach");
+            return;
+        }
+
+        matrix.start_sync();
+
+        // Drain inbound Matrix messages onto the worker queue — the same path a
+        // verified Slack message takes, so the fused turn runs identically and
+        // the worker routes the reply back through Matrix by channel-id scheme.
+        let work_tx = self.work_tx.clone();
+        tokio::spawn(async move {
+            loop {
+                match matrix.receive().await {
+                    Ok(incoming) => {
+                        if work_tx.send(incoming).is_err() {
+                            tracing::error!("turn worker is gone; stopping matrix forwarder");
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "matrix receive failed; stopping forwarder");
+                        break;
+                    }
+                }
+            }
+        });
     }
 
     /// The Slack adapter, for inbound event verification in the HTTP handler.
@@ -297,6 +348,9 @@ impl AppState {
 struct Processor {
     runtime: FusedRuntime,
     slack: Arc<SlackAdapter>,
+    /// The Matrix channel, shared with [`AppState`]; `None` until attached. Used
+    /// to post the reply when a turn originated on Matrix (`matrix://…`).
+    matrix: Arc<OnceLock<Arc<MatrixChannel>>>,
     issuer: BiscuitCapTokenIssuer,
     cap_budget_remaining: u64,
 }
@@ -304,6 +358,9 @@ struct Processor {
 impl Processor {
     /// Run one inbound message through the fused runtime and post the reply.
     async fn handle(&self, incoming: IncomingMessage) {
+        // The channel-id scheme tells us which backend to reply through; the
+        // last path segment is the provider's own channel/room id.
+        let is_matrix = incoming.channel_id.0.starts_with("matrix://");
         let channel = channel_from_id(&incoming.channel_id.0);
         let user = incoming.sender.0.clone();
         let Some(text) = message_text(&incoming.body) else {
@@ -329,12 +386,12 @@ impl Processor {
         match self.runtime.submit(request).await {
             Ok(result) => {
                 let reply = result.response.content;
-                match self.slack.post_message(&channel, &reply, None).await {
-                    Ok(ts) => tracing::info!(
+                match self.post_reply(is_matrix, &channel, &reply).await {
+                    Ok(id) => tracing::info!(
                         %user,
                         %channel,
                         receipt_id = %result.receipt_id.0,
-                        ts = %ts,
+                        provider_message_id = %id,
                         "turn completed and reply posted"
                     ),
                     Err(e) => {
@@ -345,12 +402,37 @@ impl Processor {
             Err(e) => {
                 tracing::error!(%user, %channel, error = %e, "turn failed");
                 let apology = format!("Sorry, that turn failed: {e}");
-                if let Err(post_err) = self.slack.post_message(&channel, &apology, None).await {
+                if let Err(post_err) = self.post_reply(is_matrix, &channel, &apology).await {
                     tracing::error!(
                         %user, %channel, error = %post_err, "failed to post failure notice"
                     );
                 }
             }
+        }
+    }
+
+    /// Post `text` to `channel`, routing to the Matrix or Slack backend by the
+    /// turn's origin. Returns the provider's message id on success.
+    async fn post_reply(
+        &self,
+        is_matrix: bool,
+        channel: &str,
+        text: &str,
+    ) -> anyhow::Result<String> {
+        if is_matrix {
+            let matrix = self
+                .matrix
+                .get()
+                .ok_or_else(|| anyhow::anyhow!("matrix reply requested but no channel attached"))?;
+            matrix
+                .send_text(channel, text)
+                .await
+                .map_err(|e| anyhow::anyhow!(e.to_string()))
+        } else {
+            self.slack
+                .post_message(channel, text, None)
+                .await
+                .map_err(|e| anyhow::anyhow!(e.to_string()))
         }
     }
 

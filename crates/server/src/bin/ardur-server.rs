@@ -55,8 +55,24 @@ async fn main() -> anyhow::Result<()> {
         model = %config.model,
         provider = %provider_id,
         budget_cents = config.cost_budget_cents,
+        channel_matrix = config.channel_matrix,
         "ardur-server booted"
     );
+
+    // Second channel: when enabled, connect the Matrix bot and wire its sync +
+    // forwarding alongside Slack. Construction is async (client build + session
+    // restore), so it happens here in the runtime rather than inside `boot`.
+    if config.channel_matrix {
+        let matrix_config = ardur_channel_matrix::MatrixConfig::from_env()
+            .map_err(|e| anyhow::anyhow!("reading matrix config: {e}"))?;
+        let matrix = ardur_channel_matrix::MatrixChannel::new(matrix_config)
+            .await
+            .map_err(|e| anyhow::anyhow!("connecting matrix channel: {e}"))?;
+        let matrix = std::sync::Arc::new(matrix);
+        let matrix_user = matrix.user_id().to_string();
+        state.attach_matrix(matrix);
+        tracing::info!(user = %matrix_user, "matrix channel attached and syncing");
+    }
 
     let app = build_router(state.clone());
     let listener = tokio::net::TcpListener::bind(&config.bind_addr)
