@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ardur_provider_runtime::{AnthropicProvider, ModelId, Provider};
-use ardur_server::{AppState, Config, LogFormat, build_router};
+use ardur_server::{AppState, Config, LogFormat, MemoryBackend, build_router};
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -82,6 +82,8 @@ async fn server_routes_signed_slack_message_through_runtime_to_chat_post_message
         mcp_bearer_tokens: Vec::new(),
         mcp_path_prefix: "/mcp".to_string(),
         mcp_remote_servers: Vec::new(),
+        memory_backend: MemoryBackend::InMemory,
+        qdrant_url: None,
     };
     let provider: Arc<dyn Provider> =
         Arc::new(AnthropicProvider::stub(ModelId::new(&config.model)));

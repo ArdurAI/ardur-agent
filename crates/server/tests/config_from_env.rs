@@ -14,7 +14,7 @@
 
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-use ardur_server::Config;
+use ardur_server::{Config, MemoryBackend};
 
 fn env_lock() -> MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -41,6 +41,8 @@ const TOUCHED: &[&str] = &[
     "ARDUR_MCP_BEARER_TOKENS",
     "ARDUR_MCP_PATH_PREFIX",
     "ARDUR_MCP_REMOTE_SERVERS",
+    "ARDUR_MEMORY",
+    "QDRANT_URL",
 ];
 
 fn set(key: &str, value: &str) {
@@ -209,6 +211,48 @@ fn from_env_mcp_parses_tokens_prefix_and_remotes() {
             ("beta".to_string(), "http://b.local/mcp".to_string()),
         ]
     );
+}
+
+#[test]
+fn from_env_defaults_to_in_memory_without_qdrant_url() {
+    let _guard = env_lock();
+    let _env = CleanEnv::new().with_slack();
+    // Use a non-anthropic provider so the test isolates the *memory* default
+    // (no ANTHROPIC_API_KEY needed). ARDUR_MEMORY + QDRANT_URL deliberately unset.
+    set("ARDUR_PROVIDER", "ollama");
+
+    let config = Config::from_env().expect("the default in-memory backend needs no QDRANT_URL");
+    assert_eq!(config.memory_backend, MemoryBackend::InMemory);
+    assert_eq!(config.qdrant_url, None);
+}
+
+#[test]
+fn from_env_requires_qdrant_url_when_qdrant_selected() {
+    let _guard = env_lock();
+    let _env = CleanEnv::new().with_slack();
+    // Non-anthropic provider so the Anthropic-key check passes first; the only
+    // missing requirement is then QDRANT_URL — mirroring the Anthropic gate.
+    set("ARDUR_PROVIDER", "ollama");
+    set("ARDUR_MEMORY", "qdrant"); // QDRANT_URL deliberately unset
+
+    let err = Config::from_env().expect_err("the qdrant backend must require QDRANT_URL");
+    assert_eq!(
+        err.to_string(),
+        "required environment variable `QDRANT_URL` is unset or empty"
+    );
+}
+
+#[test]
+fn from_env_qdrant_selected_with_url_loads() {
+    let _guard = env_lock();
+    let _env = CleanEnv::new().with_slack();
+    set("ARDUR_PROVIDER", "ollama");
+    set("ARDUR_MEMORY", "qdrant");
+    set("QDRANT_URL", "http://localhost:6334");
+
+    let config = Config::from_env().expect("qdrant + a URL loads");
+    assert_eq!(config.memory_backend, MemoryBackend::Qdrant);
+    assert_eq!(config.qdrant_url.as_deref(), Some("http://localhost:6334"));
 }
 
 #[test]
