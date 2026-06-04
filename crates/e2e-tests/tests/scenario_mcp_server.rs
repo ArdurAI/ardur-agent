@@ -40,6 +40,8 @@ async fn spawn_server(bearer: &str) -> String {
         cedar_policy_path: None,
         slack_base_url: None,
         channel_matrix: false,
+        channel_discord: false,
+        channel_telegram: false,
         log_format: LogFormat::Text,
         mcp_enabled: true,
         mcp_bearer_tokens: vec![bearer.to_string()],

@@ -75,6 +75,8 @@ async fn main() -> anyhow::Result<()> {
         provider = %provider_id,
         budget_cents = config.cost_budget_cents,
         channel_matrix = config.channel_matrix,
+        channel_discord = config.channel_discord,
+        channel_telegram = config.channel_telegram,
         "ardur-server booted"
     );
 
@@ -91,6 +93,28 @@ async fn main() -> anyhow::Result<()> {
         let matrix_user = matrix.user_id().to_string();
         state.attach_matrix(matrix);
         tracing::info!(user = %matrix_user, "matrix channel attached and syncing");
+    }
+
+    // Third channel: Discord. Same opt-in + async-connect shape as Matrix.
+    if config.channel_discord {
+        let discord_config = ardur_channel_discord::DiscordConfig::from_env()
+            .map_err(|e| anyhow::anyhow!("reading discord config: {e}"))?;
+        let discord = ardur_channel_discord::DiscordChannel::new(discord_config)
+            .await
+            .map_err(|e| anyhow::anyhow!("connecting discord channel: {e}"))?;
+        state.attach_discord(std::sync::Arc::new(discord)).await;
+        tracing::info!("discord channel attached and connecting");
+    }
+
+    // Fourth channel: Telegram.
+    if config.channel_telegram {
+        let telegram_config = ardur_channel_telegram::TelegramConfig::from_env()
+            .map_err(|e| anyhow::anyhow!("reading telegram config: {e}"))?;
+        let telegram = ardur_channel_telegram::TelegramChannel::new(telegram_config)
+            .await
+            .map_err(|e| anyhow::anyhow!("connecting telegram channel: {e}"))?;
+        state.attach_telegram(std::sync::Arc::new(telegram));
+        tracing::info!("telegram channel attached and polling");
     }
 
     let app = build_router(state.clone());

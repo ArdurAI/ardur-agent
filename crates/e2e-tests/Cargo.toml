@@ -106,3 +106,7 @@ reqwest = { workspace = true }
 # The §4.X Matrix scenario drives a fused turn from a Matrix-shaped inbound
 # message; its gated-live half connects a real `MatrixChannel`.
 ardur-channel-matrix = { workspace = true }
+# The §4.Y Discord + Telegram scenarios drive a fused turn from a channel-shaped
+# inbound message; their gated-live halves connect the real adapters.
+ardur-channel-discord = { workspace = true }
+ardur-channel-telegram = { workspace = true }

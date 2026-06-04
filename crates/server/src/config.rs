@@ -72,6 +72,16 @@ pub struct Config {
     /// credentials are required at config-load (the bin constructs
     /// `MatrixChannel::from_env` at boot); the adapter itself re-reads them.
     pub channel_matrix: bool,
+    /// Whether to start the Discord channel adapter alongside Slack
+    /// (`ARDUR_CHANNEL_DISCORD`, default `false`). When `true`, the
+    /// `DISCORD_BOT_TOKEN` + `DISCORD_APPLICATION_ID` credentials are required at
+    /// config-load (the bin constructs `DiscordChannel::from_env` at boot).
+    pub channel_discord: bool,
+    /// Whether to start the Telegram channel adapter alongside Slack
+    /// (`ARDUR_CHANNEL_TELEGRAM`, default `false`). When `true`, the
+    /// `TELEGRAM_BOT_TOKEN` credential is required at config-load (the bin
+    /// constructs `TelegramChannel::from_env` at boot).
+    pub channel_telegram: bool,
     /// How tracing events are formatted (`ARDUR_LOG_FORMAT`).
     pub log_format: LogFormat,
     /// Whether the §6.0 MCP surface is mounted (`ARDUR_MCP_ENABLED`, default
@@ -174,6 +184,22 @@ impl Config {
             require("MATRIX_ACCESS_TOKEN")?;
         }
 
+        // The Discord + Telegram adapters follow the same opt-in shape: when
+        // enabled, their credentials are required at config-load.
+        let channel_discord = optional("ARDUR_CHANNEL_DISCORD")
+            .as_deref()
+            .is_some_and(is_truthy);
+        if channel_discord {
+            require("DISCORD_BOT_TOKEN")?;
+            require("DISCORD_APPLICATION_ID")?;
+        }
+        let channel_telegram = optional("ARDUR_CHANNEL_TELEGRAM")
+            .as_deref()
+            .is_some_and(is_truthy);
+        if channel_telegram {
+            require("TELEGRAM_BOT_TOKEN")?;
+        }
+
         Ok(Self {
             anthropic_api_key,
             slack_bot_token: require("SLACK_BOT_TOKEN")?,
@@ -189,6 +215,8 @@ impl Config {
             cedar_policy_path: optional("ARDUR_CEDAR_POLICY_PATH").map(PathBuf::from),
             slack_base_url: None,
             channel_matrix,
+            channel_discord,
+            channel_telegram,
             log_format: match optional("ARDUR_LOG_FORMAT").as_deref() {
                 Some("json") => LogFormat::Json,
                 _ => LogFormat::Text,

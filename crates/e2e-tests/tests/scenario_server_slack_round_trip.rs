@@ -78,6 +78,8 @@ async fn server_routes_signed_slack_message_through_runtime_to_chat_post_message
         cedar_policy_path: None,
         slack_base_url: Some(server.uri()),
         channel_matrix: false,
+        channel_discord: false,
+        channel_telegram: false,
         log_format: LogFormat::Text,
         mcp_enabled: false,
         mcp_bearer_tokens: Vec::new(),
