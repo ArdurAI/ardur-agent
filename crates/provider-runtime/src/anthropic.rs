@@ -11,13 +11,19 @@
 // TODO §3.0 Phase 2: token streaming (server-sent events) and multi-turn cost
 // projection at admission. (§6.0 added `tool_use` request/response wiring.)
 
+use std::collections::BTreeMap;
+use std::collections::VecDeque;
+
 use ardur_runtime::{ChatMessage, CostTuple, ProviderId, Role, ToolCall};
 use async_trait::async_trait;
+use eventsource_stream::Eventsource;
+use futures::StreamExt;
 use serde::Deserialize;
 
 use crate::error::ProviderError;
 use crate::provider::Provider;
 use crate::rate_card::RateCard;
+use crate::stream::{ProviderStream, StreamEvent, events_from_response, iter_events};
 use crate::types::{CompletionRequest, CompletionResponse, FinishReason, ModelId, Usage};
 
 /// The Anthropic Messages API endpoint.
@@ -45,6 +51,10 @@ pub struct AnthropicProvider {
     model_id: ModelId,
     rate_card: RateCard,
     backend: Backend,
+    /// The Messages-API endpoint requests are posted to. Defaults to
+    /// [`MESSAGES_URL`]; [`with_base_url`](Self::with_base_url) repoints it at a
+    /// mock server so the live HTTP/SSE path is exercised offline.
+    base_url: String,
 }
 
 impl AnthropicProvider {
@@ -56,7 +66,17 @@ impl AnthropicProvider {
             model_id,
             rate_card: RateCard::anthropic_2026_q2_v1(),
             backend: Backend::Live(reqwest::Client::new()),
+            base_url: MESSAGES_URL.to_string(),
         }
+    }
+
+    /// Repoint the provider at `base_url` instead of the public Messages-API
+    /// endpoint (builder-style). Used by the streaming/round-trip tests to drive
+    /// the live HTTP and SSE paths against a local `wiremock` server.
+    #[must_use]
+    pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
+        self.base_url = base_url.into();
+        self
     }
 
     /// Construct a *live* provider, reading the API key from `ANTHROPIC_API_KEY`.
@@ -77,6 +97,7 @@ impl AnthropicProvider {
             model_id,
             rate_card: RateCard::anthropic_2026_q2_v1(),
             backend: Backend::Stub,
+            base_url: MESSAGES_URL.to_string(),
         }
     }
 
@@ -114,7 +135,7 @@ impl AnthropicProvider {
         let body = build_request_body(&req);
 
         let resp = client
-            .post(MESSAGES_URL)
+            .post(&self.base_url)
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", ANTHROPIC_VERSION)
             .header("content-type", "application/json")
@@ -140,6 +161,86 @@ impl AnthropicProvider {
         let body = resp.text().await.unwrap_or_default();
         Err(map_http_error(code, retry_after_ms, &body, &req.model))
     }
+
+    /// Open the live Messages-API call in streaming mode and return a
+    /// [`ProviderStream`] of decoded [`StreamEvent`]s (§3.1b).
+    ///
+    /// The request body is the same one [`complete`](Provider::complete) sends,
+    /// with `"stream": true` added. A non-2xx status is mapped to a
+    /// [`ProviderError`] *before* any stream is returned (the `Err` arm), so the
+    /// caller sees admission failures synchronously. On success the response's
+    /// raw byte stream is parsed into SSE frames by `eventsource-stream` and
+    /// folded — incrementally, one frame at a time — into the event sequence,
+    /// preserving cancellation: dropping the returned stream drops the in-flight
+    /// `reqwest` response and aborts the upstream request.
+    async fn stream_live(
+        &self,
+        client: &reqwest::Client,
+        req: CompletionRequest,
+    ) -> Result<ProviderStream, ProviderError> {
+        if self.api_key.is_empty() {
+            return Err(ProviderError::Unauthorized);
+        }
+
+        let mut body = build_request_body(&req);
+        body.as_object_mut()
+            .expect("build_request_body always returns a JSON object")
+            .insert("stream".to_string(), serde_json::Value::Bool(true));
+
+        let resp = client
+            .post(&self.base_url)
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", ANTHROPIC_VERSION)
+            .header("content-type", "application/json")
+            .header("accept", "text/event-stream")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| ProviderError::NetworkFailure(e.to_string()))?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let retry_after_ms = parse_retry_after_ms(resp.headers());
+            let code = status.as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(map_http_error(code, retry_after_ms, &body, &req.model));
+        }
+
+        // `bytes_stream()` is the raw chunk source; `.eventsource()` reframes it
+        // into `event: …\ndata: …\n\n` SSE messages. Box it so the concrete
+        // (unnameable) stream type can live behind the `unfold` state.
+        let events = resp.bytes_stream().eventsource();
+        let state = SseState::new(Box::pin(events));
+
+        // `unfold` pulls one SSE frame at a time, turning each into zero-or-more
+        // queued `StreamEvent`s and emitting them one per poll — so the stream
+        // stays lazy and cancel-safe rather than buffering the whole response.
+        let stream = futures::stream::unfold(state, |mut state| async move {
+            loop {
+                if let Some(item) = state.queue.pop_front() {
+                    return Some((item, state));
+                }
+                if state.terminated {
+                    return None;
+                }
+                match state.events.next().await {
+                    // Underlying stream exhausted: a well-formed response already
+                    // queued its `message_stop` events, so nothing remains.
+                    None => return None,
+                    Some(Ok(event)) => state.handle(&event),
+                    Some(Err(e)) => {
+                        state.terminated = true;
+                        return Some((
+                            Err(ProviderError::Upstream(format!("SSE stream error: {e}"))),
+                            state,
+                        ));
+                    }
+                }
+            }
+        });
+
+        Ok(Box::pin(stream))
+    }
 }
 
 #[async_trait]
@@ -153,13 +254,24 @@ impl Provider for AnthropicProvider {
         }
     }
 
+    /// Stream the completion as decoded [`StreamEvent`]s (§3.1b). The live
+    /// backend parses real Messages-API server-sent events; the stub replays its
+    /// fixed response through the shared [`events_from_response`] flattening, so
+    /// the stub streams without a network call exactly as the default impl would.
+    async fn stream(&self, req: CompletionRequest) -> Result<ProviderStream, ProviderError> {
+        match &self.backend {
+            Backend::Stub => Ok(iter_events(events_from_response(Self::stub_response()))),
+            Backend::Live(client) => self.stream_live(client, req).await,
+        }
+    }
+
     fn id(&self) -> ProviderId {
         ProviderId("anthropic".to_string())
     }
 
     fn supports_streaming(&self) -> bool {
-        // TODO §3.0 Phase 2: flip to `true` once the SSE streaming path lands.
-        false
+        // §3.1b: the SSE streaming path (`Provider::stream`) is live.
+        true
     }
 
     fn rate_card(&self) -> &RateCard {
@@ -424,6 +536,190 @@ impl MessagesResponse {
             cost: rate_card.price(usage),
             usage,
             raw_provider_response: Some(raw),
+        }
+    }
+}
+
+/// The boxed SSE-frame stream the [`SseState`] folds events out of — the decoded
+/// `event:`/`data:` messages from `eventsource-stream`, errored by the
+/// underlying `reqwest` transport.
+type SseEvents = std::pin::Pin<
+    Box<
+        dyn futures::Stream<
+                Item = Result<
+                    eventsource_stream::Event,
+                    eventsource_stream::EventStreamError<reqwest::Error>,
+                >,
+            > + Send,
+    >,
+>;
+
+/// A tool call being assembled across streamed frames: its id/name are known
+/// from the `content_block_start`, and its JSON `arguments` accrete from the
+/// `input_json_delta` fragments.
+struct ToolAccum {
+    id: String,
+    name: String,
+    json: String,
+}
+
+/// The fold state the Anthropic SSE parser threads through `unfold`.
+///
+/// It owns the decoded-frame stream, a `queue` of events ready to emit (one
+/// frame can produce several), the running token `ledger`, the per-index
+/// `tool_blocks` being assembled, and the `stop_reason`/`stop_sequence` captured
+/// from `message_delta` so `message_stop` can mint the terminal
+/// [`FinishReason`].
+struct SseState {
+    events: SseEvents,
+    queue: VecDeque<Result<StreamEvent, ProviderError>>,
+    ledger: Usage,
+    tool_blocks: BTreeMap<u64, ToolAccum>,
+    stop_reason: Option<String>,
+    stop_sequence: Option<String>,
+    terminated: bool,
+}
+
+impl SseState {
+    /// Seed the parser over a decoded SSE-frame stream.
+    fn new(events: SseEvents) -> Self {
+        Self {
+            events,
+            queue: VecDeque::new(),
+            ledger: Usage::default(),
+            tool_blocks: BTreeMap::new(),
+            stop_reason: None,
+            stop_sequence: None,
+            terminated: false,
+        }
+    }
+
+    /// Fold one decoded SSE frame into zero-or-more queued [`StreamEvent`]s.
+    ///
+    /// Mirrors the Messages-API streaming protocol: `message_start` seeds input
+    /// usage, `content_block_start` opens a text or `tool_use` block,
+    /// `content_block_delta` carries text or tool-argument fragments,
+    /// `message_delta` records the stop reason and final output usage, and
+    /// `message_stop` emits the final usage and terminal finish. A malformed or
+    /// unrecognized frame is skipped; an `error` frame is surfaced as an
+    /// `Upstream` error item.
+    fn handle(&mut self, event: &eventsource_stream::Event) {
+        // Frames carry a JSON `data:` payload; skip any that fails to parse
+        // rather than aborting the whole stream on one bad frame.
+        let data: serde_json::Value = match serde_json::from_str(&event.data) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+
+        match event.event.as_str() {
+            "message_start" => {
+                let usage = &data["message"]["usage"];
+                self.ledger.tokens_in = usage["input_tokens"].as_u64().unwrap_or(0) as u32;
+                self.ledger.tokens_out = usage["output_tokens"].as_u64().unwrap_or(0) as u32;
+                self.queue.push_back(Ok(StreamEvent::Usage(self.ledger)));
+            }
+            "content_block_start" => {
+                let index = data["index"].as_u64().unwrap_or(0);
+                let block = &data["content_block"];
+                if block["type"].as_str() == Some("tool_use") {
+                    let id = block["id"].as_str().unwrap_or_default().to_string();
+                    let name = block["name"].as_str().unwrap_or_default().to_string();
+                    self.tool_blocks.insert(
+                        index,
+                        ToolAccum {
+                            id: id.clone(),
+                            name: name.clone(),
+                            json: String::new(),
+                        },
+                    );
+                    self.queue
+                        .push_back(Ok(StreamEvent::ToolCallStart(ToolCall {
+                            id,
+                            name,
+                            arguments: serde_json::Value::Null,
+                        })));
+                }
+            }
+            "content_block_delta" => {
+                let index = data["index"].as_u64().unwrap_or(0);
+                let delta = &data["delta"];
+                match delta["type"].as_str() {
+                    Some("text_delta") => {
+                        if let Some(text) = delta["text"].as_str() {
+                            self.queue
+                                .push_back(Ok(StreamEvent::ContentDelta(text.to_string())));
+                        }
+                    }
+                    Some("input_json_delta") => {
+                        let fragment = delta["partial_json"].as_str().unwrap_or_default();
+                        if let Some(accum) = self.tool_blocks.get_mut(&index) {
+                            accum.json.push_str(fragment);
+                            self.queue.push_back(Ok(StreamEvent::ToolCallDelta {
+                                id: accum.id.clone(),
+                                delta: fragment.to_string(),
+                            }));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            "content_block_stop" => {}
+            "message_delta" => {
+                if let Some(reason) = data["delta"]["stop_reason"].as_str() {
+                    self.stop_reason = Some(reason.to_string());
+                }
+                if let Some(seq) = data["delta"]["stop_sequence"].as_str() {
+                    self.stop_sequence = Some(seq.to_string());
+                }
+                if let Some(out) = data["usage"]["output_tokens"].as_u64() {
+                    self.ledger.tokens_out = out as u32;
+                }
+                self.queue.push_back(Ok(StreamEvent::Usage(self.ledger)));
+            }
+            "message_stop" => {
+                // Final ledger then terminal finish — the order a consumer mints
+                // the receipt from, matching the non-streaming cost-gate flow.
+                self.queue.push_back(Ok(StreamEvent::Usage(self.ledger)));
+                self.queue
+                    .push_back(Ok(StreamEvent::Finish(self.assemble_finish_reason())));
+            }
+            "error" => {
+                let message = data["error"]["message"]
+                    .as_str()
+                    .unwrap_or("anthropic streaming error")
+                    .to_string();
+                self.queue.push_back(Err(ProviderError::Upstream(message)));
+            }
+            // `ping` and any future event types are intentionally ignored.
+            _ => {}
+        }
+    }
+
+    /// Build the terminal [`FinishReason`] from the captured stop reason,
+    /// assembling any `tool_use` blocks into complete [`ToolCall`]s (their JSON
+    /// arguments parsed from the accreted `input_json_delta` fragments). Mirrors
+    /// the non-streaming [`MessagesResponse`] mapping.
+    fn assemble_finish_reason(&self) -> FinishReason {
+        match self.stop_reason.as_deref() {
+            Some("end_turn") | None => FinishReason::Stop,
+            Some("max_tokens") => FinishReason::MaxTokens,
+            Some("stop_sequence") => {
+                FinishReason::StopSequence(self.stop_sequence.clone().unwrap_or_default())
+            }
+            Some("tool_use") => {
+                let calls = self
+                    .tool_blocks
+                    .values()
+                    .map(|accum| ToolCall {
+                        id: accum.id.clone(),
+                        name: accum.name.clone(),
+                        arguments: serde_json::from_str(&accum.json)
+                            .unwrap_or(serde_json::Value::Null),
+                    })
+                    .collect();
+                FinishReason::ToolUse(calls)
+            }
+            Some(other) => FinishReason::Error(format!("unknown stop_reason: {other}")),
         }
     }
 }
