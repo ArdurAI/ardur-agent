@@ -52,6 +52,9 @@ clap = { workspace = true }
 # the synchronous `run_chat` entrypoint.
 tokio = { workspace = true }
 rustyline = { workspace = true }
+# §2.1b streaming: `StreamExt::next` drains the `Provider::stream` feed the
+# progressive display renders.
+futures = { workspace = true }
 
 anyhow = { workspace = true }
 thiserror = { workspace = true }
@@ -69,5 +72,10 @@ assert_cmd = { workspace = true }
 tokio = { workspace = true }
 ardur-runtime = { workspace = true }
 ardur-cost-gate = { workspace = true }
+# §2.1b streaming tests: a mock `Provider` (async-trait + boxed event stream)
+# drives the progressive-display surface in-process.
+ardur-provider-runtime = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
 # A throwaway HOME so the fused state-dir tests never touch the real `~/.ardur`.
 tempfile = { workspace = true }
