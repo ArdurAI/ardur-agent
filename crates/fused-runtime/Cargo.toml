@@ -62,6 +62,13 @@ uuid = { workspace = true, features = ["v4"] }
 # §6.0 — per-tool-call timeout (`tokio::time::timeout`) in the tool-execution
 # loop. Driven by the caller's runtime (the server worker, tests' #[tokio::test]).
 tokio = { workspace = true }
+# §6.0c — `FusedRuntime::stream` returns a `futures::Stream`; `StreamExt::next`
+# drains the inner `Provider::stream` token feed.
+futures = { workspace = true }
+# §6.0c — the `try_stream!` generator the streaming pipeline runs inside, so the
+# whole turn is driven by the consumer's polls (and a dropped stream cancels the
+# in-flight provider round before any receipt is minted).
+async-stream = "0.3"
 
 [dev-dependencies]
 tokio = { workspace = true }
@@ -69,3 +76,4 @@ tempfile = { workspace = true }
 serde_json = { workspace = true }
 assert_matches = "1"
 biscuit-auth = { workspace = true }
+futures = { workspace = true }

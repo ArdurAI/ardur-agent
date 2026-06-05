@@ -31,7 +31,8 @@ use ardur_lifecycle_hooks::{
 };
 use ardur_memory::MemoryRuntime;
 use ardur_provider_runtime::{
-    CompletionRequest, CompletionResponse, FinishReason, ModelId, Provider, ProviderError, ToolDef,
+    CompletionRequest, CompletionResponse, FinishReason, ModelId, Provider, ProviderError,
+    StreamEvent, ToolDef, Usage,
 };
 use ardur_receipt::{
     Es256SigningKey, ReceiptBody, ReceiptSigner, Sha256Digest, ToolCallReceipt, VerbObject,
@@ -49,6 +50,8 @@ use crate::reconcile::{
     ReconciliationAction, ReconciliationError, ReconciliationReport, ReconciliationStrategy,
 };
 use crate::shared::{SharedBudget, SharedDenyList};
+use crate::streaming::{FusedEvent, StageKind};
+use futures::{Stream, StreamExt as _};
 
 /// The receipt verb minted for a completed turn (`verb.object.state.vN`).
 pub(crate) const COMPLETION_VERB: &str = "llm.completion.minted.v1";
@@ -326,6 +329,133 @@ impl FusedRuntime {
         }
     }
 
+    /// **Stage 1.** Parse + verify the request's cap-token against the root, the
+    /// audience (the per-request override if supplied, else the builder default),
+    /// the tool, and the deny-list — returning the verified claims. Fires no
+    /// hooks: both [`submit`](Self::submit_inner) and
+    /// [`stream`](Self::stream_inner) call this and bracket it with their own
+    /// error reporting (a `fire_error` call / a `StageEnd` event), so the
+    /// verification rule lives in exactly one place.
+    fn stage_cap_token(
+        &self,
+        req: &SubmitRequest,
+        provisioning: &PerRequestProvisioning,
+        now_unix: u64,
+    ) -> Result<VerifiedClaims, RuntimeError> {
+        if req.cap_token.0.is_empty() {
+            return Err(RuntimeError::CapTokenMissing);
+        }
+        let token = CapToken::from_base64(&req.cap_token.0, &self.cap_root).map_err(|e| {
+            RuntimeError::CapDenied {
+                reason: e.to_string(),
+            }
+        })?;
+        let audience = provisioning
+            .audience
+            .clone()
+            .unwrap_or_else(|| self.audience.clone());
+        self.verifier
+            .verify(
+                &token,
+                &self.cap_root,
+                &RequiredCaveats {
+                    now_unix,
+                    audience,
+                    tool: self.tool.clone(),
+                    cost: self.cost_units,
+                },
+            )
+            .map_err(|e| match e {
+                CapTokenError::Expired => RuntimeError::CapTokenExpired,
+                other => RuntimeError::CapDenied {
+                    reason: other.to_string(),
+                },
+            })
+    }
+
+    /// **Stage 2.** Authorize the turn against the Cedar bundle. The principal is
+    /// *derived* from the verified cap-token subject (never caller-asserted) and
+    /// the resource from the session; the cap claims ride as resource attributes.
+    /// Fires no hooks (see [`stage_cap_token`](Self::stage_cap_token)).
+    fn stage_cedar(
+        &self,
+        session_id: SessionId,
+        claims: &VerifiedClaims,
+    ) -> Result<(), RuntimeError> {
+        let principal = derive_principal(&self.principal_entity_type, claims);
+        let resource = derive_resource(session_id);
+        let attributes = cedar_attributes_from_claims(&self.cedar_attributes, claims);
+        match self.policies.evaluate(&EvaluationContext {
+            principal,
+            action: self.action.clone(),
+            resource,
+            attributes,
+        }) {
+            Decision::Allow { .. } => Ok(()),
+            Decision::Deny { reason, .. } => Err(RuntimeError::PolicyDenied { reason }),
+            Decision::Indeterminate { reason } => Err(RuntimeError::PolicyDenied {
+                reason: format!("indeterminate: {reason}"),
+            }),
+        }
+    }
+
+    /// **Stage 3 (setup).** Resolve the budget holder (the verified subject
+    /// unless the request overrides it), apply a per-request top-up if one was
+    /// supplied, and bind the verified token to the holder. Returns the gate
+    /// token id the per-round admission reserves under. The per-round `admit` /
+    /// `finalize` happen inside each turn's loop. Fires no hooks.
+    async fn stage_cost_setup(
+        &self,
+        claims: &VerifiedClaims,
+        provisioning: &PerRequestProvisioning,
+    ) -> Result<GateTokenId, RuntimeError> {
+        let gate_token_id = GateTokenId(claims.token_id);
+        let holder = provisioning
+            .subject
+            .clone()
+            .unwrap_or_else(|| GateHolderId(claims.subject.0.clone()));
+        if let Some(budget) = provisioning.budget {
+            self.gate
+                .provision_for(&holder, budget)
+                .await
+                .map_err(|e| RuntimeError::ProvisioningFailed {
+                    subject: holder.0.clone(),
+                    reason: e.to_string(),
+                })?;
+        }
+        self.gate.bind_token(gate_token_id, holder);
+        Ok(gate_token_id)
+    }
+
+    /// **Stage 4.** Run the pre-submit hooks over the initial request and return
+    /// the request the turn loop starts from. A `Veto` is
+    /// [`RuntimeError::VetoedByHook`] (no reservation is held yet, so nothing to
+    /// release); a `Replace` swaps the request. Like the other stage helpers it
+    /// fires no hooks of its own.
+    async fn stage_pre_submit(
+        &self,
+        req: &SubmitRequest,
+        tool_defs: Vec<ToolDef>,
+    ) -> Result<CompletionRequest, RuntimeError> {
+        let base_request =
+            CompletionRequest::new(req.messages.clone(), self.model.clone(), self.max_tokens)
+                .with_tools(tool_defs);
+        let pre_ctx = PreSubmitCtx {
+            session_id: req.session_id,
+            request: &base_request,
+            cap_token_id: &req.cap_token,
+            attempt: 1,
+        };
+        match self.registry.run_pre_submit(&pre_ctx).await {
+            PreSubmitOutcome::Continue => Ok(base_request),
+            PreSubmitOutcome::Replaced { request } => Ok(request),
+            PreSubmitOutcome::Vetoed { hook_id, reason } => Err(RuntimeError::VetoedByHook {
+                hook_id: hook_id.to_string(),
+                reason,
+            }),
+        }
+    }
+
     /// Append a signed receipt's compact JWS to the durable receipt log
     /// (one line, fsynced), if a log path is configured.
     fn persist_receipt(&self, jws_compact: &str) -> std::io::Result<()> {
@@ -584,142 +714,43 @@ impl FusedRuntime {
 
         // ---- 1. cap-token: parse + verify against the root, audience, tool,
         //         and deny-list.
-        if req.cap_token.0.is_empty() {
-            let err = RuntimeError::CapTokenMissing;
+        let claims = match self.stage_cap_token(&req, &provisioning, now_unix) {
+            Ok(claims) => claims,
+            Err(err) => {
+                self.fire_error(session_id, LifecyclePhase::Submit, &err)
+                    .await;
+                return Err(err);
+            }
+        };
+
+        // ---- 2. cedar-policy: authorize the turn against the verified subject.
+        if let Err(err) = self.stage_cedar(session_id, &claims) {
             self.fire_error(session_id, LifecyclePhase::Submit, &err)
                 .await;
             return Err(err);
         }
-        let token = match CapToken::from_base64(&req.cap_token.0, &self.cap_root) {
-            Ok(token) => token,
-            Err(e) => {
-                let err = RuntimeError::CapDenied {
-                    reason: e.to_string(),
-                };
+
+        // ---- 3. cost-gate setup (once): resolve the holder, top it up if the
+        //         request carries a budget, and bind the token. The per-iteration
+        //         `admit`/`finalize` happen inside the tool-call loop below.
+        let gate_token_id = match self.stage_cost_setup(&claims, &provisioning).await {
+            Ok(gate_token_id) => gate_token_id,
+            Err(err) => {
                 self.fire_error(session_id, LifecyclePhase::Submit, &err)
                     .await;
                 return Err(err);
             }
         };
-        // The audience the cap-token is verified against: the per-request
-        // override if supplied (so one runtime can serve cap-tokens scoped to
-        // different tenant audiences), else the builder default.
-        let audience = provisioning
-            .audience
-            .clone()
-            .unwrap_or_else(|| self.audience.clone());
-        let claims = match self.verifier.verify(
-            &token,
-            &self.cap_root,
-            &RequiredCaveats {
-                now_unix,
-                audience,
-                tool: self.tool.clone(),
-                cost: self.cost_units,
-            },
-        ) {
-            Ok(claims) => claims,
-            Err(CapTokenError::Expired) => {
-                let err = RuntimeError::CapTokenExpired;
-                self.fire_error(session_id, LifecyclePhase::Submit, &err)
-                    .await;
-                return Err(err);
-            }
-            Err(other) => {
-                let err = RuntimeError::CapDenied {
-                    reason: other.to_string(),
-                };
-                self.fire_error(session_id, LifecyclePhase::Submit, &err)
-                    .await;
-                return Err(err);
-            }
-        };
-
-        // ---- 2. cedar-policy: authorize the turn. The principal is *derived*
-        //         from the verified cap-token subject (stage 1), not asserted by
-        //         the caller — so the runtime authorizes as whoever the cap
-        //         proved, and a misconfigured caller cannot impersonate another
-        //         subject. The resource is the session the turn acts on; the cap
-        //         claims (audience, tools, expiry, subject, budget) ride as
-        //         resource attributes so policies can reference `resource.<key>`.
-        let principal = derive_principal(&self.principal_entity_type, &claims);
-        let resource = derive_resource(session_id);
-        let attributes = cedar_attributes_from_claims(&self.cedar_attributes, &claims);
-        match self.policies.evaluate(&EvaluationContext {
-            principal,
-            action: self.action.clone(),
-            resource,
-            attributes,
-        }) {
-            Decision::Allow { .. } => {}
-            Decision::Deny { reason, .. } => {
-                let err = RuntimeError::PolicyDenied { reason };
-                self.fire_error(session_id, LifecyclePhase::Submit, &err)
-                    .await;
-                return Err(err);
-            }
-            Decision::Indeterminate { reason } => {
-                let err = RuntimeError::PolicyDenied {
-                    reason: format!("indeterminate: {reason}"),
-                };
-                self.fire_error(session_id, LifecyclePhase::Submit, &err)
-                    .await;
-                return Err(err);
-            }
-        }
-
-        // ---- 3. cost-gate setup (once): resolve the budget holder and, if the
-        //         request carries a budget, top it up *before* admission, then
-        //         bind the verified token to the holder. The per-iteration
-        //         `admit`/`finalize` happen inside the tool-call loop below — each
-        //         provider round (the initial call plus one per tool round trip)
-        //         reserves and settles its own envelope.
-        //
-        // The holder is the verified cap-token subject (so a turn spends against
-        // whoever the cap proved), unless the caller overrides it — rare, and
-        // reserved for impersonation-test fixtures.
-        let gate_token_id = GateTokenId(claims.token_id);
-        let holder = provisioning
-            .subject
-            .clone()
-            .unwrap_or_else(|| GateHolderId(claims.subject.0.clone()));
-        if let Some(budget) = provisioning.budget {
-            if let Err(e) = self.gate.provision_for(&holder, budget).await {
-                let err = RuntimeError::ProvisioningFailed {
-                    subject: holder.0.clone(),
-                    reason: e.to_string(),
-                };
-                self.fire_error(session_id, LifecyclePhase::Submit, &err)
-                    .await;
-                return Err(err);
-            }
-        }
-        self.gate.bind_token(gate_token_id, holder.clone());
 
         // The tools advertised to the provider every iteration of this turn.
         let tool_defs = self.tool_defs();
 
-        // ---- 4. pre-submit hooks (once, on the initial request). A veto aborts;
-        //         a replace swaps the request the loop starts from. No cost
-        //         reservation is held yet, so a veto needs no release.
-        let base_request =
-            CompletionRequest::new(req.messages.clone(), self.model.clone(), self.max_tokens)
-                .with_tools(tool_defs.clone());
-        let pre_ctx = PreSubmitCtx {
-            session_id,
-            request: &base_request,
-            cap_token_id: &req.cap_token,
-            attempt: 1,
-        };
-        let initial = match self.registry.run_pre_submit(&pre_ctx).await {
-            PreSubmitOutcome::Continue => base_request,
-            PreSubmitOutcome::Replaced { request } => request,
-            PreSubmitOutcome::Vetoed { hook_id, reason } => {
-                return Err(RuntimeError::VetoedByHook {
-                    hook_id: hook_id.to_string(),
-                    reason,
-                });
-            }
+        // ---- 4. pre-submit hooks (once, on the initial request). A veto aborts
+        //         (no reservation is held yet, so no release); a replace swaps the
+        //         request the loop starts from.
+        let initial = match self.stage_pre_submit(&req, tool_defs.clone()).await {
+            Ok(request) => request,
+            Err(err) => return Err(err),
         };
 
         // The working transcript the loop grows with each tool round trip, plus
@@ -1012,6 +1043,466 @@ impl FusedRuntime {
             response: ChatMessage::assistant(final_content),
             cost: total_cost,
         })
+    }
+}
+
+impl FusedRuntime {
+    /// **§6.0c.** Stream a turn through the full ten-stage pipeline, emitting a
+    /// [`FusedEvent`] feed as it unfolds.
+    ///
+    /// This is the progressive sibling of [`submit`](ChatRuntime::submit): it
+    /// runs the **same** stages over the **same** helpers (cap-token → Cedar →
+    /// injection-defense → cost-gate → provider → tool-exec → receipt → finalize
+    /// → memory → journal) but, instead of returning one
+    /// [`SubmitResult`](SubmitResult) at the end, yields stage transitions, token
+    /// [`Content`](FusedEvent::Content) deltas as the provider produces them, the
+    /// tool-call lifecycle, the minted receipt's chain hash, and a terminal
+    /// [`Finish`](FusedEvent::Finish). The substrate the §2.1b CLI streaming path
+    /// bypassed (PR #89) is fully intact — every streamed turn is cap-verified,
+    /// authorized, admitted, receipted, and journaled.
+    ///
+    /// The item type is `Result<FusedEvent, RuntimeError>`: a stage that rejects
+    /// the turn emits its [`StageEnd { ok: false }`](FusedEvent::StageEnd) and
+    /// then a terminal `Err`, after which the stream ends (the
+    /// [`ProviderStream`](ardur_provider_runtime::ProviderStream) convention).
+    ///
+    /// **Cancellation.** The whole pipeline runs inside the returned stream's
+    /// generator, so dropping the stream cancels the in-flight provider round at
+    /// its next `.await`. Because the receipt is minted only *after* a round
+    /// completes, a turn cancelled mid-generation mints **no** receipt, appends
+    /// **no** journal entry, and records **no** memory — the held reservation
+    /// lapses on the gate's TTL. See [`crate::streaming`] for the full contract.
+    pub fn stream(
+        &self,
+        req: SubmitRequest,
+    ) -> impl Stream<Item = Result<FusedEvent, RuntimeError>> + Send + '_ {
+        self.stream_inner(req, PerRequestProvisioning::default())
+    }
+
+    /// Streaming counterpart of
+    /// [`submit_with_provisioning`](Self::submit_with_provisioning): drive the
+    /// [`stream`](Self::stream) pipeline with per-request budget / audience /
+    /// subject overrides. `stream(req)` is exactly
+    /// `stream_with_provisioning(req, Default::default())`.
+    pub fn stream_with_provisioning(
+        &self,
+        req: SubmitRequest,
+        provisioning: PerRequestProvisioning,
+    ) -> impl Stream<Item = Result<FusedEvent, RuntimeError>> + Send + '_ {
+        self.stream_inner(req, provisioning)
+    }
+
+    /// The shared streaming pipeline. Mirrors [`submit_inner`](Self::submit_inner)
+    /// stage-for-stage, reusing the same stage helpers, scan methods, cost/error
+    /// conversions, and receipt/journal logic — the only difference is that it
+    /// emits events progressively instead of accumulating a single result.
+    fn stream_inner(
+        &self,
+        req: SubmitRequest,
+        provisioning: PerRequestProvisioning,
+    ) -> impl Stream<Item = Result<FusedEvent, RuntimeError>> + Send + '_ {
+        async_stream::try_stream! {
+            let session_id = req.session_id;
+            let now_ms = self.clock.now_ms();
+            let now_unix = now_ms / 1000;
+
+            // ---- 1. cap-token.
+            yield FusedEvent::StageStart { stage: StageKind::CapTokenVerify };
+            let claims = match self.stage_cap_token(&req, &provisioning, now_unix) {
+                Ok(claims) => {
+                    yield FusedEvent::StageEnd { stage: StageKind::CapTokenVerify, ok: true };
+                    claims
+                }
+                Err(err) => {
+                    yield FusedEvent::StageEnd { stage: StageKind::CapTokenVerify, ok: false };
+                    self.fire_error(session_id, LifecyclePhase::Submit, &err).await;
+                    Err(err)?
+                }
+            };
+
+            // ---- 2. cedar-policy.
+            yield FusedEvent::StageStart { stage: StageKind::CedarCheck };
+            if let Err(err) = self.stage_cedar(session_id, &claims) {
+                yield FusedEvent::StageEnd { stage: StageKind::CedarCheck, ok: false };
+                self.fire_error(session_id, LifecyclePhase::Submit, &err).await;
+                Err(err)?;
+            }
+            yield FusedEvent::StageEnd { stage: StageKind::CedarCheck, ok: true };
+
+            // ---- 3. cost-gate setup (provision + bind; no per-round admission
+            //         yet — that happens inside the loop). No stage event: the
+            //         CostGateAdmit event brackets the per-round `admit`.
+            let gate_token_id = match self.stage_cost_setup(&claims, &provisioning).await {
+                Ok(gate_token_id) => gate_token_id,
+                Err(err) => {
+                    self.fire_error(session_id, LifecyclePhase::Submit, &err).await;
+                    Err(err)?
+                }
+            };
+
+            let tool_defs = self.tool_defs();
+
+            // ---- 4. pre-submit hooks. A veto needs no release (no reservation
+            //         is held) and fires no error hook (matching `submit`).
+            let initial = match self.stage_pre_submit(&req, tool_defs.clone()).await {
+                Ok(request) => request,
+                Err(err) => {
+                    Err(err)?;
+                    unreachable!()
+                }
+            };
+
+            let mut messages = initial.messages;
+            let temperature = initial.temperature;
+            let stop_sequences = initial.stop_sequences;
+            let requested_cost_envelope = initial.requested_cost_envelope;
+            let mut iteration: u32 = 0;
+
+            // The terminal finish reason of the round that settles the turn.
+            let final_finish = loop {
+                iteration += 1;
+
+                let mut iter_request =
+                    CompletionRequest::new(messages.clone(), self.model.clone(), self.max_tokens);
+                iter_request.temperature = temperature;
+                iter_request.stop_sequences = stop_sequences.clone();
+                iter_request.requested_cost_envelope = requested_cost_envelope;
+                iter_request.tools = tool_defs.clone();
+                iter_request.stream = true;
+
+                // 4.5 injection-defense scan (most recent user message).
+                yield FusedEvent::StageStart { stage: StageKind::InjectionScan };
+                let iter_request = match self.scan_outbound_request(iter_request).await {
+                    Ok(request) => {
+                        yield FusedEvent::StageEnd { stage: StageKind::InjectionScan, ok: true };
+                        request
+                    }
+                    Err(err) => {
+                        yield FusedEvent::StageEnd { stage: StageKind::InjectionScan, ok: false };
+                        self.fire_error(session_id, LifecyclePhase::Submit, &err).await;
+                        Err(err)?
+                    }
+                };
+
+                // 3'. cost-gate admit (per iteration).
+                yield FusedEvent::StageStart { stage: StageKind::CostGateAdmit };
+                let request_digest =
+                    GateSha256::of(&serde_json::to_vec(&iter_request.messages).unwrap_or_default());
+                let reservation_handle = match self
+                    .gate
+                    .admit(AdmissionRequest {
+                        cap_token_id: gate_token_id,
+                        projected_envelope: self.envelope,
+                        provider_id: self.gate_provider_id.clone(),
+                        model_id: self.gate_model_id.clone(),
+                        request_digest,
+                    })
+                    .await
+                {
+                    Ok(reservation) => {
+                        yield FusedEvent::StageEnd { stage: StageKind::CostGateAdmit, ok: true };
+                        reservation
+                    }
+                    Err(e) => {
+                        let err = map_admission_error(e);
+                        yield FusedEvent::StageEnd { stage: StageKind::CostGateAdmit, ok: false };
+                        self.fire_error(session_id, LifecyclePhase::Submit, &err).await;
+                        Err(err)?
+                    }
+                };
+                // Hold the reservation in an `Option` so the borrow checker is
+                // happy with it being consumed on whichever (mutually exclusive)
+                // path settles the round — `try_stream!`'s `?` desugaring hides
+                // the divergence of the error paths from NLL, so a bare move
+                // would look like a double-move across loop iterations. `.take()`
+                // moves the value out without moving the binding.
+                let mut reservation = Some(reservation_handle);
+
+                // 5. provider stream: forward each delta as it arrives.
+                yield FusedEvent::StageStart { stage: StageKind::ProviderStream };
+                let mut provider_stream = match self.provider.stream(iter_request).await {
+                    Ok(provider_stream) => provider_stream,
+                    Err(provider_err) => {
+                        self.release(reservation.take().expect("reservation held")).await;
+                        yield FusedEvent::StageEnd { stage: StageKind::ProviderStream, ok: false };
+                        self.fire_error(session_id, LifecyclePhase::Provider, &provider_err)
+                            .await;
+                        Err(map_provider_error(&provider_err))?
+                    }
+                };
+                let mut content = String::new();
+                let mut usage = Usage::default();
+                let mut finish_reason = FinishReason::Stop;
+                let mut stream_err: Option<ProviderError> = None;
+                while let Some(item) = provider_stream.next().await {
+                    match item {
+                        Ok(StreamEvent::ContentDelta(text)) => {
+                            content.push_str(&text);
+                            yield FusedEvent::Content(text);
+                        }
+                        Ok(StreamEvent::ToolCallStart(call)) => {
+                            yield FusedEvent::ToolCallStart {
+                                id: call.id,
+                                name: call.name,
+                            };
+                        }
+                        Ok(StreamEvent::ToolCallDelta { id, delta }) => {
+                            yield FusedEvent::ToolCallDelta { id, delta };
+                        }
+                        Ok(StreamEvent::Usage(reported)) => usage = reported,
+                        Ok(StreamEvent::Finish(reason)) => finish_reason = reason,
+                        Err(provider_err) => {
+                            stream_err = Some(provider_err);
+                            break;
+                        }
+                    }
+                }
+                // Free the provider stream before the post-provider stages run.
+                drop(provider_stream);
+                if let Some(provider_err) = stream_err {
+                    self.release(reservation.take().expect("reservation held")).await;
+                    yield FusedEvent::StageEnd { stage: StageKind::ProviderStream, ok: false };
+                    self.fire_error(session_id, LifecyclePhase::Provider, &provider_err)
+                        .await;
+                    Err(map_provider_error(&provider_err))?;
+                }
+                yield FusedEvent::Usage(usage);
+                yield FusedEvent::StageEnd { stage: StageKind::ProviderStream, ok: true };
+
+                // Assemble the round's response, priced from the rate card exactly
+                // as a non-streaming `complete()` would have returned it.
+                let response = CompletionResponse {
+                    content: content.clone(),
+                    finish_reason: finish_reason.clone(),
+                    usage,
+                    cost: self.provider.rate_card().price(usage),
+                    raw_provider_response: None,
+                };
+
+                let requested: Vec<ToolCall> = match &response.finish_reason {
+                    FinishReason::ToolUse(calls) => calls.clone(),
+                    _ => Vec::new(),
+                };
+                let wants_tools = !requested.is_empty();
+                let exhausted = wants_tools && iteration >= self.max_tool_iterations;
+
+                // 6. tool execution.
+                let mut tool_receipts: Vec<ToolCallReceipt> = Vec::new();
+                let mut tool_messages: Vec<ChatMessage> = Vec::new();
+                let mut tool_cost = RuntimeCostTuple::default();
+                if wants_tools && !exhausted {
+                    yield FusedEvent::StageStart { stage: StageKind::ToolExec };
+                    for call in &requested {
+                        let Some(tool) = self.tools.get(&ToolId::new(&call.name)) else {
+                            self.release(reservation.take().expect("reservation held")).await;
+                            let err = RuntimeError::UnknownTool {
+                                tool: call.name.clone(),
+                            };
+                            yield FusedEvent::StageEnd { stage: StageKind::ToolExec, ok: false };
+                            self.fire_error(session_id, LifecyclePhase::Provider, &err).await;
+                            Err(err)?;
+                            unreachable!()
+                        };
+                        let ctx = self.tool_context(&req.cap_token, session_id);
+                        let output = match tokio::time::timeout(
+                            self.tool_timeout,
+                            tool.invoke(&ctx, call.arguments.clone()),
+                        )
+                        .await
+                        {
+                            Ok(Ok(output)) => output,
+                            Ok(Err(tool_err)) => {
+                                self.release(reservation.take().expect("reservation held")).await;
+                                let err = map_tool_error(tool_err, &call.name);
+                                yield FusedEvent::StageEnd { stage: StageKind::ToolExec, ok: false };
+                                self.fire_error(session_id, LifecyclePhase::Provider, &err).await;
+                                Err(err)?;
+                                unreachable!()
+                            }
+                            Err(_elapsed) => {
+                                self.release(reservation.take().expect("reservation held")).await;
+                                let err = RuntimeError::ToolTimeout {
+                                    tool: call.name.clone(),
+                                };
+                                yield FusedEvent::StageEnd { stage: StageKind::ToolExec, ok: false };
+                                self.fire_error(session_id, LifecyclePhase::Provider, &err).await;
+                                Err(err)?;
+                                unreachable!()
+                            }
+                        };
+
+                        // Scan the tool output before it re-enters the context.
+                        if let Err(err) = self.scan_tool_output(&call.name, &output.content).await {
+                            self.release(reservation.take().expect("reservation held")).await;
+                            yield FusedEvent::StageEnd { stage: StageKind::ToolExec, ok: false };
+                            self.fire_error(session_id, LifecyclePhase::Submit, &err).await;
+                            Err(err)?;
+                        }
+
+                        yield FusedEvent::ToolCallResult {
+                            id: call.id.clone(),
+                            result: output.content.clone(),
+                        };
+
+                        tool_cost = add_cost(tool_cost, &output.cost);
+                        tool_receipts.push(ToolCallReceipt {
+                            call_id: call.id.clone(),
+                            tool_name: call.name.clone(),
+                            arguments_digest: Sha256Digest::of(
+                                &serde_json::to_vec(&call.arguments).unwrap_or_default(),
+                            ),
+                            output_digest: Sha256Digest::of(
+                                &serde_json::to_vec(&output.content).unwrap_or_default(),
+                            ),
+                            cost: runtime_cost_to_receipt(&output.cost),
+                        });
+                        tool_messages.push(ChatMessage::tool_result(
+                            &call.id,
+                            tool_output_text(&output.content),
+                        ));
+                    }
+                    yield FusedEvent::StageEnd { stage: StageKind::ToolExec, ok: true };
+                } else if exhausted {
+                    // Record the requested calls for audit even though the loop
+                    // aborts without executing them (mirrors `submit`).
+                    for call in &requested {
+                        tool_receipts.push(ToolCallReceipt {
+                            call_id: call.id.clone(),
+                            tool_name: call.name.clone(),
+                            arguments_digest: Sha256Digest::of(
+                                &serde_json::to_vec(&call.arguments).unwrap_or_default(),
+                            ),
+                            output_digest: Sha256Digest::of(b""),
+                            cost: runtime_cost_to_receipt(&RuntimeCostTuple::default()),
+                        });
+                    }
+                }
+
+                // 7. receipt mint + chain.
+                yield FusedEvent::StageStart { stage: StageKind::ReceiptMint };
+                let combined_cost = add_cost(response.cost, &tool_cost);
+                let parent_hash = *self.chain_tail.lock();
+                let body = ReceiptBody {
+                    receipt_id: uuid::Uuid::new_v4(),
+                    parent_hash,
+                    verb: self.verb.clone(),
+                    issued_at: ardur_receipt::UnixTsMillis(now_ms),
+                    subject: ardur_receipt::HolderId(claims.subject.0.clone()),
+                    cap_token_id: ardur_receipt::TokenId(claims.token_id.to_string()),
+                    payload_digest: Sha256Digest::of(response.content.as_bytes()),
+                    cost: runtime_cost_to_receipt(&combined_cost),
+                    tool_calls: tool_receipts,
+                    provider: Some(self.provider.name()),
+                };
+                let signed = match ReceiptSigner::sign(body, &self.receipt_key) {
+                    Ok(signed) => signed,
+                    Err(e) => {
+                        self.release(reservation.take().expect("reservation held")).await;
+                        yield FusedEvent::StageEnd { stage: StageKind::ReceiptMint, ok: false };
+                        self.fire_error(session_id, LifecyclePhase::Receipt, &e).await;
+                        Err(RuntimeError::Internal(anyhow::anyhow!(
+                            "receipt mint failed: {e}"
+                        )))?;
+                        unreachable!()
+                    }
+                };
+                let chain_hash = Sha256Digest::of(signed.jws_compact().as_bytes());
+                *self.chain_tail.lock() = Some(chain_hash);
+                if let Err(e) = self.persist_receipt(signed.jws_compact()) {
+                    self.fire_error(session_id, LifecyclePhase::Receipt, &e).await;
+                }
+                let receipt = signed.body().clone();
+                yield FusedEvent::Receipt {
+                    receipt_id: ReceiptId(receipt.receipt_id),
+                    chain_hash: format!("{chain_hash}"),
+                };
+                yield FusedEvent::StageEnd { stage: StageKind::ReceiptMint, ok: true };
+
+                // 7'. post-receipt hooks (observational).
+                let post_ctx = PostReceiptCtx {
+                    session_id,
+                    receipt: &receipt,
+                    response: &response,
+                    cost: response.cost,
+                };
+                for err in self.registry.run_post_receipt(&post_ctx).await {
+                    let _ = err;
+                }
+
+                // 8. cost-gate finalize.
+                yield FusedEvent::StageStart { stage: StageKind::CostGateFinalize };
+                let actual = runtime_cost_to_gate(&combined_cost);
+                let _ = self
+                    .gate
+                    .finalize(reservation.take().expect("reservation held"), actual)
+                    .await;
+                yield FusedEvent::StageEnd { stage: StageKind::CostGateFinalize, ok: true };
+
+                // 9. memory (only when a backend is configured).
+                if let Some(memory) = &self.memory {
+                    yield FusedEvent::StageStart { stage: StageKind::MemoryRecord };
+                    let record = turn_record(&claims.subject.0, &response, &receipt, now_ms);
+                    if let Err(mem_err) = memory.record(record) {
+                        self.fire_error(session_id, LifecyclePhase::MemoryWrite, &mem_err)
+                            .await;
+                    }
+                    yield FusedEvent::StageEnd { stage: StageKind::MemoryRecord, ok: true };
+                }
+
+                // 10. session-journal (only when a journal is configured).
+                if let Some(journal) = &self.journal {
+                    yield FusedEvent::StageStart { stage: StageKind::JournalAppend };
+                    if iteration == 1 {
+                        if let Some(prompt) = last_user_message(&req.messages) {
+                            if let Err(e) = journal
+                                .append(JournalEntry::UserMessage {
+                                    content: prompt.to_string(),
+                                    at: now_ms,
+                                })
+                                .await
+                            {
+                                self.fire_error(session_id, LifecyclePhase::JournalAppend, &e)
+                                    .await;
+                            }
+                        }
+                    }
+                    if let Err(e) = journal
+                        .append(JournalEntry::AssistantMessage {
+                            content: response.content.clone(),
+                            at: now_ms,
+                            receipt_id: ReceiptId(receipt.receipt_id),
+                        })
+                        .await
+                    {
+                        self.fire_error(session_id, LifecyclePhase::JournalAppend, &e)
+                            .await;
+                    }
+                    yield FusedEvent::StageEnd { stage: StageKind::JournalAppend, ok: true };
+                }
+
+                // Termination: a response with no tool calls settles the turn; a
+                // tool-wanting response at the ceiling aborts; otherwise fold the
+                // tool round into the transcript and loop.
+                if !wants_tools {
+                    break finish_reason;
+                }
+                if exhausted {
+                    let err = RuntimeError::ToolLoopExhausted {
+                        iterations: iteration,
+                    };
+                    self.fire_error(session_id, LifecyclePhase::Provider, &err).await;
+                    Err(err)?;
+                    unreachable!()
+                }
+                messages.push(ChatMessage::assistant_tool_calls(
+                    response.content.clone(),
+                    requested,
+                ));
+                messages.extend(tool_messages);
+            };
+
+            yield FusedEvent::Finish(final_finish);
+        }
     }
 }
 
