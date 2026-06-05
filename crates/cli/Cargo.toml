@@ -56,6 +56,14 @@ rustyline = { workspace = true }
 # progressive display renders.
 futures = { workspace = true }
 
+# §2.X stunning-CLI rendering core (ADR-Phase2-021): CommonMark parsing
+# (comrak), syntect syntax highlight for fenced code blocks, and crossterm
+# terminal-width probing for width-adaptive boxes/tables. Feature-set rationale
+# lives in the workspace manifest.
+comrak = { workspace = true }
+syntect = { workspace = true }
+crossterm = { workspace = true }
+
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }

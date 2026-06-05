@@ -5,10 +5,10 @@
 //! [`StreamEvent`](ardur_provider_runtime::StreamEvent) feed progressively, a
 //! non-streaming backend (and the `--no-stream` gate) falls back to
 //! `complete()`, and a mid-stream error keeps the partial output already shown.
-//! Output is captured into a byte buffer with `color=false` so the assertions
-//! match the plain (no-ANSI) rendering.
+//! Output is captured into a byte buffer through an unstyled (plain) theme so the
+//! assertions match the no-ANSI rendering.
 
-use ardur_cli::{StreamOutcome, drive_turn};
+use ardur_cli::{RenderCtx, StreamOutcome, Theme, ThemeName, drive_turn};
 use ardur_provider_runtime::{
     CompletionRequest, CompletionResponse, FinishReason, ModelId, Provider, ProviderError,
     ProviderStream, RateCard, StreamEvent, Usage,
@@ -106,7 +106,11 @@ fn request() -> CompletionRequest {
 /// plain (no-color) output and the [`StreamOutcome`].
 async fn run(provider: &MockProvider, stream_enabled: bool) -> (String, StreamOutcome) {
     let mut buf: Vec<u8> = Vec::new();
-    let outcome = drive_turn(provider, request(), stream_enabled, &mut buf, false)
+    // An unstyled theme at a fixed width keeps the captured output escape-free and
+    // deterministic regardless of the test terminal.
+    let theme = Theme::named(ThemeName::Night).plain();
+    let ctx = RenderCtx::new(&theme, 80);
+    let outcome = drive_turn(provider, request(), stream_enabled, &mut buf, &ctx)
         .await
         .expect("rendering to an in-memory buffer never fails");
     (String::from_utf8(buf).expect("utf-8 output"), outcome)
@@ -141,8 +145,8 @@ async fn streaming_shows_tool_call_indicator() {
     let (output, outcome) = run(&provider, true).await;
 
     assert!(
-        output.contains("→ calling tool: search_web"),
-        "a ToolCallStart should render the tool indicator, got: {output:?}"
+        output.contains("tool · search_web"),
+        "a ToolCallStart should render the tool box, got: {output:?}"
     );
     assert_eq!(outcome.tool_calls, vec!["search_web".to_string()]);
 }
@@ -158,10 +162,10 @@ async fn streaming_shows_usage_at_end() {
 
     let (output, outcome) = run(&provider, true).await;
 
-    // The dim end-of-turn line names the token split and the priced cost. Under
-    // the Anthropic Q2-2026 card, 1k in + 1k out = 0.3 + 1.5 = ~2c -> $0.02.
+    // The dim end-of-turn cost line names the token split and the priced cost.
+    // Under the Anthropic Q2-2026 card, 1k in + 1k out = 0.3 + 1.5 = ~2c -> $0.02.
     assert!(
-        output.contains("[tokens in/out: 1000/1000, cost: $0.02"),
+        output.contains("1000 tokens in · 1000 out") && output.contains("$0.02"),
         "the usage/cost line should close the turn, got: {output:?}"
     );
     assert_eq!(
