@@ -48,7 +48,7 @@ use ardur_channel_discord::DiscordChannel;
 use ardur_channel_matrix::MatrixChannel;
 use ardur_channel_telegram::TelegramChannel;
 use ardur_cost_gate::{CostEnvelope, CostTuple as GateCostTuple, HolderId as GateHolderId};
-use ardur_fused_runtime::{FusedRuntime, FusedRuntimeBuilder};
+use ardur_fused_runtime::{FusedRuntime, FusedRuntimeBuilder, load_persisted_chain};
 use ardur_memory::{InMemoryMemoryRuntime, MemoryRuntime};
 use ardur_memory_qdrant::{
     Bm25Index, Embedder, FastEmbedEmbedder, HybridMemoryRetriever, QdrantMemoryConfig,
@@ -57,13 +57,15 @@ use ardur_memory_qdrant::{
 use ardur_messaging_gateway::{IncomingMessage, MessageBody, MessagingGateway};
 use ardur_provider_runtime::{ModelId, Provider};
 use ardur_receipt::Es256SigningKey;
-use ardur_runtime::{CapTokenRef, ChatMessage, ChatRuntime, SessionId, SubmitRequest};
+use ardur_runtime::{
+    CapTokenRef, ChatMessage, ChatRuntime, RuntimeError, SessionId, SubmitRequest,
+};
 use ardur_session_journals::{FileSessionJournal, SessionJournal};
 use ardur_slack_adapter::SlackAdapter;
 use ardur_tool_registry::ToolRegistry;
 use biscuit_auth::{Algorithm, PrivateKey};
 use secrecy::SecretString;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::config::{Config, MemoryBackend};
 
@@ -95,6 +97,61 @@ const PER_TURN_CENTS_CAP: u64 = 1_000;
 /// `ARDUR_CEDAR_POLICY_PATH` is unset or its file is absent.
 const DEFAULT_POLICY: &str = "permit(principal, action == Action::\"Submit\", resource);";
 
+/// A unit of work handed to the turn worker. Both variants run the identical
+/// fused-runtime pipeline; they differ only in where the reply goes — a
+/// [`Channel`](WorkItem::Channel) message's reply is posted back to its origin
+/// channel (Slack/Matrix/…), while an [`Http`](WorkItem::Http) `/chat` turn's
+/// result is returned to the HTTP caller over a oneshot.
+enum WorkItem {
+    /// A fire-and-forget message from a chat channel; reply posted to the channel.
+    Channel(IncomingMessage),
+    /// A synchronous `POST /chat` turn; result returned over the oneshot.
+    Http(HttpTurn),
+}
+
+/// A synchronous chat turn submitted over `POST /chat`: the prompt, the session
+/// it belongs to, and the oneshot the worker sends the outcome (or the turn's
+/// [`RuntimeError`]) back on.
+struct HttpTurn {
+    message: String,
+    session_id: SessionId,
+    reply: oneshot::Sender<Result<ChatTurnOutcome, RuntimeError>>,
+}
+
+/// The result of a successful synchronous `/chat` turn, surfaced to the HTTP
+/// handler so it can render the response JSON.
+#[derive(Clone, Debug)]
+pub struct ChatTurnOutcome {
+    /// The session the turn ran under — echoed so the caller can thread a
+    /// follow-up onto the same session.
+    pub session_id: SessionId,
+    /// The assistant's reply text.
+    pub reply: String,
+    /// Prompt/input tokens billed for the turn.
+    pub tokens_in: u64,
+    /// Completion/output tokens billed for the turn.
+    pub tokens_out: u64,
+    /// Monetary cost of the turn, in whole US cents.
+    pub cents: u64,
+    /// The tools the model invoked over the turn's provider iterations, in
+    /// receipt order. Empty when the turn took no tool calls.
+    pub tools_called: Vec<String>,
+    /// The id of the (final) receipt minted for the turn.
+    pub receipt_id: String,
+}
+
+/// Why a `/chat` turn could not be completed.
+#[derive(Debug, thiserror::Error)]
+pub enum ChatSubmitError {
+    /// The fused runtime rejected or failed the turn (cap-token, policy, cost
+    /// gate, injection defense, or provider). The HTTP layer maps this to `502`.
+    #[error(transparent)]
+    Runtime(#[from] RuntimeError),
+    /// The turn worker has shut down, so no turn can be processed.
+    #[error("turn worker is unavailable")]
+    WorkerGone,
+}
+
 /// The wired application state shared (behind an [`Arc`]) across request handlers.
 ///
 /// Holds only what the HTTP layer needs: the Slack adapter (inbound signature
@@ -103,7 +160,7 @@ const DEFAULT_POLICY: &str = "permit(principal, action == Action::\"Submit\", re
 /// the cap-token issuer live on the worker thread (see the module docs).
 pub struct AppState {
     slack: Arc<SlackAdapter>,
-    work_tx: mpsc::UnboundedSender<IncomingMessage>,
+    work_tx: mpsc::UnboundedSender<WorkItem>,
     journal: Arc<dyn SessionJournal>,
     data_dir: PathBuf,
     mcp: Option<McpSurface>,
@@ -280,6 +337,7 @@ impl AppState {
             telegram: telegram.clone(),
             issuer,
             cap_budget_remaining: config.cost_budget_cents,
+            receipt_log,
         };
         let work_tx = spawn_worker(processor);
 
@@ -384,7 +442,39 @@ impl AppState {
     /// only if the worker has shut down (so the caller can log a drop).
     #[must_use]
     pub fn enqueue(&self, message: IncomingMessage) -> bool {
-        self.work_tx.send(message).is_ok()
+        self.work_tx.send(WorkItem::Channel(message)).is_ok()
+    }
+
+    /// Run a synchronous chat turn (the `POST /chat` path): hand the prompt to the
+    /// turn worker and await its outcome over a oneshot. Unlike a channel message
+    /// ([`enqueue`](Self::enqueue)), the reply is returned to the caller here
+    /// rather than posted back to an origin channel — so an embedding HTTP client
+    /// gets the assistant's response, its token/cost accounting, the tools it
+    /// called, and the receipt id in one request/response.
+    ///
+    /// # Errors
+    /// [`ChatSubmitError::Runtime`] if the fused runtime rejects or fails the turn
+    /// (cap-token / policy / cost-gate / injection / provider), or
+    /// [`ChatSubmitError::WorkerGone`] if the worker thread has shut down.
+    pub async fn submit_chat(
+        &self,
+        message: String,
+        session_id: SessionId,
+    ) -> Result<ChatTurnOutcome, ChatSubmitError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let turn = HttpTurn {
+            message,
+            session_id,
+            reply: reply_tx,
+        };
+        if self.work_tx.send(WorkItem::Http(turn)).is_err() {
+            return Err(ChatSubmitError::WorkerGone);
+        }
+        match reply_rx.await {
+            Ok(result) => result.map_err(ChatSubmitError::Runtime),
+            // The worker dropped the sender without replying (it shut down).
+            Err(_canceled) => Err(ChatSubmitError::WorkerGone),
+        }
     }
 
     /// The session journal handle (used by graceful shutdown to fsync + close).
@@ -416,6 +506,11 @@ struct Processor {
     telegram: Arc<OnceLock<Arc<TelegramChannel>>>,
     issuer: BiscuitCapTokenIssuer,
     cap_budget_remaining: u64,
+    /// The append-only receipt-chain log the fused runtime writes to. Read
+    /// before/after an HTTP turn to recover the tools it called (the worker is
+    /// single-threaded, so the receipts appended across one `submit` belong to
+    /// exactly that turn).
+    receipt_log: PathBuf,
 }
 
 /// Which channel backend a turn originated on — decided by the namespaced
@@ -499,6 +594,100 @@ impl Processor {
         }
     }
 
+    /// Run one synchronous `/chat` turn through the fused runtime and return the
+    /// outcome over the turn's oneshot. The reply is *not* posted to any channel —
+    /// the HTTP caller receives it directly (see [`AppState::submit_chat`]).
+    async fn handle_http(&self, turn: HttpTurn) {
+        let HttpTurn {
+            message,
+            session_id,
+            reply,
+        } = turn;
+
+        let token = match self.mint_session_token(now_unix()) {
+            Ok(token) => token,
+            Err(e) => {
+                let _ = reply.send(Err(RuntimeError::Internal(anyhow::anyhow!(
+                    "minting session cap-token: {e}"
+                ))));
+                return;
+            }
+        };
+
+        // Bracket the turn's receipts: the worker is single-threaded and runs one
+        // turn at a time, so every receipt appended between this snapshot and the
+        // post-submit read belongs to this turn. The final receipt carries no tool
+        // calls (it is the no-tool answer that terminates the loop); the tools ride
+        // on the earlier tool-use iterations, which this window captures.
+        let receipts_before = self.receipt_count();
+
+        let request = SubmitRequest {
+            messages: vec![ChatMessage::user(message)],
+            cap_token: CapTokenRef(token),
+            session_id,
+            requested_provider: None,
+        };
+
+        let outcome = match self.runtime.submit(request).await {
+            Ok(result) => {
+                let tools_called = self.tools_called_since(receipts_before);
+                tracing::info!(
+                    session_id = %session_id.0,
+                    receipt_id = %result.receipt_id.0,
+                    tools = tools_called.len(),
+                    "chat turn completed"
+                );
+                Ok(ChatTurnOutcome {
+                    session_id,
+                    reply: result.response.content,
+                    tokens_in: result.cost.tokens_in,
+                    tokens_out: result.cost.tokens_out,
+                    cents: result.cost.cents,
+                    tools_called,
+                    receipt_id: result.receipt_id.0.to_string(),
+                })
+            }
+            Err(e) => {
+                tracing::warn!(session_id = %session_id.0, error = %e, "chat turn failed");
+                Err(e)
+            }
+        };
+        // A dropped receiver means the HTTP caller's request future was cancelled
+        // (client hung up); nothing to do but discard the outcome.
+        let _ = reply.send(outcome);
+    }
+
+    /// The number of receipts currently persisted in the chain log (`0` if the
+    /// log is absent or unreadable). Brackets a turn's receipts for
+    /// [`tools_called_since`](Self::tools_called_since).
+    fn receipt_count(&self) -> usize {
+        load_persisted_chain(&self.receipt_log)
+            .map(|chain| chain.len())
+            .unwrap_or(0)
+    }
+
+    /// The tool names recorded on every receipt appended after index `before` —
+    /// the tools this turn's provider iterations invoked, in receipt order.
+    fn tools_called_since(&self, before: usize) -> Vec<String> {
+        match load_persisted_chain(&self.receipt_log) {
+            Ok(chain) => chain
+                .into_iter()
+                .skip(before)
+                .flat_map(|receipt| {
+                    receipt
+                        .body
+                        .tool_calls
+                        .into_iter()
+                        .map(|call| call.tool_name)
+                })
+                .collect(),
+            Err(e) => {
+                tracing::warn!(error = %e, "reading receipt chain for tools_called");
+                Vec::new()
+            }
+        }
+    }
+
     /// Post `text` to `channel`, routing to the backend the turn originated on.
     /// Returns the provider's message id on success.
     async fn post_reply(
@@ -562,8 +751,8 @@ impl Processor {
 /// Spawn the worker thread: a current-thread Tokio runtime that drains the work
 /// queue, processing each message to completion in arrival order. Returns the
 /// sender the HTTP layer enqueues onto.
-fn spawn_worker(processor: Processor) -> mpsc::UnboundedSender<IncomingMessage> {
-    let (tx, mut rx) = mpsc::unbounded_channel::<IncomingMessage>();
+fn spawn_worker(processor: Processor) -> mpsc::UnboundedSender<WorkItem> {
+    let (tx, mut rx) = mpsc::unbounded_channel::<WorkItem>();
     std::thread::Builder::new()
         .name("ardur-turn-worker".to_string())
         .spawn(move || {
@@ -579,8 +768,11 @@ fn spawn_worker(processor: Processor) -> mpsc::UnboundedSender<IncomingMessage> 
             };
             // `block_on` drives the `!Send` per-turn futures on this one thread.
             rt.block_on(async move {
-                while let Some(message) = rx.recv().await {
-                    processor.handle(message).await;
+                while let Some(item) = rx.recv().await {
+                    match item {
+                        WorkItem::Channel(message) => processor.handle(message).await,
+                        WorkItem::Http(turn) => processor.handle_http(turn).await,
+                    }
                 }
             });
         })
@@ -595,7 +787,7 @@ fn spawn_worker(processor: Processor) -> mpsc::UnboundedSender<IncomingMessage> 
 /// in log lines.
 fn spawn_inbound_forwarder<G>(
     label: &'static str,
-    work_tx: mpsc::UnboundedSender<IncomingMessage>,
+    work_tx: mpsc::UnboundedSender<WorkItem>,
     channel: Arc<G>,
 ) where
     G: MessagingGateway + Send + Sync + 'static,
@@ -604,7 +796,7 @@ fn spawn_inbound_forwarder<G>(
         loop {
             match channel.receive().await {
                 Ok(incoming) => {
-                    if work_tx.send(incoming).is_err() {
+                    if work_tx.send(WorkItem::Channel(incoming)).is_err() {
                         tracing::error!(channel = label, "turn worker is gone; stopping forwarder");
                         break;
                     }
