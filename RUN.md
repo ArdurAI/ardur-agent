@@ -346,6 +346,27 @@ Provider support (Phase 1): **anthropic** (Messages API `tool_use`) and
 `claude` CLI providers orchestrate their own tools internally, so the runtime
 loop does not drive tools through them.
 
+## Streaming
+
+Every provider exposes a streaming surface on the `Provider` trait
+(`Provider::stream` → a `ProviderStream` of `StreamEvent`s), and each backend
+advertises whether it implements it via `supports_streaming()`:
+
+| Provider | `supports_streaming()` | Transport |
+|---|---|---|
+| `anthropic` | yes | SSE (§3.1b) |
+| `ollama` | yes | NDJSON (§3.4b) |
+| `openrouter` | no | planned |
+| `codex` | no | CLI orchestrates its own output |
+| `claude-cli` | no | planned |
+
+This is currently a **provider-library** capability: the fused turn pipeline
+consumes the non-streaming completion and posts the full reply once it is
+ready, so there is no operator knob and you will not see token-by-token
+"typing" land in Slack/Matrix/Discord/Telegram yet. The streaming path is in
+place at the provider boundary so the turn loop can adopt it later without a
+provider rewrite.
+
 ## Skills (SKILL.md)
 
 A **skill** is a folder holding a `SKILL.md`: YAML frontmatter (`name`,
@@ -421,6 +442,46 @@ Point it at a backend in seconds:
   endpoint, or point `OTEL_EXPORTER_OTLP_ENDPOINT` at a Langfuse-compatible
   collector.
 
+## Companion tools
+
+Two standalone binaries ship alongside `ardur-server` for evaluation and
+after-the-fact observability. Both are optional and decoupled from the server
+process.
+
+- **`ardur-admin`** (`crates/admin-ui`) — a **read-only** observability
+  dashboard over a deployment's on-disk artifacts. It reads the server's
+  journals, the hash-chained receipt log, and (optionally) the durable Qdrant
+  memory collection *directly* and serves them over a small HTTP UI on its own
+  port. No write path, no shared config — configured purely by CLI flags:
+
+  ```sh
+  ardur-admin \
+    --journal-dir /var/lib/ardur/journals \
+    --receipt-store /var/lib/ardur/receipts \
+    --qdrant-url http://localhost:6334 \   # optional; enables the memory view
+    --port 8090 \                          # default 8090
+    --basic-auth user:pass                 # optional light gate
+  ```
+
+  It is strictly read-only, but it surfaces receipt and journal contents —
+  treat its port like the data directory and keep it on a trusted/private
+  network behind your own auth.
+
+- **`ardur-eval`** (`crates/eval-harness`) — a CLI that POSTs scenario files
+  to a server chat endpoint and grades the results, emitting `json`, `junit`,
+  or `markdown`:
+
+  ```sh
+  ardur-eval run  --scenarios ./scenarios --server-url http://localhost:3000 --output markdown
+  ardur-eval list --scenarios ./scenarios
+  ardur-eval new  --id my-scenario --scenarios ./scenarios
+  ```
+
+  Note: it targets a `POST <server-url>/chat` JSON contract that
+  `ardur-server` does **not** yet expose (today the server speaks only
+  `/slack/events` + `/healthz`). The path is overridable with `--chat-path`,
+  so point it at whatever endpoint serves the contract.
+
 ## Cost ceilings
 
 `ARDUR_COST_BUDGET_CENTS=10000` caps a single session at $100 of provider
@@ -450,8 +511,6 @@ error to the channel before the next provider call when the ceiling is hit.
 Open tickets that an operator should know about before depending on this
 deployment for anything sensitive:
 
-- **ARD-14** — Cedar derive from cap-token claims. **DONE** (landed in PR
-  #42).
 - **ARD-17** — Orphan-receipt durability: the two-phase commit between
   journal append and receipt sign is still single-phase. A crash in the
   window can leave an orphan receipt.
@@ -461,10 +520,8 @@ deployment for anything sensitive:
   with a real local model (`EMBED_MODEL`), and `HybridMemoryRetriever` adds fused
   dense + sparse recall — but the runtime's recall side does not yet call the
   hybrid surface, so semantic recall is not wired into the turn path.
-- **ARD-48** — Injection-defense not yet wired into the FusedRuntime
-  pipeline; the standalone crate exists but does not gate provider calls.
 - **ARD-21** — Dependabot triage queue is unmanaged; pin reviews land
   ad-hoc.
 
-Until ARD-17, ARD-19, and ARD-48 land, this is **dev fidelity**, not
-**production**. Use it in a private Slack channel first.
+Until ARD-17 and ARD-19 land, this is **dev fidelity**, not **production**.
+Use it in a private Slack channel first.
