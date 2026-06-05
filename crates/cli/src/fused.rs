@@ -38,7 +38,9 @@ use ardur_cap_token::{CapScope, CapTokenIssuer, HolderId as CapHolderId};
 use ardur_cost_gate::{CostEnvelope, CostTuple as GateCostTuple, HolderId as GateHolderId};
 use ardur_fused_runtime::FusedRuntimeBuilder;
 use ardur_memory::InMemoryMemoryRuntime;
-use ardur_provider_runtime::{AnthropicProvider, InstrumentedProvider, ModelId, Provider};
+use ardur_provider_runtime::{
+    AnthropicProvider, CompletionRequest, InstrumentedProvider, ModelId, Provider,
+};
 use ardur_provider_selector as provider_selector;
 use ardur_runtime::{CapTokenRef, ChatMessage, ChatRuntime, SessionId, SubmitRequest};
 use ardur_session_journals::FileSessionJournal;
@@ -47,6 +49,7 @@ use crate::config::Config;
 use crate::engine::TurnOutcome;
 use crate::error::CliError;
 use crate::state::StateDirs;
+use crate::stream::{StreamOutcome, drive_turn};
 
 /// The audience the session cap-token is scoped to (matches the runtime's
 /// verifier caveat).
@@ -58,10 +61,23 @@ const CAP_TTL_SECS: u64 = 3_600;
 /// The default per-turn cents ceiling when `ARDUR_CLI_PER_TURN_CENTS` is unset,
 /// capped at the session budget so a tiny budget still affords a turn.
 const DEFAULT_PER_TURN_CENTS: u64 = 100;
+/// The output-token ceiling on a streamed turn's request, matching the fused
+/// runtime's own default (`FusedRuntimeBuilder`'s `max_tokens`).
+const STREAM_MAX_TOKENS: u32 = 1024;
 
 /// A FusedRuntime-backed chat substrate for one interactive session.
 pub struct FusedEngine {
     runtime: ardur_fused_runtime::FusedRuntime,
+    /// The selected (instrumented) backend, retained so [`stream_turn`] can call
+    /// [`Provider::stream`] directly at the CLI layer (the §2.1b streaming path
+    /// bypasses the fused pipeline — see [`crate::stream`]).
+    ///
+    /// [`stream_turn`]: FusedEngine::stream_turn
+    /// [`Provider::stream`]: ardur_provider_runtime::Provider::stream
+    provider: Arc<dyn Provider>,
+    /// The model streamed requests are built against (the same the fused runtime
+    /// dispatches against).
+    model: ModelId,
     cap_token: CapTokenRef,
     holder: GateHolderId,
     session_id: SessionId,
@@ -105,6 +121,9 @@ impl FusedEngine {
         // an OTLP backend when `ARDUR_OTEL_ENABLED=true`, and otherwise route to the
         // CLI's console subscriber.
         let provider = InstrumentedProvider::wrap(provider);
+        // Keep a handle to the same instrumented provider the runtime owns so the
+        // streaming REPL path can drive `Provider::stream` directly.
+        let provider_handle = Arc::clone(&provider);
 
         let issuer = dirs.load_or_create_issuer()?;
         let cap_root = issuer.public_key();
@@ -156,28 +175,31 @@ impl FusedEngine {
         // for the persistent store that replaces this).
         let memory = InMemoryMemoryRuntime::new();
 
-        let runtime = FusedRuntimeBuilder::new(cap_root, policies, provider, receipt_key, model)
-            .audience(AUDIENCE)
-            .tool(TOOL)
-            .provision_budget(
-                holder.clone(),
-                GateCostTuple {
-                    tokens_in: 1_000_000_000,
-                    tokens_out: 1_000_000_000,
-                    cents: budget_cents,
-                    wall_ms: 1_000_000_000,
-                    attention_score: 1_000_000_000,
-                },
-            )
-            .projected_envelope(envelope)
-            .with_memory(Arc::new(memory))
-            .with_journal(Arc::new(journal))
-            .receipt_log(dirs.receipt_log())
-            .build()
-            .map_err(|e| CliError::State(format!("building the fused runtime: {e}")))?;
+        let runtime =
+            FusedRuntimeBuilder::new(cap_root, policies, provider, receipt_key, model.clone())
+                .audience(AUDIENCE)
+                .tool(TOOL)
+                .provision_budget(
+                    holder.clone(),
+                    GateCostTuple {
+                        tokens_in: 1_000_000_000,
+                        tokens_out: 1_000_000_000,
+                        cents: budget_cents,
+                        wall_ms: 1_000_000_000,
+                        attention_score: 1_000_000_000,
+                    },
+                )
+                .projected_envelope(envelope)
+                .with_memory(Arc::new(memory))
+                .with_journal(Arc::new(journal))
+                .receipt_log(dirs.receipt_log())
+                .build()
+                .map_err(|e| CliError::State(format!("building the fused runtime: {e}")))?;
 
         Ok(Self {
             runtime,
+            provider: provider_handle,
+            model,
             cap_token,
             holder,
             session_id,
@@ -204,6 +226,66 @@ impl FusedEngine {
     #[must_use]
     pub fn remaining_cents(&self) -> u64 {
         self.remaining.load(Ordering::SeqCst)
+    }
+
+    /// Whether the selected backend can stream tokens incrementally.
+    #[must_use]
+    pub fn supports_streaming(&self) -> bool {
+        self.provider.supports_streaming()
+    }
+
+    /// Whether the REPL should drive this turn through the progressive
+    /// [`stream_turn`](Self::stream_turn) path rather than the fused
+    /// [`run_turn`](Self::run_turn).
+    ///
+    /// True only for a **live** streaming-capable backend. The offline stub is
+    /// excluded: it has no incremental SSE feed (its `stream()` is the default
+    /// wrap-`complete()` impl, so streaming buys no UX), and routing it through
+    /// the fused pipeline keeps the offline session's signed receipts and durable
+    /// journal — the very substrate guarantees the offline mode demonstrates.
+    #[must_use]
+    pub fn should_stream(&self) -> bool {
+        !self.offline && self.provider.supports_streaming()
+    }
+
+    /// Run one chat turn by streaming the provider **directly**, rendering tokens
+    /// progressively to `out`.
+    ///
+    /// This is the §2.1b interactive path: it calls
+    /// [`Provider::stream`](ardur_provider_runtime::Provider::stream) at the CLI
+    /// layer, **bypassing** the fused runtime's ten-stage pipeline (cap-token
+    /// verify, Cedar authorization, cost admission, signed receipt, durable
+    /// journal) that [`run_turn`](Self::run_turn) routes through. The displayed
+    /// budget is decremented locally from the streamed turn's usage cost so the
+    /// prompt stays sensible; a subsequent fused turn re-syncs the balance from
+    /// the gate ledger. Threading streaming *through* the fused runtime is the
+    /// proposed follow-up.
+    ///
+    /// The REPL only routes here once it has confirmed streaming is enabled
+    /// (`--no-stream` absent) *and* [`supports_streaming`](Self::supports_streaming),
+    /// so this always drives the real streaming path; a non-streaming-capable
+    /// backend keeps the full-pipeline [`run_turn`](Self::run_turn) instead.
+    pub async fn stream_turn<W: std::io::Write>(
+        &self,
+        messages: &[ChatMessage],
+        out: &mut W,
+        color: bool,
+    ) -> std::io::Result<StreamOutcome> {
+        let req = CompletionRequest::new(messages.to_vec(), self.model.clone(), STREAM_MAX_TOKENS)
+            .streaming();
+        let outcome = drive_turn(self.provider.as_ref(), req, true, out, color).await?;
+
+        // Decrement the displayed balance by this turn's usage cost. The gate
+        // ledger is untouched on this bypass path (documented trade-off above).
+        if let Some(usage) = outcome.usage {
+            let used = self.provider.rate_card().price(usage).cents;
+            self.remaining
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |bal| {
+                    Some(bal.saturating_sub(used))
+                })
+                .ok();
+        }
+        Ok(outcome)
     }
 
     /// Run one chat turn over `messages` through the full fused pipeline, then
