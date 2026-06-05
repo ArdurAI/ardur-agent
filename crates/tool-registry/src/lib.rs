@@ -20,8 +20,9 @@
 //!   id and by required capability.
 //! - [`EchoTool`] — a capability-free sample tool that returns its input.
 //! - [`ShellTool`] / [`ReadFileTool`] / [`WriteFileTool`] / [`ListDirTool`]
-//!   (§6.1) — capability-gated built-in shell and filesystem tools, installed
-//!   via [`ToolRegistry::register_builtins`] and [`BuiltinOpts`]. See
+//!   (§6.1) and [`HttpFetchTool`] (§6.2) — capability-gated built-in shell,
+//!   filesystem, and SSRF-defended HTTP-fetch tools, installed via
+//!   [`ToolRegistry::register_builtins`] and [`BuiltinOpts`]. See
 //!   `src/builtins/README.md` for the security model.
 //! - [`SkillTool`] / [`SkillLoader`] / [`Skill`] (§8.X) — load filesystem
 //!   `SKILL.md` documents (YAML frontmatter + Markdown body) and expose each as
@@ -59,7 +60,9 @@ mod registry;
 mod skills;
 mod tool;
 
-pub use builtins::{BuiltinOpts, ListDirTool, ReadFileTool, ShellTool, WriteFileTool};
+pub use builtins::{
+    BuiltinOpts, HttpFetchOpts, HttpFetchTool, ListDirTool, ReadFileTool, ShellTool, WriteFileTool,
+};
 pub use capability::Capability;
 pub use echo::EchoTool;
 pub use error::{RegistryError, ToolError};
