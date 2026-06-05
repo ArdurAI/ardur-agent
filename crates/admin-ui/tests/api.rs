@@ -122,6 +122,43 @@ fn append_receipt(
     fs::write(&path, existing).unwrap();
 }
 
+/// Append one synthetic receipt carrying an explicit §11.14b `provider` field.
+/// Mirrors [`append_receipt`] but adds the `"provider"` key so the loader's
+/// field-over-verb preference can be exercised.
+fn append_receipt_with_provider(
+    receipt_store: &Path,
+    receipt_id: &str,
+    verb: &str,
+    provider: &str,
+    issued_ms: u64,
+    cents: u64,
+) {
+    let body = serde_json::json!({
+        "receipt_id": receipt_id,
+        "parent_hash": null,
+        "verb": verb,
+        "issued_at": issued_ms,
+        "subject": "user:test",
+        "cap_token_id": "tok-test",
+        "payload_digest": "0".repeat(64),
+        "cost": {
+            "tokens_in": 1,
+            "tokens_out": 1,
+            "cents": cents,
+            "wall_ms": 250,
+            "attention_score": 0.0
+        },
+        "provider": provider,
+    });
+    let payload = B64URL.encode(serde_json::to_vec(&body).unwrap());
+    let line = format!("aGVhZGVy.{payload}.c2ln\n");
+    fs::create_dir_all(receipt_store).unwrap();
+    let path = receipt_store.join("chain.jsonl");
+    let mut existing = fs::read_to_string(&path).unwrap_or_default();
+    existing.push_str(&line);
+    fs::write(&path, existing).unwrap();
+}
+
 /// A temp data dir with `journals/` and `receipts/` and a test server over it.
 struct Fixture {
     _dir: TempDir,
@@ -299,6 +336,66 @@ async fn receipts_endpoint_summarizes() {
     // An unknown id is a 404.
     let missing = fx.server().get("/api/receipts/does-not-exist").await;
     assert_eq!(missing.status_code(), 404);
+}
+
+#[tokio::test]
+async fn receipts_endpoint_prefers_provider_field_over_verb() {
+    let fx = Fixture::new();
+    // §11.14b receipt: explicit provider differs from the verb. The summary's
+    // "provider" dimension must surface the field, not the verb.
+    append_receipt_with_provider(
+        &fx.receipt_store,
+        "22222222-2222-4222-8222-222222222222",
+        "llm.completion.minted.v1",
+        "anthropic",
+        1_000,
+        7,
+    );
+    // Pre-§11.14b receipt: no provider field → falls back to the verb.
+    append_receipt(
+        &fx.receipt_store,
+        "33333333-3333-4333-8333-333333333333",
+        "llm.completion.minted.v1",
+        2_000,
+        3,
+        1,
+        1,
+        &[],
+    );
+
+    let arr: Value = fx.server().get("/api/receipts").await.json();
+    let by_id: std::collections::HashMap<&str, &Value> = arr
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| (r["receipt_id"].as_str().unwrap(), r))
+        .collect();
+
+    assert_eq!(
+        by_id["22222222-2222-4222-8222-222222222222"]["provider"], "anthropic",
+        "explicit provider field is preferred over the verb"
+    );
+    assert_eq!(
+        by_id["33333333-3333-4333-8333-333333333333"]["provider"], "llm.completion.minted.v1",
+        "absent provider field falls back to the verb"
+    );
+
+    // The cost-by-provider roll-up groups by the same preferred key: the two
+    // receipts share a verb but split into "anthropic" + the verb fallback.
+    let report: Value = fx.server().get("/api/costs").await.json();
+    let by_provider: std::collections::HashMap<&str, u64> = report["by_provider"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| {
+            (
+                p["provider"].as_str().unwrap(),
+                p["cents"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(by_provider.get("anthropic"), Some(&7));
+    assert_eq!(by_provider.get("llm.completion.minted.v1"), Some(&3));
 }
 
 #[tokio::test]

@@ -24,6 +24,7 @@ fn sample_body(verb: &str) -> ReceiptBody {
             attention_score: 0.5,
         },
         tool_calls: Vec::new(),
+        provider: None,
     }
 }
 
@@ -185,4 +186,64 @@ fn jwks_json_roundtrip() {
 
     let signed = ReceiptSigner::sign(sample_body("cost.admission.allow.v1"), &key).unwrap();
     ReceiptVerifier::verify(&signed, &parsed).expect("verifies against round-tripped JWKS");
+}
+
+/// §11.14b backward-compat: a receipt body serialized before the `provider`
+/// field existed (no `"provider"` key) decodes with `provider == None`.
+#[test]
+fn provider_field_backward_compat_decode() {
+    let pre = sample_body("llm.completion.minted.v1");
+    let mut json = serde_json::to_value(&pre).expect("body serializes");
+    // Strip the field to model a pre-§11.14b receipt on disk.
+    json.as_object_mut().unwrap().remove("provider");
+    assert!(
+        !json.as_object().unwrap().contains_key("provider"),
+        "the pre-§11.14b fixture has no provider key"
+    );
+
+    let decoded: ReceiptBody = serde_json::from_value(json).expect("legacy body decodes");
+    assert_eq!(decoded.provider, None, "absent provider key loads as None");
+    assert_eq!(
+        decoded, pre,
+        "round-trips to the original None-provider body"
+    );
+}
+
+/// §11.14b forward-compat: a `None`-provider body serializes byte-identically to
+/// a pre-§11.14b one — `skip_serializing_if` omits the key, so the signature and
+/// chain hash of a no-provider receipt are unchanged.
+#[test]
+fn provider_none_is_byte_identical() {
+    let none = sample_body("llm.completion.minted.v1");
+    assert_eq!(none.provider, None);
+
+    let bytes = serde_json::to_vec(&none).expect("body serializes");
+    let text = String::from_utf8(bytes).unwrap();
+    assert!(
+        !text.contains("\"provider\""),
+        "a None provider must not emit a provider key: {text}"
+    );
+
+    // A populated provider DOES emit the key — the omission above is the
+    // None case specifically, not the field being dropped outright.
+    let mut some = none.clone();
+    some.provider = Some("anthropic".to_string());
+    let some_text = serde_json::to_string(&some).expect("body serializes");
+    assert!(some_text.contains("\"provider\":\"anthropic\""));
+}
+
+/// §11.14b: a populated `provider` survives a sign → verify round-trip — it is
+/// inside the signed body, not metadata bolted on after minting.
+#[test]
+fn provider_field_survives_sign_verify() {
+    let key = Es256SigningKey::generate();
+    let jwks = Jwks::from_public_key(&key.public_key());
+
+    let mut body = sample_body("llm.completion.minted.v1");
+    body.provider = Some("anthropic".to_string());
+
+    let signed = ReceiptSigner::sign(body.clone(), &key).unwrap();
+    let verified = ReceiptVerifier::verify(&signed, &jwks).unwrap();
+    assert_eq!(verified.body.provider.as_deref(), Some("anthropic"));
+    assert_eq!(verified.body, body);
 }

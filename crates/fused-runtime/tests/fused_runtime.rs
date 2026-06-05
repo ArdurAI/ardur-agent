@@ -68,6 +68,35 @@ async fn happy_path_runs_every_stage() {
     verify_persisted_chain(&chain).expect("the single-receipt chain verifies");
 }
 
+/// §11.14b: the fused-runtime mint records the serving provider's
+/// [`name`](ardur_provider_runtime::Provider::name) on the receipt body, so the
+/// persisted (and signed) receipt names its backend. `EchoProvider` answers to
+/// `"echo"`, inheriting the trait's default `name()` from its `id()`.
+#[tokio::test]
+async fn mint_records_provider_on_receipt() {
+    let provider = Arc::new(EchoProvider::new());
+    let session_id = SessionId::new();
+    let receipt_log = tempfile::NamedTempFile::new().expect("receipt log");
+
+    let runtime = runtime_builder(provider.clone())
+        .receipt_log(receipt_log.path())
+        .build()
+        .expect("runtime builds");
+
+    runtime
+        .submit(request_for("hello substrate", &valid_token(), session_id))
+        .await
+        .expect("the turn completes");
+
+    let chain = load_persisted_chain(receipt_log.path()).expect("chain loads");
+    assert_eq!(chain.len(), 1);
+    assert_eq!(
+        chain[0].body.provider.as_deref(),
+        Some("echo"),
+        "the minted receipt names the serving provider"
+    );
+}
+
 /// Stage 1: an empty cap-token is rejected before any provider call.
 #[tokio::test]
 async fn missing_cap_token_is_rejected() {
