@@ -50,7 +50,10 @@ use ardur_channel_telegram::TelegramChannel;
 use ardur_cost_gate::{CostEnvelope, CostTuple as GateCostTuple, HolderId as GateHolderId};
 use ardur_fused_runtime::{FusedRuntime, FusedRuntimeBuilder};
 use ardur_memory::{InMemoryMemoryRuntime, MemoryRuntime};
-use ardur_memory_qdrant::{QdrantMemoryConfig, QdrantMemoryRuntime};
+use ardur_memory_qdrant::{
+    Bm25Index, Embedder, FastEmbedEmbedder, HybridMemoryRetriever, QdrantMemoryConfig,
+    QdrantMemoryRuntime,
+};
 use ardur_messaging_gateway::{IncomingMessage, MessageBody, MessagingGateway};
 use ardur_provider_runtime::{ModelId, Provider};
 use ardur_receipt::Es256SigningKey;
@@ -173,24 +176,47 @@ impl AppState {
         let policy = load_policy(config.cedar_policy_path.as_deref())?;
 
         // 4. Substrate sinks. Memory is selected by `ARDUR_MEMORY`: the
-        //    in-process §7.0 Phase 1 store (default — fast, lost on restart) or
-        //    the durable Qdrant-backed §7.0 Phase 2 store. Both implement the
-        //    same `MemoryRuntime`, so the runtime builder is agnostic. The
-        //    `memory/` dir is still created for any future file-backed store.
-        let _ = &memory_dir;
+        //    in-process §7.0 Phase 1 store (default — fast, lost on restart), the
+        //    durable Qdrant-backed §7.0 Phase 2 store, or the §7.0c `hybrid`
+        //    retriever (dense Qdrant + sparse BM25 + an embedder, fused on
+        //    recall). All three implement the same `MemoryRuntime`, so the runtime
+        //    builder is agnostic. The `memory/` dir is the file-backed BM25 index
+        //    home under `hybrid`.
         let memory: Arc<dyn MemoryRuntime + Send + Sync> = match config.memory_backend {
-            MemoryBackend::InMemory => Arc::new(InMemoryMemoryRuntime::new()),
+            MemoryBackend::InMemory => {
+                let _ = &memory_dir;
+                Arc::new(InMemoryMemoryRuntime::new())
+            }
             MemoryBackend::Qdrant => {
-                // The collection/dim/api-key knobs come from `QDRANT_*`; the URL
-                // is overridden from the validated `Config::qdrant_url` when set.
-                let mut qcfg = QdrantMemoryConfig::from_env();
-                if let Some(url) = &config.qdrant_url {
-                    qcfg = qcfg.with_url(url.clone());
-                }
+                let _ = &memory_dir;
                 Arc::new(
-                    QdrantMemoryRuntime::connect_and_init(qcfg)
+                    QdrantMemoryRuntime::connect_and_init(qdrant_config(config))
                         .map_err(|e| anyhow::anyhow!("connecting qdrant memory: {e}"))?,
                 )
+            }
+            MemoryBackend::Hybrid => {
+                // Connect the durable half *un-initialised* — the collection's
+                // vector dim is realigned to the embedder when the retriever
+                // attaches it, so init must follow construction, never precede it.
+                let qdrant = QdrantMemoryRuntime::connect(qdrant_config(config))
+                    .map_err(|e| anyhow::anyhow!("connecting hybrid qdrant memory: {e}"))?;
+                // The sparse half is a file-backed BM25 index under `memory/bm25`
+                // so the lexical index survives restarts like the durable store.
+                let bm25 = Bm25Index::new(Some(memory_dir.join("bm25")))
+                    .map_err(|e| anyhow::anyhow!("opening hybrid bm25 index: {e}"))?;
+                // The shared embedding model (BGE-small by default; `EMBED_MODEL`
+                // overrides). Downloaded + disk-cached on first boot.
+                let embedder: Arc<dyn Embedder> = Arc::new(
+                    FastEmbedEmbedder::from_env()
+                        .map_err(|e| anyhow::anyhow!("loading hybrid embedder: {e}"))?,
+                );
+                let hybrid = HybridMemoryRetriever::new(qdrant, bm25, embedder);
+                // Init the durable collection now that the embedder is attached.
+                hybrid
+                    .qdrant()
+                    .init()
+                    .map_err(|e| anyhow::anyhow!("initialising hybrid qdrant collection: {e}"))?;
+                Arc::new(hybrid)
             }
         };
 
@@ -654,6 +680,17 @@ fn now_unix() -> u64 {
 ///
 /// The key is stored as the Biscuit private key's canonical hex (not PKCS#8 PEM
 /// — `biscuit-auth` exposes no PEM writer for Ed25519), one line.
+/// The Qdrant connection config shared by the `qdrant` and `hybrid` backends:
+/// the collection/dim/api-key knobs come from `QDRANT_*`, with the URL
+/// overridden from the validated [`Config::qdrant_url`] when set.
+fn qdrant_config(config: &Config) -> QdrantMemoryConfig {
+    let mut qcfg = QdrantMemoryConfig::from_env();
+    if let Some(url) = &config.qdrant_url {
+        qcfg = qcfg.with_url(url.clone());
+    }
+    qcfg
+}
+
 fn load_or_mint_issuer(keys_dir: &Path) -> anyhow::Result<BiscuitCapTokenIssuer> {
     let path = keys_dir.join("issuer.key");
     if path.exists() {

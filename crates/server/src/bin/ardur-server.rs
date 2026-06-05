@@ -57,6 +57,7 @@ async fn main() -> anyhow::Result<()> {
     let memory_label = match config.memory_backend {
         MemoryBackend::InMemory => "in-memory",
         MemoryBackend::Qdrant => "qdrant",
+        MemoryBackend::Hybrid => "hybrid",
     };
     let tools = Arc::new(
         assemble_tool_registry(
