@@ -15,6 +15,10 @@ ardur-runtime = { workspace = true }
 # Object-safe `Tool::invoke` — async-trait boxes the returned future so
 # `dyn Tool` works as a registry value (§6.0).
 async-trait = { workspace = true }
+# §6.1 — the built-in shell/file tools run child processes and touch the
+# filesystem off the async runtime: `tokio::process::Command` (timeout-wrapped
+# and `kill_on_drop`), `tokio::time::timeout`, and `tokio::fs`.
+tokio = { workspace = true }
 serde = { workspace = true }
 # Tool input/output payloads and JSON-Schema documents are untyped JSON.
 serde_json = { workspace = true }

@@ -19,6 +19,10 @@
 //! - [`ToolRegistry`] — id→tool resolution keyed by [`ToolId`], with lookup by
 //!   id and by required capability.
 //! - [`EchoTool`] — a capability-free sample tool that returns its input.
+//! - [`ShellTool`] / [`ReadFileTool`] / [`WriteFileTool`] / [`ListDirTool`]
+//!   (§6.1) — capability-gated built-in shell and filesystem tools, installed
+//!   via [`ToolRegistry::register_builtins`] and [`BuiltinOpts`]. See
+//!   `src/builtins/README.md` for the security model.
 //! - [`SkillTool`] / [`SkillLoader`] / [`Skill`] (§8.X) — load filesystem
 //!   `SKILL.md` documents (YAML frontmatter + Markdown body) and expose each as
 //!   a [`Tool`].
@@ -45,6 +49,7 @@
 // TODO §6.0 Phase 2: sandbox enforcement — gate `invoke` on the cap-token +
 // Cedar verdict for each declared `Capability`, and confine fs/process access.
 
+mod builtins;
 mod capability;
 mod echo;
 mod error;
@@ -54,6 +59,7 @@ mod registry;
 mod skills;
 mod tool;
 
+pub use builtins::{BuiltinOpts, ListDirTool, ReadFileTool, ShellTool, WriteFileTool};
 pub use capability::Capability;
 pub use echo::EchoTool;
 pub use error::{RegistryError, ToolError};
