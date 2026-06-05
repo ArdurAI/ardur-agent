@@ -28,7 +28,10 @@ use std::sync::Arc;
 use ardur_bm25_index::Bm25Index;
 use ardur_embeddings::Embedder;
 use ardur_fusion::{DEFAULT_RRF_K, ScoredDoc, reciprocal_rank_fusion};
-use ardur_memory::{MemoryError, MemoryRecord, MemoryRuntime, RecordId, Result};
+use ardur_memory::{
+    HolderId, InvalidationReason, MemoryError, MemoryRecord, MemoryRuntime, RecordId, Result,
+    UnixTsMillis,
+};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
@@ -195,6 +198,50 @@ impl HybridMemoryRetriever {
             .qdrant
             .fetch_record(RecordId(uuid))?
             .filter(|rec| rec.invalidation_time.is_none()))
+    }
+}
+
+/// The retriever *is* a [`MemoryRuntime`] (§7.0c): this is what lets boot wrap it
+/// behind the same `Arc<dyn MemoryRuntime>` seam as the in-process and bare
+/// durable stores, while uniquely overriding [`search`](MemoryRuntime::search)
+/// with real dense+sparse fusion.
+///
+/// The bi-temporal methods (`at_time`, `history_of`, `invalidate`) delegate
+/// straight to the durable [`QdrantMemoryRuntime`]. The write/recall methods —
+/// [`record`](MemoryRuntime::record) and [`search`](MemoryRuntime::search) — are
+/// asynchronous on the inherent API (dual-write to Qdrant **and** the BM25 index;
+/// fused recall over both), so the synchronous trait methods bridge onto the
+/// runtime's own Tokio executor via its `block_on` (the same `block_in_place`
+/// path the durable runtime uses for its sync trait methods). `self.record(..)`
+/// and `self.search(..)` below resolve to the *inherent* async methods (inherent
+/// methods shadow trait methods of the same name), so there is no recursion.
+impl MemoryRuntime for HybridMemoryRetriever {
+    fn record(&self, rec: MemoryRecord) -> Result<RecordId> {
+        self.qdrant.block_on(self.record(rec))
+    }
+
+    fn at_time(&self, subject: &HolderId, as_of: UnixTsMillis) -> Vec<MemoryRecord> {
+        self.qdrant.at_time(subject, as_of)
+    }
+
+    fn history_of(&self, record_id: RecordId) -> Vec<MemoryRecord> {
+        self.qdrant.history_of(record_id)
+    }
+
+    fn invalidate(
+        &self,
+        record_id: RecordId,
+        at: UnixTsMillis,
+        reason: InvalidationReason,
+    ) -> Result<()> {
+        // Invalidation is a Qdrant-only tombstone write; the BM25 lexical index
+        // is append-mostly and carries no tombstones (recall already drops any
+        // invalidated record it surfaces, see `search`).
+        self.qdrant.invalidate(record_id, at, reason)
+    }
+
+    fn search(&self, query: &str, top_k: usize) -> Result<Vec<MemoryRecord>> {
+        self.qdrant.block_on(self.search(query, top_k))
     }
 }
 

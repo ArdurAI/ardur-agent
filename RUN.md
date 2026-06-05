@@ -72,6 +72,7 @@ unreachable or the CLI is not logged in.
 |---|---|---|
 | `in_memory` (default) | In-process §7.0 Phase 1 store | none — **lost on restart** |
 | `qdrant` | Durable, Qdrant-backed §7.0 Phase 2 store | `QDRANT_URL` (**required**); `QDRANT_API_KEY` (cloud only), `QDRANT_COLLECTION` (default `ardur_memory`), `QDRANT_VECTOR_DIM` (default `384`), `EMBED_MODEL` (default `bge-small-en-v1.5`) |
+| `hybrid` | §7.0c dense+sparse retriever over the durable store | same as `qdrant` (`QDRANT_URL` **required**) plus a BM25 lexical index persisted under `<ARDUR_DATA_DIR>/memory/bm25` |
 
 The default `in_memory` store is fast but volatile: every fact is gone when the
 process restarts. The `qdrant` backend upserts each bi-temporal record as a
@@ -80,10 +81,21 @@ Qdrant point so memory survives a restart (or a pod reschedule). When
 config-load (the same conditional shape as `ANTHROPIC_API_KEY` under the
 Anthropic provider) rather than failing silently at first use.
 
+The `hybrid` backend (§7.0c) boots the same durable Qdrant store **and** a
+file-backed BM25 lexical index plus the embedder, wrapping them in a
+`HybridMemoryRetriever` that adds fused dense+sparse recall behind the same
+`MemoryRuntime` seam. It shares every `QDRANT_*` / `EMBED_MODEL` knob with
+`qdrant` (and likewise **requires** `QDRANT_URL`); the BM25 half persists under
+`<ARDUR_DATA_DIR>/memory/bm25` so the lexical index survives restarts too. The
+embedder is downloaded and disk-cached on first boot.
+
 ```sh
 # Durable memory against a local Qdrant (gRPC on 6334).
 docker run -p 6333:6333 -p 6334:6334 qdrant/qdrant
 ARDUR_MEMORY=qdrant QDRANT_URL=http://localhost:6334 ardur-server
+
+# Or fused dense+sparse recall over that same Qdrant (§7.0c).
+ARDUR_MEMORY=hybrid QDRANT_URL=http://localhost:6334 ardur-server
 ```
 
 The collection (Cosine distance, the configured dim) and its payload indexes
@@ -103,9 +115,11 @@ is meaningless).
 
 `HybridMemoryRetriever` (in `ardur-memory-qdrant`) layers **dense** vector search
 and **sparse** BM25 lexical search over the same store and fuses them with
-reciprocal-rank fusion — see that crate's `README.md`. It is a library surface;
-the server's `ARDUR_MEMORY` seam still selects between the in-process and the
-durable Qdrant `MemoryRuntime`.
+reciprocal-rank fusion — see that crate's `README.md`. As of §7.0c the server's
+`ARDUR_MEMORY` seam selects it directly (`ARDUR_MEMORY=hybrid`): it implements the
+same `MemoryRuntime`, additionally overriding `MemoryRuntime::search` with the
+fused recall (the in-process and bare-durable backends return nothing from
+`search`).
 
 ## Slack app setup
 

@@ -32,6 +32,12 @@ pub enum MemoryBackend {
     /// The durable, Qdrant-backed §7.0 Phase 2 store (`ardur-memory-qdrant`),
     /// selected with `ARDUR_MEMORY=qdrant`; requires `QDRANT_URL`.
     Qdrant,
+    /// The §7.0c dense+sparse hybrid retriever (`HybridMemoryRetriever`),
+    /// selected with `ARDUR_MEMORY=hybrid`. Layers a BM25 lexical index and an
+    /// embedding model over the same durable Qdrant store, so — like
+    /// [`Qdrant`](Self::Qdrant) — it requires `QDRANT_URL`, and additionally
+    /// adds fused recall via [`MemoryRuntime::search`](ardur_memory::MemoryRuntime::search).
+    Hybrid,
 }
 
 /// The fully-resolved server configuration.
@@ -133,9 +139,10 @@ impl Config {
     /// itself rejects the bad value — with a message listing the supported ones —
     /// when the binary builds the provider.
     ///
-    /// `QDRANT_URL` follows the same conditional shape: it is required only when
-    /// `ARDUR_MEMORY=qdrant` selects the durable Qdrant memory backend (the
-    /// default `in_memory` backend needs no Qdrant).
+    /// `QDRANT_URL` follows the same conditional shape: it is required when
+    /// `ARDUR_MEMORY=qdrant` selects the durable Qdrant memory backend, or
+    /// `ARDUR_MEMORY=hybrid` selects the §7.0c dense+sparse retriever over that
+    /// same store (the default `in_memory` backend needs no Qdrant).
     ///
     /// # Errors
     /// [`MissingEnvVar`] naming the first required variable that is unset or
@@ -163,15 +170,20 @@ impl Config {
             return Err(MissingEnvVar("ARDUR_MCP_BEARER_TOKENS".to_string()));
         }
 
-        // The memory backend selector. `QDRANT_URL` is required only when the
-        // Qdrant backend is selected — the same conditional shape as the
-        // Anthropic key above. Under the default `in_memory` backend it is
+        // The memory backend selector. `QDRANT_URL` is required when either
+        // Qdrant-backed backend is selected — `qdrant` (durable) or `hybrid`
+        // (durable + dense/sparse recall, §7.0c) — the same conditional shape as
+        // the Anthropic key above. Under the default `in_memory` backend it is
         // optional (and ignored).
         let memory_backend = match optional("ARDUR_MEMORY").as_deref() {
             Some("qdrant") => MemoryBackend::Qdrant,
+            Some("hybrid") => MemoryBackend::Hybrid,
             _ => MemoryBackend::InMemory,
         };
-        let qdrant_url = if memory_backend == MemoryBackend::Qdrant {
+        let qdrant_url = if matches!(
+            memory_backend,
+            MemoryBackend::Qdrant | MemoryBackend::Hybrid
+        ) {
             Some(require("QDRANT_URL")?)
         } else {
             optional("QDRANT_URL")

@@ -382,7 +382,11 @@ impl QdrantMemoryRuntime {
     }
 
     /// Block on `fut`, cooperating with an ambient Tokio runtime when present.
-    fn block_on<F: std::future::Future>(&self, fut: F) -> F::Output {
+    ///
+    /// `pub(crate)` so the sibling [`HybridMemoryRetriever`](crate::HybridMemoryRetriever)
+    /// can bridge its async recall onto this owned runtime when serving the
+    /// synchronous `MemoryRuntime::search` (§7.0c).
+    pub(crate) fn block_on<F: std::future::Future>(&self, fut: F) -> F::Output {
         match tokio::runtime::Handle::try_current() {
             // Inside an ambient runtime: tell it we are about to block this
             // worker, then drive `fut` on our own runtime. Requires the ambient

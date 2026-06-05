@@ -262,6 +262,35 @@ fn from_env_qdrant_selected_with_url_loads() {
 }
 
 #[test]
+fn parses_hybrid_from_env() {
+    let _guard = env_lock();
+    let _env = CleanEnv::new().with_slack();
+    set("ARDUR_PROVIDER", "ollama");
+    set("ARDUR_MEMORY", "hybrid");
+    set("QDRANT_URL", "http://localhost:6334");
+
+    let config = Config::from_env().expect("hybrid + a URL loads");
+    assert_eq!(config.memory_backend, MemoryBackend::Hybrid);
+    // The §7.0c hybrid retriever layers BM25 + an embedder over the *same*
+    // durable Qdrant store, so it requires `QDRANT_URL` exactly like `qdrant`.
+    assert_eq!(config.qdrant_url.as_deref(), Some("http://localhost:6334"));
+}
+
+#[test]
+fn from_env_requires_qdrant_url_when_hybrid_selected() {
+    let _guard = env_lock();
+    let _env = CleanEnv::new().with_slack();
+    set("ARDUR_PROVIDER", "ollama");
+    set("ARDUR_MEMORY", "hybrid"); // QDRANT_URL deliberately unset
+
+    let err = Config::from_env().expect_err("the hybrid backend must require QDRANT_URL");
+    assert_eq!(
+        err.to_string(),
+        "required environment variable `QDRANT_URL` is unset or empty"
+    );
+}
+
+#[test]
 fn from_env_discord_disabled_by_default() {
     let _guard = env_lock();
     let _env = CleanEnv::new().with_slack();
