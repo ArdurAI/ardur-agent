@@ -92,6 +92,9 @@ const PROVIDER_ID: &str = "claude-cli";
 pub const DEFAULT_BINARY: &str = "claude";
 /// Default per-run timeout — a `claude -p` turn can take a while.
 const DEFAULT_TIMEOUT_SECS: u64 = 300;
+/// Maximum spawn retries when Linux returns `ETXTBSY` ("Text file busy"). See
+/// [`spawn_claude`] for why the retry exists.
+const SPAWN_ETXTBSY_RETRIES: u32 = 6;
 
 /// Env var [`ClaudeCliConfig::from_env`] reads the binary path from.
 pub const BINARY_ENV: &str = "CLAUDE_CLI_BINARY";
@@ -368,7 +371,7 @@ impl Provider for ClaudeCliProvider {
             // the child; kill_on_drop ensures the claude process dies with it.
             .kill_on_drop(true);
 
-        let mut child = cmd.spawn().map_err(|e| {
+        let mut child = spawn_claude(&mut cmd).await.map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 ProviderError::Upstream(format!(
                     "Claude CLI not installed (binary {:?} not found on PATH). \
@@ -484,6 +487,47 @@ fn claude_subscription_rate_card() -> RateCard {
         cents_per_1k_input: 0.0,
         cents_per_1k_output: 0.0,
         cents_per_request: 0.0,
+    }
+}
+
+/// Errno for Linux's `ETXTBSY` ("Text file busy"). macOS never returns it.
+const ETXTBSY: i32 = 26;
+
+/// Whether a spawn error is `ETXTBSY` ("Text file busy"). Matches both the
+/// stable [`ErrorKind::ExecutableFileBusy`](std::io::ErrorKind::ExecutableFileBusy)
+/// mapping and the raw errno, so it holds even if the kind mapping is absent.
+fn is_etxtbsy(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::ExecutableFileBusy || e.raw_os_error() == Some(ETXTBSY)
+}
+
+/// Spawn the claude subprocess, retrying briefly on `ETXTBSY` ("Text file busy").
+///
+/// On Linux, `execve(2)` fails with `ETXTBSY` if **any** process still holds the
+/// target file open for writing. In a multithreaded program that both writes
+/// executables and spawns subprocesses — exactly this crate's test suite, where
+/// parallel tests each write a shim then exec it — a sibling thread's
+/// `fork()`+`execve()` transiently inherits the just-written file's writable fd
+/// across the fork window, so our `execve` of that file races to `ETXTBSY` even
+/// though our own writer was already closed. The inherited fd is `O_CLOEXEC`
+/// (Rust's default), so the window is only as long as the racing child's
+/// fork→exec gap; a bounded retry with a small linear backoff closes it
+/// deterministically. macOS never returns `ETXTBSY`, so this is a no-op there
+/// and the very first `spawn` succeeds. This mirrors the §3.3b `spawn_codex`
+/// fix (PR #82), which root-caused the identical race in the codex backend.
+async fn spawn_claude(cmd: &mut tokio::process::Command) -> std::io::Result<tokio::process::Child> {
+    let mut attempt: u32 = 0;
+    loop {
+        match cmd.spawn() {
+            Ok(child) => return Ok(child),
+            Err(e) if is_etxtbsy(&e) && attempt < SPAWN_ETXTBSY_RETRIES => {
+                attempt += 1;
+                // Linear backoff: the racing fork's exec closes the inherited
+                // writable fd within a few milliseconds, so a handful of short
+                // sleeps is plenty without inflating the happy path.
+                tokio::time::sleep(Duration::from_millis(2 * u64::from(attempt))).await;
+            }
+            Err(e) => return Err(e),
+        }
     }
 }
 
@@ -918,6 +962,20 @@ mod tests {
             }
             other => panic!("expected Upstream, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn is_etxtbsy_recognizes_text_file_busy() {
+        // The raw errno path (what the kernel actually returns on a spawn race).
+        assert!(is_etxtbsy(&std::io::Error::from_raw_os_error(ETXTBSY)));
+        // The stable ErrorKind mapping, independent of errno.
+        assert!(is_etxtbsy(&std::io::Error::from(
+            std::io::ErrorKind::ExecutableFileBusy
+        )));
+        // A genuinely-missing binary must not be mistaken for the busy race.
+        assert!(!is_etxtbsy(&std::io::Error::from(
+            std::io::ErrorKind::NotFound
+        )));
     }
 
     #[test]
