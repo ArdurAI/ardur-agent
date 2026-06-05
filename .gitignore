@@ -39,6 +39,8 @@ plans/
 dev-workspace/
 # external machine-state handoff bundle (copy/sync, not tracked)
 handoff/
+# local-only companion to handoff/ (references EXTENDED-drive paths); root-anchored
+/HANDOFF.md
 
 # Local nested clones / backups
 ardur-agent/
