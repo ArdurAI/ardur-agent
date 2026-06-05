@@ -25,7 +25,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::pin::Pin;
 
-use ardur_provider_runtime::{FinishReason, ProviderError, ToolCall, Usage};
+use ardur_provider_runtime::{FinishReason, ProviderError, StreamEvent, ToolCall, Usage};
 use futures::{Stream, StreamExt};
 use serde::Deserialize;
 
@@ -401,6 +401,155 @@ pub(crate) fn into_chunk_stream(
     })
 }
 
+// ---------------------------------------------------------------------------
+// §3.X — adapt the OpenRouter-native chunk feed onto the shared `StreamEvent`
+// protocol.
+// ---------------------------------------------------------------------------
+
+/// Maps the index-keyed [`OpenRouterChunk`] feed onto the id-keyed shared
+/// [`StreamEvent`] protocol.
+///
+/// OpenAI/OpenRouter streams tool calls keyed by an integer `index` and carries
+/// each call's `id` only on its opening fragment, whereas the shared protocol
+/// keys [`StreamEvent::ToolCallDelta`] by `id`. This adapter bridges the two: it
+/// remembers the `id` learned for each `index` and, on the first fragment that
+/// reveals it, emits a [`StreamEvent::ToolCallStart`].
+///
+/// **Out-of-order ids (the buffering choice).** If an `arguments` fragment
+/// arrives *before* the fragment carrying its `id` (so the id is not yet known),
+/// the fragment is **buffered** per index rather than emitted with a placeholder
+/// id. Once the id lands, the [`StreamEvent::ToolCallStart`] is emitted first,
+/// then the buffered fragments are flushed in arrival order as
+/// [`StreamEvent::ToolCallDelta`]s. This keeps every delta correctly attributed
+/// and the `start`-before-`delta` ordering the shared protocol promises — no
+/// consumer ever sees an `id: ""` delta. (In practice OpenAI always sends the id
+/// on the opening fragment, so the buffer stays empty; the path exists for
+/// resilience to reordering.)
+#[derive(Debug, Default)]
+struct EventAdapter {
+    /// `index` → the `id` once known. Presence also marks "start already emitted".
+    ids: BTreeMap<u32, String>,
+    /// `index` → argument fragments that arrived before the id was known.
+    pending: BTreeMap<u32, Vec<String>>,
+}
+
+impl EventAdapter {
+    /// Fold one [`OpenRouterChunk`] into zero-or-more shared [`StreamEvent`]s.
+    fn adapt(
+        &mut self,
+        chunk: OpenRouterChunk,
+        out: &mut VecDeque<Result<StreamEvent, ProviderError>>,
+    ) {
+        match chunk {
+            OpenRouterChunk::Content(text) => {
+                out.push_back(Ok(StreamEvent::ContentDelta(text)));
+            }
+            OpenRouterChunk::ToolCall(delta) => self.adapt_tool_call(delta, out),
+            OpenRouterChunk::Usage(usage) => out.push_back(Ok(StreamEvent::Usage(usage))),
+            OpenRouterChunk::Done(reason) => out.push_back(Ok(StreamEvent::Finish(reason))),
+        }
+    }
+
+    /// Map one streamed tool-call fragment, emitting a [`StreamEvent::ToolCallStart`]
+    /// the first time an `index`'s `id` is seen and routing the `arguments` slice
+    /// to a [`StreamEvent::ToolCallDelta`] (buffering it if the id is not yet known).
+    fn adapt_tool_call(
+        &mut self,
+        delta: ToolCallDelta,
+        out: &mut VecDeque<Result<StreamEvent, ProviderError>>,
+    ) {
+        let ToolCallDelta {
+            index,
+            id,
+            name,
+            arguments,
+        } = delta;
+
+        // The opening fragment reveals the id (and name): emit the start once,
+        // then flush any fragments that raced ahead of it.
+        if let Some(id) = id.filter(|s| !s.is_empty()) {
+            if !self.ids.contains_key(&index) {
+                out.push_back(Ok(StreamEvent::ToolCallStart(ToolCall {
+                    id: id.clone(),
+                    name: name.unwrap_or_default(),
+                    arguments: serde_json::Value::Null,
+                })));
+                if let Some(buffered) = self.pending.remove(&index) {
+                    for frag in buffered {
+                        out.push_back(Ok(StreamEvent::ToolCallDelta {
+                            id: id.clone(),
+                            delta: frag,
+                        }));
+                    }
+                }
+                self.ids.insert(index, id);
+            }
+        }
+
+        // Route this fragment's argument slice — by id if known, else buffer it.
+        if !arguments.is_empty() {
+            match self.ids.get(&index) {
+                Some(id) => out.push_back(Ok(StreamEvent::ToolCallDelta {
+                    id: id.clone(),
+                    delta: arguments,
+                })),
+                None => self.pending.entry(index).or_default().push(arguments),
+            }
+        }
+    }
+}
+
+/// The state the [`into_provider_events`] unfold threads across polls: the source
+/// chunk feed, the [`EventAdapter`] map, a queue of decoded-but-unyielded shared
+/// events, and the "source drained" flag.
+struct AdaptState<S> {
+    chunks: S,
+    adapter: EventAdapter,
+    pending: VecDeque<Result<StreamEvent, ProviderError>>,
+    finished: bool,
+}
+
+/// Adapt an [`OpenRouterChunk`] stream into the shared [`StreamEvent`] feed
+/// [`Provider::stream`](ardur_provider_runtime::Provider::stream) yields (§3.X).
+///
+/// `Content` → [`ContentDelta`](StreamEvent::ContentDelta); `Usage` →
+/// [`Usage`](StreamEvent::Usage); `Done` → [`Finish`](StreamEvent::Finish); and
+/// `ToolCall` deltas are remapped from index-keyed to id-keyed by the
+/// [`EventAdapter`] (with [`ToolCallStart`](StreamEvent::ToolCallStart) on the
+/// first fragment per call). A mid-stream `Err` is forwarded unchanged.
+pub(crate) fn into_provider_events<S>(
+    chunks: S,
+) -> impl Stream<Item = Result<StreamEvent, ProviderError>> + Send
+where
+    S: Stream<Item = Result<OpenRouterChunk, ProviderError>> + Send + 'static,
+{
+    let state = AdaptState {
+        chunks: Box::pin(chunks),
+        adapter: EventAdapter::default(),
+        pending: VecDeque::new(),
+        finished: false,
+    };
+
+    futures::stream::unfold(state, |mut st| async move {
+        loop {
+            if let Some(item) = st.pending.pop_front() {
+                return Some((item, st));
+            }
+            if st.finished {
+                return None;
+            }
+            match st.chunks.next().await {
+                Some(Ok(chunk)) => st.adapter.adapt(chunk, &mut st.pending),
+                Some(Err(e)) => {
+                    st.finished = true;
+                    return Some((Err(e), st));
+                }
+                None => st.finished = true,
+            }
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -516,5 +665,139 @@ mod tests {
             out.pop_front().unwrap(),
             Err(ProviderError::Upstream(_))
         ));
+    }
+
+    /// Drive a sequence of [`OpenRouterChunk`]s through an [`EventAdapter`] and
+    /// collect the shared events it emits.
+    fn adapt_all(chunks: Vec<OpenRouterChunk>) -> Vec<StreamEvent> {
+        let mut adapter = EventAdapter::default();
+        let mut out = VecDeque::new();
+        for c in chunks {
+            adapter.adapt(c, &mut out);
+        }
+        out.into_iter().map(|r| r.unwrap()).collect()
+    }
+
+    fn td(index: u32, id: Option<&str>, name: Option<&str>, args: &str) -> OpenRouterChunk {
+        OpenRouterChunk::ToolCall(ToolCallDelta {
+            index,
+            id: id.map(str::to_string),
+            name: name.map(str::to_string),
+            arguments: args.to_string(),
+        })
+    }
+
+    #[test]
+    fn adapter_maps_content_usage_and_finish() {
+        let events = adapt_all(vec![
+            OpenRouterChunk::Content("hi".to_string()),
+            OpenRouterChunk::Usage(Usage {
+                tokens_in: 3,
+                tokens_out: 1,
+            }),
+            OpenRouterChunk::Done(FinishReason::Stop),
+        ]);
+        assert_eq!(
+            events,
+            vec![
+                StreamEvent::ContentDelta("hi".to_string()),
+                StreamEvent::Usage(Usage {
+                    tokens_in: 3,
+                    tokens_out: 1
+                }),
+                StreamEvent::Finish(FinishReason::Stop),
+            ]
+        );
+    }
+
+    #[test]
+    fn adapter_tool_call_id_first() {
+        // id + name on the opening fragment, arguments streamed after.
+        let events = adapt_all(vec![
+            td(0, Some("call_1"), Some("echo"), ""),
+            td(0, None, None, r#"{"msg":"#),
+            td(0, None, None, r#""hi"}"#),
+        ]);
+        assert_eq!(
+            events,
+            vec![
+                StreamEvent::ToolCallStart(ToolCall {
+                    id: "call_1".to_string(),
+                    name: "echo".to_string(),
+                    arguments: serde_json::Value::Null,
+                }),
+                StreamEvent::ToolCallDelta {
+                    id: "call_1".to_string(),
+                    delta: r#"{"msg":"#.to_string(),
+                },
+                StreamEvent::ToolCallDelta {
+                    id: "call_1".to_string(),
+                    delta: r#""hi"}"#.to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn adapter_tool_call_id_late_buffers() {
+        // arguments arrive before the id fragment; they are buffered, then the
+        // start is emitted and the buffered fragments flush — all keyed by the id.
+        let events = adapt_all(vec![
+            td(0, None, None, r#"{"msg":"#),
+            td(0, None, None, r#""hi"}"#),
+            td(0, Some("call_9"), Some("echo"), ""),
+        ]);
+        assert_eq!(
+            events,
+            vec![
+                StreamEvent::ToolCallStart(ToolCall {
+                    id: "call_9".to_string(),
+                    name: "echo".to_string(),
+                    arguments: serde_json::Value::Null,
+                }),
+                StreamEvent::ToolCallDelta {
+                    id: "call_9".to_string(),
+                    delta: r#"{"msg":"#.to_string(),
+                },
+                StreamEvent::ToolCallDelta {
+                    id: "call_9".to_string(),
+                    delta: r#""hi"}"#.to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn adapter_multi_index_tool_calls() {
+        // Two parallel calls at index 0 and 1, interleaved.
+        let events = adapt_all(vec![
+            td(0, Some("a"), Some("first"), ""),
+            td(1, Some("b"), Some("second"), ""),
+            td(0, None, None, "{}"),
+            td(1, None, None, "[]"),
+        ]);
+        assert_eq!(
+            events,
+            vec![
+                StreamEvent::ToolCallStart(ToolCall {
+                    id: "a".to_string(),
+                    name: "first".to_string(),
+                    arguments: serde_json::Value::Null,
+                }),
+                StreamEvent::ToolCallStart(ToolCall {
+                    id: "b".to_string(),
+                    name: "second".to_string(),
+                    arguments: serde_json::Value::Null,
+                }),
+                StreamEvent::ToolCallDelta {
+                    id: "a".to_string(),
+                    delta: "{}".to_string(),
+                },
+                StreamEvent::ToolCallDelta {
+                    id: "b".to_string(),
+                    delta: "[]".to_string(),
+                },
+            ]
+        );
     }
 }
