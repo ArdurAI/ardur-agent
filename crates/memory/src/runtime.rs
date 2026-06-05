@@ -71,6 +71,30 @@ pub trait MemoryRuntime {
         at: UnixTsMillis,
         reason: InvalidationReason,
     ) -> Result<()>;
+
+    /// Recall the `top_k` records most relevant to a free-text `query`.
+    ///
+    /// This is the recall seam (§7.0c): the bi-temporal methods above answer
+    /// "what does this subject hold *now*"; `search` answers "what is relevant to
+    /// *this query*", fusing dense (embedding) and sparse (lexical) signals in the
+    /// backends that have them. The Phase-1 in-process store and the bare durable
+    /// store carry no recall index, so the default returns an empty `Vec` — only
+    /// the dense+sparse hybrid retriever (`HybridMemoryRetriever`) overrides it
+    /// with real fused recall.
+    ///
+    /// Kept synchronous like the rest of the trait: an implementation wrapping an
+    /// async backend bridges it internally (the Qdrant-backed runtimes drive a
+    /// future on their owned runtime via `block_in_place`). The signature is
+    /// fallible because the hybrid path can fail on the embed/vector/lexical
+    /// query; the default never errors.
+    ///
+    /// # Errors
+    /// Backend-specific failures from the recall path (embedding, vector search,
+    /// or lexical query).
+    fn search(&self, query: &str, top_k: usize) -> Result<Vec<MemoryRecord>> {
+        let _ = (query, top_k);
+        Ok(Vec::new())
+    }
 }
 
 /// The Phase 1 in-process store: an append-only log behind an `RwLock`, with a
@@ -211,5 +235,39 @@ impl MemoryRuntime for InMemoryMemoryRuntime {
         store.records.push(tombstone);
         store.by_subject.entry(subject).or_default().push(pos);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::RecordKind;
+
+    /// The §7.0c recall seam: the in-process store has no recall index, so it
+    /// inherits the trait's default `search`, which returns an empty `Vec`
+    /// regardless of what has been recorded — even for a query that exactly
+    /// matches a stored record's text. Only `HybridMemoryRetriever` overrides it.
+    #[test]
+    fn default_search_empty() {
+        let rt = InMemoryMemoryRuntime::new();
+        rt.record(MemoryRecord::new(
+            HolderId::from("user:search"),
+            RecordKind::Fact,
+            serde_json::json!({ "predicate": "prefers", "object": "oolong tea" }),
+            UnixTsMillis(1_000),
+            UnixTsMillis(1_000),
+            None,
+            UnixTsMillis(1_000),
+        ))
+        .expect("record");
+
+        let hits = rt
+            .search("oolong tea", 5)
+            .expect("default search never errors");
+        assert!(
+            hits.is_empty(),
+            "the default recall seam returns nothing, got {} records",
+            hits.len()
+        );
     }
 }
