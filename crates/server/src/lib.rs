@@ -31,4 +31,7 @@ pub use mcp::{
     register_skills,
 };
 pub use routes::build_router;
-pub use state::{AUDIENCE, AppState, CAP_TTL_SECS, GATEWAY_SUBJECT, McpSurface, TOOL};
+pub use state::{
+    AUDIENCE, AppState, CAP_TTL_SECS, ChatSubmitError, ChatTurnOutcome, GATEWAY_SUBJECT,
+    McpSurface, TOOL,
+};

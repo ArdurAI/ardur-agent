@@ -1,9 +1,13 @@
-//! The HTTP surface: a two-route axum [`Router`] over [`AppState`].
+//! The HTTP surface: an axum [`Router`] over [`AppState`].
 //!
 //! - `POST /slack/events` — verify + parse a Slack Events-API request, then
 //!   enqueue a genuine user message for the worker (which runs the fused turn
 //!   and posts the reply). Always answered with `200` for a verified request, so
 //!   Slack does not retry.
+//! - `POST /chat` — a generic, synchronous chat surface: run one turn through the
+//!   fused runtime and return the consolidated result (reply, tokens, cost, tools
+//!   called, receipt id) as JSON. Unlike Slack, the caller receives the reply
+//!   directly rather than having it posted to a channel.
 //! - `GET /healthz` — a liveness probe carrying build metadata.
 
 use std::sync::Arc;
@@ -14,20 +18,23 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use ardur_runtime::SessionId;
 use ardur_slack_adapter::{SlackError, SlackEvent, SlackHeaders};
 
-use crate::state::AppState;
+use crate::state::{AppState, ChatSubmitError, ChatTurnOutcome};
 
 /// Build the application router over the shared [`AppState`].
 ///
-/// Always mounts `POST /slack/events` and `GET /healthz`. When the MCP surface
-/// is enabled (see [`AppState::mcp`]), the bearer-gated MCP routes are merged in
-/// at the configured path prefix.
+/// Always mounts `POST /slack/events`, `POST /chat`, and `GET /healthz`. When the
+/// MCP surface is enabled (see [`AppState::mcp`]), the bearer-gated MCP routes are
+/// merged in at the configured path prefix.
 pub fn build_router(state: Arc<AppState>) -> Router {
     let mut router = Router::new()
         .route("/slack/events", post(slack_events))
+        .route("/chat", post(chat))
         .route("/healthz", get(healthz));
 
     if let Some(mcp) = state.mcp() {
@@ -49,6 +56,118 @@ async fn healthz() -> Response {
         "tests": "147",
     }))
     .into_response()
+}
+
+/// The `POST /chat` request body.
+///
+/// `session_id` is a UUID string (the runtime's [`SessionId`]); omit it to have
+/// the server mint a fresh one. `stream` requests an SSE response — not yet
+/// implemented (P1.5), so a `true` value is rejected with `400`.
+#[derive(Debug, Deserialize)]
+struct ChatRequest {
+    /// The user's message to run one turn against. Required and non-empty.
+    message: String,
+    /// The session this turn belongs to; minted fresh when absent.
+    #[serde(default)]
+    session_id: Option<SessionId>,
+    /// Whether to stream the reply as SSE. Unsupported in P1 (see the handler).
+    #[serde(default)]
+    stream: bool,
+}
+
+/// The `POST /chat` success response body.
+#[derive(Debug, Serialize)]
+struct ChatResponse {
+    /// The session the turn ran under (echoed; minted when the request omitted it).
+    session_id: SessionId,
+    /// The assistant's reply text.
+    reply: String,
+    /// Token accounting for the turn.
+    tokens: Tokens,
+    /// Monetary cost of the turn, in US dollars.
+    cost_usd: f64,
+    /// The tools the model invoked over the turn, in receipt order.
+    tools_called: Vec<String>,
+    /// The id of the (final) receipt minted for the turn.
+    receipt_id: String,
+}
+
+/// Prompt/completion token counts, as the response's `tokens` object.
+#[derive(Debug, Serialize)]
+struct Tokens {
+    /// Prompt/input tokens billed.
+    input: u64,
+    /// Completion/output tokens billed.
+    output: u64,
+}
+
+impl From<ChatTurnOutcome> for ChatResponse {
+    fn from(outcome: ChatTurnOutcome) -> Self {
+        ChatResponse {
+            session_id: outcome.session_id,
+            reply: outcome.reply,
+            tokens: Tokens {
+                input: outcome.tokens_in,
+                output: outcome.tokens_out,
+            },
+            // Receipts account cost in whole US cents; the HTTP surface reports
+            // dollars for an embedding client's convenience.
+            cost_usd: outcome.cents as f64 / 100.0,
+            tools_called: outcome.tools_called,
+            receipt_id: outcome.receipt_id,
+        }
+    }
+}
+
+/// `POST /chat` — the generic synchronous chat entry point.
+///
+/// Parses the JSON body, runs one turn through the fused runtime via
+/// [`AppState::submit_chat`], and returns the consolidated result. Status codes:
+/// `400` for a malformed body, a missing/empty `message`, or `stream: true`
+/// (unsupported); `502` when the runtime rejects or fails the turn (cost gate
+/// denied, injection blocked, provider error, …); `200` otherwise.
+async fn chat(State(state): State<Arc<AppState>>, body: Bytes) -> Response {
+    let request: ChatRequest = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(e) => return bad_request(format!("invalid request body: {e}")),
+    };
+
+    if request.message.trim().is_empty() {
+        return bad_request("`message` is required and must be non-empty".to_string());
+    }
+
+    // Streaming (SSE) is the P1.5 follow-up — fail loudly rather than silently
+    // returning a non-streamed body the caller did not ask for.
+    if request.stream {
+        return bad_request(
+            "`stream: true` is not yet supported; omit it for a consolidated reply".to_string(),
+        );
+    }
+
+    // A provided session id threads a follow-up onto the same session; an absent
+    // one mints a fresh, time-ordered session (`SessionId::default` == `new`).
+    let session_id = request.session_id.unwrap_or_default();
+
+    match state.submit_chat(request.message, session_id).await {
+        Ok(outcome) => (StatusCode::OK, Json(ChatResponse::from(outcome))).into_response(),
+        // The runtime rejected or failed the turn — a bad-gateway from the HTTP
+        // surface's point of view (the upstream pipeline refused or errored).
+        Err(ChatSubmitError::Runtime(e)) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+        Err(ChatSubmitError::WorkerGone) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": "turn worker is unavailable" })),
+        )
+            .into_response(),
+    }
+}
+
+/// A `400` with a JSON `{ "error": … }` body.
+fn bad_request(message: String) -> Response {
+    (StatusCode::BAD_REQUEST, Json(json!({ "error": message }))).into_response()
 }
 
 /// `POST /slack/events` — the Slack webhook entry point.

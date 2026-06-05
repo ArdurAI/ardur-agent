@@ -415,6 +415,78 @@ newer skill schema still loads. A skill whose `name` collides with an
 already-registered tool is skipped (first registration wins). Two example skills
 ship under `examples/skills/`.
 
+## HTTP endpoints
+
+`ardur-server` exposes a small HTTP surface over the fused runtime:
+
+| Method & path        | Purpose                                                        |
+| -------------------- | ------------------------------------------------------------- |
+| `POST /slack/events` | Slack Events-API webhook (HMAC-verified; replies to channel). |
+| `POST /chat`         | Generic synchronous chat — run one turn, get the reply back.  |
+| `GET  /healthz`      | Liveness probe with build metadata.                           |
+| `…/mcp` (optional)   | Bearer-gated MCP surface (see [MCP](#mcp-model-context-protocol)). |
+
+### `POST /chat`
+
+Run a single turn through the full pipeline (cap-token → cedar → cost-gate →
+injection-defense → provider → receipt → journal → memory) and get the
+consolidated result back in the **same** request — unlike `/slack/events`, the
+reply is returned to the caller rather than posted to a channel. This is the
+endpoint [`ardur-eval`](#companion-tools) targets and a generic surface for
+embedding the agent.
+
+Request body:
+
+```jsonc
+{
+  "message": "What is the capital of France?",  // required, non-empty
+  "session_id": "018f5e1a-...-000000000abc",     // optional UUID; minted if absent
+  "stream": false                                  // optional; see note below
+}
+```
+
+Response body (`200 OK`):
+
+```json
+{
+  "session_id": "018f5e1a-0000-7000-8000-000000000abc",
+  "reply": "The capital of France is Paris.",
+  "tokens": { "input": 120, "output": 30 },
+  "cost_usd": 0.42,
+  "tools_called": ["echo"],
+  "receipt_id": "5f8e1a2b-3c4d-4e5f-8a9b-0c1d2e3f4a5b"
+}
+```
+
+- `session_id` round-trips when provided (thread follow-up turns onto the same
+  session); a fresh time-ordered UUID is minted when it is omitted.
+- `tokens` / `cost_usd` are the turn's billed usage (`cost_usd` is the receipt's
+  cents rendered as dollars).
+- `tools_called` lists the tools the model invoked over the turn, in receipt
+  order — empty when no tool ran.
+- `receipt_id` is the id of the signed receipt minted for the turn, joinable
+  against the receipt log (and the `ardur-admin` dashboard).
+
+Example:
+
+```sh
+curl -sS http://localhost:3000/chat \
+  -H 'content-type: application/json' \
+  -d '{"message":"hello ardur"}'
+```
+
+Status codes:
+
+- `400` — malformed JSON body, a missing/empty `message`, or `stream: true`.
+- `502` — the runtime rejected or failed the turn (cost-gate denied, injection
+  blocked, provider error, …); the body carries `{"error": "<reason>"}`.
+- `200` — success, with the body above.
+
+**Streaming.** `stream: true` (an SSE `text/event-stream` response of
+`Provider::stream` events) is **not yet implemented** — a `true` value is
+rejected with `400` rather than silently answered with a consolidated body. It
+is a planned P1.5 follow-up.
+
 ## Monitoring
 
 - `GET /healthz` — returns `200 OK` once the runtime is initialized.
@@ -491,10 +563,9 @@ process.
   ardur-eval new  --id my-scenario --scenarios ./scenarios
   ```
 
-  Note: it targets a `POST <server-url>/chat` JSON contract that
-  `ardur-server` does **not** yet expose (today the server speaks only
-  `/slack/events` + `/healthz`). The path is overridable with `--chat-path`,
-  so point it at whatever endpoint serves the contract.
+  It targets the `POST <server-url>/chat` JSON contract that `ardur-server`
+  now exposes (see [HTTP endpoints](#http-endpoints)). The path is overridable
+  with `--chat-path` if you front the server with a different route.
 
 ## Cost ceilings
 
