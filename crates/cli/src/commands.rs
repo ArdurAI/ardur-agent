@@ -22,14 +22,7 @@ struct HelpCommand;
 impl Command for HelpCommand {
     fn execute(&self, _ctx: &CommandContext) -> Result<CommandResult, RuntimeError> {
         Ok(CommandResult {
-            output: [
-                "Commands:",
-                "  /help            show this help",
-                "  /budget          show the remaining session budget",
-                "  /quit, /exit     leave the chat",
-                "Type anything else to send it as a chat message.",
-            ]
-            .join("\n"),
+            output: crate::slash::phase1_help(),
         })
     }
 }

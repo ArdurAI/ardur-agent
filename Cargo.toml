@@ -145,6 +145,26 @@ clap = { version = "4", features = ["derive"] }
 tracing-subscriber = "0.3"
 # Interactive line editor backing the chat REPL (crates/cli, §2.1).
 rustyline = "18"
+# §2.X stunning-CLI rendering core (crates/cli, ADR-Phase2-021). CommonMark
+# parser — we walk comrak's AST and render to our *own* styled terminal spans
+# (not its HTML/ANSI formatters), so `default-features = false` drops the CLI,
+# xdg, syntect-bridge, and shortcode features we don't use and keeps just the
+# parser + node arena.
+comrak = { version = "0.52", default-features = false }
+# Syntax highlighting for fenced code blocks. `regex-fancy` is the pure-Rust
+# regex engine (avoids the `onig` C dependency in CI); `default-syntaxes` +
+# `default-themes` bundle the Sublime grammars + themes we map languages and
+# light/dark palettes onto. Prior art: Codex CLI ships syntect highlighting.
+syntect = { version = "5.3", default-features = false, features = [
+    "parsing",
+    "default-syntaxes",
+    "default-themes",
+    "regex-fancy",
+] }
+# Terminal capability probing for the rendering core — `terminal::size()` for
+# width-adaptive boxes/tables. `default-features = false` drops the event reader
+# and Windows bracketed-paste machinery (Phase 2's TUI opts those back in).
+crossterm = { version = "0.29", default-features = false }
 # Black-box CLI assertions — drives the built `ardur` binary in integration
 # tests (crates/cli dev-dependency, §2.1).
 assert_cmd = "2"
