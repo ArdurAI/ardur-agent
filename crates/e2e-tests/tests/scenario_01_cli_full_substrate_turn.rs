@@ -248,6 +248,7 @@ async fn single_turn_through_full_substrate() {
                 attention_score: 0.0,
             },
             tool_calls: Vec::new(),
+            provider: None,
         },
     );
     let signed = ReceiptSigner::sign(body, &receipt_key).expect("the genesis receipt signs");

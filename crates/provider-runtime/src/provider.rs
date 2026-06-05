@@ -41,6 +41,14 @@ pub trait Provider: Send + Sync {
     /// The registry key this provider answers to (e.g. `"anthropic"`).
     fn id(&self) -> ProviderId;
 
+    /// A short, human-facing name for this provider — the value recorded in a
+    /// receipt's `provider` field (§11.14b). Defaults to the registry
+    /// [`id`](Self::id) string, which every provider already answers to, so
+    /// existing backends need no change.
+    fn name(&self) -> String {
+        self.id().0
+    }
+
     /// Whether this provider can stream tokens incrementally.
     fn supports_streaming(&self) -> bool;
 
