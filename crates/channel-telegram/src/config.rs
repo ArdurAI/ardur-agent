@@ -78,7 +78,7 @@ impl TelegramConfig {
         let allowed_chat_ids = parse_allowed_chats(get(ENV_ALLOWED_CHATS).as_deref())?;
 
         Ok(Self {
-            bot_token: SecretString::new(bot_token),
+            bot_token: SecretString::from(bot_token),
             allowed_chat_ids,
         })
     }
@@ -115,7 +115,7 @@ impl TelegramConfigBuilder {
             return Err(TelegramError::MissingField("bot_token".to_owned()));
         }
         Ok(TelegramConfig {
-            bot_token: SecretString::new(self.bot_token),
+            bot_token: SecretString::from(self.bot_token),
             allowed_chat_ids: self.allowed_chat_ids,
         })
     }

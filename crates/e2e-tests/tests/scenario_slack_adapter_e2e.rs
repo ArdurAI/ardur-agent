@@ -65,8 +65,8 @@ async fn slack_adapter_sends_and_parses_end_to_end() {
         .await;
 
     let adapter = SlackAdapter::new(
-        SecretString::new(BOT_TOKEN.to_string()),
-        SecretString::new(SIGNING_SECRET.to_string()),
+        SecretString::from(BOT_TOKEN.to_string()),
+        SecretString::from(SIGNING_SECRET.to_string()),
         APP_ID.to_string(),
     )
     .with_base_url(server.uri());
