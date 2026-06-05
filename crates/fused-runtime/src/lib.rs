@@ -45,6 +45,21 @@
 //! turn (the receipt is the source of truth). A failure at stages 1→5 returns
 //! the error and never reaches the provider's billing.
 //!
+//! # Streaming (§6.0c)
+//!
+//! [`FusedRuntime::stream`](FusedRuntime::stream) is the progressive sibling of
+//! `submit`: it drives the **same** ten stages over the **same** helpers but
+//! yields a [`FusedEvent`] feed as the turn unfolds — stage transitions, token
+//! [`Content`](FusedEvent::Content) deltas as the provider emits them, the
+//! tool-call lifecycle, the minted receipt's chain hash, and the terminal
+//! [`Finish`](FusedEvent::Finish). A consumer (the CLI, a channel adapter) gets
+//! the §2.1b streaming UX **without** the security/observability bypass a direct
+//! [`Provider::stream`](ardur_provider_runtime::Provider::stream) call at the CLI
+//! layer incurs. Because the whole pipeline runs inside the returned stream's
+//! generator, dropping the stream cancels the in-flight provider round and mints
+//! **no** receipt — see [`crate::streaming`] for the event model and the
+//! cancellation contract.
+//!
 //! # Why a separate crate (Option B)
 //!
 //! The brief offered two shapes: **(A)** extend `ardur-lifecycle-hooks`'
@@ -75,6 +90,7 @@ mod receipts;
 mod reconcile;
 mod runtime;
 mod shared;
+pub mod streaming;
 
 pub use builder::FusedRuntimeBuilder;
 pub use receipts::{
@@ -85,3 +101,4 @@ pub use reconcile::{
 };
 pub use runtime::{FusedRuntime, PerRequestProvisioning};
 pub use shared::{SharedBudget, SharedDenyList};
+pub use streaming::{FusedEvent, StageKind};
