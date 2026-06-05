@@ -8,10 +8,12 @@
 //!
 //! ## The "provider" dimension
 //!
-//! The persisted [`ReceiptBody`] carries no explicit provider field. The
-//! closest available grouping key is the receipt **verb**
-//! (`verb.object.state.vN`, e.g. `llm.completion.minted.v1`), so the admin-ui
-//! surfaces the verb as the "provider" dimension in the receipts feed and the
+//! A receipt minted at or after §11.14b carries an explicit
+//! [`provider`](ardur_receipt::ReceiptBody::provider) field (e.g. `"anthropic"`),
+//! and the admin-ui prefers it. Receipts minted before §11.14b leave it `None`;
+//! for those we fall back to the receipt **verb** (`verb.object.state.vN`, e.g.
+//! `llm.completion.minted.v1`) as the closest available grouping key. Either way
+//! the value surfaces as the "provider" dimension in the receipts feed and the
 //! cost-by-provider breakdown. This is documented in the README.
 
 use std::fs;
@@ -32,9 +34,14 @@ pub struct LoadedReceipt {
 }
 
 impl LoadedReceipt {
-    /// The verb-derived "provider" label (see module docs).
+    /// The "provider" label: the explicit §11.14b
+    /// [`provider`](ardur_receipt::ReceiptBody::provider) field when present,
+    /// otherwise the verb as a fallback (see module docs).
     pub fn provider(&self) -> &str {
-        self.body.verb.as_str()
+        self.body
+            .provider
+            .as_deref()
+            .unwrap_or_else(|| self.body.verb.as_str())
     }
 }
 

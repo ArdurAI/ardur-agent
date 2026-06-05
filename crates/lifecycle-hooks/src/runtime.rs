@@ -226,6 +226,9 @@ fn mint_receipt(req: &SubmitRequest, response: &CompletionResponse) -> ReceiptBo
         // This Phase-1 hooked runtime does not execute tools; the §6.0
         // tool-call receipts are minted by the fused runtime.
         tool_calls: Vec::new(),
+        // The §11.14b provider field is populated by the fused-runtime mint,
+        // which holds the `dyn Provider`; this hooked runtime leaves it unset.
+        provider: None,
     }
 }
 
