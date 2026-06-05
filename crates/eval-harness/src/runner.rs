@@ -1,29 +1,36 @@
 //! The runner — drives a [`Scenario`] against a live server and grades it.
 //!
-//! # Assumed server contract
+//! # Server contract (`POST /chat`, §4.0b)
 //!
-//! `ardur-server` does not (yet) expose a public chat endpoint — its HTTP
-//! surface is the Slack webhook (`POST /slack/events`), `GET /healthz`, and the
-//! optional MCP routes. Rather than block on that, the runner targets a small,
-//! documented contract the server can grow into:
+//! `ardur-server` exposes the synchronous chat surface this runner targets
+//! (landed in PR #93). The runner POSTs one turn per prompt and grades the
+//! consolidated reply:
 //!
 //! ```text
 //! POST <base_url>/chat
 //! Content-Type: application/json
-//! { "message": "<prompt>", "session_id": "<optional, for multi-turn>" }
+//! { "message": "<prompt>", "session_id": "<optional uuid, for multi-turn>" }
 //!
 //! 200 OK
-//! { "reply": "<assistant text>",
-//!   "tokens": 42,                  // optional usage, graded by max_tokens
-//!   "cost_usd": 0.0007,            // optional cost, graded by cost_under
-//!   "tools_called": ["web_search"] // optional, graded by tool_called
-//! }
+//! { "session_id": "<uuid the turn ran under; minted when omitted>",
+//!   "reply": "<assistant text>",         // what the matchers grade
+//!   "tokens": { "input": 120, "output": 30 }, // summed, graded by max_tokens
+//!   "cost_usd": 0.0007,                   // graded by cost_under
+//!   "tools_called": ["web_search"],       // graded by tool_called
+//!   "receipt_id": "<uuid>" }
 //! ```
 //!
-//! When that endpoint lands the harness works unchanged; until then the runner
-//! is exercised against a `wiremock` stand-in (see the crate tests). The path
-//! is overridable via [`RunConfig::chat_path`] so a differently-named endpoint
-//! needs no code change.
+//! Status mapping: a `400` is a *failure* of the scenario (the server rejected
+//! the request body — e.g. an empty message), surfaced as [`Outcome::Fail`]; a
+//! `502` (the runtime rejected/failed the turn — cost gate, injection block,
+//! provider error) and any other non-2xx surface as [`Outcome::Error`], as do
+//! transport errors, timeouts, and malformed JSON — a flaky server marks the
+//! scenario errored rather than aborting the whole run.
+//!
+//! Multi-turn scenarios omit `session_id` on the first turn, then thread the
+//! server-minted id through every follow-up so the agent retains context. The
+//! path is overridable via [`RunConfig::chat_path`] so a differently-named
+//! endpoint needs no code change.
 
 use std::time::{Duration, Instant};
 
@@ -52,6 +59,9 @@ impl RunConfig {
 }
 
 /// The request body the runner POSTs for each turn.
+///
+/// `stream` is deliberately never sent: the server rejects `stream: true` with
+/// a `400`, and omitting it yields the consolidated reply the harness grades.
 #[derive(Debug, Serialize)]
 struct ChatRequest<'a> {
     message: &'a str,
@@ -59,19 +69,41 @@ struct ChatRequest<'a> {
     session_id: Option<&'a str>,
 }
 
-/// The response body the runner expects back. Only `reply` is required; the
-/// usage/cost/tool fields are optional and absent ⇒ that matcher is skipped
-/// (with a recorded reason) rather than failing hard.
+/// The `200 OK` response body the server returns for a turn. `tokens` is a
+/// nested `{ input, output }` object (summed for the `max_tokens` matcher);
+/// `cost_usd` is graded by `cost_under`. Fields default so a partial body still
+/// decodes — but the real server always populates them.
 #[derive(Debug, Default, Deserialize)]
 struct ChatResponse {
+    /// The session the turn ran under — echoed back and threaded through any
+    /// follow-up turns so a multi-turn scenario shares one session.
+    #[serde(default)]
+    session_id: String,
     #[serde(default)]
     reply: String,
+    /// Present ⇒ graded against `max_tokens` (input + output); absent ⇒ skipped.
     #[serde(default)]
-    tokens: Option<u32>,
+    tokens: Option<Tokens>,
     #[serde(default)]
     cost_usd: Option<f64>,
     #[serde(default)]
     tools_called: Vec<String>,
+}
+
+/// The nested `tokens: { input, output }` object the server reports per turn.
+#[derive(Debug, Default, Deserialize)]
+struct Tokens {
+    #[serde(default)]
+    input: u64,
+    #[serde(default)]
+    output: u64,
+}
+
+/// The `{ "error": "…" }` body the server returns on a `400` / `502`.
+#[derive(Debug, Default, Deserialize)]
+struct ChatError {
+    #[serde(default)]
+    error: String,
 }
 
 /// The verdict for a scenario.
@@ -194,67 +226,98 @@ pub async fn run_scenario(
         config.base_url.trim_end_matches('/'),
         config.chat_path.trim_start_matches('/')
     );
-    let session_id = scenario.id.clone();
     let timeout = Duration::from_secs(scenario.timeout_secs.max(1));
     let started = Instant::now();
 
-    // The initial prompt followed by any multi-turn follow-ups, all on one
-    // session id so the agent retains context. The matchers grade the last.
+    // The initial prompt followed by any multi-turn follow-ups. The first turn
+    // omits `session_id` (the server mints one); every follow-up threads the
+    // server-returned id so the agent retains context. Matchers grade the last.
     let mut prompts = vec![scenario.prompt.clone()];
     prompts.extend(scenario.follow_ups.iter().cloned());
 
+    // A short closure to stamp an outcome with the scenario's identity + timing.
+    let result_with = |outcome: Outcome, reply: String| ScenarioResult {
+        id: scenario.id.clone(),
+        description: scenario.description.clone(),
+        outcome,
+        reply,
+        duration_ms: started.elapsed().as_millis(),
+    };
+
+    let mut session_id: Option<String> = None;
     let mut last: ChatResponse = ChatResponse::default();
     for prompt in &prompts {
         let body = ChatRequest {
             message: prompt,
-            session_id: Some(&session_id),
+            session_id: session_id.as_deref(),
         };
         let resp = client.post(&url).timeout(timeout).json(&body).send().await;
         match resp {
             Ok(r) if r.status().is_success() => match r.json::<ChatResponse>().await {
-                Ok(parsed) => last = parsed,
+                Ok(parsed) => {
+                    // Capture the session for follow-ups (the first turn mints it).
+                    if !parsed.session_id.is_empty() {
+                        session_id = Some(parsed.session_id.clone());
+                    }
+                    last = parsed;
+                }
                 Err(e) => {
-                    return ScenarioResult {
-                        id: scenario.id.clone(),
-                        description: scenario.description.clone(),
-                        outcome: Outcome::Error {
+                    return result_with(
+                        Outcome::Error {
                             message: format!("decoding /chat response: {e}"),
                         },
-                        reply: String::new(),
-                        duration_ms: started.elapsed().as_millis(),
-                    };
+                        String::new(),
+                    );
                 }
             },
             Ok(r) => {
                 let status = r.status();
-                return ScenarioResult {
-                    id: scenario.id.clone(),
-                    description: scenario.description.clone(),
-                    outcome: Outcome::Error {
-                        message: format!("server returned HTTP {status}"),
+                // Pull the server's `{ "error": … }` detail when present.
+                let detail = r
+                    .json::<ChatError>()
+                    .await
+                    .map(|e| e.error)
+                    .unwrap_or_default();
+                let outcome = match status.as_u16() {
+                    // The server rejected the request body itself (empty message,
+                    // unsupported `stream`, …) — a scenario *failure*, not an error.
+                    400 => Outcome::Fail {
+                        reasons: vec![format!("bad_request: {detail}")],
                     },
-                    reply: String::new(),
-                    duration_ms: started.elapsed().as_millis(),
+                    // The runtime rejected or failed the turn (cost gate, injection
+                    // block, provider error) — an error of the exchange.
+                    502 => Outcome::Error {
+                        message: format!("runtime: {detail}"),
+                    },
+                    _ => Outcome::Error {
+                        message: if detail.is_empty() {
+                            format!("server returned HTTP {status}")
+                        } else {
+                            format!("server returned HTTP {status}: {detail}")
+                        },
+                    },
                 };
+                return result_with(outcome, String::new());
             }
             Err(e) => {
-                return ScenarioResult {
-                    id: scenario.id.clone(),
-                    description: scenario.description.clone(),
-                    outcome: Outcome::Error {
+                return result_with(
+                    Outcome::Error {
                         message: format!("POST {url} failed: {e}"),
                     },
-                    reply: String::new(),
-                    duration_ms: started.elapsed().as_millis(),
-                };
+                    String::new(),
+                );
             }
         }
     }
 
+    // The server reports input + output token counts; sum them for the
+    // `max_tokens` matcher. An absent `tokens` object ⇒ usage-graded matcher
+    // skipped (the field is `None`).
+    let tokens_total = last.tokens.as_ref().map(|t| (t.input + t.output) as u32);
     let reasons = grade(
         &scenario.expected,
         &last.reply,
-        last.tokens,
+        tokens_total,
         last.cost_usd,
         &last.tools_called,
         scenario.max_tokens,
@@ -265,11 +328,5 @@ pub async fn run_scenario(
         Outcome::Fail { reasons }
     };
 
-    ScenarioResult {
-        id: scenario.id.clone(),
-        description: scenario.description.clone(),
-        outcome,
-        reply: last.reply,
-        duration_ms: started.elapsed().as_millis(),
-    }
+    result_with(outcome, last.reply)
 }
