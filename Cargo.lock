@@ -269,7 +269,7 @@ dependencies = [
  "anyhow",
  "ardur-messaging-gateway",
  "async-trait",
- "secrecy",
+ "secrecy 0.10.3",
  "serde",
  "serenity",
  "thiserror 2.0.18",
@@ -286,7 +286,7 @@ dependencies = [
  "ardur-messaging-gateway",
  "async-trait",
  "matrix-sdk",
- "secrecy",
+ "secrecy 0.10.3",
  "serde",
  "thiserror 2.0.18",
  "tokio",
@@ -301,7 +301,7 @@ dependencies = [
  "anyhow",
  "ardur-messaging-gateway",
  "async-trait",
- "secrecy",
+ "secrecy 0.10.3",
  "serde",
  "teloxide",
  "thiserror 2.0.18",
@@ -396,7 +396,7 @@ dependencies = [
  "hmac 0.13.0",
  "parking_lot",
  "reqwest 0.12.28",
- "secrecy",
+ "secrecy 0.10.3",
  "serde_json",
  "sha2 0.11.0",
  "tempfile",
@@ -713,7 +713,7 @@ dependencies = [
  "hex",
  "hmac 0.13.0",
  "rmcp",
- "secrecy",
+ "secrecy 0.10.3",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -755,7 +755,7 @@ dependencies = [
  "hex",
  "hmac 0.13.0",
  "reqwest 0.12.28",
- "secrecy",
+ "secrecy 0.10.3",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -6657,6 +6657,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "secrecy"
+version = "0.10.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e891af845473308773346dc847b2c23ee78fe442e0472ac50e22a18a93d3ae5a"
+dependencies = [
+ "zeroize",
+]
+
+[[package]]
 name = "security-framework"
 version = "3.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6896,7 +6905,7 @@ dependencies = [
  "percent-encoding",
  "reqwest 0.13.4",
  "rustc-hash",
- "secrecy",
+ "secrecy 0.8.0",
  "serde",
  "serde_cow",
  "serde_json",
@@ -8165,7 +8174,7 @@ dependencies = [
  "hashbrown 0.14.5",
  "mini-moka",
  "parking_lot",
- "secrecy",
+ "secrecy 0.8.0",
  "serde_json",
  "time",
  "typesize-derive",
