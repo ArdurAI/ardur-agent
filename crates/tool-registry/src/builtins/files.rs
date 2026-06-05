@@ -320,6 +320,12 @@ impl Tool for WriteFileTool {
             file.write_all(bytes)
                 .await
                 .map_err(|e| ToolError::ExecutionFailed(format!("append `{}`: {e}", args.path)))?;
+            // `tokio::fs::File` buffers internally and does not guarantee a flush
+            // on drop, so push the bytes through before returning — otherwise a
+            // caller that immediately reads the file can miss the append.
+            file.flush()
+                .await
+                .map_err(|e| ToolError::ExecutionFailed(format!("flush `{}`: {e}", args.path)))?;
         } else {
             tokio::fs::write(&path, bytes)
                 .await
