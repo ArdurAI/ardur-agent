@@ -226,4 +226,14 @@ pub struct ReceiptBody {
     /// signature and chain hash) identical to a pre-§6.0 one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCallReceipt>,
+    /// The model backend that served this turn (§11.14b), e.g. `"anthropic"`.
+    /// Populated at the fused-runtime mint from [`Provider::name`]. Additive:
+    /// `#[serde(default)]` so receipts written before this field load with
+    /// `None`, and `skip_serializing_if` keeps a `None` receipt's bytes (and
+    /// therefore its signature and chain hash) byte-identical to a pre-§11.14b
+    /// one.
+    ///
+    /// [`Provider::name`]: https://docs.rs/ardur-provider-runtime
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
 }

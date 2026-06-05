@@ -908,6 +908,7 @@ impl FusedRuntime {
                 payload_digest: Sha256Digest::of(response.content.as_bytes()),
                 cost: runtime_cost_to_receipt(&combined_cost),
                 tool_calls: tool_receipts,
+                provider: Some(self.provider.name()),
             };
             let signed = match ReceiptSigner::sign(body, &self.receipt_key) {
                 Ok(signed) => signed,
