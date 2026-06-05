@@ -154,7 +154,10 @@ impl Bm25Index {
             .parse_query(query)
             .map_err(|e| Bm25Error::QueryParse(e.to_string()))?;
 
-        let hits = searcher.search(&parsed, &TopDocs::with_limit(top_k))?;
+        // tantivy 0.26 removed the blanket `Collector` impl on `TopDocs`; the
+        // score-ordered collector is now obtained explicitly via `order_by_score()`
+        // (same `Vec<(Score, DocAddress)>` fruit as the 0.22 default).
+        let hits = searcher.search(&parsed, &TopDocs::with_limit(top_k).order_by_score())?;
         let mut out = Vec::with_capacity(hits.len());
         for (score, addr) in hits {
             let doc: TantivyDocument = searcher.doc(addr)?;

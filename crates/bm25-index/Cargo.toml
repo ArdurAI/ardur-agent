@@ -11,7 +11,7 @@ description = "BM25 lexical search index backed by Tantivy — in-memory or file
 # Tantivy is the BM25 engine: schema, inverted index, query parser, TopDocs.
 # Pinned at 0.22 (the workspace's target); the `mmap` default feature backs the
 # file-backed (persistent) index path.
-tantivy = "0.22"
+tantivy = "0.26"
 # Typed open/index/query failure surface.
 thiserror = { workspace = true }
 # `ScoredDoc` rides receipts / crosses crate boundaries.
