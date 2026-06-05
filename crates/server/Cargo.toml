@@ -87,6 +87,13 @@ thiserror = { workspace = true }
 tower = { workspace = true }
 wiremock = { workspace = true }
 secrecy = { workspace = true }
+# The `/chat` tests inject scripted `Provider` impls (an erroring backend, a
+# tool-using backend, a cost-reporting backend) to exercise the runtime-error,
+# tools-called, and token/cost paths without a live model. The trait is
+# `async-trait`-based, so implementing it in a test needs the attribute macro.
+# (`ardur-runtime` / `ardur-provider-runtime` are already normal dependencies and
+# so are reachable from the integration tests.)
+async-trait = { workspace = true }
 hmac = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }

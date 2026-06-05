@@ -702,6 +702,7 @@ dependencies = [
  "ardur-session-journals",
  "ardur-slack-adapter",
  "ardur-tool-registry",
+ "async-trait",
  "axum",
  "biscuit-auth",
  "hex",
