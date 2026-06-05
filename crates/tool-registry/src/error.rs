@@ -19,6 +19,16 @@ pub enum ToolError {
     #[error("invalid arguments: {0}")]
     InvalidArgs(String),
 
+    /// The tool refused the request under its own configured policy — distinct
+    /// from [`ToolError::CapabilityDenied`], which is the *authorization* layer
+    /// withholding a capability. `Denied` is the tool itself declining: a shell
+    /// command outside its allowlist, or a file path that escapes its root.
+    #[error("denied: {reason}")]
+    Denied {
+        /// Why the tool refused to run the request.
+        reason: String,
+    },
+
     /// The tool ran but failed to produce a result.
     #[error("tool execution failed: {0}")]
     ExecutionFailed(String),
