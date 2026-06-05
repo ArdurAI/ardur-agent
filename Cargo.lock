@@ -769,6 +769,7 @@ dependencies = [
  "ardur-runtime",
  "async-trait",
  "axum",
+ "reqwest 0.12.28",
  "rmcp",
  "serde",
  "serde_json",
@@ -778,7 +779,9 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "url",
  "uuid",
+ "wiremock",
 ]
 
 [[package]]
