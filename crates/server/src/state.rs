@@ -313,8 +313,8 @@ impl AppState {
 
         // 6. The Slack adapter (base URL overridable so tests point at a mock).
         let mut slack = SlackAdapter::new(
-            SecretString::new(config.slack_bot_token.clone()),
-            SecretString::new(config.slack_signing_secret.clone()),
+            SecretString::from(config.slack_bot_token.clone()),
+            SecretString::from(config.slack_signing_secret.clone()),
             config.slack_app_id.clone(),
         );
         if let Some(base) = &config.slack_base_url {

@@ -128,7 +128,7 @@ impl MatrixConfig {
         Ok(Self {
             homeserver_url,
             user_id,
-            access_token: SecretString::new(access_token),
+            access_token: SecretString::from(access_token),
             device_id,
             state_dir,
             auto_join_invites,
@@ -210,7 +210,7 @@ impl MatrixConfigBuilder {
         Ok(MatrixConfig {
             homeserver_url: self.homeserver_url,
             user_id: self.user_id,
-            access_token: SecretString::new(self.access_token),
+            access_token: SecretString::from(self.access_token),
             device_id: self.device_id,
             state_dir: self.state_dir.unwrap_or_else(default_state_dir),
             auto_join_invites: self.auto_join_invites,

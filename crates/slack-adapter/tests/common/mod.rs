@@ -30,8 +30,8 @@ pub const NOW_UNIX: u64 = 1_750_000_000;
 /// the inbound-only tests that never make an HTTP call.
 pub fn test_adapter(base_url: Option<String>) -> SlackAdapter {
     let adapter = SlackAdapter::new(
-        SecretString::new(BOT_TOKEN.to_string()),
-        SecretString::new(SIGNING_SECRET.to_string()),
+        SecretString::from(BOT_TOKEN.to_string()),
+        SecretString::from(SIGNING_SECRET.to_string()),
         APP_ID.to_string(),
     );
     match base_url {
