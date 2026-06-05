@@ -40,12 +40,16 @@
 //!   `impl Stream<Item = Result<OllamaChatChunk, ProviderError>>` — one item per
 //!   NDJSON line, the upstream HTTP handshake / non-2xx already resolved before
 //!   the stream yields.
-//! - [`OllamaProvider::stream_events`] layers the local [`StreamEvent`] surface
-//!   over that: a [`StreamEvent::Token`] per chunk and a terminal
-//!   [`StreamEvent::Done`] whose [`StreamSummary`] folds the final chunk's token
-//!   counts into a [`Usage`] / [`CostTuple`] ledger (always `0` cents — Ollama is
-//!   free). [`StreamEvent`] is defined here, minimally; once the shared
-//!   provider-runtime `StreamEvent` lands the two are reconciled in a follow-up.
+//! - [`Provider::stream`] (§3.X) is the uniform streaming surface: it overrides
+//!   the trait default to drive [`stream_ndjson`] under the hood and adapt each
+//!   [`OllamaChatChunk`] into a shared
+//!   [`StreamEvent`](ardur_provider_runtime::StreamEvent) — a
+//!   [`ContentDelta`](ardur_provider_runtime::StreamEvent::ContentDelta) per
+//!   token chunk, then a final
+//!   [`Usage`](ardur_provider_runtime::StreamEvent::Usage) and terminal
+//!   [`Finish`](ardur_provider_runtime::StreamEvent::Finish) folded from the
+//!   `done` chunk's token counts and `done_reason`. (Ollama does not advertise
+//!   tools yet, so no `ToolCall*` events are produced.)
 //! - **Cancellation** is the natural drop of the returned stream: dropping it
 //!   drops the underlying `reqwest` byte stream, which closes the connection and
 //!   stops the generation upstream — no explicit abort handle needed.
@@ -62,11 +66,12 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+use std::pin::Pin;
 use std::time::Duration;
 
 use ardur_provider_runtime::{
     CompletionRequest, CompletionResponse, FinishReason, ModelId, Provider, ProviderError,
-    RateCard, Usage,
+    ProviderStream, RateCard, StreamEvent, Usage,
 };
 use ardur_runtime::{CostTuple, ProviderId, Role};
 use async_trait::async_trait;
@@ -82,6 +87,16 @@ pub const DEFAULT_BASE_URL: &str = "http://localhost:11434";
 pub const CLOUD_BASE_URL: &str = "https://ollama.com";
 /// The model a config defaults to when none is set explicitly.
 pub const DEFAULT_MODEL: &str = "llama3.2";
+
+/// The boxed NDJSON chunk stream the streaming entry points return.
+///
+/// A `'static`, `Send` (so it crosses the async runtime's threads) and `Unpin`
+/// (so callers drive it with [`StreamExt::next`] directly) trait object — one
+/// item per newline-delimited JSON object. Naming the type concretely (rather
+/// than an `impl Stream` that would capture `&self`'s lifetime) lets
+/// [`Provider::stream`] box the chunk feed into a `'static` [`ProviderStream`].
+pub type OllamaChunkStream =
+    Pin<Box<dyn Stream<Item = Result<OllamaChatChunk, ProviderError>> + Send>>;
 /// The default per-request timeout.
 const DEFAULT_TIMEOUT_SECS: u64 = 60;
 /// The environment variable the base URL is read from by
@@ -243,8 +258,7 @@ impl OllamaProvider {
     pub async fn stream_ndjson(
         &self,
         req: CompletionRequest,
-    ) -> Result<impl Stream<Item = Result<OllamaChatChunk, ProviderError>> + Unpin, ProviderError>
-    {
+    ) -> Result<OllamaChunkStream, ProviderError> {
         let body = build_request_body(&req, true);
         self.open_ndjson(self.config.chat_url(), body, req.model)
             .await
@@ -259,26 +273,10 @@ impl OllamaProvider {
     pub async fn stream_ndjson_generate(
         &self,
         req: CompletionRequest,
-    ) -> Result<impl Stream<Item = Result<OllamaChatChunk, ProviderError>> + Unpin, ProviderError>
-    {
+    ) -> Result<OllamaChunkStream, ProviderError> {
         let body = build_generate_body(&req, true);
         self.open_ndjson(self.config.generate_url(), body, req.model)
             .await
-    }
-
-    /// Stream a chat completion as higher-level [`StreamEvent`]s.
-    ///
-    /// Wraps [`stream_ndjson`](Self::stream_ndjson): each non-terminal chunk
-    /// becomes a [`StreamEvent::Token`], and the `done` chunk becomes a
-    /// [`StreamEvent::Done`] whose [`StreamSummary`] folds the final
-    /// `prompt_eval_count` / `eval_count` into a [`Usage`] / [`CostTuple`] ledger
-    /// (always `0` cents — Ollama is free).
-    pub async fn stream_events(
-        &self,
-        req: CompletionRequest,
-    ) -> Result<impl Stream<Item = Result<StreamEvent, ProviderError>> + Unpin, ProviderError> {
-        let chunks = self.stream_ndjson(req).await?;
-        Ok(into_events(chunks))
     }
 
     /// Open an NDJSON stream against `url` with `body`, returning the parsed
@@ -290,8 +288,7 @@ impl OllamaProvider {
         url: String,
         body: serde_json::Value,
         model: ModelId,
-    ) -> Result<impl Stream<Item = Result<OllamaChatChunk, ProviderError>> + Unpin, ProviderError>
-    {
+    ) -> Result<OllamaChunkStream, ProviderError> {
         // No per-request timeout on the stream: the timeout caps a whole request
         // including body read, which would cut off a long generation. Cancellation
         // is the caller dropping the stream instead.
@@ -358,6 +355,22 @@ impl Provider for OllamaProvider {
         let code = status.as_u16();
         let body = resp.text().await.unwrap_or_default();
         Err(map_http_error(code, retry_after_ms, &body, &req.model))
+    }
+
+    /// Stream a chat completion as shared [`StreamEvent`]s (§3.X) — the uniform
+    /// streaming surface that supersedes the crate-local event type.
+    ///
+    /// Drives [`stream_ndjson`](Self::stream_ndjson) and adapts each
+    /// [`OllamaChatChunk`] via [`into_stream_events`]: a non-empty token chunk
+    /// becomes a [`StreamEvent::ContentDelta`], and the terminal `done` chunk
+    /// becomes a [`StreamEvent::Usage`] (the folded `prompt_eval_count` /
+    /// `eval_count`) followed by a [`StreamEvent::Finish`]. The handshake / non-2xx
+    /// failure is the `Err` of the returned `Result` (resolved before any event
+    /// yields); a mid-stream transport error is an `Err` item. Cancellation is by
+    /// drop, exactly as for [`stream_ndjson`](Self::stream_ndjson).
+    async fn stream(&self, req: CompletionRequest) -> Result<ProviderStream, ProviderError> {
+        let chunks = self.stream_ndjson(req).await?;
+        Ok(Box::pin(into_stream_events(chunks)))
     }
 
     fn id(&self) -> ProviderId {
@@ -670,65 +683,41 @@ impl OllamaChatChunk {
     }
 }
 
-/// A high-level event in an Ollama token stream (see
-/// [`OllamaProvider::stream_events`]).
+/// Adapt a parsed-chunk stream onto the shared [`StreamEvent`] surface (§3.X).
 ///
-/// Defined here, minimally, while this crate's streaming PR stays self-contained.
-/// Once the shared provider-runtime `StreamEvent` lands, this is reconciled with
-/// it in a follow-up; the lane coordinator owns that unification.
-#[derive(Clone, Debug, PartialEq)]
-pub enum StreamEvent {
-    /// An incremental token chunk.
-    Token(String),
-    /// The terminal event, carrying the run's final usage/cost ledger.
-    Done(StreamSummary),
-}
-
-/// The terminal ledger of a token stream: the final token counts folded into a
-/// [`Usage`] and a [`CostTuple`] (always `0` cents — Ollama is free), plus the
-/// finish reason.
-#[derive(Clone, Debug, PartialEq)]
-pub struct StreamSummary {
-    /// Final input/output token counts for the run.
-    pub usage: Usage,
-    /// The billed cost — token counts carried through, `0` cents.
-    pub cost: CostTuple,
-    /// Why generation stopped.
-    pub finish_reason: FinishReason,
-}
-
-/// The zero-dollar [`CostTuple`] for a stream's final `usage` — token counts
-/// carried through, `0` cents (Ollama bills no dollar cost).
-fn zero_cost(usage: Usage) -> CostTuple {
-    CostTuple {
-        tokens_in: u64::from(usage.tokens_in),
-        tokens_out: u64::from(usage.tokens_out),
-        cents: 0,
-        wall_ms: 0,
-        attention_score: 0.0,
-    }
-}
-
-/// Map a parsed-chunk stream onto the higher-level [`StreamEvent`] surface: a
-/// [`Token`](StreamEvent::Token) per chunk, a [`Done`](StreamEvent::Done) for
-/// the terminal one.
-fn into_events<S>(chunks: S) -> impl Stream<Item = Result<StreamEvent, ProviderError>>
+/// Each non-terminal chunk with a non-empty token becomes a
+/// [`StreamEvent::ContentDelta`]; the terminal `done` chunk fans out into a
+/// [`StreamEvent::Usage`] (the run's folded `prompt_eval_count` /
+/// `eval_count`) followed by a [`StreamEvent::Finish`] carrying the mapped
+/// `done_reason` — the same usage-then-finish order the receipt is minted from.
+/// An empty token chunk (e.g. an opener carrying no text) yields nothing, and a
+/// mid-stream `Err` is forwarded unchanged.
+///
+/// Ollama bills no dollar cost, so — unlike the buffered [`complete`] path —
+/// there is no cost ledger here: the shared [`StreamEvent::Usage`] carries token
+/// counts only, and the consumer prices them through the provider's zeroed
+/// [`RateCard`].
+fn into_stream_events<S>(chunks: S) -> impl Stream<Item = Result<StreamEvent, ProviderError>> + Send
 where
-    S: Stream<Item = Result<OllamaChatChunk, ProviderError>>,
+    S: Stream<Item = Result<OllamaChatChunk, ProviderError>> + Send + 'static,
 {
-    chunks.map(|res| {
-        res.map(|chunk| {
-            if chunk.is_done() {
-                let usage = chunk.usage();
-                StreamEvent::Done(StreamSummary {
-                    usage,
-                    cost: zero_cost(usage),
-                    finish_reason: chunk.finish_reason(),
-                })
-            } else {
-                StreamEvent::Token(chunk.token().to_string())
+    chunks.flat_map(|res| {
+        let events: Vec<Result<StreamEvent, ProviderError>> = match res {
+            Ok(chunk) if chunk.is_done() => vec![
+                Ok(StreamEvent::Usage(chunk.usage())),
+                Ok(StreamEvent::Finish(chunk.finish_reason())),
+            ],
+            Ok(chunk) => {
+                let token = chunk.token();
+                if token.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![Ok(StreamEvent::ContentDelta(token.to_string()))]
+                }
             }
-        })
+            Err(e) => vec![Err(e)],
+        };
+        futures::stream::iter(events)
     })
 }
 
@@ -752,9 +741,7 @@ struct NdjsonState<S> {
 ///
 /// The result is boxed (a `BoxStream`) so it is `Unpin` — callers can drive it
 /// with `StreamExt::next` directly, and dropping it is the cancellation path.
-fn parse_ndjson<S, B>(
-    stream: S,
-) -> impl Stream<Item = Result<OllamaChatChunk, ProviderError>> + Unpin
+fn parse_ndjson<S, B>(stream: S) -> OllamaChunkStream
 where
     S: Stream<Item = Result<B, ProviderError>> + Unpin + Send + 'static,
     B: AsRef<[u8]> + Send + 'static,
@@ -1052,14 +1039,36 @@ mod tests {
         assert!(matches!(done.finish_reason(), FinishReason::Stop));
     }
 
-    #[test]
-    fn zero_cost_carries_tokens_and_zero_cents() {
-        let cost = zero_cost(Usage {
-            tokens_in: 7,
-            tokens_out: 3,
-        });
-        assert_eq!(cost.tokens_in, 7);
-        assert_eq!(cost.tokens_out, 3);
-        assert_eq!(cost.cents, 0);
+    #[tokio::test]
+    async fn into_stream_events_maps_chunks_to_shared_events() {
+        // A token chunk → ContentDelta; the done chunk → Usage then Finish.
+        let token: OllamaChatChunk = serde_json::from_value(serde_json::json!({
+            "message": {"content": "hi"},
+            "done": false
+        }))
+        .unwrap();
+        let done: OllamaChatChunk = serde_json::from_value(serde_json::json!({
+            "done": true,
+            "done_reason": "stop",
+            "prompt_eval_count": 9,
+            "eval_count": 4
+        }))
+        .unwrap();
+        let chunks = futures::stream::iter(vec![Ok(token), Ok(done)]);
+        let events: Vec<StreamEvent> = into_stream_events(chunks)
+            .map(|r| r.expect("each event is Ok"))
+            .collect()
+            .await;
+        assert_eq!(
+            events,
+            vec![
+                StreamEvent::ContentDelta("hi".to_string()),
+                StreamEvent::Usage(Usage {
+                    tokens_in: 9,
+                    tokens_out: 4
+                }),
+                StreamEvent::Finish(FinishReason::Stop),
+            ]
+        );
     }
 }

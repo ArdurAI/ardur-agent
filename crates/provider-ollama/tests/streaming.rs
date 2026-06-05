@@ -9,7 +9,7 @@
 //! offline. A final gated test (`OLLAMA_LIVE_STREAM_TEST=1` + a running local
 //! Ollama) hits the real endpoint.
 
-use ardur_provider_ollama::{OllamaConfig, OllamaProvider, StreamEvent};
+use ardur_provider_ollama::{OllamaConfig, OllamaProvider};
 use ardur_provider_runtime::{ChatMessage, CompletionRequest, FinishReason, ModelId, Provider};
 use futures::StreamExt;
 use wiremock::matchers::{body_partial_json, method, path};
@@ -108,40 +108,26 @@ async fn extracts_token_counts_from_final_chunk() {
     mount_chat_ndjson(&server, CHAT_NDJSON).await;
 
     let provider = local_provider(&server, "llama3.2");
-    // Drive the higher-level StreamEvent surface so the cost ledger is exercised.
+    // Drive the raw NDJSON chunk surface; the shared StreamEvent surface
+    // (`Provider::stream`) is covered in `stream_trait.rs`.
     let stream = provider
-        .stream_events(chat_req("llama3.2"))
+        .stream_ndjson(chat_req("llama3.2"))
         .await
         .expect("the streaming handshake succeeds");
-    let events: Vec<_> = stream
-        .map(|r| r.expect("each event parses"))
+    let chunks: Vec<_> = stream
+        .map(|r| r.expect("each chunk parses"))
         .collect()
         .await;
 
-    // Two token events then a terminal Done carrying the folded ledger.
-    let tokens: String = events
-        .iter()
-        .filter_map(|e| match e {
-            StreamEvent::Token(t) => Some(t.as_str()),
-            StreamEvent::Done(_) => None,
-        })
-        .collect();
+    // Two token chunks then a terminal `done` chunk carrying the folded counts.
+    let tokens: String = chunks.iter().map(|c| c.token()).collect();
     assert_eq!(tokens, "Hello world");
 
-    let summary = events
-        .iter()
-        .find_map(|e| match e {
-            StreamEvent::Done(s) => Some(s),
-            StreamEvent::Token(_) => None,
-        })
-        .expect("a terminal Done event");
-    assert_eq!(summary.usage.tokens_in, 11);
-    assert_eq!(summary.usage.tokens_out, 2);
-    assert_eq!(summary.cost.tokens_in, 11);
-    assert_eq!(summary.cost.tokens_out, 2);
-    // Ollama is free — the ledger always bills zero cents.
-    assert_eq!(summary.cost.cents, 0);
-    assert!(matches!(summary.finish_reason, FinishReason::Stop));
+    let done = chunks.last().expect("a terminal chunk");
+    assert!(done.is_done());
+    assert_eq!(done.usage().tokens_in, 11);
+    assert_eq!(done.usage().tokens_out, 2);
+    assert!(matches!(done.finish_reason(), FinishReason::Stop));
 }
 
 #[tokio::test]
@@ -236,7 +222,7 @@ async fn live_stream_hits_real_endpoint() {
     let model = std::env::var("OLLAMA_LIVE_MODEL").unwrap_or_else(|_| "llama3.2".to_string());
     let provider = OllamaProvider::from_env();
     let stream = provider
-        .stream_events(CompletionRequest::new(
+        .stream_ndjson(CompletionRequest::new(
             vec![ChatMessage::user("Say the single word: pong")],
             ModelId::new(&model),
             64,
@@ -244,25 +230,20 @@ async fn live_stream_hits_real_endpoint() {
         .await
         .expect("the live streaming handshake succeeds");
 
-    let events: Vec<_> = stream
-        .map(|r| r.expect("each live event parses"))
+    let chunks: Vec<_> = stream
+        .map(|r| r.expect("each live chunk parses"))
         .collect()
         .await;
     assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, StreamEvent::Token(t) if !t.is_empty())),
+        chunks.iter().any(|c| !c.token().is_empty()),
         "the live stream yields at least one non-empty token"
     );
-    let summary = events
+    let done = chunks
         .iter()
-        .find_map(|e| match e {
-            StreamEvent::Done(s) => Some(s),
-            StreamEvent::Token(_) => None,
-        })
-        .expect("a terminal Done event from the live stream");
+        .find(|c| c.is_done())
+        .expect("a terminal done chunk from the live stream");
     assert!(
-        summary.usage.tokens_out > 0,
+        done.usage().tokens_out > 0,
         "the live run reports output tokens"
     );
 }
