@@ -269,11 +269,11 @@ impl FusedEngine {
         &self,
         messages: &[ChatMessage],
         out: &mut W,
-        color: bool,
+        ctx: &crate::stream::RenderCtx<'_>,
     ) -> std::io::Result<StreamOutcome> {
         let req = CompletionRequest::new(messages.to_vec(), self.model.clone(), STREAM_MAX_TOKENS)
             .streaming();
-        let outcome = drive_turn(self.provider.as_ref(), req, true, out, color).await?;
+        let outcome = drive_turn(self.provider.as_ref(), req, true, out, ctx).await?;
 
         // Decrement the displayed balance by this turn's usage cost. The gate
         // ledger is untouched on this bypass path (documented trade-off above).
