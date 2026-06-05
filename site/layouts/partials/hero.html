@@ -1,0 +1,50 @@
+<section id="top" class="relative overflow-hidden pt-36 pb-24 md:pt-44 md:pb-32">
+  <div class="aurora"></div>
+
+  <div class="container-content relative z-10">
+    <div class="mx-auto max-w-3xl text-center">
+      <p class="hero-line hero-line-1 mb-5 inline-flex items-center gap-2 rounded-full border border-[var(--border)] px-3 py-1 text-xs text-ink-muted">
+        <span class="inline-block h-1.5 w-1.5 rounded-full bg-accent-cyan"></span>
+        Substrate complete · 600+ tests green · wrapping up the implementation effort
+      </p>
+
+      <h1 class="hero-line hero-line-2 text-4xl font-bold leading-tight tracking-tight md:text-6xl">
+        Your AI agent.<br />
+        <span class="gradient-text">Cryptographically yours.</span>
+      </h1>
+
+      <p class="hero-line hero-line-3 mx-auto mt-6 max-w-2xl text-lg text-ink-muted">
+        Open-source personal AI that lives in your terminal and your chat apps —
+        across four channels and five model providers, with security,
+        transparency, and cost control built into the wire format. Not bolted on.
+      </p>
+
+      <div class="hero-line hero-line-4 mt-9 flex flex-wrap items-center justify-center gap-3">
+        <a href="#quickstart" class="btn btn-primary">Get Started</a>
+        <a href="{{ .Site.Params.repo }}" class="btn btn-ghost">View Source</a>
+      </div>
+    </div>
+
+    {{/* Animated demo terminal. observer.js types the exchange line by line. */}}
+    <div
+      class="reveal card mx-auto mt-16 max-w-2xl overflow-hidden p-0 text-left"
+      data-term='[
+        {"cls":"term-prompt text-accent-cyan","text":"you ▸ summarize the 3 papers in ~/reading and cite them"},
+        {"cls":"term-meta text-ink-faint","text":"cap-token: fs.read(~/reading) · provider: claude · ceiling: $0.20"},
+        {"cls":"term-agent text-ink","text":"ardur ▸ done. 3 summaries with inline citations written to notes.md"},
+        {"cls":"term-meta text-ink-faint","text":"receipt #a91f · cost: 14,208 tok · $0.06 · 9.4s · 1 file write"}
+      ]'
+    >
+      <div class="flex items-center gap-1.5 border-b border-[var(--border)] px-4 py-3">
+        <span class="h-2.5 w-2.5 rounded-full" style="background:#ff5f57"></span>
+        <span class="h-2.5 w-2.5 rounded-full" style="background:#febc2e"></span>
+        <span class="h-2.5 w-2.5 rounded-full" style="background:#28c840"></span>
+        <span class="ml-3 text-xs text-ink-faint">ardur — session</span>
+      </div>
+      <div class="font-mono text-sm leading-relaxed p-5">
+        <div data-term-out class="space-y-1.5"></div>
+        <span class="term-caret">&nbsp;</span>
+      </div>
+    </div>
+  </div>
+</section>

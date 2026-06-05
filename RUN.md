@@ -370,7 +370,7 @@ advertises whether it implements it via `supports_streaming()`:
 |---|---|---|
 | `anthropic` | yes | SSE (§3.1b) |
 | `ollama` | yes | NDJSON (§3.4b) |
-| `openrouter` | no | planned |
+| `openrouter` | yes | SSE (§3.2b) |
 | `codex` | no | CLI orchestrates its own output |
 | `claude-cli` | no | planned |
 
@@ -412,8 +412,8 @@ argument, e.g. `{"expand": ["conventions.md"]}`.
 **Validation.** `name` and `description` are required — a `SKILL.md` missing
 either is skipped with a warning. Unknown frontmatter fields are ignored, so a
 newer skill schema still loads. A skill whose `name` collides with an
-already-registered tool is skipped (first registration wins). Two example skills
-ship under `examples/skills/`.
+already-registered tool is skipped (first registration wins). Nine example
+skills ship under `examples/skills/`.
 
 ## HTTP endpoints
 
