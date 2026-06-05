@@ -33,11 +33,14 @@
 //! finish reason, and the final token [`Usage`]. The streamed `Provider::complete`
 //! path is unchanged (it stays `stream: false`).
 //!
-//! [`Provider::supports_streaming`] stays `false` for now: the uniform
-//! `Provider::stream` trait method (the §3.0 streaming lane) has not landed yet,
-//! so OpenRouter streaming is reachable only through the inherent `stream_chat`.
-//! A follow-up flips the flag and implements the trait method once that lane
-//! merges.
+//! # §3.X — uniform `Provider::stream`
+//!
+//! [`Provider::stream`] overrides the trait default to expose that same SSE feed
+//! as shared [`StreamEvent`](ardur_provider_runtime::StreamEvent)s, adapting
+//! OpenAI's index-keyed tool-call deltas onto the shared id-keyed
+//! `ToolCallStart` / `ToolCallDelta` events (the inherent `stream_chat` stays as
+//! the OpenRouter-native surface). [`Provider::supports_streaming`] is therefore
+//! `true`.
 //!
 //! § 6.0 added tool use: the request advertises `tools`, an assistant turn that
 //! requested tools replays its `tool_calls`, a [`Role::Tool`] result becomes a
@@ -53,7 +56,7 @@ use std::time::Duration;
 
 use ardur_provider_runtime::{
     CompletionRequest, CompletionResponse, FinishReason, ModelId, Provider, ProviderError,
-    RateCard, ToolCall, Usage,
+    ProviderStream, RateCard, ToolCall, Usage,
 };
 use ardur_runtime::{ChatMessage, CostTuple, ProviderId, Role};
 use async_trait::async_trait;
@@ -295,13 +298,59 @@ impl Provider for OpenRouterProvider {
         Err(map_http_error(code, retry_after_ms, &body, &req.model))
     }
 
+    /// Stream the completion as shared [`StreamEvent`](ardur_provider_runtime::StreamEvent)s
+    /// (§3.X) — the uniform streaming surface, layered over the OpenRouter-native
+    /// [`stream_chat`](Self::stream_chat) chunk feed.
+    ///
+    /// The SSE handshake mirrors [`complete`](Self::complete): an empty key, a
+    /// connect failure, or a non-2xx status is the `Err` of the returned `Result`
+    /// (resolved before any event yields), and a mid-stream transport error is an
+    /// `Err` item. On success the byte feed is decoded into [`OpenRouterChunk`]s
+    /// and adapted by [`streaming::into_provider_events`]: content/usage/finish
+    /// pass straight through, and OpenAI's index-keyed tool-call deltas are
+    /// remapped onto the shared id-keyed [`ToolCallStart`]/[`ToolCallDelta`]
+    /// events. Cancellation is by drop.
+    ///
+    /// [`ToolCallStart`]: ardur_provider_runtime::StreamEvent::ToolCallStart
+    /// [`ToolCallDelta`]: ardur_provider_runtime::StreamEvent::ToolCallDelta
+    async fn stream(&self, req: CompletionRequest) -> Result<ProviderStream, ProviderError> {
+        if self.config.api_key.is_empty() {
+            return Err(ProviderError::Unauthorized);
+        }
+
+        let body = build_stream_request_body(&req);
+        let resp = self
+            .client
+            .post(self.config.completions_url())
+            .bearer_auth(&self.config.api_key)
+            .header("HTTP-Referer", &self.config.referer)
+            .header("X-Title", &self.config.title)
+            .timeout(self.config.request_timeout)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| ProviderError::NetworkFailure(e.to_string()))?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            // Drain the error body and map it through the same taxonomy as `complete`.
+            let retry_after_ms = parse_retry_after_ms(resp.headers());
+            let code = status.as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(map_http_error(code, retry_after_ms, &body, &req.model));
+        }
+
+        let chunks = streaming::into_chunk_stream(resp);
+        Ok(Box::pin(streaming::into_provider_events(chunks)))
+    }
+
     fn id(&self) -> ProviderId {
         ProviderId(PROVIDER_ID.to_string())
     }
 
     fn supports_streaming(&self) -> bool {
-        // Phase 2: flip to `true` once the SSE streaming path lands.
-        false
+        // §3.X: the uniform `Provider::stream` trait method is live.
+        true
     }
 
     fn rate_card(&self) -> &RateCard {
@@ -890,6 +939,6 @@ mod tests {
         let provider =
             OpenRouterProvider::new(OpenRouterConfig::new("k"), ModelId::new("openai/gpt-4o"));
         assert_eq!(provider.id(), ProviderId("openrouter".to_string()));
-        assert!(!provider.supports_streaming());
+        assert!(provider.supports_streaming());
     }
 }
