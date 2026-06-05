@@ -32,3 +32,34 @@ ardur-eval run --scenarios crates/eval-harness/scenarios --server-url <url>
 
 Copy any of these as a starting point, or scaffold a fresh one with
 `ardur-eval new --id <your_id>`.
+
+## Live scenarios (`live/`)
+
+The [`live/`](live/) subdirectory holds three deliberately-minimal smokes meant
+to run against a **real** `ardur-server` `/chat` endpoint (and thus a real
+model). `Scenario::load_dir` is non-recursive, so the default
+`--scenarios crates/eval-harness/scenarios` run does **not** include them — you
+opt in by pointing `--scenarios` at `live/`, or by running the gated
+`live_chat` integration test.
+
+| Scenario | Asserts | Key matchers |
+|---|---|---|
+| [`live/live_factual_question.yaml`](live/live_factual_question.yaml) | The model answers a trivial arithmetic question directly. | `contains: ["4"]` |
+| [`live/live_session_continuity.yaml`](live/live_session_continuity.yaml) | A fact stated in turn 1 is recalled in turn 2 on the server-minted `session_id`. | `contains: ["Quillon"]` on the final reply |
+| [`live/live_cost_visible.yaml`](live/live_cost_visible.yaml) | The response carries a `cost_usd` field at all (cost-tracking smoke). | `cost_under: 1000.0` (a ceiling a short turn cannot reach, so it passes iff `cost_usd` was reported) |
+
+Run them only against a live server:
+
+```sh
+# Via the CLI, pointing at the live/ directory:
+ardur-eval run --scenarios crates/eval-harness/scenarios/live \
+               --server-url http://localhost:8080
+
+# Or via the gated integration test (skipped unless BOTH are set):
+ARDUR_LIVE_CHAT_TEST=1 ARDUR_LIVE_CHAT_URL=http://localhost:8080 \
+  cargo test -p ardur-eval --test live_chat -- --nocapture
+```
+
+Against a server with no real model wired up these will fail (not error) — that
+is the harness correctly reporting that the live backend didn't answer as
+expected.
