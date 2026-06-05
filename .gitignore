@@ -21,7 +21,8 @@ target
 #.idea/
 
 # Ardur project-specific excludes
-references/            # vendored upstream code
+# vendored upstream code
+references/
 /Volumes/
 /Users/
 .DS_Store
@@ -36,6 +37,8 @@ tmp/
 architect/
 plans/
 dev-workspace/
+# external machine-state handoff bundle (copy/sync, not tracked)
+handoff/
 
 # Local nested clones / backups
 ardur-agent/
