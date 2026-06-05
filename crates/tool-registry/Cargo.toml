@@ -39,6 +39,13 @@ uuid = { workspace = true, features = ["v4"] }
 rmcp = { workspace = true }
 # Constant-time bearer-token comparison for the MCP HTTP admission allowlist.
 subtle = { workspace = true }
+# §6.2 — the built-in `http.fetch` tool's HTTP(S) client. `resolve_to_addrs`
+# pins the connection to the SSRF-vetted IPs; the manual redirect follower
+# (Policy::none) re-checks every hop.
+reqwest = { workspace = true }
+# §6.2 — typed URL parsing + host classification (domain vs IPv4/IPv6 literal)
+# backing the `http.fetch` allowlist and SSRF checks.
+url = { workspace = true }
 
 [dev-dependencies]
 # Integration tests are a separate crate; the async `invoke` calls need a
@@ -52,3 +59,7 @@ axum = { workspace = true }
 # §8.X — the skill-loader integration tests stage SKILL.md trees in a throwaway
 # directory.
 tempfile = { workspace = true }
+# §6.2 — a mock HTTP origin for the `http.fetch` integration tests: 200/500
+# bodies, long bodies for truncation, slow responses for the timeout, and
+# 302 chains for redirect following.
+wiremock = { workspace = true }
