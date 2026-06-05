@@ -37,6 +37,7 @@ mod engine;
 mod error;
 mod fused;
 mod state;
+mod stream;
 
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
@@ -52,6 +53,7 @@ pub use engine::{ChatEngine, TurnOutcome};
 pub use error::CliError;
 pub use fused::FusedEngine;
 pub use state::StateDirs;
+pub use stream::{StreamOutcome, drive_turn};
 
 /// The environment variable overriding the per-session budget, in US cents.
 pub const BUDGET_CENTS_ENV: &str = "ARDUR_CLI_BUDGET_CENTS";
@@ -74,6 +76,13 @@ pub struct ChatArgs {
     /// without an API key.
     #[arg(long)]
     pub echo: bool,
+
+    /// Disable progressive streaming and render each turn from a single
+    /// `complete()` call through the full fused pipeline (cap-token, Cedar, cost
+    /// gate, signed receipt, journal). Useful for scripting and logging. The
+    /// default streams tokens as they arrive when the backend supports it.
+    #[arg(long)]
+    pub no_stream: bool,
 }
 
 /// The active chat substrate for a session: the default [`FusedEngine`] or the
@@ -149,7 +158,7 @@ pub fn run_chat(args: ChatArgs) -> Result<(), CliError> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    let result = runtime.block_on(run_chat_loop(config, args.echo));
+    let result = runtime.block_on(run_chat_loop(config, args.echo, args.no_stream));
 
     // Flush any buffered OpenTelemetry spans before returning (a no-op when
     // telemetry was never initialized).
@@ -172,7 +181,10 @@ fn resolve_budget_cents(flag: Option<u64>, config_value: u64) -> u64 {
 /// The async REPL body, driven by [`run_chat`]'s tokio runtime. Wires the
 /// selected substrate, registers the slash-commands, and reads turns from either
 /// an interactive line-editor (a tty) or piped stdin.
-async fn run_chat_loop(config: Config, echo: bool) -> Result<(), CliError> {
+async fn run_chat_loop(config: Config, echo: bool, no_stream: bool) -> Result<(), CliError> {
+    // Streaming is the default; `--no-stream` opts a session into the
+    // single-`complete()` full-pipeline path for every turn.
+    let stream_enabled = !no_stream;
     let engine = if echo {
         ActiveEngine::Echo(Box::new(ChatEngine::new(&config)?))
     } else {
@@ -203,9 +215,9 @@ async fn run_chat_loop(config: Config, echo: bool) -> Result<(), CliError> {
     // A tty drives the rich line-editor; piped/redirected stdin reads lines
     // directly so `echo "hi" | ardur chat` (and the integration tests) work.
     if std::io::stdin().is_terminal() {
-        run_interactive(&engine, &bus, &mut history).await?;
+        run_interactive(&engine, &bus, &mut history, stream_enabled).await?;
     } else {
-        run_piped(&engine, &bus, &mut history).await;
+        run_piped(&engine, &bus, &mut history, stream_enabled).await;
     }
     Ok(())
 }
@@ -215,6 +227,7 @@ async fn run_interactive(
     engine: &ActiveEngine,
     bus: &InMemoryCommandBus,
     history: &mut Vec<ChatMessage>,
+    stream_enabled: bool,
 ) -> Result<(), CliError> {
     let mut editor = DefaultEditor::new().map_err(readline_to_cli)?;
     loop {
@@ -229,7 +242,7 @@ async fn run_interactive(
                     continue;
                 }
                 let _ = editor.add_history_entry(line);
-                if handle_line(engine, bus, history, line).await {
+                if handle_line(engine, bus, history, line, stream_enabled).await {
                     break;
                 }
             }
@@ -250,6 +263,7 @@ async fn run_piped(
     engine: &ActiveEngine,
     bus: &InMemoryCommandBus,
     history: &mut Vec<ChatMessage>,
+    stream_enabled: bool,
 ) {
     use std::io::BufRead as _;
     let stdin = std::io::stdin();
@@ -259,7 +273,7 @@ async fn run_piped(
         if line.is_empty() {
             continue;
         }
-        if handle_line(engine, bus, history, line).await {
+        if handle_line(engine, bus, history, line, stream_enabled).await {
             break;
         }
     }
@@ -272,11 +286,12 @@ async fn handle_line(
     bus: &InMemoryCommandBus,
     history: &mut Vec<ChatMessage>,
     line: &str,
+    stream_enabled: bool,
 ) -> bool {
     if let Some(rest) = line.strip_prefix('/') {
         dispatch_slash(bus, rest)
     } else {
-        run_chat_message(engine, history, line).await;
+        run_chat_message(engine, history, line, stream_enabled).await;
         false
     }
 }
@@ -300,10 +315,33 @@ fn dispatch_slash(bus: &InMemoryCommandBus, rest: &str) -> bool {
     matches!(command, commands::QUIT_COMMAND | commands::EXIT_COMMAND)
 }
 
-/// Submit `line` as a chat turn, appending it (and any reply) to `history` and
-/// printing the response with its cost.
-async fn run_chat_message(engine: &ActiveEngine, history: &mut Vec<ChatMessage>, line: &str) {
+/// Submit `line` as a chat turn, appending it (and any reply) to `history`.
+///
+/// When the session streams (`--no-stream` absent) and the active engine is the
+/// fused substrate backing a streaming-capable provider, the turn renders
+/// progressively via [`FusedEngine::stream_turn`] (which bypasses the fused
+/// pipeline — see [`crate::stream`]). Otherwise it routes through the full
+/// pipeline [`run_turn`](FusedEngine::run_turn)/echo path and prints the reply
+/// with its cost.
+async fn run_chat_message(
+    engine: &ActiveEngine,
+    history: &mut Vec<ChatMessage>,
+    line: &str,
+    stream_enabled: bool,
+) {
     history.push(ChatMessage::user(line));
+
+    // Streaming path: only the fused engine, only when enabled and the backend
+    // should stream (a live, streaming-capable provider). `--no-stream`, a
+    // non-streaming backend (Codex, Claude-CLI), and the offline stub all keep
+    // the full-pipeline `complete()` path below.
+    if let ActiveEngine::Fused(fused) = engine {
+        if stream_enabled && fused.should_stream() {
+            run_streamed_message(fused, history).await;
+            return;
+        }
+    }
+
     match engine.run_turn(history).await {
         Ok(outcome) => {
             println!("{}", outcome.response);
@@ -317,6 +355,31 @@ async fn run_chat_message(engine: &ActiveEngine, history: &mut Vec<ChatMessage>,
             // Drop the unanswered user message so a retry starts clean.
             history.pop();
             let _ = std::io::stdout().flush();
+            eprintln!("error: {e}");
+        }
+    }
+}
+
+/// Render one turn by streaming the provider directly to stdout, then record the
+/// assembled reply in `history`. Colors are enabled only when stdout is a tty.
+async fn run_streamed_message(fused: &FusedEngine, history: &mut Vec<ChatMessage>) {
+    let color = std::io::stdout().is_terminal();
+    let mut stdout = std::io::stdout();
+    match fused.stream_turn(history, &mut stdout, color).await {
+        Ok(outcome) => {
+            // A clean stream (or one that errored *after* emitting content) leaves
+            // a usable reply to record; an error with no content drops the user
+            // message so a retry starts clean — the error was already printed.
+            if outcome.content.is_empty() && outcome.error.is_some() {
+                history.pop();
+            } else {
+                history.push(ChatMessage::assistant(outcome.content));
+            }
+        }
+        Err(e) => {
+            // An I/O failure writing to stdout (not a provider error) — drop the
+            // unanswered user message and report.
+            history.pop();
             eprintln!("error: {e}");
         }
     }
