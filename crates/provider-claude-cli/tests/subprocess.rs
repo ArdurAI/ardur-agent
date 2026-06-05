@@ -216,6 +216,55 @@ async fn timeout_returns_network_failure() {
     }
 }
 
+/// Regression for the §3.3d `ETXTBSY` ("Text file busy") spawn flake on Linux.
+///
+/// In a multithreaded program that both writes executables and spawns
+/// subprocesses, a sibling thread's `fork()`+`execve()` transiently inherits a
+/// just-written shim's writable fd across the fork window, so our `execve` of
+/// that shim races to `ETXTBSY` even though our own writer was already closed.
+/// `spawn_claude` retries that errno away (the same race + fix as the §3.3b
+/// codex backend, PR #82). This hammers write-then-spawn concurrently across
+/// several worker threads — the shape that provokes the race — and asserts it
+/// never surfaces as a spawn failure. On macOS `ETXTBSY` is unreachable, so the
+/// loop simply exercises the happy path there.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn spawn_after_write_no_etxtbsy() {
+    // Concurrency across worker threads is what provokes the inherited-fd race;
+    // 4 writers × 25 spawns each keeps the run short while still overlapping many
+    // fork→exec windows against freshly-written shims.
+    const TASKS: usize = 4;
+    const ITERS: usize = 25;
+
+    let mut handles = Vec::with_capacity(TASKS);
+    for _ in 0..TASKS {
+        handles.push(tokio::spawn(async move {
+            for _ in 0..ITERS {
+                // Fresh tempdir + shim per iteration: no path collision, so the
+                // only way a spawn can see a busy file is the inherited-fd race.
+                let (_dir, shim) = write_shim(success_shim_body());
+                let provider = ClaudeCliProvider::new(
+                    ClaudeCliConfig::new().claude_binary(shim),
+                    ModelId::new("sonnet"),
+                );
+                match provider.complete(simple_request()).await {
+                    Ok(resp) => assert_eq!(resp.content, "shim-pong"),
+                    Err(ProviderError::Upstream(msg)) => {
+                        assert!(
+                            !msg.to_ascii_lowercase().contains("text file busy"),
+                            "ETXTBSY leaked through the spawn retry: {msg}"
+                        );
+                        panic!("unexpected spawn failure: {msg}");
+                    }
+                    Err(other) => panic!("unexpected error: {other:?}"),
+                }
+            }
+        }));
+    }
+    for h in handles {
+        h.await.expect("spawn-stress task panicked");
+    }
+}
+
 /// Gated live smoke test against the real `claude` CLI. Off by default; runs only
 /// when `CLAUDE_CLI_LIVE_TEST=1` and a logged-in claude install is present.
 #[tokio::test]
