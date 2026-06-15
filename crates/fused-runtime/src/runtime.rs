@@ -962,6 +962,7 @@ impl FusedRuntime {
             // 7. post-receipt hooks (observational; the call already happened).
             let post_ctx = PostReceiptCtx {
                 session_id,
+                signed_receipt: &signed,
                 receipt: &receipt,
                 response: &response,
                 cost: response.cost,
@@ -1421,6 +1422,7 @@ impl FusedRuntime {
                 // 7'. post-receipt hooks (observational).
                 let post_ctx = PostReceiptCtx {
                     session_id,
+                    signed_receipt: &signed,
                     receipt: &receipt,
                     response: &response,
                     cost: response.cost,
