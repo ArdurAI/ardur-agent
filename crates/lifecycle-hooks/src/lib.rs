@@ -23,8 +23,8 @@
 //!   replacements-chain; the observational runs collect errors).
 //! - [`HookedRuntime`] — a [`ChatRuntime`](ardur_runtime::ChatRuntime) that
 //!   threads the registry through a [`Provider`](ardur_provider_runtime::Provider)
-//!   call, the minted [`ReceiptBody`](ardur_receipt::ReceiptBody), and an
-//!   optional [`MemoryRuntime`](ardur_memory::MemoryRuntime) write.
+//!   call, the minted signed receipt, and an optional
+//!   [`MemoryRuntime`](ardur_memory::MemoryRuntime) write.
 //! - [`RecordingHook`] — a built-in observer that logs every callback, for
 //!   tests.
 //!

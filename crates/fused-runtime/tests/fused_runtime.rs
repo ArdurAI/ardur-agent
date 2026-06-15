@@ -8,17 +8,49 @@ mod support;
 use std::sync::Arc;
 
 use ardur_fused_runtime::{load_persisted_chain, verify_persisted_chain};
-use ardur_lifecycle_hooks::{HookEvent, HookRegistry, RecordingHook};
+use ardur_lifecycle_hooks::{
+    HookError, HookEvent, HookId, HookRegistry, LifecycleHook, PostReceiptCtx, RecordingHook,
+};
 use ardur_memory::{HolderId as MemHolderId, InMemoryMemoryRuntime, MemoryRuntime, UnixTsMillis};
 use ardur_receipt::Sha256Digest;
 use ardur_runtime::{CapTokenRef, ChatRuntime, RuntimeError, SessionId};
 use ardur_session_journals::{FileSessionJournal, JournalEntry, SessionJournal};
+use async_trait::async_trait;
+use parking_lot::Mutex;
 
 use support::{
     EchoProvider, HOLDER, NOW_MS, NOW_UNIX, RedactingHook, VetoHook, deny_all_policy, gate_holder,
     generous_budget, mint_token, request_for, runtime_builder, runtime_builder_with_policy,
     user_request, valid_token,
 };
+
+struct CapturingSignedJwsHook {
+    seen: Arc<Mutex<Option<String>>>,
+}
+
+impl CapturingSignedJwsHook {
+    fn new() -> Self {
+        Self {
+            seen: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    fn seen(&self) -> Option<String> {
+        self.seen.lock().clone()
+    }
+}
+
+#[async_trait]
+impl LifecycleHook for CapturingSignedJwsHook {
+    async fn on_post_receipt(&self, ctx: &PostReceiptCtx<'_>) -> Result<(), HookError> {
+        *self.seen.lock() = Some(ctx.signed_receipt.jws_compact().to_string());
+        Ok(())
+    }
+
+    fn hook_id(&self) -> HookId {
+        HookId::new("capture-signed-jws")
+    }
+}
 
 /// The happy path drives every stage and persists to memory, the journal, and
 /// the receipt log.
@@ -352,6 +384,43 @@ async fn post_receipt_observer_runs_after_pre_submit() {
             .any(|e| matches!(e, HookEvent::OnPostReceipt { .. })),
         "post-receipt fired after the receipt was minted"
     );
+}
+
+/// Stage 7: the post-receipt hook sees the exact signed JWS that the receipt
+/// log persists and the next receipt chains onto.
+#[tokio::test]
+async fn post_receipt_observer_sees_persisted_signed_jws() {
+    let provider = Arc::new(EchoProvider::new());
+    let receipt_log = tempfile::NamedTempFile::new().expect("receipt log");
+    let capture = Arc::new(CapturingSignedJwsHook::new());
+    let mut registry = HookRegistry::new();
+    registry.register(capture.clone());
+
+    let runtime = runtime_builder(provider.clone())
+        .registry(Arc::new(registry))
+        .receipt_log(receipt_log.path())
+        .build()
+        .expect("builds");
+
+    let outcome = runtime
+        .submit(user_request("observe signed", &valid_token()))
+        .await
+        .expect("the observed turn completes");
+
+    let persisted = std::fs::read_to_string(receipt_log.path())
+        .expect("receipt log reads")
+        .trim()
+        .to_string();
+    let observed = capture
+        .seen()
+        .expect("post-receipt hook captured signed receipt");
+
+    assert_eq!(
+        observed, persisted,
+        "hook-visible signed receipt is the persisted chain element"
+    );
+    let chain = load_persisted_chain(receipt_log.path()).expect("chain loads");
+    assert_eq!(chain[0].body.receipt_id, outcome.receipt_id.0);
 }
 
 /// Stage 6: receipts chain across turns — the second receipt's `parent_hash`
