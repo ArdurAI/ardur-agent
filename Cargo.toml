@@ -45,6 +45,9 @@ members = [
     "crates/task-flow",
     "crates/wiki",
     "crates/curator",
+    "crates/mcp-server",
+    "crates/commitments",
+    "crates/standing-goals",
 ]
 
 [workspace.package]
