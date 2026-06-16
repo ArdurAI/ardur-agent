@@ -122,7 +122,7 @@ maud = { version = "0.27", features = ["axum"] }
 # In-process axum test harness — `axum-test::TestServer` drives the admin-ui
 # router without binding a port, backing the endpoint integration tests
 # (crates/admin-ui dev-dependency, §13.X).
-axum-test = "16"
+axum-test = "20"
 # Tracing & observability.
 tracing = "0.1"
 # OpenTelemetry GenAI semantic-convention emission (crates/provider-runtime
