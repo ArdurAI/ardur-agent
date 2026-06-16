@@ -51,6 +51,12 @@ Keep each commit tightly scoped to a single logical change. Don't mix refactors 
 ## Pull requests
 
 - Branch from `dev` for ongoing work; `main` is protected and merges require review.
+- Treat `dev` as the integration branch and `main` as the linear public release
+  branch. Routine `dev` → `main` sync PRs must preserve `main`'s linear history:
+  use a squash merge for multi-commit syncs, or a rebase merge for a single
+  commit. Do not use merge commits for routine `main` syncs. Admin bypass is a
+  break-glass path only and must be recorded in the PR and the owning Linear
+  issue.
 - Fill out the [pull request template](.github/PULL_REQUEST_TEMPLATE.md) completely — including the `§X.Y` plan mapping, verification gates passed, and the DCO + signed-commit checklist.
 - Keep PRs focused and reviewable. Large PRs will be asked to split.
 
