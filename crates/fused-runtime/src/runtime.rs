@@ -992,7 +992,16 @@ impl FusedRuntime {
             // 8. cost-gate finalize: settle this iteration against the combined
             //    actual (provider + the tools it triggered).
             let actual = runtime_cost_to_gate(&combined_cost);
-            let _ = self.gate.finalize(reservation, actual).await;
+            match self.gate.finalize(reservation, actual).await {
+                Ok(_) => {}
+                Err(e) => {
+                    self.fire_error(session_id, LifecyclePhase::Receipt, &e)
+                        .await;
+                    return Err(RuntimeError::Internal(anyhow::anyhow!(
+                        "cost-gate finalization failed: {e}"
+                    )));
+                }
+            }
 
             // 9. memory: record this round as a bi-temporal fact. Non-fatal.
             if let Some(memory) = &self.memory {
@@ -1468,11 +1477,23 @@ impl FusedRuntime {
                 // 8. cost-gate finalize.
                 yield FusedEvent::StageStart { stage: StageKind::CostGateFinalize };
                 let actual = runtime_cost_to_gate(&combined_cost);
-                let _ = self
+                match self
                     .gate
                     .finalize(reservation.take().expect("reservation held"), actual)
-                    .await;
-                yield FusedEvent::StageEnd { stage: StageKind::CostGateFinalize, ok: true };
+                    .await
+                {
+                    Ok(_) => {
+                        yield FusedEvent::StageEnd { stage: StageKind::CostGateFinalize, ok: true };
+                    }
+                    Err(e) => {
+                        yield FusedEvent::StageEnd { stage: StageKind::CostGateFinalize, ok: false };
+                        self.fire_error(session_id, LifecyclePhase::Receipt, &e)
+                            .await;
+                        Err(RuntimeError::Internal(anyhow::anyhow!(
+                            "cost-gate finalization failed: {e}"
+                        )))?;
+                    }
+                }
 
                 // 9. memory (only when a backend is configured).
                 if let Some(memory) = &self.memory {

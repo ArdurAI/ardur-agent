@@ -922,12 +922,20 @@ fn load_or_generate_receipt_key(keys_dir: &Path) -> anyhow::Result<Es256SigningK
     }
 }
 
-/// Compile the Cedar policy: the operator's file when configured and present,
-/// otherwise the built-in [`DEFAULT_POLICY`].
+/// Compile the Cedar policy: the operator's file when configured and present.
+/// Fails closed (errors) when a policy path is configured but missing.
+/// Only falls back to the built-in [`DEFAULT_POLICY`] when no path is configured.
 fn load_policy(path: Option<&Path>) -> anyhow::Result<CedarPolicyBundle> {
     let source = match path {
         Some(p) if p.exists() => PolicySource::File(p.to_path_buf()),
-        _ => PolicySource::Embedded(DEFAULT_POLICY.to_string()),
+        Some(p) => {
+            return Err(anyhow::anyhow!(
+                "Cedar policy path configured but file not found: {}. \
+                 To use the built-in permissive policy, unset ARDUR_CEDAR_POLICY_PATH.",
+                p.display()
+            ));
+        }
+        None => PolicySource::Embedded(DEFAULT_POLICY.to_string()),
     };
     CedarPolicyBundle::load(source).map_err(|e| anyhow::anyhow!("compiling cedar policy: {e}"))
 }

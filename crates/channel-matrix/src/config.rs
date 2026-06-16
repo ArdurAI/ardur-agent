@@ -80,7 +80,7 @@ impl MatrixConfig {
             access_token: access_token.into(),
             device_id: None,
             state_dir: None,
-            auto_join_invites: true,
+            auto_join_invites: false,
             allowed_rooms: Vec::new(),
         }
     }
@@ -90,7 +90,7 @@ impl MatrixConfig {
     /// Required: `MATRIX_HOMESERVER_URL`, `MATRIX_USER_ID`,
     /// `MATRIX_ACCESS_TOKEN`. Optional: `MATRIX_DEVICE_ID`, `MATRIX_STATE_DIR`
     /// (default `~/.ardur/matrix-state`), `MATRIX_AUTO_JOIN_INVITES`
-    /// (default `true`), `MATRIX_ALLOWED_ROOMS` (comma-separated; empty = all).
+    /// (default `false`), `MATRIX_ALLOWED_ROOMS` (comma-separated; empty = all).
     ///
     /// # Errors
     /// [`MatrixError::MissingEnvVar`] naming the first required variable that is
