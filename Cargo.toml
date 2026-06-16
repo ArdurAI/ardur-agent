@@ -54,6 +54,10 @@ members = [
     "crates/config",
     "crates/health",
     "crates/logs",
+    "crates/acp",
+    "crates/automation",
+    "crates/media-audio",
+    "crates/hooks-openclaw-compat",
 ]
 
 [workspace.package]
