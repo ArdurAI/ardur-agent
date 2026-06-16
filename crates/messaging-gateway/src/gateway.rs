@@ -11,6 +11,7 @@ use crate::types::{
     ChannelId, IncomingMessage, MessageReceipt, MessageTarget, OutgoingMessage, SenderRef,
     UnixTsMillis,
 };
+use crate::verb::{MessageVerb, MessageVerbRequest};
 
 /// A bidirectional message channel: send an [`OutgoingMessage`] for delivery,
 /// and long-poll for the next [`IncomingMessage`].
@@ -21,6 +22,42 @@ use crate::types::{
 pub trait MessagingGateway: Send + Sync {
     /// Deliver a message, returning a [`MessageReceipt`] on acceptance.
     async fn send_message(&self, msg: OutgoingMessage) -> Result<MessageReceipt, GatewayError>;
+
+    /// Dispatch a typed per-message operation.
+    ///
+    /// The compatibility implementation maps [`MessageVerb::Send`] onto the
+    /// existing [`send_message`](Self::send_message) path. Other verbs refuse
+    /// with a typed error until a backend implements the richer §4.11 contract.
+    async fn dispatch_message_verb(
+        &self,
+        request: MessageVerbRequest,
+    ) -> Result<MessageReceipt, GatewayError> {
+        let MessageVerbRequest {
+            operation_id,
+            channel_id,
+            target,
+            verb,
+            cap_token,
+            parent_message_id,
+        } = request;
+
+        match verb {
+            MessageVerb::Send { body } => {
+                self.send_message(OutgoingMessage {
+                    message_id: operation_id,
+                    channel_id,
+                    target,
+                    body,
+                    cap_token,
+                    parent_message_id,
+                })
+                .await
+            }
+            verb => Err(GatewayError::MessageVerbUnsupported {
+                verb: verb.id().to_owned(),
+            }),
+        }
+    }
 
     /// Await the next inbound message. Long-poll style: resolves as soon as a
     /// message is available (immediately if one is already queued).
