@@ -19,6 +19,7 @@ members = [
     "crates/memory",
     "crates/memory-qdrant",
     "crates/runtime",
+    "crates/automation",
     "crates/cost-gate",
     "crates/provider-runtime",
     "crates/provider-openrouter",
@@ -207,6 +208,7 @@ ardur-memory = { path = "crates/memory" }
 ardur-memory-qdrant = { path = "crates/memory-qdrant" }
 ardur-runtime = { path = "crates/runtime" }
 ardur-acp = { path = "crates/acp" }
+ardur-automation = { path = "crates/automation" }
 ardur-cost-gate = { path = "crates/cost-gate" }
 ardur-provider-runtime = { path = "crates/provider-runtime" }
 ardur-provider-openrouter = { path = "crates/provider-openrouter" }

@@ -240,6 +240,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "ardur-automation"
+version = "0.0.1"
+dependencies = [
+ "ardur-cap-token",
+ "ardur-cedar-policy",
+ "ardur-receipt",
+ "ardur-runtime",
+ "async-trait",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "ardur-bm25-index"
 version = "0.0.1"
 dependencies = [
