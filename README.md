@@ -44,6 +44,23 @@ tools, and skills for both the CLI and the server. The full operator runbook —
 every provider, the Qdrant/hybrid memory backends, the four chat channels, MCP,
 skills, OpenTelemetry, and the HTTP surface — lives in **[RUN.md](RUN.md)**.
 
+## Agent Bootstrap
+
+Every LLM or agent session working in this repo must start with the read-only
+bootstrap:
+
+```sh
+python3 scripts/agent_bootstrap.py
+```
+
+It reports the current Linear project/issue status, native project progress,
+Git/worktree isolation state, EXTENDED-drive evidence root, `parallel:ready`
+work candidates, Plan Corpus verification backlog, Keychain-backed ARD Linear
+access status, provider posture, and the no-key smoke-test path. Each
+implementation must be merged back to `dev` with required workflows green
+before that session moves to another item. The conduct rules live in **[AGENTS.md](AGENTS.md)**
+and **[docs/agents/session-code-of-conduct.md](docs/agents/session-code-of-conduct.md)**.
+
 ## Capabilities
 
 **Channels (4).** Slack, Matrix, Discord, Telegram — each with bot-token auth,
