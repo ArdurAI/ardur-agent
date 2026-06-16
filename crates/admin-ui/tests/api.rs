@@ -182,7 +182,7 @@ impl Fixture {
 
     fn server(&self) -> TestServer {
         let state = AppState::new(&self.journal_dir, &self.receipt_store);
-        TestServer::new(build_router(state.shared())).unwrap()
+        TestServer::new(build_router(state.shared()))
     }
 }
 

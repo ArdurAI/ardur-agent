@@ -166,10 +166,9 @@ where
         );
 
     // The transport dispatches GET/POST/DELETE itself; one service route per
-    // named server. `:server_name` (axum 0.7 path-param syntax) lets a
-    // deployment expose several logical servers on one host (all currently
-    // backed by the same registry).
-    let route = format!("{}/:server_name", path_prefix.trim_end_matches('/'));
+    // named server. `{server_name}` lets a deployment expose several logical
+    // servers on one host (all currently backed by the same registry).
+    let route = format!("{}/{}", path_prefix.trim_end_matches('/'), "{server_name}");
 
     Router::new()
         .route_service(&route, service)
