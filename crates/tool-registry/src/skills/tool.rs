@@ -66,11 +66,40 @@ impl SkillTool {
     /// An `@./<file>` marker in the body is replaced in place by the file's
     /// contents; a requested file with no matching marker is appended. Filenames
     /// are resolved against the skill's [`dir`](Skill::dir).
+    ///
+    /// Path traversal is blocked: filenames containing `..` or absolute paths
+    /// (starting with `/`) are rejected.
     fn render(&self, expand: &[String]) -> Result<String, ToolError> {
         let mut rendered = self.body.clone();
         for file in expand {
             let rel = file.trim_start_matches("./");
-            let contents = std::fs::read_to_string(self.dir.join(rel)).map_err(|e| {
+
+            // Block path traversal: reject `..` components and absolute paths
+            if rel.starts_with('/') || rel.contains("..") {
+                return Err(ToolError::ExecutionFailed(format!(
+                    "invalid resource path `{rel}`: path traversal blocked"
+                )));
+            }
+
+            let resolved = self.dir.join(rel);
+            // Double-check the resolved path is within the skill directory
+            let canonical_dir = std::fs::canonicalize(&self.dir).map_err(|e| {
+                ToolError::ExecutionFailed(format!(
+                    "cannot canonicalize skill directory: {e}"
+                ))
+            })?;
+            let canonical_resolved = std::fs::canonicalize(&resolved).map_err(|e| {
+                ToolError::ExecutionFailed(format!(
+                    "cannot inline referenced resource `{rel}`: {e}"
+                ))
+            })?;
+            if !canonical_resolved.starts_with(&canonical_dir) {
+                return Err(ToolError::ExecutionFailed(format!(
+                    "invalid resource path `{rel}`: path escapes skill directory"
+                )));
+            }
+
+            let contents = std::fs::read_to_string(&resolved).map_err(|e| {
                 ToolError::ExecutionFailed(format!(
                     "cannot inline referenced resource `{rel}`: {e}"
                 ))
@@ -200,5 +229,31 @@ mod tests {
             .await
             .expect_err("non-array expand fails");
         assert!(matches!(err, ToolError::InvalidArgs(_)));
+    }
+
+    #[tokio::test]
+    async fn expand_path_traversal_blocked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = SkillTool::new(skill("body", tmp.path().to_path_buf()));
+        let err = tool
+            .invoke(&ctx(), json!({ "expand": ["../../../etc/passwd"] }))
+            .await
+            .expect_err("path traversal blocked");
+        assert!(matches!(err, ToolError::ExecutionFailed(_)));
+        let msg = format!("{err}");
+        assert!(msg.contains("path traversal"), "error mentions path traversal: {msg}");
+    }
+
+    #[tokio::test]
+    async fn expand_absolute_path_blocked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = SkillTool::new(skill("body", tmp.path().to_path_buf()));
+        let err = tool
+            .invoke(&ctx(), json!({ "expand": ["/etc/passwd"] }))
+            .await
+            .expect_err("absolute path blocked");
+        assert!(matches!(err, ToolError::ExecutionFailed(_)));
+        let msg = format!("{err}");
+        assert!(msg.contains("path traversal"), "error mentions path traversal: {msg}");
     }
 }
