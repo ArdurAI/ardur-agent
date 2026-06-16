@@ -155,5 +155,6 @@ fn error_type(err: &ProviderError) -> &'static str {
         ProviderError::CostCeilingExceeded => "CostCeilingExceeded",
         ProviderError::Unauthorized => "Unauthorized",
         ProviderError::Upstream(_) => "Upstream",
+        ProviderError::InvalidSelection(_) => "InvalidSelection",
     }
 }

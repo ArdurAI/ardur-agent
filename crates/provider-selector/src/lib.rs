@@ -188,11 +188,11 @@ impl std::error::Error for UnknownProvider {}
 /// is the env-free core that [`from_env`] wraps — the CLI/server boot tests call
 /// it directly with a fixed value so they need not mutate process environment.
 ///
-/// # Panics
+/// # Errors
 ///
-/// Panics when `selector` is `Some(value)` and `value` matches no known backend
+/// Returns [`ProviderError::InvalidSelection`] when `selector` is `Some(value)` and `value` matches no known backend
 /// — an unrecognized `ARDUR_PROVIDER` is a boot misconfiguration that should
-/// abort the process. The panic message lists the supported values.
+/// abort the process. The error message lists the supported values.
 ///
 /// # Errors
 ///
@@ -201,7 +201,7 @@ impl std::error::Error for UnknownProvider {}
 /// `OPENROUTER_API_KEY` yields [`ProviderError::Unauthorized`].
 pub fn select(selector: Option<&str>, model: ModelId) -> Result<Arc<dyn Provider>, ProviderError> {
     let kind = ProviderKind::resolve(selector)
-        .unwrap_or_else(|e| panic!("invalid provider selection: {e}"));
+        .map_err(|e| ProviderError::InvalidSelection(e.to_string()))?;
     kind.build(model)
 }
 
@@ -211,11 +211,9 @@ pub fn select(selector: Option<&str>, model: ModelId) -> Result<Arc<dyn Provider
 /// This is the boot entry point the CLI and server call in place of the old
 /// hard-coded `AnthropicProvider::from_env`.
 ///
-/// # Panics
-///
-/// Panics when `ARDUR_PROVIDER` is set to an unrecognized value (see [`select`]).
-///
 /// # Errors
+///
+/// Returns [`ProviderError::InvalidSelection`] when `ARDUR_PROVIDER` is set to an unrecognized value.
 ///
 /// Returns [`ProviderError`] when the selected backend cannot be built from the
 /// environment (e.g. a missing API key).
@@ -309,9 +307,16 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "supported values are")]
-    fn unknown_provider_panics_with_helpful_error() {
-        let _ = select(Some("mistral"), model());
+    fn unknown_provider_returns_error_with_helpful_message() {
+        let result = select(Some("mistral"), model());
+        match result {
+            Err(e) => {
+                let msg = format!("{e}");
+                assert!(msg.contains("invalid provider selection"), "error mentions invalid selection: {msg}");
+                assert!(msg.contains("mistral"), "error mentions the invalid provider: {msg}");
+            }
+            Ok(_) => panic!("expected an error for unknown provider, but selection succeeded"),
+        }
     }
 
     #[test]
