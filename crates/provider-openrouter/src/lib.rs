@@ -85,13 +85,25 @@ pub const API_KEY_ENV: &str = "OPENROUTER_API_KEY";
 /// Build it from an API key with [`OpenRouterConfig::new`] (or
 /// [`OpenRouterConfig::from_env`]) and tune the optional fields with the
 /// builder methods; every field but the key has a sensible default.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct OpenRouterConfig {
     api_key: String,
     base_url: String,
     referer: String,
     title: String,
     request_timeout: Duration,
+}
+
+impl std::fmt::Debug for OpenRouterConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenRouterConfig")
+            .field("api_key", &"***")
+            .field("base_url", &self.base_url)
+            .field("referer", &self.referer)
+            .field("title", &self.title)
+            .field("request_timeout", &self.request_timeout)
+            .finish()
+    }
 }
 
 impl OpenRouterConfig {

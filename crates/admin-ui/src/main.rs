@@ -46,7 +46,16 @@ async fn main() -> anyhow::Result<()> {
 
     let app = build_router(state.shared());
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], cli.port));
+    // Default to localhost for security; only bind to 0.0.0.0 when explicitly requested
+    let bind_host = std::env::var("ARDUR_ADMIN_BIND")
+        .unwrap_or_else(|_| "127.0.0.1".to_string());
+    let addr = match bind_host.parse::<std::net::IpAddr>() {
+        Ok(ip) => SocketAddr::from((ip, cli.port)),
+        Err(_) => {
+            tracing::warn!("Invalid ARDUR_ADMIN_BIND, falling back to 127.0.0.1");
+            SocketAddr::from(([127, 0, 0, 1], cli.port))
+        }
+    };
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!(
         %addr,

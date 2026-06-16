@@ -228,7 +228,7 @@ impl Config {
             slack_app_id: require("SLACK_APP_ID")?,
             data_dir: optional("ARDUR_DATA_DIR")
                 .map_or_else(|| PathBuf::from("./data"), PathBuf::from),
-            bind_addr: optional("ARDUR_BIND_ADDR").unwrap_or_else(|| "0.0.0.0:3000".to_string()),
+            bind_addr: optional("ARDUR_BIND_ADDR").unwrap_or_else(|| "127.0.0.1:3000".to_string()),
             model: optional("ARDUR_MODEL").unwrap_or_else(|| "claude-opus-4-8".to_string()),
             cost_budget_cents: optional("ARDUR_COST_BUDGET_CENTS")
                 .and_then(|v| v.parse().ok())
