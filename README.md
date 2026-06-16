@@ -123,7 +123,7 @@ provider's billing; stages 6–10 run after the response and cannot un-happen th
 turn. `FusedRuntime::stream` drives the same ten stages but yields a progressive
 event feed, which is what the CLI consumes for its streaming UX.
 
-Each subsystem is its own workspace crate (33 in all). The design corpus and
+Each subsystem is its own workspace crate (34 in all). The design corpus and
 architecture-decision records live under [`docs/`](docs/).
 
 ## Status
