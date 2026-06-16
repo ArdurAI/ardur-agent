@@ -784,6 +784,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ardur-session"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "ardur-session-journals"
 version = "0.0.1"
 dependencies = [

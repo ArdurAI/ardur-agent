@@ -48,6 +48,9 @@ members = [
     "crates/mcp-server",
     "crates/commitments",
     "crates/standing-goals",
+    "crates/session",
+    "crates/cli",
+    "crates/runtime",
 ]
 
 [workspace.package]
