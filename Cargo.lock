@@ -792,6 +792,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "ardur-provider-openai-compat"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "ardur-provider-runtime",
+ "ardur-runtime",
+ "async-trait",
+ "chrono",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "ardur-provider-openrouter"
 version = "0.0.1"
 dependencies = [
@@ -836,6 +855,7 @@ dependencies = [
  "ardur-provider-claude-cli",
  "ardur-provider-codex",
  "ardur-provider-ollama",
+ "ardur-provider-openai-compat",
  "ardur-provider-openrouter",
  "ardur-provider-runtime",
 ]

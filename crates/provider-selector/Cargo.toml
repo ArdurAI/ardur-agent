@@ -38,3 +38,5 @@ ardur-provider-codex = { workspace = true }
 # The Claude Code CLI subscription backend (§3.3c) — selected by
 # `ARDUR_PROVIDER=claude-cli` (alias `claude-subscription`).
 ardur-provider-claude-cli = { workspace = true }
+# The OpenAI-compatible backend (§3.4) — selected by `ARDUR_PROVIDER=openai-compat`.
+ardur-provider-openai-compat = { workspace = true }
