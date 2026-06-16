@@ -79,7 +79,7 @@ struct JournalQuery {
     offset: Option<usize>,
 }
 
-/// `GET /api/sessions/:id/journal?limit=&offset=`
+/// `GET /api/sessions/{id}/journal?limit=&offset=`
 async fn session_journal(
     State(state): State<SharedState>,
     Path(id): Path<String>,
@@ -111,7 +111,7 @@ struct FullReceipt {
     jws_compact: String,
 }
 
-/// `GET /api/receipts/:id`
+/// `GET /api/receipts/{id}`
 async fn receipt_by_id(
     State(state): State<SharedState>,
     Path(id): Path<String>,
@@ -150,9 +150,9 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/", get(dashboard))
         .route("/healthz", get(healthz))
         .route("/api/sessions", get(list_sessions))
-        .route("/api/sessions/:id/journal", get(session_journal))
+        .route("/api/sessions/{id}/journal", get(session_journal))
         .route("/api/receipts", get(list_receipts))
-        .route("/api/receipts/:id", get(receipt_by_id))
+        .route("/api/receipts/{id}", get(receipt_by_id))
         .route("/api/costs", get(costs_report))
         .route("/api/memory/recent", get(memory_recent))
         .layer(axum::middleware::from_fn_with_state(
