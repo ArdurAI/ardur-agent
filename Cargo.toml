@@ -14,6 +14,7 @@ members = [
     "crates/fusion",
     "crates/receipt",
     "crates/lifecycle-hooks",
+    "crates/hooks-openclaw-compat",
     "crates/cedar-policy",
     "crates/memory",
     "crates/memory-qdrant",
@@ -200,6 +201,7 @@ ardur-bm25-index = { path = "crates/bm25-index" }
 ardur-fusion = { path = "crates/fusion" }
 ardur-receipt = { path = "crates/receipt" }
 ardur-lifecycle-hooks = { path = "crates/lifecycle-hooks" }
+ardur-hooks-openclaw-compat = { path = "crates/hooks-openclaw-compat" }
 ardur-cedar-policy = { path = "crates/cedar-policy" }
 ardur-memory = { path = "crates/memory" }
 ardur-memory-qdrant = { path = "crates/memory-qdrant" }

@@ -1,0 +1,15 @@
+[package]
+name = "ardur-hooks-openclaw-compat"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "OpenClaw codex-format hook compatibility primitives for Ardur lifecycle hooks."
+
+[dependencies]
+# Codex hook payloads and stdout responses are JSON wire formats.
+serde = { workspace = true }
+serde_json = { workspace = true }
+# Typed serializer/parser/translator failure surfaces.
+thiserror = { workspace = true }
