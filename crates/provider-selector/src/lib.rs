@@ -10,6 +10,7 @@
 //! |------------------|--------------------------------------|-----------------------------|
 //! | `anthropic`      | [`AnthropicProvider`] (default)      | `ardur-provider-runtime`    |
 //! | `openrouter`     | `OpenRouterProvider`                 | `ardur-provider-openrouter` |
+//! | `openai-compat`  | `OpenAiCompatProvider`               | `ardur-provider-openai-compat` |
 //! | `ollama`         | `OllamaProvider` (local **or** cloud)| `ardur-provider-ollama`     |
 //! | `codex`          | `CodexProvider` (subprocess wrap)    | `ardur-provider-codex`      |
 //! | `claude-cli`     | `ClaudeCliProvider` (subprocess wrap)| `ardur-provider-claude-cli` |
@@ -22,19 +23,19 @@
 //! typo aborts the process loudly rather than silently falling back.
 //!
 //! The credentialed backends ([`ProviderKind::Anthropic`],
-//! [`ProviderKind::OpenRouter`]) can still fail *after* a valid selection when
-//! their key is absent — that surfaces as `Err(ProviderError)`, distinct from
-//! the panic on an unknown selector. The credential-free backends
+//! [`ProviderKind::OpenRouter`], [`ProviderKind::OpenAiCompat`]) can still fail
+//! *after* a valid selection when their key is absent — that surfaces as
+//! `Err(ProviderError)`, distinct from the panic on an unknown selector. The
+//! credential-free backends
 //! ([`ProviderKind::Ollama`], [`ProviderKind::Codex`], [`ProviderKind::ClaudeCli`])
 //! never fail.
 //!
 //! # Why a standalone crate
 //!
-//! The three peer backends each depend on `ardur-provider-runtime` (they
-//! implement its `Provider` trait). A selector that depends on all four
-//! therefore cannot live *inside* `provider-runtime` without closing a
-//! dependency cycle. A leaf crate sitting above all four is the only acyclic
-//! home — hence this crate.
+//! The peer backends each depend on `ardur-provider-runtime` (they implement
+//! its `Provider` trait). A selector that depends on all of them therefore
+//! cannot live *inside* `provider-runtime` without closing a dependency cycle. A
+//! leaf crate sitting above the concrete providers is the only acyclic home.
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
@@ -44,6 +45,7 @@ use std::sync::Arc;
 use ardur_provider_claude_cli::ClaudeCliProvider;
 use ardur_provider_codex::CodexProvider;
 use ardur_provider_ollama::OllamaProvider;
+use ardur_provider_openai_compat::OpenAiCompatProvider;
 use ardur_provider_openrouter::OpenRouterProvider;
 use ardur_provider_runtime::AnthropicProvider;
 
@@ -65,6 +67,8 @@ pub enum ProviderKind {
     Anthropic,
     /// OpenRouter HTTP gateway (§3.2).
     OpenRouter,
+    /// Generic OpenAI-compatible HTTP backend (§12.5).
+    OpenAiCompat,
     /// Ollama local daemon or hosted cloud (§3.3).
     Ollama,
     /// OpenAI Codex CLI subscription, wrapped as a subprocess (§3.3b).
@@ -80,9 +84,10 @@ impl ProviderKind {
 
     /// Every recognized selector spelling, in selection order — the canonical
     /// list surfaced in the unknown-value error.
-    pub const ALL: [ProviderKind; 5] = [
+    pub const ALL: [ProviderKind; 6] = [
         ProviderKind::Anthropic,
         ProviderKind::OpenRouter,
+        ProviderKind::OpenAiCompat,
         ProviderKind::Ollama,
         ProviderKind::Codex,
         ProviderKind::ClaudeCli,
@@ -94,6 +99,7 @@ impl ProviderKind {
         match self {
             ProviderKind::Anthropic => "anthropic",
             ProviderKind::OpenRouter => "openrouter",
+            ProviderKind::OpenAiCompat => "openai-compat",
             ProviderKind::Ollama => "ollama",
             ProviderKind::Codex => "codex",
             ProviderKind::ClaudeCli => "claude-cli",
@@ -111,6 +117,7 @@ impl ProviderKind {
         match raw.trim().to_ascii_lowercase().as_str() {
             "anthropic" => Ok(ProviderKind::Anthropic),
             "openrouter" => Ok(ProviderKind::OpenRouter),
+            "openai-compat" | "openai_compat" | "openai" => Ok(ProviderKind::OpenAiCompat),
             "ollama" => Ok(ProviderKind::Ollama),
             "codex" => Ok(ProviderKind::Codex),
             "claude-cli" | "claude-subscription" => Ok(ProviderKind::ClaudeCli),
@@ -140,14 +147,16 @@ impl ProviderKind {
     /// # Errors
     ///
     /// Returns [`ProviderError`] when a credentialed backend's key is missing
-    /// ([`ProviderKind::Anthropic`] / [`ProviderKind::OpenRouter`] →
-    /// [`ProviderError::Unauthorized`]). The credential-free backends
+    /// ([`ProviderKind::Anthropic`] / [`ProviderKind::OpenRouter`] /
+    /// [`ProviderKind::OpenAiCompat`] → [`ProviderError::Unauthorized`]).
+    /// The credential-free backends
     /// ([`ProviderKind::Ollama`] / [`ProviderKind::Codex`] /
     /// [`ProviderKind::ClaudeCli`]) never fail.
     pub fn build(self, model: ModelId) -> Result<Arc<dyn Provider>, ProviderError> {
         let provider: Arc<dyn Provider> = match self {
             ProviderKind::Anthropic => Arc::new(AnthropicProvider::from_env(model)?),
             ProviderKind::OpenRouter => Arc::new(OpenRouterProvider::from_env(model)?),
+            ProviderKind::OpenAiCompat => Arc::new(OpenAiCompatProvider::from_env(model)?),
             ProviderKind::Ollama => Arc::new(OllamaProvider::from_env()),
             ProviderKind::Codex => Arc::new(CodexProvider::from_env(model)),
             ProviderKind::ClaudeCli => Arc::new(ClaudeCliProvider::from_env(model)),
@@ -174,7 +183,7 @@ impl fmt::Display for UnknownProvider {
         write!(
             f,
             "unknown {SELECTOR_ENV} value {:?}: supported values are \
-             anthropic (default), openrouter, ollama, codex, claude-cli",
+             anthropic (default), openrouter, openai-compat, ollama, codex, claude-cli",
             self.0
         )
     }
@@ -197,8 +206,9 @@ impl std::error::Error for UnknownProvider {}
 /// # Errors
 ///
 /// Returns [`ProviderError`] when the selected (valid) backend cannot be built
-/// from the environment — e.g. a missing `ANTHROPIC_API_KEY` /
-/// `OPENROUTER_API_KEY` yields [`ProviderError::Unauthorized`].
+/// from the environment — e.g. a missing `ANTHROPIC_API_KEY`,
+/// `OPENROUTER_API_KEY`, or `OPENAI_COMPAT_API_KEY` /
+/// `OPENAI_API_KEY` yields [`ProviderError::Unauthorized`].
 pub fn select(selector: Option<&str>, model: ModelId) -> Result<Arc<dyn Provider>, ProviderError> {
     let kind = ProviderKind::resolve(selector)
         .unwrap_or_else(|e| panic!("invalid provider selection: {e}"));
@@ -266,6 +276,23 @@ mod tests {
                 ProviderKind::resolve(Some(v)).unwrap(),
                 ProviderKind::OpenRouter,
                 "{v:?} should select openrouter"
+            );
+        }
+    }
+
+    #[test]
+    fn openai_compat_selects_openai_compat() {
+        for v in [
+            "openai-compat",
+            "OpenAI-Compat",
+            "OPENAI_COMPAT",
+            "openai",
+            "  openai-compat  ",
+        ] {
+            assert_eq!(
+                ProviderKind::resolve(Some(v)).unwrap(),
+                ProviderKind::OpenAiCompat,
+                "{v:?} should select openai-compat"
             );
         }
     }

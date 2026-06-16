@@ -74,6 +74,44 @@ fn from_env_openrouter_selects_openrouter() {
 }
 
 #[test]
+fn from_env_openai_compat_selects_openai_compat() {
+    let _guard = env_lock();
+    let prior_sel = swap("ARDUR_PROVIDER", Some("openai-compat"));
+    let prior_key = swap("OPENAI_COMPAT_API_KEY", Some("sk-compat-test"));
+    let prior_openai_key = swap("OPENAI_API_KEY", None);
+    let prior_base = swap("OPENAI_COMPAT_BASE_URL", None);
+    let prior_timeout = swap("OPENAI_COMPAT_TIMEOUT_SECS", None);
+
+    let provider = from_env(model()).expect("openai-compat builds with a key present");
+    assert_eq!(provider.id().0, "openai-compat");
+
+    restore("OPENAI_COMPAT_TIMEOUT_SECS", prior_timeout);
+    restore("OPENAI_COMPAT_BASE_URL", prior_base);
+    restore("OPENAI_API_KEY", prior_openai_key);
+    restore("OPENAI_COMPAT_API_KEY", prior_key);
+    restore("ARDUR_PROVIDER", prior_sel);
+}
+
+#[test]
+fn from_env_openai_compat_accepts_openai_api_key_fallback() {
+    let _guard = env_lock();
+    let prior_sel = swap("ARDUR_PROVIDER", Some("openai"));
+    let prior_compat_key = swap("OPENAI_COMPAT_API_KEY", None);
+    let prior_openai_key = swap("OPENAI_API_KEY", Some("sk-openai-test"));
+    let prior_base = swap("OPENAI_COMPAT_BASE_URL", None);
+    let prior_timeout = swap("OPENAI_COMPAT_TIMEOUT_SECS", None);
+
+    let provider = from_env(model()).expect("openai alias builds from OPENAI_API_KEY");
+    assert_eq!(provider.id().0, "openai-compat");
+
+    restore("OPENAI_COMPAT_TIMEOUT_SECS", prior_timeout);
+    restore("OPENAI_COMPAT_BASE_URL", prior_base);
+    restore("OPENAI_API_KEY", prior_openai_key);
+    restore("OPENAI_COMPAT_API_KEY", prior_compat_key);
+    restore("ARDUR_PROVIDER", prior_sel);
+}
+
+#[test]
 fn from_env_ollama_local_selects_ollama() {
     let _guard = env_lock();
     let prior_sel = swap("ARDUR_PROVIDER", Some("ollama"));

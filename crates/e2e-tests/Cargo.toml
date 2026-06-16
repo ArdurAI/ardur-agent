@@ -67,6 +67,9 @@ parking_lot = { workspace = true }
 # The §3.2 scenario drives the live-HTTP OpenRouter provider against a wiremock
 # stand-in for OpenRouter's OpenAI-compatible endpoint.
 ardur-provider-openrouter = { workspace = true }
+# The §12.5 scenario drives the generic OpenAI-compatible provider against a
+# wiremock stand-in for `/chat/completions`.
+ardur-provider-openai-compat = { workspace = true }
 # The §3.3 scenario drives the live-HTTP Ollama provider against a wiremock
 # stand-in for Ollama's native `/api/chat` endpoint.
 ardur-provider-ollama = { workspace = true }

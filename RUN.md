@@ -31,6 +31,7 @@ startup (`using provider provider=<id>`).
 |---|---|---|
 | `anthropic` (default) | Anthropic Messages API | `ANTHROPIC_API_KEY` |
 | `openrouter` | OpenRouter HTTP gateway | `OPENROUTER_API_KEY` |
+| `openai-compat` (alias `openai`) | Generic OpenAI-compatible Chat Completions endpoint | `OPENAI_COMPAT_API_KEY` preferred; `OPENAI_API_KEY` fallback for OpenAI proper; `OPENAI_COMPAT_BASE_URL` default `https://api.openai.com/v1`; `OPENAI_COMPAT_TIMEOUT_SECS` |
 | `ollama` | Ollama local daemon **or** hosted cloud | `OLLAMA_BASE_URL` (default `http://localhost:11434`); `OLLAMA_API_KEY` (cloud only — its presence auto-defaults the base URL to `https://ollama.com`) |
 | `codex` | OpenAI Codex CLI (ChatGPT subscription) | `CODEX_BINARY` (default: `codex` on `PATH`), `CODEX_DEFAULT_MODEL`, `CODEX_SANDBOX_MODE` (`read-only` \| `workspace-write` \| `danger-full-access`), `CODEX_WORKING_DIR` |
 | `claude-cli` (alias `claude-subscription`) | Claude Code CLI (Anthropic subscription) | `CLAUDE_CLI_BINARY` (default: `claude` on `PATH`), `CLAUDE_CLI_DEFAULT_MODEL`, `CLAUDE_CLI_PERMISSION_MODE` (`default` \| `acceptEdits` \| `auto` \| `bypassPermissions` \| `dontAsk` \| `plan`), `CLAUDE_CLI_WORKING_DIR`, `CLAUDE_CLI_ALLOWED_TOOLS`. Run `claude login` once; spends the **Agent SDK Credit pool** ($20–$200/mo, plan-dependent), not unbounded |
@@ -44,6 +45,11 @@ ARDUR_PROVIDER=anthropic ANTHROPIC_API_KEY=sk-ant-... ardur chat
 # OpenRouter
 ARDUR_PROVIDER=openrouter OPENROUTER_API_KEY=sk-or-... ardur chat
 
+# OpenAI-compatible endpoint — defaults to https://api.openai.com/v1
+ARDUR_PROVIDER=openai-compat OPENAI_COMPAT_API_KEY=sk-... ardur chat
+# OpenAI proper can use the standard OpenAI key name as a fallback
+ARDUR_PROVIDER=openai OPENAI_API_KEY=sk-... ardur chat
+
 # Ollama — local daemon (no key)
 ARDUR_PROVIDER=ollama ardur chat
 # Ollama — hosted cloud (a key auto-targets https://ollama.com)
@@ -56,11 +62,12 @@ ARDUR_PROVIDER=codex ardur chat
 ARDUR_PROVIDER=claude-cli ardur chat
 ```
 
-The Anthropic and OpenRouter backends fail at boot if their API key is missing
-(the CLI then falls back to a network-free stub and prints an offline notice;
-the server aborts). The Ollama, Codex, and Claude-CLI backends need no
-credentials to wire — they fail later, per-turn, if the daemon/binary is
-unreachable or the CLI is not logged in.
+The Anthropic, OpenRouter, and OpenAI-compatible backends fail at boot if their
+API key is missing (the CLI then falls back to a network-free stub and prints an
+offline notice; the server aborts). `OPENAI_COMPAT_BASE_URL` must use HTTPS
+unless it targets loopback HTTP for local tests. The Ollama, Codex, and
+Claude-CLI backends need no credentials to wire — they fail later, per-turn, if
+the daemon/binary is unreachable or the CLI is not logged in.
 
 ## Selecting a memory backend
 
@@ -355,8 +362,9 @@ A turn that keeps requesting tools past the iteration ceiling aborts with a
 tool name, or a tool output that trips the injection filter, likewise aborts the
 turn before it can affect the conversation.
 
-Provider support (Phase 1): **anthropic** (Messages API `tool_use`) and
-**openrouter** (OpenAI-compatible `tools`/`tool_calls`). The `codex` and
+Provider support (Phase 1): **anthropic** (Messages API `tool_use`),
+**openrouter** (OpenAI-compatible `tools`/`tool_calls`), and
+**openai-compat** (OpenAI-compatible `tools`/`tool_calls`). The `codex` and
 `claude` CLI providers orchestrate their own tools internally, so the runtime
 loop does not drive tools through them.
 
@@ -371,6 +379,7 @@ advertises whether it implements it via `supports_streaming()`:
 | `anthropic` | yes | SSE (§3.1b) |
 | `ollama` | yes | NDJSON (§3.4b) |
 | `openrouter` | yes | SSE (§3.2b) |
+| `openai-compat` | yes | SSE |
 | `codex` | no | CLI orchestrates its own output |
 | `claude-cli` | no | planned |
 
@@ -502,7 +511,7 @@ attributes — `gen_ai.system`, `gen_ai.request.model`,
 `error.type`, and friends. Export them to any OTLP-native backend (Langfuse,
 Arize Phoenix, Arize, Jaeger, Grafana Tempo, …) for token-usage dashboards,
 latency tracing, and per-call drill-down — for free, across **every** provider
-(anthropic / openrouter / ollama / codex / claude-cli).
+(anthropic / openrouter / openai-compat / ollama / codex / claude-cli).
 
 Disabled by default. To enable, set:
 

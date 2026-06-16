@@ -380,6 +380,7 @@ dependencies = [
  "ardur-provider-claude-cli",
  "ardur-provider-codex",
  "ardur-provider-ollama",
+ "ardur-provider-openai-compat",
  "ardur-provider-openrouter",
  "ardur-provider-runtime",
  "ardur-receipt",
@@ -609,6 +610,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "ardur-provider-openai-compat"
+version = "0.0.1"
+dependencies = [
+ "ardur-provider-runtime",
+ "ardur-runtime",
+ "async-trait",
+ "futures",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+ "url",
+ "wiremock",
+]
+
+[[package]]
 name = "ardur-provider-openrouter"
 version = "0.0.1"
 dependencies = [
@@ -653,6 +670,7 @@ dependencies = [
  "ardur-provider-claude-cli",
  "ardur-provider-codex",
  "ardur-provider-ollama",
+ "ardur-provider-openai-compat",
  "ardur-provider-openrouter",
  "ardur-provider-runtime",
 ]
