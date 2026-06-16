@@ -29,6 +29,8 @@ use ardur_provider_runtime::{FinishReason, ProviderError, StreamEvent, ToolCall,
 use futures::{Stream, StreamExt};
 use serde::Deserialize;
 
+use crate::dollars_to_cents;
+
 /// One event yielded by the [`stream_chat`](crate::OpenRouterProvider::stream_chat)
 /// stream.
 ///
@@ -203,14 +205,18 @@ struct DeltaFunction {
     arguments: Option<String>,
 }
 
-/// The streamed `usage` object (final chunk). Only token counts are surfaced;
-/// streamed chunks do not carry OpenRouter's per-call `cost`.
+/// The streamed `usage` object (final chunk). OpenRouter includes `cost` when
+/// `stream_options.include_usage: true` is set (which `stream_chat` always does).
 #[derive(Debug, Deserialize)]
 struct StreamUsage {
     #[serde(default)]
     prompt_tokens: u32,
     #[serde(default)]
     completion_tokens: u32,
+    /// OpenRouter's per-call dollar cost (USD), present on the final usage chunk
+    /// when the upstream supports it.
+    #[serde(default)]
+    cost: Option<f64>,
 }
 
 /// Lift one streamed wire tool-call into the public [`ToolCallDelta`], dropping
@@ -291,6 +297,7 @@ fn process_chunk(
         out.push_back(Ok(OpenRouterChunk::Usage(Usage {
             tokens_in: u.prompt_tokens,
             tokens_out: u.completion_tokens,
+            cost_cents: Some(dollars_to_cents(u.cost)),
         })));
     }
 }
@@ -651,7 +658,8 @@ mod tests {
             events,
             vec![OpenRouterChunk::Usage(Usage {
                 tokens_in: 11,
-                tokens_out: 4
+                tokens_out: 4,
+                cost_cents: Some(0),
             })]
         );
     }
@@ -694,7 +702,9 @@ mod tests {
             OpenRouterChunk::Usage(Usage {
                 tokens_in: 3,
                 tokens_out: 1,
-            }),
+            
+            ..Default::default()
+        }),
             OpenRouterChunk::Done(FinishReason::Stop),
         ]);
         assert_eq!(
@@ -703,7 +713,8 @@ mod tests {
                 StreamEvent::ContentDelta("hi".to_string()),
                 StreamEvent::Usage(Usage {
                     tokens_in: 3,
-                    tokens_out: 1
+                    tokens_out: 1,
+                    ..Default::default()
                 }),
                 StreamEvent::Finish(FinishReason::Stop),
             ]

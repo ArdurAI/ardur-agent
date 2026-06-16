@@ -80,7 +80,9 @@ impl Provider for EchoProvider {
             usage: Usage {
                 tokens_in: 1,
                 tokens_out: 1,
-            },
+            
+            ..Default::default()
+        },
             cost: CostTuple::default(),
             raw_provider_response: None,
         })

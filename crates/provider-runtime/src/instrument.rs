@@ -74,6 +74,7 @@ impl Provider for InstrumentedProvider {
         );
 
         let inner = Arc::clone(&self.inner);
+        let model = req.model.clone();
         async move {
             let result = inner.complete(req).await;
             let span = tracing::Span::current();
@@ -84,6 +85,7 @@ impl Provider for InstrumentedProvider {
                     // requested model — already on `gen_ai.request.model` — is the
                     // best available value; recording it keeps the response side of
                     // the semconv populated for backends that key on it.
+                    span.record("gen_ai.response.model", model.0);
                     span.record("gen_ai.usage.input_tokens", resp.usage.tokens_in);
                     span.record("gen_ai.usage.output_tokens", resp.usage.tokens_out);
                     span.record(
@@ -102,12 +104,45 @@ impl Provider for InstrumentedProvider {
         .await
     }
 
-    /// Delegate streaming straight to the inner provider, so wrapping at boot
-    /// preserves a backend's real SSE path (§3.1b) rather than silently
-    /// collapsing it to the `complete`-based default. (Per-chunk span enrichment
-    /// is a Phase-2 follow-up; for now the inner stream is returned untouched.)
+    /// Stream the completion inside the same `provider.send` GenAI span that
+    /// `complete` uses, so the streaming path emits the same OTel attributes
+    /// (§3.1b / ARD-297). The span is opened at handshake time and closed when
+    /// the stream ends; per-chunk enrichment is a Phase-2 follow-up.
     async fn stream(&self, req: CompletionRequest) -> Result<ProviderStream, ProviderError> {
-        self.inner.stream(req).await
+        let span = tracing::info_span!(
+            "provider.send",
+            "gen_ai.system" = %self.inner.id().0,
+            "gen_ai.operation.name" = "chat",
+            "gen_ai.request.model" = %req.model,
+            "gen_ai.request.temperature" = req.temperature,
+            "gen_ai.request.max_tokens" = req.max_tokens,
+            "gen_ai.response.model" = tracing::field::Empty,
+            "gen_ai.response.finish_reasons" = tracing::field::Empty,
+            "gen_ai.usage.input_tokens" = tracing::field::Empty,
+            "gen_ai.usage.output_tokens" = tracing::field::Empty,
+            "error.type" = tracing::field::Empty,
+        );
+
+        let inner = Arc::clone(&self.inner);
+        let model = req.model.clone();
+        async move {
+            match inner.stream(req).await {
+                Ok(stream) => {
+                    // Record the response model on the span now that the handshake
+                    // succeeded (ARD-298).
+                    tracing::Span::current().record("gen_ai.response.model", model.0);
+                    Ok(stream)
+                }
+                Err(err) => {
+                    let span = tracing::Span::current();
+                    span.record("error.type", error_type(&err));
+                    span.record("gen_ai.response.finish_reasons", "[\"error\"]");
+                    Err(err)
+                }
+            }
+        }
+        .instrument(span)
+        .await
     }
 
     fn id(&self) -> ProviderId {

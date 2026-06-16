@@ -53,7 +53,9 @@ impl Provider for EchoProvider {
             usage: Usage {
                 tokens_in: 1,
                 tokens_out: 1,
-            },
+            
+            ..Default::default()
+        },
             cost: CostTuple::default(),
             raw_provider_response: None,
         })
@@ -104,7 +106,9 @@ impl Provider for BillingProvider {
             usage: Usage {
                 tokens_in: 0,
                 tokens_out: 0,
-            },
+            
+            ..Default::default()
+        },
             cost: CostTuple {
                 tokens_in: 0,
                 tokens_out: 0,

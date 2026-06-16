@@ -95,7 +95,9 @@ impl Provider for ScriptedProvider {
                 usage: Usage {
                     tokens_in: 0,
                     tokens_out: 0,
-                },
+                
+            ..Default::default()
+        },
                 cost: CostTuple::default(),
                 raw_provider_response: None,
             }),
@@ -105,7 +107,9 @@ impl Provider for ScriptedProvider {
                 usage: Usage {
                     tokens_in: cost.tokens_in as u32,
                     tokens_out: cost.tokens_out as u32,
-                },
+                
+            ..Default::default()
+        },
                 cost,
                 raw_provider_response: None,
             }),
@@ -115,7 +119,9 @@ impl Provider for ScriptedProvider {
                 usage: Usage {
                     tokens_in: 0,
                     tokens_out: 0,
-                },
+                
+            ..Default::default()
+        },
                 cost: CostTuple::default(),
                 raw_provider_response: None,
             }),

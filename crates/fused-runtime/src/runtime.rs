@@ -983,7 +983,7 @@ impl FusedRuntime {
                 session_id,
                 receipt: &receipt,
                 response: &response,
-                cost: response.cost,
+                cost: combined_cost,
             };
             for err in self.registry.run_post_receipt(&post_ctx).await {
                 let _ = err;
@@ -1459,7 +1459,7 @@ impl FusedRuntime {
                     session_id,
                     receipt: &receipt,
                     response: &response,
-                    cost: response.cost,
+                    cost: combined_cost,
                 };
                 for err in self.registry.run_post_receipt(&post_ctx).await {
                     let _ = err;

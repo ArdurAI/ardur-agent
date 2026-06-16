@@ -115,6 +115,7 @@ impl AnthropicProvider {
             usage: Usage {
                 tokens_in: 0,
                 tokens_out: 0,
+                ..Default::default()
             },
             cost: CostTuple::default(),
             raw_provider_response: None,
@@ -503,6 +504,8 @@ impl MessagesResponse {
         let usage = Usage {
             tokens_in: self.usage.input_tokens,
             tokens_out: self.usage.output_tokens,
+        
+            ..Default::default()
         };
 
         // Decode any `tool_use` blocks into the calls the runtime will dispatch.

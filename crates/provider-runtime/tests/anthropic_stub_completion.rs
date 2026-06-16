@@ -26,7 +26,8 @@ async fn stub_returns_fixed_completion() {
         resp.usage,
         Usage {
             tokens_in: 0,
-            tokens_out: 0
+            tokens_out: 0,
+            ..Default::default()
         }
     );
     assert_eq!(resp.cost, CostTuple::default());
