@@ -21,6 +21,18 @@ updates:
     labels:
       - "dependencies"
     groups:
+      # Keep the OpenTelemetry stack in one PR. `provider-runtime` wires
+      # `opentelemetry`, `opentelemetry_sdk`, `opentelemetry-otlp`, and
+      # `tracing-opentelemetry` through one API surface; a single-crate bump left
+      # `dev` red when the SDK advanced without matching API/exporter crates.
+      otel-stack:
+        applies-to: version-updates
+        patterns:
+          - "opentelemetry*"
+          - "tracing-opentelemetry"
+        update-types:
+          - "minor"
+          - "patch"
       cargo-minor-patch:
         applies-to: version-updates
         update-types:
