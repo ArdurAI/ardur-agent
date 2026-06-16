@@ -1,12 +1,12 @@
 # ardur-provider-selector — boot-time provider selection (§3.0 wiring).
 #
-# The five §3.x backends (Anthropic §3.1, OpenRouter §3.2, Ollama §3.3, Codex
-# §3.3b, Claude CLI §3.3c) each implement the same `Provider` trait and each own
+# The six §3.x/§12.5 backends (Anthropic §3.1, OpenRouter §3.2, Ollama §3.3,
+# Codex §3.3b, Claude CLI §3.3c, OpenAI-compatible §12.5) each implement the same `Provider` trait and each own
 # a `from_env` constructor. This crate is the one place that reads the
 # `ARDUR_PROVIDER` selector and dispatches to the right backend, returning a
 # boxed `Arc<dyn Provider>` the CLI and server wire into the FusedRuntime at boot.
 #
-# It sits ABOVE all five provider crates in the dep graph (it depends on each of
+# It sits ABOVE all provider crates in the dep graph (it depends on each of
 # them), which is exactly why the selector cannot live in `provider-runtime`:
 # the peer crates already depend on `provider-runtime`, so a selector there would
 # close a cycle. A leaf crate that depends on all of them is the only acyclic
@@ -31,6 +31,9 @@ repository.workspace = true
 ardur-provider-runtime = { workspace = true }
 # The OpenRouter backend (§3.2) — selected by `ARDUR_PROVIDER=openrouter`.
 ardur-provider-openrouter = { workspace = true }
+# The generic OpenAI-compatible backend (§12.5) — selected by
+# `ARDUR_PROVIDER=openai-compat`.
+ardur-provider-openai-compat = { workspace = true }
 # The Ollama backend (§3.3) — selected by `ARDUR_PROVIDER=ollama`.
 ardur-provider-ollama = { workspace = true }
 # The Codex subscription backend (§3.3b) — selected by `ARDUR_PROVIDER=codex`.

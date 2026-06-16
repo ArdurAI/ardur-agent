@@ -21,6 +21,7 @@ members = [
     "crates/cost-gate",
     "crates/provider-runtime",
     "crates/provider-openrouter",
+    "crates/provider-openai-compat",
     "crates/provider-ollama",
     "crates/provider-codex",
     "crates/provider-claude-cli",
@@ -207,6 +208,7 @@ ardur-runtime = { path = "crates/runtime" }
 ardur-cost-gate = { path = "crates/cost-gate" }
 ardur-provider-runtime = { path = "crates/provider-runtime" }
 ardur-provider-openrouter = { path = "crates/provider-openrouter" }
+ardur-provider-openai-compat = { path = "crates/provider-openai-compat" }
 ardur-provider-ollama = { path = "crates/provider-ollama" }
 ardur-provider-codex = { path = "crates/provider-codex" }
 ardur-provider-claude-cli = { path = "crates/provider-claude-cli" }

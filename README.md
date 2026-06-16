@@ -51,11 +51,12 @@ per-channel allowlists, and self-message echo prevention. Inbound messages on
 any channel run through the same fused turn pipeline; replies post back to the
 originating channel.
 
-**Providers (5).** Anthropic (Claude), OpenRouter, Ollama (local daemon or
-hosted cloud), Codex (ChatGPT subscription via the `codex` CLI), and Claude-CLI
-(Anthropic subscription via the `claude` CLI). Selected at boot with
-`ARDUR_PROVIDER`. Anthropic, OpenRouter, and Ollama stream token-by-token
-(SSE, SSE, NDJSON respectively) through the uniform `Provider::stream` surface.
+**Providers (6).** Anthropic (Claude), OpenRouter, generic OpenAI-compatible
+HTTP endpoints, Ollama (local daemon or hosted cloud), Codex (ChatGPT
+subscription via the `codex` CLI), and Claude-CLI (Anthropic subscription via
+the `claude` CLI). Selected at boot with `ARDUR_PROVIDER`. Anthropic,
+OpenRouter, OpenAI-compatible endpoints, and Ollama stream token-by-token (SSE,
+SSE, SSE, NDJSON respectively) through the uniform `Provider::stream` surface.
 
 **Tool execution.** Tools run inside the fused pipeline — cap-token + Cedar
 policy + cost gate + injection-defense scan + signed receipt + journal +

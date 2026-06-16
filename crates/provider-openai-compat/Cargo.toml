@@ -1,0 +1,53 @@
+# ardur-provider-openai-compat — generic OpenAI-compatible HTTP backend (§12.5).
+#
+# This crate implements the §3.0 Provider trait against any service that speaks
+# the OpenAI Chat Completions dialect at `<base_url>/chat/completions`. It covers
+# OpenAI proper by default and custom services such as Groq, Together,
+# Fireworks, DeepInfra, or loopback vLLM deployments when pointed at their base
+# URLs.
+#
+# ARD-41 keeps this change scoped to `crates/provider-openai-compat/**`, provider
+# selection wiring, focused tests, and the root manifest.
+
+[package]
+name = "ardur-provider-openai-compat"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The §3.0 provider abstraction this backend implements — the `Provider` trait,
+# the request/response/usage envelopes, the `RateCard`, and the typed
+# `ProviderError`. We depend on it (one direction); the registry it owns stays
+# generic, so wiring an OpenAI-compatible endpoint in is just
+# `registry.register(Arc::new(..))`.
+ardur-provider-runtime = { workspace = true }
+# Shared value types the provider call speaks in — `CostTuple` (the billed
+# cost), `ProviderId` (the registry key), and `Role` (the prompt turn kind).
+ardur-runtime = { workspace = true }
+# Object-safe async `Provider::complete`.
+async-trait = { workspace = true }
+# Live OpenAI-compatible HTTP client. rustls-tls matches the Anthropic backend (no
+# OpenSSL/native-tls system dependency); `json` carries the serde bodies. The
+# `stream` feature unlocks `Response::bytes_stream`, the byte feed the SSE
+# parser drains the `data: {…}\n\n` chunks from.
+reqwest = { workspace = true, features = ["stream"] }
+serde = { workspace = true }
+# Request/response bodies and the retained raw upstream JSON.
+serde_json = { workspace = true }
+# Env base URL validation. `from_env` requires HTTPS unless the endpoint is
+# loopback HTTP for local vLLM-compatible development.
+url = { workspace = true }
+# `Stream`/`StreamExt` for the `stream_chat` return type and `stream::unfold`
+# (the stateful SSE-decode loop) / `stream::once` (the connect-error stream).
+futures = { workspace = true }
+
+[dev-dependencies]
+# The async `complete` calls need a runtime to poll them.
+tokio = { workspace = true }
+# Stands in for the provider endpoint so round-trips are asserted without a live
+# API key (matches the workspace's HTTP-mock convention).
+wiremock = { workspace = true }
+serde_json = { workspace = true }
