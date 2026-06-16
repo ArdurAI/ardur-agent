@@ -857,6 +857,25 @@ impl FusedRuntime {
                         return Err(err);
                     };
                     let ctx = self.tool_context(&req.cap_token, session_id);
+
+                    // Check tool capabilities before invoking (ARD-290 fix)
+                    let tool_caps = tool.required_capabilities();
+                    if !tool_caps.is_empty() {
+                        // The tool requires specific capabilities - verify the cap-token grants them
+                        // For now, we check against the claims' tool_allowlist as a proxy
+                        // A proper fix would add capability grants to the cap-token
+                        let tool_name = call.name.clone();
+                        if !claims.tool_allowlist.is_empty() && !claims.tool_allowlist.contains(&tool_name) {
+                            self.release(reservation).await;
+                            let err = RuntimeError::PolicyDenied {
+                                reason: format!("tool `{tool_name}` not in cap-token allowlist"),
+                            };
+                            self.fire_error(session_id, LifecyclePhase::Provider, &err)
+                                .await;
+                            return Err(err);
+                        }
+                    }
+
                     let output = match tokio::time::timeout(
                         self.tool_timeout,
                         tool.invoke(&ctx, call.arguments.clone()),
@@ -1304,6 +1323,23 @@ impl FusedRuntime {
                             unreachable!()
                         };
                         let ctx = self.tool_context(&req.cap_token, session_id);
+
+                        // Check tool capabilities before invoking (ARD-290 fix)
+                        let tool_caps = tool.required_capabilities();
+                        if !tool_caps.is_empty() {
+                            let tool_name = call.name.clone();
+                            if !claims.tool_allowlist.is_empty() && !claims.tool_allowlist.contains(&tool_name) {
+                                self.release(reservation.take().expect("reservation held")).await;
+                                let err = RuntimeError::PolicyDenied {
+                                    reason: format!("tool `{tool_name}` not in cap-token allowlist"),
+                                };
+                                yield FusedEvent::StageEnd { stage: StageKind::ToolExec, ok: false };
+                                self.fire_error(session_id, LifecyclePhase::Provider, &err).await;
+                                Err(err)?;
+                                unreachable!()
+                            }
+                        }
+
                         let output = match tokio::time::timeout(
                             self.tool_timeout,
                             tool.invoke(&ctx, call.arguments.clone()),
