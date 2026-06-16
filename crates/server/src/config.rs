@@ -98,6 +98,10 @@ pub struct Config {
     /// (`ARDUR_MCP_BEARER_TOKENS`, comma-separated). Required when
     /// [`mcp_enabled`](Self::mcp_enabled) is set; empty otherwise.
     pub mcp_bearer_tokens: Vec<String>,
+    /// The bearer-token allowlist gating the POST /chat endpoint
+    /// (`ARDUR_CHAT_BEARER_TOKENS`, comma-separated). When empty, the endpoint
+    /// is unauthenticated (not recommended for production).
+    pub chat_bearer_tokens: Vec<String>,
     /// URL path prefix the MCP routes mount under (`ARDUR_MCP_PATH_PREFIX`,
     /// default `/mcp`). The per-server endpoint is `<prefix>/{server_name}`.
     pub mcp_path_prefix: String,
@@ -240,6 +244,7 @@ impl Config {
             },
             mcp_enabled,
             mcp_bearer_tokens,
+            chat_bearer_tokens: parse_csv(optional("ARDUR_CHAT_BEARER_TOKENS").as_deref()),
             mcp_path_prefix: optional("ARDUR_MCP_PATH_PREFIX")
                 .unwrap_or_else(|| "/mcp".to_string()),
             mcp_remote_servers: parse_remote_servers(

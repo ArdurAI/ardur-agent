@@ -45,6 +45,7 @@ async fn spawn_server(bearer: &str) -> String {
         log_format: LogFormat::Text,
         mcp_enabled: true,
         mcp_bearer_tokens: vec![bearer.to_string()],
+        chat_bearer_tokens: Vec::new(),
         mcp_path_prefix: "/mcp".to_string(),
         mcp_remote_servers: Vec::new(),
         skills_dirs: Vec::new(),

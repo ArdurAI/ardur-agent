@@ -177,6 +177,9 @@ pub struct AppState {
     /// wires it (only when `ARDUR_CHANNEL_TELEGRAM=true`). Same `OnceLock`-shared
     /// reply path as Matrix.
     telegram: Arc<OnceLock<Arc<TelegramChannel>>>,
+    /// The bearer tokens admitted to the POST /chat endpoint.
+    /// When empty, the endpoint is unauthenticated (not recommended for production).
+    pub chat_bearer_tokens: Vec<String>,
 }
 
 /// The data [`build_router`](crate::build_router) needs to mount the §6.0 MCP
@@ -368,6 +371,7 @@ impl AppState {
             matrix,
             discord,
             telegram,
+            chat_bearer_tokens: config.chat_bearer_tokens.clone(),
         }))
     }
 

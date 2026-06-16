@@ -16,6 +16,7 @@ use axum::Router;
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
+use axum::middleware;
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use serde::{Deserialize, Serialize};
@@ -31,11 +32,29 @@ use crate::state::{AppState, ChatSubmitError, ChatTurnOutcome};
 /// Always mounts `POST /slack/events`, `POST /chat`, and `GET /healthz`. When the
 /// MCP surface is enabled (see [`AppState::mcp`]), the bearer-gated MCP routes are
 /// merged in at the configured path prefix.
+///
+/// The `POST /chat` endpoint is protected by bearer-token authentication when
+/// `chat_bearer_tokens` is configured in the server state.
 pub fn build_router(state: Arc<AppState>) -> Router {
     let mut router = Router::new()
         .route("/slack/events", post(slack_events))
-        .route("/chat", post(chat))
         .route("/healthz", get(healthz));
+
+    // Chat route with optional bearer-token authentication
+    let chat_route = Router::new()
+        .route("/chat", post(chat))
+        .with_state(state.clone());
+    
+    let chat_route = if !state.chat_bearer_tokens.is_empty() {
+        chat_route.layer(middleware::from_fn_with_state(
+            state.chat_bearer_tokens.clone(),
+            chat_auth_middleware,
+        ))
+    } else {
+        chat_route
+    };
+    
+    router = router.merge(chat_route);
 
     if let Some(mcp) = state.mcp() {
         router = router.merge(crate::build_mcp_router(
@@ -46,6 +65,41 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     }
 
     router.with_state(state)
+}
+
+/// Authentication middleware for the `/chat` endpoint.
+///
+/// Requires `Authorization: Bearer <token>` header where the token is in the
+/// configured allowlist. Returns 401 if the token is missing or invalid.
+async fn chat_auth_middleware(
+    State(allowed_tokens): State<Vec<String>>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let auth_header = request
+        .headers()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok());
+
+    match auth_header {
+        Some(header) if header.starts_with("Bearer ") => {
+            let token = &header[7..]; // Strip "Bearer " prefix
+            if allowed_tokens.contains(&token.to_string()) {
+                next.run(request).await
+            } else {
+                (
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({ "error": "invalid bearer token" })),
+                )
+                    .into_response()
+            }
+        }
+        _ => (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "missing or invalid Authorization header" })),
+        )
+            .into_response(),
+    }
 }
 
 /// `GET /healthz` — always 200 with build metadata.
