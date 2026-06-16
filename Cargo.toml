@@ -43,6 +43,8 @@ members = [
     "crates/cron",
     "crates/webhook",
     "crates/task-flow",
+    "crates/wiki",
+    "crates/curator",
 ]
 
 [workspace.package]

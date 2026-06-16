@@ -374,6 +374,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ardur-curator"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "ardur-e2e-tests"
 version = "0.0.0"
 dependencies = [
@@ -843,6 +857,22 @@ dependencies = [
  "tracing",
  "uuid",
  "wiremock",
+]
+
+[[package]]
+name = "ardur-wiki"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
