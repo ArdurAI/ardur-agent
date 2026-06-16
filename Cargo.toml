@@ -109,7 +109,7 @@ tokio = { version = "1", features = ["full"] }
 # Slack Events-API webhook listener + `/healthz`. `tower` supplies the
 # `ServiceExt::oneshot` the router is driven through in-process by the server's
 # integration tests (no real listener needed).
-axum = "0.7"
+axum = "0.8"
 tower = { version = "0.5", features = ["util"] }
 # Compile-time HTML templating for the `ardur-admin` observability dashboard
 # (crates/admin-ui, §13.X). maud renders HTML from a Rust macro — no template
