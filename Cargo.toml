@@ -40,6 +40,9 @@ members = [
     "crates/admin-ui",
     "crates/e2e-tests",
     "crates/eval-harness",
+    "crates/cron",
+    "crates/webhook",
+    "crates/task-flow",
 ]
 
 [workspace.package]
@@ -222,3 +225,6 @@ ardur-channel-matrix = { path = "crates/channel-matrix" }
 ardur-channel-discord = { path = "crates/channel-discord" }
 ardur-channel-telegram = { path = "crates/channel-telegram" }
 ardur-server = { path = "crates/server" }
+ardur-webhook = { path = "crates/webhook" }
+ardur-task-flow = { path = "crates/task-flow" }
+ardur-cron = { path = "crates/cron" }
