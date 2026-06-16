@@ -49,10 +49,11 @@ members = [
     "crates/commitments",
     "crates/standing-goals",
     "crates/session",
-    "crates/cli",
-    "crates/runtime",
     "crates/provider",
     "crates/gateway",
+    "crates/config",
+    "crates/health",
+    "crates/logs",
 ]
 
 [workspace.package]

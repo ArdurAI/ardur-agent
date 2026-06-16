@@ -359,6 +359,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ardur-config"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "ardur-cost-gate"
 version = "0.0.1"
 dependencies = [
@@ -532,6 +546,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ardur-health"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "ardur-injection-defense"
 version = "0.0.1"
 dependencies = [
@@ -564,6 +592,20 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "ardur-logs"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
  "uuid",
 ]
 
