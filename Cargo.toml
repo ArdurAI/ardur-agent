@@ -8,6 +8,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/acp",
     "crates/cap-token",
     "crates/embeddings",
     "crates/bm25-index",
@@ -205,6 +206,7 @@ ardur-cedar-policy = { path = "crates/cedar-policy" }
 ardur-memory = { path = "crates/memory" }
 ardur-memory-qdrant = { path = "crates/memory-qdrant" }
 ardur-runtime = { path = "crates/runtime" }
+ardur-acp = { path = "crates/acp" }
 ardur-cost-gate = { path = "crates/cost-gate" }
 ardur-provider-runtime = { path = "crates/provider-runtime" }
 ardur-provider-openrouter = { path = "crates/provider-openrouter" }
