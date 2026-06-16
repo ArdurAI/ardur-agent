@@ -971,12 +971,17 @@ impl FusedRuntime {
                     )));
                 }
             };
-            *self.chain_tail.lock() = Some(Sha256Digest::of(signed.jws_compact().as_bytes()));
+            let receipt = signed.body().clone();
+
+            // 6. persist the receipt before advancing chain tail.
             if let Err(e) = self.persist_receipt(signed.jws_compact()) {
                 self.fire_error(session_id, LifecyclePhase::Receipt, &e)
                     .await;
+                return Err(RuntimeError::Internal(anyhow::anyhow!(
+                    "receipt persistence failed: {e}"
+                )));
             }
-            let receipt = signed.body().clone();
+            *self.chain_tail.lock() = Some(Sha256Digest::of(signed.jws_compact().as_bytes()));
 
             // 7. post-receipt hooks (observational; the call already happened).
             let post_ctx = PostReceiptCtx {
@@ -1452,11 +1457,15 @@ impl FusedRuntime {
                     }
                 };
                 let chain_hash = Sha256Digest::of(signed.jws_compact().as_bytes());
-                *self.chain_tail.lock() = Some(chain_hash);
-                if let Err(e) = self.persist_receipt(signed.jws_compact()) {
-                    self.fire_error(session_id, LifecyclePhase::Receipt, &e).await;
-                }
                 let receipt = signed.body().clone();
+                if let Err(e) = self.persist_receipt(signed.jws_compact()) {
+                    yield FusedEvent::StageEnd { stage: StageKind::ReceiptMint, ok: false };
+                    self.fire_error(session_id, LifecyclePhase::Receipt, &e).await;
+                    Err(RuntimeError::Internal(anyhow::anyhow!(
+                        "receipt persistence failed: {e}"
+                    )))?;
+                }
+                *self.chain_tail.lock() = Some(chain_hash);
                 yield FusedEvent::Receipt {
                     receipt_id: ReceiptId(receipt.receipt_id),
                     chain_hash: format!("{chain_hash}"),

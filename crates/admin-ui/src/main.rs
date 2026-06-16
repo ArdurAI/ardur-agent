@@ -56,6 +56,16 @@ async fn main() -> anyhow::Result<()> {
             SocketAddr::from(([127, 0, 0, 1], cli.port))
         }
     };
+
+    // Require auth when binding to non-loopback addresses
+    let is_loopback = addr.ip().is_loopback();
+    if !is_loopback && cli.basic_auth.is_none() {
+        anyhow::bail!(
+            "Authentication required for non-loopback bind ({}). \
+             Use --basic-auth or bind to 127.0.0.1.",
+            addr.ip()
+        );
+    }
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!(
         %addr,
