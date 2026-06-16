@@ -540,6 +540,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "ardur-media-audio"
+version = "0.0.1"
+dependencies = [
+ "ardur-media-decode",
+ "ardur-receipt",
+ "ardur-runtime",
+ "async-trait",
+ "serde",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
+name = "ardur-media-decode"
+version = "0.0.1"
+dependencies = [
+ "serde",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "ardur-memory"
 version = "0.0.1"
 dependencies = [

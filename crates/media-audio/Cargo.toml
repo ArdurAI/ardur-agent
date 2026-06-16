@@ -1,0 +1,24 @@
+[package]
+name = "ardur-media-audio"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The decode crate owns shared audio format declarations used by this domain
+# crate and later sandboxed decode phases.
+ardur-media-decode = { workspace = true }
+# Audio operations are authorized by the same capability token handle the
+# runtime uses for turns and tools.
+ardur-runtime = { workspace = true }
+# Object-safe async trait methods for future provider adapters.
+async-trait = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
+
+[dev-dependencies]
+# Receipt constants are tested against the current canonical receipt grammar.
+ardur-receipt = { workspace = true }
