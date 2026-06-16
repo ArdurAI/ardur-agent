@@ -518,6 +518,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ardur-gateway"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "ardur-injection-defense"
 version = "0.0.1"
 dependencies = [
@@ -623,6 +637,20 @@ dependencies = [
  "serde",
  "thiserror 2.0.18",
  "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "ardur-provider"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
  "uuid",
 ]
 
