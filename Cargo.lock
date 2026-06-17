@@ -649,6 +649,8 @@ dependencies = [
 name = "ardur-memory"
 version = "0.0.1"
 dependencies = [
+ "ardur-cap-token",
+ "ardur-cedar-policy",
  "parking_lot",
  "serde",
  "serde_json",

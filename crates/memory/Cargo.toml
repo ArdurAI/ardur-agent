@@ -10,6 +10,8 @@ repository.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+ardur-cap-token = { workspace = true }
+ardur-cedar-policy = { workspace = true }
 # `v4` (random) ids for records; the workspace default is `v7` for the runtime's
 # time-ordered turn/session ids, so the memory crate opts the v4 generator in.
 uuid = { workspace = true, features = ["v4"] }
