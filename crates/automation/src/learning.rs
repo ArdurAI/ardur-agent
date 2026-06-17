@@ -83,6 +83,15 @@ pub struct DreamingReport {
     pub proposals: Vec<PlaybookProposal>,
 }
 
+/// Schedule configuration for one background dreaming job tick.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DreamingJobConfig {
+    /// Workspace/lane to mine.
+    pub workspace_id: String,
+    /// Number of most-recent sessions to read for this tick.
+    pub past_session_limit: usize,
+}
+
 /// Learning-loop failures.
 #[derive(Debug, thiserror::Error)]
 pub enum LearningError {
@@ -167,6 +176,23 @@ impl LearningLoop {
             duplicates_merged,
             proposals,
         })
+    }
+
+    /// Run one scheduled dreaming-job tick over the last `N` sessions.
+    ///
+    /// The scheduler/daemon chooses when this method is called; this method owns
+    /// the job semantics for a tick: cap-token + Cedar enforcement, newest-window
+    /// slicing, duplicate merging, playbook proposal writing, and receipt-style
+    /// proposal chaining. `sessions` are expected in chronological order, with
+    /// the newest session at the end.
+    pub fn run_scheduled_dreaming_job(
+        &mut self,
+        claims: &VerifiedClaims,
+        config: DreamingJobConfig,
+        sessions: &[LearningSession],
+    ) -> Result<DreamingReport, LearningError> {
+        let start = sessions.len().saturating_sub(config.past_session_limit);
+        self.run_dreaming_job(claims, &config.workspace_id, &sessions[start..])
     }
 
     fn proposal(&self, pattern: String, source_sessions: Vec<String>) -> PlaybookProposal {
@@ -363,6 +389,47 @@ mod tests {
         assert_eq!(
             report.proposals[1].parent_hash,
             Some(Sha256Digest::of(&report.proposals[0].chain_bytes()))
+        );
+    }
+
+    #[test]
+    fn scheduled_dreaming_job_reads_only_last_n_sessions() {
+        let mut loop_ = LearningLoop::new(allow_policy());
+        let sessions = vec![
+            LearningSession {
+                session_id: "old-1".to_string(),
+                workspace_id: "w".to_string(),
+                messages: vec!["old duplicate should be ignored".to_string()],
+            },
+            LearningSession {
+                session_id: "recent-1".to_string(),
+                workspace_id: "w".to_string(),
+                messages: vec!["recent duplicate becomes playbook".to_string()],
+            },
+            LearningSession {
+                session_id: "recent-2".to_string(),
+                workspace_id: "w".to_string(),
+                messages: vec!["recent duplicate becomes playbook".to_string()],
+            },
+        ];
+
+        let report = loop_
+            .run_scheduled_dreaming_job(
+                &claims(&[LEARNING_DREAM_TOOL]),
+                DreamingJobConfig {
+                    workspace_id: "w".to_string(),
+                    past_session_limit: 2,
+                },
+                &sessions,
+            )
+            .expect("scheduled dreaming job runs");
+
+        assert_eq!(report.sessions_read, 2);
+        assert_eq!(report.duplicates_merged, 1);
+        assert_eq!(report.proposals.len(), 1);
+        assert_eq!(
+            report.proposals[0].source_sessions,
+            vec!["recent-1".to_string(), "recent-2".to_string()]
         );
     }
 }
