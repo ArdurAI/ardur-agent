@@ -72,6 +72,44 @@ async fn journal_append_failure_does_not_persist_receipt() {
     );
 }
 
+#[tokio::test]
+async fn receipt_persist_failure_rolls_back_journal_entries() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let receipt_log_is_directory = root.path().join("missing-parent").join("receipts.jsonl");
+    let session_id = SessionId::new();
+    let provider = Arc::new(EchoProvider::new());
+    let journal = Arc::new(ardur_session_journals::InMemorySessionJournal::new(
+        session_id,
+    ));
+
+    let runtime = runtime_builder(provider)
+        .with_journal(journal.clone())
+        .receipt_log(&receipt_log_is_directory)
+        .build()
+        .expect("runtime builds even before opening receipt log for append");
+
+    let result = runtime
+        .submit(request_for(
+            "receipt persist fails",
+            &valid_token(),
+            session_id,
+        ))
+        .await;
+
+    assert!(
+        result.is_err(),
+        "receipt persistence failure must fail the turn"
+    );
+    let entries = journal
+        .replay(session_id)
+        .await
+        .expect("journal replay succeeds");
+    assert!(
+        entries.is_empty(),
+        "two-phase commit rolls back journal entries when the receipt cannot persist: {entries:?}"
+    );
+}
+
 #[test]
 fn boot_refuses_broken_receipt_chain() {
     let root = tempfile::tempdir().expect("tempdir");

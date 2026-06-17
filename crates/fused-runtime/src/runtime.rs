@@ -568,49 +568,55 @@ impl FusedRuntime {
         now_ms: u64,
     ) -> Result<ReceiptBody, RuntimeError> {
         let receipt = signed.body().clone();
-        let mut assistant_entry: Option<ardur_session_journals::EntryId> = None;
+        let journal_start_len = match &self.journal {
+            Some(journal) => Some(journal.len().await.map_err(|e| {
+                RuntimeError::Internal(anyhow::anyhow!(
+                    "journal length read failed before receipt commit: {e}"
+                ))
+            })?),
+            None => None,
+        };
 
         if let Some(journal) = &self.journal {
             if iteration == 1 {
                 if let Some(prompt) = last_user_message(&req.messages) {
-                    journal
+                    if let Err(e) = journal
                         .append(JournalEntry::UserMessage {
                             content: prompt.to_string(),
                             at: now_ms,
                         })
                         .await
-                        .map_err(|e| {
-                            RuntimeError::Internal(anyhow::anyhow!(
-                                "journal user append failed before receipt commit: {e}"
-                            ))
-                        })?;
+                    {
+                        return Err(RuntimeError::Internal(anyhow::anyhow!(
+                            "journal user append failed before receipt commit: {e}"
+                        )));
+                    }
                 }
             }
-            assistant_entry = Some(
-                journal
-                    .append(JournalEntry::AssistantMessage {
-                        content: response.content.clone(),
-                        at: now_ms,
-                        receipt_id: ReceiptId(receipt.receipt_id),
-                    })
-                    .await
-                    .map_err(|e| {
-                        RuntimeError::Internal(anyhow::anyhow!(
-                            "journal assistant append failed before receipt commit: {e}"
-                        ))
-                    })?,
-            );
+            if let Err(e) = journal
+                .append(JournalEntry::AssistantMessage {
+                    content: response.content.clone(),
+                    at: now_ms,
+                    receipt_id: ReceiptId(receipt.receipt_id),
+                })
+                .await
+            {
+                if let Some(start_len) = journal_start_len {
+                    let _ = journal.truncate(start_len).await;
+                }
+                return Err(RuntimeError::Internal(anyhow::anyhow!(
+                    "journal assistant append failed before receipt commit: {e}"
+                )));
+            }
         }
 
         if let Err(e) = self.persist_receipt(signed.jws_compact()) {
-            if let (Some(journal), Some(target_entry_id)) = (&self.journal, assistant_entry) {
-                let _ = journal
-                    .append(JournalEntry::Invalidation {
-                        target_entry_id,
-                        reason: format!("receipt commit failed after journal append: {e}"),
-                        at: now_ms,
-                    })
-                    .await;
+            if let (Some(journal), Some(start_len)) = (&self.journal, journal_start_len) {
+                if let Err(rollback_err) = journal.truncate(start_len).await {
+                    return Err(RuntimeError::Internal(anyhow::anyhow!(
+                        "receipt persist failed after journal append: {e}; journal rollback failed: {rollback_err}"
+                    )));
+                }
             }
             return Err(RuntimeError::Internal(anyhow::anyhow!(
                 "receipt persist failed after journal append: {e}"
