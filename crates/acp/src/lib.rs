@@ -45,7 +45,7 @@ pub use method::{
     ACP_NOTIFICATION_SESSION_UPDATE, ACP_PROTOCOL_VERSION, RECEIPT_ACP_PEER_DISCOVERED,
     RECEIPT_ACP_TASK_DELEGATED_OUT, RECEIPT_ACP_TASK_RECEIVED_IN, RECEIPT_ACP_TRUST_REFUSED,
 };
-pub use transport::{AcpTransport, AcpTransportKind};
+pub use transport::{AcpTransport, AcpTransportKind, StdioAcpTransport};
 pub use types::{
     AcpAuthPosture, AcpDelegationRequest, AcpDelegationResponse, AcpInboundTask, AcpOutboundTask,
     AcpPeer, AcpPeerId, AcpPeerState, AcpPeerTrustClass, AcpTarget,

@@ -19,6 +19,10 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
+mod whisper;
+
+pub use whisper::{VoiceTranscribeTool, WhisperApiConfig, WhisperApiTranscriptionProvider};
+
 /// Unix timestamp in milliseconds since the epoch.
 pub type UnixTsMillis = u64;
 

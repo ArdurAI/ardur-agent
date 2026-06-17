@@ -13,12 +13,23 @@ ardur-media-decode = { workspace = true }
 # Audio operations are authorized by the same capability token handle the
 # runtime uses for turns and tools.
 ardur-runtime = { workspace = true }
+# The voice.transcribe tool exposes transcription through the shared tool layer
+# so fused-runtime cap-token + Cedar enforcement gates every invocation.
+ardur-tool-registry = { workspace = true }
 # Object-safe async trait methods for future provider adapters.
 async-trait = { workspace = true }
+base64 = { workspace = true }
+hex = { workspace = true }
+reqwest = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
 thiserror = { workspace = true }
+url = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]
 # Receipt constants are tested against the current canonical receipt grammar.
 ardur-receipt = { workspace = true }
+tokio = { workspace = true }
+wiremock = { workspace = true }

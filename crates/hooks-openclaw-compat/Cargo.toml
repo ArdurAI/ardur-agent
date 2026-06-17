@@ -8,8 +8,18 @@ repository.workspace = true
 description = "OpenClaw codex-format hook compatibility primitives for Ardur lifecycle hooks."
 
 [dependencies]
+# Registry wiring adapts OpenClaw entries into ardur-lifecycle-hooks hooks.
+ardur-lifecycle-hooks = { workspace = true }
+ardur-provider-runtime = { workspace = true }
+ardur-runtime = { workspace = true }
+async-trait = { workspace = true }
 # Codex hook payloads and stdout responses are JSON wire formats.
 serde = { workspace = true }
 serde_json = { workspace = true }
 # Typed serializer/parser/translator failure surfaces.
 thiserror = { workspace = true }
+
+[dev-dependencies]
+ardur-provider-runtime = { workspace = true }
+ardur-runtime = { workspace = true }
+tokio = { workspace = true }

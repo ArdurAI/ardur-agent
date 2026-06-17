@@ -23,6 +23,7 @@ use axum::response::{IntoResponse, Response};
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::{StreamableHttpServerConfig, StreamableHttpService};
 
+use ardur_media_audio::{VoiceTranscribeTool, WhisperApiTranscriptionProvider};
 use ardur_tool_registry::{
     ArdurMcpServer, EchoTool, HealthCheckTool, RemoteMcpToolset, SkillLoader, SkillTool, Tool,
     ToolRegistry, bearer_token_allowed, extract_bearer_token,
@@ -127,6 +128,24 @@ pub async fn assemble_tool_registry<P: AsRef<Path>>(
     servers: &[(String, String)],
 ) -> ToolRegistry {
     let mut registry = example_registry(provider, memory_backend);
+    match WhisperApiTranscriptionProvider::from_env() {
+        Ok(Some(provider)) => {
+            if let Err(e) = registry.register(Box::new(VoiceTranscribeTool::new(provider))) {
+                tracing::warn!(error = %e, "skipping voice.transcribe tool registration");
+            } else {
+                tracing::info!(
+                    tool = VoiceTranscribeTool::ID,
+                    "registered Whisper voice transcription tool"
+                );
+            }
+        }
+        Ok(None) => tracing::debug!(
+            "OPENAI_WHISPER_API_KEY/OPENAI_API_KEY unset; voice.transcribe not registered"
+        ),
+        Err(e) => {
+            tracing::warn!(error = %e, "Whisper voice transcription config invalid; tool disabled")
+        }
+    }
     register_skills(&mut registry, skills_dirs);
     for tool in connect_remote_tools(servers).await {
         let id = tool.id();

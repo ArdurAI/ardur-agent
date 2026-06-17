@@ -23,6 +23,7 @@ mod event_name_map;
 mod migration_translator;
 mod openclaw_source;
 mod payload_serializer;
+mod registry_ext;
 mod response_parser;
 
 mod sealed {
@@ -43,6 +44,10 @@ pub use openclaw_source::OpenClawHookSource;
 pub use payload_serializer::{
     CanonicalHookFirePayload, CodexStdinPayload, DefaultOpenClawPayloadSerializer,
     OpenClawHookMeta, OpenClawHookProvider, OpenClawPayloadSerializer, SerializeError,
+};
+pub use registry_ext::{
+    NoopOpenClawRunner, OpenClawHookInvocation, OpenClawHookRegistrationError,
+    OpenClawHookRegistryExt, OpenClawHookRunner, RecordingOpenClawRunner,
 };
 pub use response_parser::{
     CodexResponseShape, DefaultOpenClawResponseParser, HookResponseEnvelope,

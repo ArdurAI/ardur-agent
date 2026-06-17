@@ -448,6 +448,8 @@ name = "ardur-e2e-tests"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "ardur-acp",
+ "ardur-automation",
  "ardur-cap-token",
  "ardur-cedar-policy",
  "ardur-channel-discord",
@@ -456,8 +458,11 @@ dependencies = [
  "ardur-cli",
  "ardur-cost-gate",
  "ardur-fused-runtime",
+ "ardur-hooks-openclaw-compat",
  "ardur-injection-defense",
  "ardur-lifecycle-hooks",
+ "ardur-media-audio",
+ "ardur-media-decode",
  "ardur-memory",
  "ardur-memory-qdrant",
  "ardur-messaging-gateway",
@@ -564,9 +569,14 @@ dependencies = [
 name = "ardur-hooks-openclaw-compat"
 version = "0.0.1"
 dependencies = [
+ "ardur-lifecycle-hooks",
+ "ardur-provider-runtime",
+ "ardur-runtime",
+ "async-trait",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]
@@ -612,10 +622,19 @@ dependencies = [
  "ardur-media-decode",
  "ardur-receipt",
  "ardur-runtime",
+ "ardur-tool-registry",
  "async-trait",
+ "base64 0.22.1",
+ "hex",
+ "reqwest 0.12.28",
  "serde",
+ "serde_json",
+ "sha2 0.11.0",
  "thiserror 2.0.18",
+ "tokio",
+ "url",
  "uuid",
+ "wiremock",
 ]
 
 [[package]]
@@ -823,6 +842,7 @@ name = "ardur-server"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ardur-acp",
  "ardur-cap-token",
  "ardur-cedar-policy",
  "ardur-channel-discord",
@@ -830,6 +850,7 @@ dependencies = [
  "ardur-channel-telegram",
  "ardur-cost-gate",
  "ardur-fused-runtime",
+ "ardur-media-audio",
  "ardur-memory",
  "ardur-memory-qdrant",
  "ardur-messaging-gateway",

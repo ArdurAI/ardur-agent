@@ -23,6 +23,8 @@ repository.workspace = true
 # those fixtures and the scenarios; every Phase-1 crate currently on `dev` is
 # listed so a new scenario can wire any of them without touching this manifest.
 [dependencies]
+ardur-acp = { workspace = true }
+ardur-automation = { workspace = true }
 ardur-cap-token = { workspace = true }
 ardur-cedar-policy = { workspace = true }
 # `ardur-cli` is a binary crate and is *not* declared in `[workspace.dependencies]`
@@ -32,6 +34,9 @@ ardur-cost-gate = { workspace = true }
 ardur-fused-runtime = { workspace = true }
 ardur-lifecycle-hooks = { workspace = true }
 ardur-memory = { workspace = true }
+ardur-media-audio = { workspace = true }
+ardur-media-decode = { workspace = true }
+ardur-hooks-openclaw-compat = { workspace = true }
 # The durable Qdrant memory backend — the `scenario_qdrant_memory_persistence`
 # scenario drives a fused turn through it, then reconnects to prove durability.
 ardur-memory-qdrant = { workspace = true }
