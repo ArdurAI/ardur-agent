@@ -8,14 +8,18 @@
 //!   fused runtime and return the consolidated result (reply, tokens, cost, tools
 //!   called, receipt id) as JSON. Unlike Slack, the caller receives the reply
 //!   directly rather than having it posted to a channel.
-//! - `GET /healthz` — a liveness probe carrying build metadata.
+//! - `GET /healthz` — a legacy liveness probe carrying build metadata.
+//! - `GET /health` — readiness with dependency checks.
+//! - `GET /metrics` — Prometheus-compatible, secret-free process metrics.
+//! - `GET /admin/runtime` — bearer-gated runtime inspection snapshot.
 
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use serde::{Deserialize, Serialize};
@@ -24,7 +28,9 @@ use serde_json::json;
 use ardur_runtime::SessionId;
 use ardur_slack_adapter::{SlackError, SlackEvent, SlackHeaders};
 
-use crate::state::{AppState, ChatSubmitError, ChatTurnOutcome};
+use crate::state::{
+    AUDIENCE, AppState, CAP_TTL_SECS, ChatSubmitError, ChatTurnOutcome, GATEWAY_SUBJECT,
+};
 
 /// Build the application router over the shared [`AppState`].
 ///
@@ -35,7 +41,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     let mut router = Router::new()
         .route("/slack/events", post(slack_events))
         .route("/chat", post(chat))
-        .route("/healthz", get(healthz));
+        .route("/healthz", get(healthz))
+        .route("/health", get(health))
+        .route("/metrics", get(metrics))
+        .route("/admin/runtime", get(admin_runtime));
 
     if let Some(mcp) = state.mcp() {
         router = router.merge(crate::build_mcp_router(
@@ -56,6 +65,126 @@ async fn healthz() -> Response {
         "tests": "147",
     }))
     .into_response()
+}
+
+/// `GET /health` — readiness probe with dependency checks.
+async fn health(State(state): State<Arc<AppState>>) -> Response {
+    let data_dir_ok = state.data_dir().is_dir();
+    let journal_ok = state.data_dir().join("journals").is_dir();
+    let worker_ok = state.worker_alive();
+    let status = if data_dir_ok && journal_ok && worker_ok {
+        "ok"
+    } else {
+        "degraded"
+    };
+    let code = if status == "ok" {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+
+    (
+        code,
+        Json(json!({
+            "status": status,
+            "dependencies": {
+                "data_dir": if data_dir_ok { "ok" } else { "error" },
+                "journal": if journal_ok { "ok" } else { "error" },
+                "worker": if worker_ok { "ok" } else { "error" },
+            },
+        })),
+    )
+        .into_response()
+}
+
+/// `GET /metrics` — Prometheus text exposition with counts only (no tokens or
+/// credentials). Keep labels low-cardinality and redact-by-design.
+async fn metrics(State(state): State<Arc<AppState>>) -> Response {
+    let version = prometheus_label_value(env!("CARGO_PKG_VERSION"));
+    let mut body = String::new();
+    let _ = writeln!(body, "# HELP ardur_server_build_info Build metadata.");
+    let _ = writeln!(body, "# TYPE ardur_server_build_info gauge");
+    let _ = writeln!(body, "ardur_server_build_info{{version=\"{version}\"}} 1");
+    let _ = writeln!(
+        body,
+        "# HELP ardur_server_receipts_total Persisted receipt count."
+    );
+    let _ = writeln!(body, "# TYPE ardur_server_receipts_total counter");
+    let _ = writeln!(
+        body,
+        "ardur_server_receipts_total {}",
+        state.receipt_count()
+    );
+    let _ = writeln!(
+        body,
+        "# HELP ardur_server_worker_alive Whether the turn worker is accepting work."
+    );
+    let _ = writeln!(body, "# TYPE ardur_server_worker_alive gauge");
+    let _ = writeln!(
+        body,
+        "ardur_server_worker_alive {}",
+        u8::from(state.worker_alive())
+    );
+    let _ = writeln!(
+        body,
+        "# HELP ardur_server_admin_bearer_tokens_configured Configured admin bearer token count (values redacted)."
+    );
+    let _ = writeln!(
+        body,
+        "# TYPE ardur_server_admin_bearer_tokens_configured gauge"
+    );
+    let _ = writeln!(
+        body,
+        "ardur_server_admin_bearer_tokens_configured {}",
+        state.admin_bearer_tokens().len()
+    );
+
+    (
+        [(
+            header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        body,
+    )
+        .into_response()
+}
+
+/// `GET /admin/runtime` — a bearer-gated, redacted snapshot of runtime security
+/// posture and receipt/gate counters. Missing admin tokens fail closed.
+async fn admin_runtime(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Err(response) = authorize_admin(&state, &headers) {
+        return *response;
+    }
+
+    Json(json!({
+        "cap_tokens": {
+            "audience": AUDIENCE,
+            "gateway_subject": GATEWAY_SUBJECT,
+            "ttl_secs": CAP_TTL_SECS,
+            "tool_allowlist_count": state.tool_allowlist().len(),
+        },
+        "receipts": {
+            "count": state.receipt_count(),
+        },
+        "gates": {
+            "cost_budget_cents": state.cost_budget_cents(),
+        },
+        "tools": {
+            "allowlist_count": state.tool_allowlist().len(),
+        },
+        "surfaces": {
+            "mcp_enabled": state.mcp().is_some(),
+            "chat_auth_required": !state.chat_bearer_tokens().is_empty(),
+            "admin_auth_required": true,
+        },
+    }))
+    .into_response()
+}
+
+fn prometheus_label_value(raw: &str) -> String {
+    raw.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
 }
 
 /// The `POST /chat` request body.
@@ -175,25 +304,27 @@ async fn chat(State(state): State<Arc<AppState>>, headers: HeaderMap, body: Byte
 
 /// Verify the `POST /chat` bearer token before body processing or provider work.
 fn authorize_chat(state: &AppState, headers: &HeaderMap) -> Result<(), Box<Response>> {
+    authorize_bearer(state.chat_bearer_tokens(), headers).map_err(|()| Box::new(unauthorized()))
+}
+
+/// Verify the admin bearer token. Empty admin token config fails closed.
+fn authorize_admin(state: &AppState, headers: &HeaderMap) -> Result<(), Box<Response>> {
+    authorize_bearer(state.admin_bearer_tokens(), headers).map_err(|()| Box::new(unauthorized()))
+}
+
+fn authorize_bearer(allowed_tokens: &[String], headers: &HeaderMap) -> Result<(), ()> {
     let presented = header_str(headers, "Authorization");
-    if presented.is_empty() {
-        return Err(Box::new(unauthorized_chat()));
-    }
     let Some(token) = presented.strip_prefix("Bearer ") else {
-        return Err(Box::new(unauthorized_chat()));
+        return Err(());
     };
-    if state
-        .chat_bearer_tokens()
-        .iter()
-        .any(|allowed| allowed == token)
-    {
+    if !allowed_tokens.is_empty() && allowed_tokens.iter().any(|allowed| allowed == token) {
         Ok(())
     } else {
-        Err(Box::new(unauthorized_chat()))
+        Err(())
     }
 }
 
-fn unauthorized_chat() -> Response {
+fn unauthorized() -> Response {
     (
         StatusCode::UNAUTHORIZED,
         Json(json!({ "error": "missing or invalid bearer token" })),

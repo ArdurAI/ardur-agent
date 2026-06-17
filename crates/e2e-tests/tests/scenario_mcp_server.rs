@@ -36,6 +36,7 @@ async fn spawn_server(bearer: &str) -> String {
         data_dir: data_dir.path().to_path_buf(),
         bind_addr: "127.0.0.1:0".to_string(),
         chat_bearer_tokens: vec!["e2e-chat-token".to_string()],
+        admin_bearer_tokens: Vec::new(),
         dev_permissive_policy: true,
         model: "claude-opus-4-8".to_string(),
         cost_budget_cents: 10_000,
