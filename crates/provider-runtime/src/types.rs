@@ -56,12 +56,20 @@ impl Default for RequestId {
 /// This is the *raw* usage the provider billed; pricing it into a
 /// [`CostTuple`](ardur_runtime::CostTuple) is the [`RateCard`](crate::RateCard)'s
 /// job.
+///
+/// Some providers (e.g. OpenRouter) also report the actual dollar cost of the
+/// call on the response. When present, `cost_cents` is the billed cost in whole
+/// US cents and takes precedence over rate-card pricing.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
     /// Prompt/input tokens consumed.
     pub tokens_in: u32,
     /// Completion/output tokens generated.
     pub tokens_out: u32,
+    /// The provider-reported actual cost of the call, in whole US cents.
+    /// `None` means the provider did not report a cost (most backends).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_cents: Option<u64>,
 }
 
 /// The cost ceiling a caller is willing to spend on a request.

@@ -42,15 +42,26 @@ impl RateCard {
     /// The returned [`CostTuple`](ardur_runtime::CostTuple) carries the token
     /// counts and `cents`; `wall_ms` and `attention_score` stay zero — those are
     /// the runtime's to fill, not the provider's.
+    ///
+    /// When `usage.cost_cents` is `Some` (e.g. OpenRouter reports the actual
+    /// dollar cost on the response), that value is used directly and the rate
+    /// card is bypassed. This ensures receipted/gated costs match the provider's
+    /// billed amount rather than an estimate.
     #[must_use]
     pub fn price(&self, usage: Usage) -> CostTuple {
-        let cents = self.cents_per_1k_input * f64::from(usage.tokens_in) / 1000.0
-            + self.cents_per_1k_output * f64::from(usage.tokens_out) / 1000.0
-            + self.cents_per_request;
+        let cents = match usage.cost_cents {
+            Some(actual) => actual,
+            None => {
+                let computed = self.cents_per_1k_input * f64::from(usage.tokens_in) / 1000.0
+                    + self.cents_per_1k_output * f64::from(usage.tokens_out) / 1000.0
+                    + self.cents_per_request;
+                computed.round() as u64
+            }
+        };
         CostTuple {
             tokens_in: u64::from(usage.tokens_in),
             tokens_out: u64::from(usage.tokens_out),
-            cents: cents.round() as u64,
+            cents,
             wall_ms: 0,
             attention_score: 0.0,
         }

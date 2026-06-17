@@ -176,7 +176,8 @@ async fn single_turn_through_full_substrate() {
         response.usage,
         Usage {
             tokens_in: 0,
-            tokens_out: 0
+            tokens_out: 0,
+            ..Default::default()
         }
     );
 
