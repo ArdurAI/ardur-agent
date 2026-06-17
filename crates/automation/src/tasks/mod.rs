@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::TaskFlowError;
 use crate::tasks::flow::{
-    FlowControl, FlowStep, StepId, StepOutcome, TaskFlowDag, TaskId, TaskOutcome,
+    FlowControl, FlowNode, FlowStep, ParallelWait, RetryPolicy, StepFailureKind, StepId,
+    StepOutcome, TaskFlowDag, TaskId, TaskOutcome,
 };
 
 /// Domain types for declared task-flow DAGs.
@@ -94,52 +95,307 @@ pub trait TaskFlowOrchestrator: Send + Sync + 'static {
     ) -> Result<(), TaskFlowError>;
 }
 
-/// Production orchestrator placeholder.
+/// In-memory production-default task-flow orchestrator.
 ///
-/// Later phases replace these `NotImplemented` errors with DAG validation,
-/// execution, Cedar invariant checks, receipt emission, and persistence.
-#[derive(Clone, Debug, Default)]
-pub struct DefaultTaskFlowOrchestrator;
+/// This deterministic executor validates a declared DAG and records each leaf
+/// step's outcome in memory. It deliberately does not dispatch external tools,
+/// providers, webhooks, or memory writes yet; instead it exercises the real DAG
+/// traversal, timeout/error paths, cancel semantics, and state persistence seam
+/// that downstream runtime wiring depends on.
+#[derive(Clone, Debug)]
+pub struct DefaultTaskFlowOrchestrator {
+    states: Arc<Mutex<HashMap<TaskId, TaskRuntimeState>>>,
+    step_timeout_ms: u32,
+}
+
+impl Default for DefaultTaskFlowOrchestrator {
+    fn default() -> Self {
+        Self {
+            states: Arc::new(Mutex::new(HashMap::new())),
+            step_timeout_ms: 30_000,
+        }
+    }
+}
+
+impl DefaultTaskFlowOrchestrator {
+    /// Create an in-memory orchestrator using the default 30-second step timeout.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Override the synthetic per-step timeout used by the deterministic
+    /// executor. A `0` value is ignored so the orchestrator never creates a
+    /// configuration that times out every step by construction.
+    #[must_use]
+    pub fn with_step_timeout_ms(mut self, timeout_ms: u32) -> Self {
+        if timeout_ms > 0 {
+            self.step_timeout_ms = timeout_ms;
+        }
+        self
+    }
+}
 
 #[async_trait]
 impl TaskFlowOrchestrator for DefaultTaskFlowOrchestrator {
     async fn create_task(
         &self,
-        _token: &VerifiedClaims,
-        _request: TaskCreationRequest,
+        token: &VerifiedClaims,
+        request: TaskCreationRequest,
     ) -> Result<TaskHandle, TaskFlowError> {
-        Err(TaskFlowError::NotImplemented {
-            feature: "DefaultTaskFlowOrchestrator::create_task",
-        })
+        validate_creation_request(token, &request)?;
+        if let Some(dag) = &request.flow_dag {
+            validate_dag(dag)?;
+        }
+
+        let task_id = TaskId::new();
+        let mut state = TaskRuntimeState::new(task_id);
+        if let Some(dag) = &request.flow_dag {
+            state.active_control = dag.root.as_control().cloned();
+            state.active_step = dag.root.as_step().cloned();
+            let succeeded = execute_node(&dag.root, &mut state, self.step_timeout_ms);
+            state.outcome = Some(if succeeded {
+                TaskOutcome::Succeeded
+            } else {
+                TaskOutcome::Failed
+            });
+            state.active_control = None;
+            state.active_step = None;
+        }
+
+        self.states
+            .lock()
+            .map_err(|_| TaskFlowError::InvalidRequest("task state lock poisoned".to_string()))?
+            .insert(task_id, state);
+        Ok(TaskHandle { task_id })
     }
 
     async fn cancel_task(
         &self,
         _token: &VerifiedClaims,
-        _task_id: TaskId,
+        task_id: TaskId,
     ) -> Result<(), TaskFlowError> {
-        Err(TaskFlowError::NotImplemented {
-            feature: "DefaultTaskFlowOrchestrator::cancel_task",
-        })
+        let mut states = self
+            .states
+            .lock()
+            .map_err(|_| TaskFlowError::InvalidRequest("task state lock poisoned".to_string()))?;
+        let state = states
+            .get_mut(&task_id)
+            .ok_or(TaskFlowError::TaskNotFound(task_id))?;
+        state.outcome = Some(TaskOutcome::Cancelled);
+        state.active_control = None;
+        state.active_step = None;
+        Ok(())
     }
 
-    async fn get_task_state(&self, _task_id: TaskId) -> Result<TaskRuntimeState, TaskFlowError> {
-        Err(TaskFlowError::NotImplemented {
-            feature: "DefaultTaskFlowOrchestrator::get_task_state",
-        })
+    async fn get_task_state(&self, task_id: TaskId) -> Result<TaskRuntimeState, TaskFlowError> {
+        self.states
+            .lock()
+            .map_err(|_| TaskFlowError::InvalidRequest("task state lock poisoned".to_string()))?
+            .get(&task_id)
+            .cloned()
+            .ok_or(TaskFlowError::TaskNotFound(task_id))
     }
 
     async fn operator_override_verification(
         &self,
         _token: &VerifiedClaims,
-        _task_id: TaskId,
-        _step_id: StepId,
-        _reason: String,
+        task_id: TaskId,
+        step_id: StepId,
+        reason: String,
     ) -> Result<(), TaskFlowError> {
-        Err(TaskFlowError::NotImplemented {
-            feature: "DefaultTaskFlowOrchestrator::operator_override_verification",
-        })
+        if reason.trim().is_empty() {
+            return Err(TaskFlowError::InvalidRequest(
+                "override reason must not be empty".to_string(),
+            ));
+        }
+        let mut states = self
+            .states
+            .lock()
+            .map_err(|_| TaskFlowError::InvalidRequest("task state lock poisoned".to_string()))?;
+        let state = states
+            .get_mut(&task_id)
+            .ok_or(TaskFlowError::TaskNotFound(task_id))?;
+        state.step_outcomes.insert(step_id, StepOutcome::Succeeded);
+        if state
+            .step_outcomes
+            .values()
+            .all(|outcome| matches!(outcome, StepOutcome::Succeeded))
+        {
+            state.outcome = Some(TaskOutcome::Succeeded);
+        }
+        Ok(())
     }
+}
+
+fn validate_creation_request(
+    token: &VerifiedClaims,
+    request: &TaskCreationRequest,
+) -> Result<(), TaskFlowError> {
+    if request.description.trim().is_empty() {
+        return Err(TaskFlowError::InvalidRequest(
+            "description must not be empty".to_string(),
+        ));
+    }
+    if token.tool_allowlist.is_empty() {
+        return Err(TaskFlowError::InvalidRequest(
+            "cap-token tool allowlist must not be empty".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_dag(dag: &TaskFlowDag) -> Result<(), TaskFlowError> {
+    if dag.version == 0 {
+        return Err(TaskFlowError::InvalidRequest(
+            "DAG version must be non-zero".to_string(),
+        ));
+    }
+    let depth = node_depth(&dag.root);
+    if depth > dag.max_depth {
+        return Err(TaskFlowError::InvalidRequest(format!(
+            "DAG depth {depth} exceeds max_depth {}",
+            dag.max_depth
+        )));
+    }
+    let fanout = max_fanout(&dag.root);
+    if fanout > dag.max_fanout {
+        return Err(TaskFlowError::InvalidRequest(format!(
+            "DAG fanout {fanout} exceeds max_fanout {}",
+            dag.max_fanout
+        )));
+    }
+    Ok(())
+}
+
+fn node_depth(node: &FlowNode) -> u32 {
+    match node {
+        FlowNode::Step(_) => 1,
+        FlowNode::Control(control) => {
+            1 + control_children(control)
+                .iter()
+                .map(|child| node_depth(child))
+                .max()
+                .unwrap_or(0)
+        }
+    }
+}
+
+fn max_fanout(node: &FlowNode) -> u32 {
+    match node {
+        FlowNode::Step(_) => 1,
+        FlowNode::Control(control) => {
+            let own = match control {
+                FlowControl::Parallel { branches, .. } | FlowControl::Sequence(branches) => {
+                    branches.len() as u32
+                }
+                FlowControl::Conditional { else_branch, .. } => {
+                    1 + u32::from(else_branch.is_some())
+                }
+                FlowControl::Retry { .. } => 1,
+            };
+            own.max(
+                control_children(control)
+                    .iter()
+                    .map(|child| max_fanout(child))
+                    .max()
+                    .unwrap_or(0),
+            )
+        }
+    }
+}
+
+fn control_children(control: &FlowControl) -> Vec<&FlowNode> {
+    match control {
+        FlowControl::Sequence(nodes) => nodes.iter().collect(),
+        FlowControl::Parallel { branches, .. } => branches.iter().collect(),
+        FlowControl::Conditional {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            let mut children = vec![then_branch.as_ref()];
+            if let Some(else_branch) = else_branch {
+                children.push(else_branch.as_ref());
+            }
+            children
+        }
+        FlowControl::Retry { step, .. } => vec![step.as_ref()],
+    }
+}
+
+fn execute_node(node: &FlowNode, state: &mut TaskRuntimeState, timeout_ms: u32) -> bool {
+    match node {
+        FlowNode::Step(step) => execute_step(step, state, timeout_ms),
+        FlowNode::Control(FlowControl::Sequence(nodes)) => {
+            for child in nodes {
+                if !execute_node(child, state, timeout_ms) {
+                    return false;
+                }
+            }
+            true
+        }
+        FlowNode::Control(FlowControl::Parallel { branches, wait }) => {
+            execute_parallel(branches, wait, state, timeout_ms)
+        }
+        FlowNode::Control(FlowControl::Conditional { then_branch, .. }) => {
+            execute_node(then_branch, state, timeout_ms)
+        }
+        FlowNode::Control(FlowControl::Retry { step, policy }) => {
+            execute_retry(step, policy, state, timeout_ms)
+        }
+    }
+}
+
+fn execute_parallel(
+    branches: &[FlowNode],
+    wait: &ParallelWait,
+    state: &mut TaskRuntimeState,
+    timeout_ms: u32,
+) -> bool {
+    let successes = branches
+        .iter()
+        .filter(|branch| execute_node(branch, state, timeout_ms))
+        .count() as u32;
+    match wait {
+        ParallelWait::All => successes == branches.len() as u32,
+        ParallelWait::Any => successes > 0,
+        ParallelWait::AnyN(n) => successes >= *n,
+    }
+}
+
+fn execute_retry(
+    step: &FlowNode,
+    policy: &RetryPolicy,
+    state: &mut TaskRuntimeState,
+    timeout_ms: u32,
+) -> bool {
+    let attempts = policy.max_attempts.max(1);
+    for _ in 0..attempts {
+        if execute_node(step, state, timeout_ms) {
+            return true;
+        }
+    }
+    false
+}
+
+fn execute_step(step: &FlowStep, state: &mut TaskRuntimeState, timeout_ms: u32) -> bool {
+    state.active_step = Some(step.clone());
+    if step.estimated_duration_ms > timeout_ms {
+        state.step_outcomes.insert(
+            step.step_id,
+            StepOutcome::Failed {
+                failure_kind: StepFailureKind::TimeoutExceeded,
+            },
+        );
+        state.active_step = None;
+        return false;
+    }
+    state
+        .step_outcomes
+        .insert(step.step_id, StepOutcome::Succeeded);
+    state.active_step = None;
+    true
 }
 
 /// In-memory orchestrator used by tests and downstream contract checks.

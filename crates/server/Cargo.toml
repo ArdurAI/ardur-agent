@@ -31,6 +31,7 @@ path = "src/bin/ardur-server.rs"
 [dependencies]
 # The boot sequence wires every Phase-1/2 substrate crate behind the fused
 # runtime, then fronts it with the Slack adapter.
+ardur-acp = { workspace = true }
 ardur-fused-runtime = { workspace = true }
 ardur-slack-adapter = { workspace = true }
 # The §4.X Matrix channel adapter — a second `MessagingGateway` backend the boot
@@ -55,6 +56,9 @@ ardur-session-journals = { workspace = true }
 ardur-receipt = { workspace = true }
 ardur-runtime = { workspace = true }
 ardur-messaging-gateway = { workspace = true }
+# Optional Whisper-backed voice.transcribe tool registration; missing API keys
+# degrade gracefully at boot.
+ardur-media-audio = { workspace = true }
 # §6.0 Phase 2 — the tool registry + its MCP bridge. The server exposes ardur's
 # tools over MCP (`ArdurMcpServer` mounted on the Streamable-HTTP transport) and
 # gates the surface with the registry's bearer-token allowlist helpers.

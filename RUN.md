@@ -337,6 +337,7 @@ ARDUR_MCP_PATH_PREFIX=/mcp                     # default
 |---|---|
 | `echo` | returns its input arguments unchanged (round-trip check) |
 | `health_check` | reports uptime, selected provider, and memory backend |
+| `voice.transcribe` | optional Whisper-backed audio transcription tool; registered only when `OPENAI_WHISPER_API_KEY` or `OPENAI_API_KEY` is set |
 
 **Auth.** Every MCP request must carry `Authorization: Bearer ***` matching
 `ARDUR_MCP_BEARER_TOKENS` (constant-time compare); anything else is `401`. The
@@ -369,9 +370,10 @@ final answer (§6.0). Each round runs the full pipeline — cost-gate admission,
 injection-defense scanning of the tool output, and a signed receipt that records
 the calls — so tool use is governed and audited like the rest of a turn.
 
-The tools available in a turn are the local ones (`echo`, `health_check`), any
-filesystem **skills** (see **Skills** below), plus any from
-`ARDUR_MCP_REMOTE_SERVERS`. Two safeguards bound the loop:
+The tools available in a turn are the local ones (`echo`, `health_check`),
+optional `voice.transcribe` (see **Voice transcription** below), any filesystem
+**skills** (see **Skills** below), plus any from `ARDUR_MCP_REMOTE_SERVERS`. Two
+safeguards bound the loop:
 
 ```bash
 ARDUR_TOOL_MAX_ITERATIONS=5    # provider rounds that may request tools (default 5)
@@ -453,6 +455,107 @@ Tools: `web.fetch`, `web.parse`, `web.screenshot`, and `web.form_fill`.
   URL policy.
 - Each web operation returns receipt metadata under `ToolOutput.receipt_data`.
 
+## Voice transcription (Whisper)
+
+EPIC-TOOLS adds a concrete `TranscriptionProvider`: `WhisperApiTranscriptionProvider`
+in `ardur-media-audio`. When the server assembles its tool registry it attempts
+to register `voice.transcribe`; missing Whisper credentials are a graceful
+degradation (the server still boots, logs that the tool is disabled, and the
+tool is simply absent from the registry).
+
+Environment:
+
+```bash
+OPENAI_WHISPER_API_KEY=sk-...        # preferred for Whisper only
+# or OPENAI_API_KEY=sk-...           # fallback
+OPENAI_WHISPER_BASE_URL=https://api.openai.com/v1   # optional; loopback HTTP allowed for tests
+OPENAI_WHISPER_MODEL=whisper-1       # optional default
+```
+
+`voice.transcribe` takes base64 audio bytes and a declared format (`mp3`, `wav`,
+`ogg`/`opus`, `flac`, `m4a`, or `webm`) and returns transcript text, language,
+provider/model ids, and the provider-level receipt hash. The runtime still gates
+the tool call before invocation with the normal cap-token allowlist and Cedar
+`Action::"ToolInvoke"` check, then records the invocation in the signed turn
+receipt. The provider itself also validates the audio request, refuses empty or
+oversized inline audio before any network call, enforces the declared duration
+ceiling, validates the Whisper base URL (HTTPS except loopback HTTP for tests),
+and hash-chains provider operation receipts.
+
+Example tool arguments (when a model asks to call it through the fused runtime):
+
+```json
+{
+  "audio_base64": "UklGRiQAAABXQVZF...",
+  "format": "wav",
+  "duration_seconds_upper_bound": 30,
+  "language_hint": "en",
+  "mission_id": "mission.voice-note"
+}
+```
+
+## ACP (Agent Communication Protocol)
+
+EPIC-TOOLS wires ACP two ways:
+
+- `ardur-acp::StdioAcpTransport` carries newline-delimited JSON-RPC 2.0 ACP
+  frames over any stdio-like async reader/writer (child-process stdin/stdout,
+  or `tokio::io::duplex` in tests).
+- `POST /acp` accepts one ACP JSON-RPC request over HTTP. It uses the same bearer
+  gate as `/chat`, then dispatches only explicitly supported methods. Currently
+  `initialize` and `session/prompt` are accepted; unsupported methods return a
+  JSON-RPC `-32601` error before provider work, journaling, or receipt writes.
+  Accepted requests are submitted through the fused runtime so the request is
+  cap-token verified, Cedar-authorized, cost-gated, journaled, and
+  receipt-chained before the JSON-RPC response is returned.
+
+Quick HTTP check against a running server:
+
+```bash
+curl -sS http://localhost:3000/acp \
+  -H "Authorization: Bearer $ARDUR_CHAT_TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}'
+```
+
+Successful responses are ACP JSON-RPC responses whose `result` includes
+`accepted: true`, the method, the fused-runtime reply, and the signed
+`receipt_id`. Missing/invalid bearer tokens return `401`; malformed ACP messages
+return `400`; unsupported ACP methods return JSON-RPC `-32601`; runtime failures
+are returned as JSON-RPC errors with `502`.
+
+## Automation task-flow DAGs
+
+`ardur-automation::DefaultTaskFlowOrchestrator` is now an in-memory production
+default rather than a `NotImplemented` placeholder. It validates non-empty
+descriptions, cap-token allowlists for every declared dispatch, DAG
+version/depth/fanout, and fail-closed control-flow constraints. Empty sequence or
+parallel controls, invalid `AnyN`, Cedar invariants, and conditional branches are
+rejected until a real Cedar predicate evaluator is wired. It records a
+`TaskRuntimeState`, deterministically traverses supported sequence/parallel/retry
+nodes, and records both success and timeout failure paths. Operator verification
+overrides require a `task.override` allowlist entry and an existing
+verification-failed step. It still does not dispatch external
+tools/providers/webhooks; it provides the real DAG execution/state seam that
+runtime workers can depend on while effectful dispatch is added in later phases.
+
+## OpenClaw hook compatibility
+
+`ardur-hooks-openclaw-compat` now exposes `OpenClawHookRegistryExt` for
+registering OpenClaw-format hook configs directly into
+`ardur_lifecycle_hooks::HookRegistry`. The compatibility layer translates
+OpenClaw/codex events into Ardur canonical hook events, preserves source order as
+hook priority, and adapts runner results into lifecycle decisions:
+
+- `pre_tool_use` / permission-style events run as pre-submit hooks and can veto
+  with a human-readable reason.
+- post/finalize-style events run as post-receipt observational hooks.
+- the default runner is safe no-op; tests and embeddings can inject explicit
+  runners (for example a recording runner, or a future subprocess runner).
+
+This keeps OpenClaw config parsing and ordering compatible without silently
+executing shell commands just because a compatibility config exists.
+
 ## Streaming
 
 Every provider exposes a streaming surface on the `Provider` trait
@@ -517,6 +620,7 @@ skills ship under `examples/skills/`.
 | ------------------------------- | -------------------------------------------------------------- |
 | `POST /slack/events`            | Slack Events-API webhook (HMAC-verified; replies to channel).  |
 | `POST /chat`                    | Generic synchronous chat — run one turn, get the reply back.   |
+| `POST /acp`                     | ACP JSON-RPC ingress; bearer-gated and receipt-chained through the fused runtime. |
 | `GET  /healthz`                 | Liveness probe with build metadata.                            |
 | `GET  /openapi.json`            | OpenAPI 3.0 document for the mounted HTTP surface.              |
 | `GET  /openapi/clients/rust`    | Generated Rust client source.                                  |
@@ -568,6 +672,7 @@ Example:
 
 ```sh
 curl -sS http://localhost:3000/chat \
+  -H "Authorization: Bearer ${ARDUR_CHAT_TOKEN}" \
   -H 'content-type: application/json' \
   -d '{"message":"hello ardur"}'
 ```

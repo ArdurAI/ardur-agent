@@ -21,6 +21,10 @@ use axum::routing::{get, post};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use ardur_acp::{
+    ACP_METHOD_INITIALIZE, ACP_METHOD_SESSION_PROMPT, AcpErrorObject, AcpMessage, AcpRequest,
+    AcpResponse,
+};
 use ardur_runtime::SessionId;
 use ardur_slack_adapter::{SlackError, SlackEvent, SlackHeaders};
 
@@ -36,6 +40,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     let mut router = Router::new()
         .route("/slack/events", post(slack_events))
         .route("/chat", post(chat))
+        .route("/acp", post(acp))
         .route("/healthz", get(healthz))
         .route("/openapi.json", get(openapi_json))
         .route("/openapi/clients/rust", get(openapi_rust_client))
@@ -203,6 +208,129 @@ async fn chat(State(state): State<Arc<AppState>>, headers: HeaderMap, body: Byte
             Json(json!({ "error": "turn worker is unavailable" })),
         )
             .into_response(),
+    }
+}
+
+/// `POST /acp` — accept one ACP JSON-RPC envelope over HTTP.
+///
+/// This endpoint deliberately reuses the same bearer gate and fused-runtime
+/// submission path as `/chat`: the server mints a scoped cap-token, Cedar checks
+/// `Action::Submit`, the cost gate admits the work, and a signed receipt is
+/// appended to the chain before the JSON-RPC response is returned.
+async fn acp(State(state): State<Arc<AppState>>, headers: HeaderMap, body: Bytes) -> Response {
+    if let Err(response) = authorize_chat(&state, &headers) {
+        return *response;
+    }
+    if body.len() > 64 * 1024 {
+        return bad_request("request body exceeds 64KiB".to_string());
+    }
+    let message: AcpMessage = match serde_json::from_slice(&body) {
+        Ok(message) => message,
+        Err(e) => return bad_request(format!("invalid ACP message: {e}")),
+    };
+    if let Err(e) = message.validate() {
+        return bad_request(format!("invalid ACP message: {e}"));
+    }
+    let AcpMessage::Request(request) = message else {
+        return bad_request("ACP HTTP ingress accepts requests only".to_string());
+    };
+
+    let prompt = match acp_prompt_for_request(&request) {
+        Ok(prompt) => prompt,
+        Err(error) => {
+            return (
+                StatusCode::OK,
+                Json(AcpMessage::Response(AcpResponse::failure(request.id, error))),
+            )
+                .into_response();
+        }
+    };
+    match state.submit_chat(prompt, SessionId::new()).await {
+        Ok(outcome) => {
+            let result = json!({
+                "accepted": true,
+                "method": request.method,
+                "receipt_id": outcome.receipt_id,
+                "reply": outcome.reply,
+                "tokens": {
+                    "input": outcome.tokens_in,
+                    "output": outcome.tokens_out,
+                },
+                "cost_usd": outcome.cents as f64 / 100.0,
+            });
+            (
+                StatusCode::OK,
+                Json(AcpMessage::Response(AcpResponse::success(
+                    request.id, result,
+                ))),
+            )
+                .into_response()
+        }
+        Err(ChatSubmitError::Runtime(e)) => (
+            StatusCode::BAD_GATEWAY,
+            Json(AcpMessage::Response(AcpResponse::failure(
+                request.id,
+                AcpErrorObject::new(-32000, e.to_string(), None),
+            ))),
+        )
+            .into_response(),
+        Err(ChatSubmitError::WorkerGone) => (
+            StatusCode::BAD_GATEWAY,
+            Json(AcpMessage::Response(AcpResponse::failure(
+                request.id,
+                AcpErrorObject::new(-32001, "turn worker is unavailable", None),
+            ))),
+        )
+            .into_response(),
+    }
+}
+
+fn acp_prompt_for_request(request: &AcpRequest) -> Result<String, AcpErrorObject> {
+    match request.method.as_str() {
+        ACP_METHOD_INITIALIZE => {
+            if let Some(params) = &request.params {
+                let protocol = params
+                    .get("protocolVersion")
+                    .or_else(|| params.get("protocol_version"))
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(1);
+                if protocol != 1 {
+                    return Err(AcpErrorObject::new(
+                        -32602,
+                        format!("unsupported ACP protocol version {protocol}"),
+                        None,
+                    ));
+                }
+            }
+            Ok("ACP initialize request accepted for protocol v1".to_string())
+        }
+        ACP_METHOD_SESSION_PROMPT => {
+            let params = request
+                .params
+                .as_ref()
+                .and_then(serde_json::Value::as_object)
+                .ok_or_else(|| {
+                    AcpErrorObject::new(-32602, "session/prompt params must be an object", None)
+                })?;
+            let message = params
+                .get("prompt")
+                .or_else(|| params.get("message"))
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    AcpErrorObject::new(
+                        -32602,
+                        "session/prompt requires a non-empty prompt or message string",
+                        None,
+                    )
+                })?;
+            Ok(format!("ACP session prompt: {message}"))
+        }
+        other => Err(AcpErrorObject::new(
+            -32601,
+            format!("unsupported ACP method `{other}`"),
+            None,
+        )),
     }
 }
 
