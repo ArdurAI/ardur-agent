@@ -171,6 +171,9 @@ pub struct AppState {
     journal: Arc<dyn SessionJournal>,
     data_dir: PathBuf,
     chat_bearer_tokens: Vec<String>,
+    admin_bearer_tokens: Vec<String>,
+    tool_allowlist: Vec<String>,
+    cost_budget_cents: u64,
     mcp: Option<McpSurface>,
     /// The Matrix channel, once [`attach_matrix`](AppState::attach_matrix) wires
     /// it (only when `ARDUR_CHANNEL_MATRIX=true`). Shared with the worker's
@@ -340,6 +343,7 @@ impl AppState {
         let matrix: Arc<OnceLock<Arc<MatrixChannel>>> = Arc::new(OnceLock::new());
         let discord: Arc<OnceLock<Arc<DiscordChannel>>> = Arc::new(OnceLock::new());
         let telegram: Arc<OnceLock<Arc<TelegramChannel>>> = Arc::new(OnceLock::new());
+        let tool_allowlist = tool_allowlist_for_runtime(&tools);
         let processor = Processor {
             runtime,
             slack: slack.clone(),
@@ -348,7 +352,7 @@ impl AppState {
             telegram: telegram.clone(),
             issuer,
             cap_budget_remaining: config.cost_budget_cents,
-            tool_allowlist: tool_allowlist_for_runtime(&tools),
+            tool_allowlist: tool_allowlist.clone(),
             receipt_log,
         };
         let work_tx = spawn_worker(processor);
@@ -377,6 +381,9 @@ impl AppState {
             journal,
             data_dir,
             chat_bearer_tokens: config.chat_bearer_tokens.clone(),
+            admin_bearer_tokens: config.admin_bearer_tokens.clone(),
+            tool_allowlist,
+            cost_budget_cents: config.cost_budget_cents,
             mcp,
             matrix,
             discord,
@@ -388,6 +395,38 @@ impl AppState {
     #[must_use]
     pub fn chat_bearer_tokens(&self) -> &[String] {
         &self.chat_bearer_tokens
+    }
+
+    /// The bearer tokens admitted to the admin runtime-inspection API.
+    #[must_use]
+    pub fn admin_bearer_tokens(&self) -> &[String] {
+        &self.admin_bearer_tokens
+    }
+
+    /// The configured per-process cost-gate budget, in cents.
+    #[must_use]
+    pub fn cost_budget_cents(&self) -> u64 {
+        self.cost_budget_cents
+    }
+
+    /// The tool ids minted into session cap-tokens for runtime turns.
+    #[must_use]
+    pub fn tool_allowlist(&self) -> &[String] {
+        &self.tool_allowlist
+    }
+
+    /// Whether the turn worker is still accepting work.
+    #[must_use]
+    pub fn worker_alive(&self) -> bool {
+        !self.work_tx.is_closed()
+    }
+
+    /// Number of receipts currently persisted in the server's chain log.
+    #[must_use]
+    pub fn receipt_count(&self) -> usize {
+        load_persisted_chain(self.data_dir.join("receipts").join("chain.jsonl"))
+            .map(|chain| chain.len())
+            .unwrap_or(0)
     }
 
     /// The MCP surface to mount, if `ARDUR_MCP_ENABLED` was set at boot.

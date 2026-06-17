@@ -65,6 +65,10 @@ pub struct Config {
     /// (`ARDUR_CHAT_BEARER_TOKENS`, comma-separated). When empty, `/chat`
     /// denies every request with `401` instead of processing the body.
     pub chat_bearer_tokens: Vec<String>,
+    /// Bearer-token allowlist required for the runtime-inspection admin API
+    /// (`ARDUR_ADMIN_BEARER_TOKENS`, comma-separated). When empty, admin routes
+    /// deny every request with `401` (fail-closed).
+    pub admin_bearer_tokens: Vec<String>,
     /// Explicit development escape hatch for the embedded permissive Cedar policy
     /// (`ARDUR_DEV_PERMISSIVE_POLICY=true`). Production boots without a configured
     /// policy use a deny-all policy, and a configured-but-missing path is an error.
@@ -155,6 +159,10 @@ impl fmt::Debug for Config {
             .field(
                 "chat_bearer_tokens",
                 &redacted_count(self.chat_bearer_tokens.len()),
+            )
+            .field(
+                "admin_bearer_tokens",
+                &redacted_count(self.admin_bearer_tokens.len()),
             )
             .field("dev_permissive_policy", &self.dev_permissive_policy)
             .field("model", &self.model)
@@ -289,6 +297,7 @@ impl Config {
                 .map_or_else(|| PathBuf::from("./data"), PathBuf::from),
             bind_addr: optional("ARDUR_BIND_ADDR").unwrap_or_else(|| "127.0.0.1:3000".to_string()),
             chat_bearer_tokens: parse_csv(optional("ARDUR_CHAT_BEARER_TOKENS").as_deref()),
+            admin_bearer_tokens: parse_csv(optional("ARDUR_ADMIN_BEARER_TOKENS").as_deref()),
             dev_permissive_policy: optional("ARDUR_DEV_PERMISSIVE_POLICY")
                 .as_deref()
                 .is_some_and(is_truthy),
