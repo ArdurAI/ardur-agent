@@ -46,6 +46,9 @@ members = [
     "crates/admin-ui",
     "crates/e2e-tests",
     "crates/eval-harness",
+    "crates/browser",
+    "crates/terminal",
+    "crates/web",
 ]
 
 [workspace.package]
@@ -197,6 +200,10 @@ futures = "0.3"
 # `transport-streamable-http-server` for the axum-mounted Streamable-HTTP
 # service in `crates/server`. Pinned here so both crates share one version.
 rmcp = { version = "1", default-features = false, features = ["server", "client", "transport-streamable-http-server", "transport-streamable-http-client-reqwest"] }
+# Docker daemon API for terminal Docker exec backend (ARD-315/ARD-324).
+bollard = "0.21"
+# SSH client library for terminal SSH remote backend (ARD-315/ARD-324).
+russh = "0.61"
 
 # --- Internal crate path-deps (one per Phase-0 crate). Declared here so
 #     cross-crate wiring in Phase 1 references `{ workspace = true }`. ---
@@ -234,3 +241,6 @@ ardur-channel-matrix = { path = "crates/channel-matrix" }
 ardur-channel-discord = { path = "crates/channel-discord" }
 ardur-channel-telegram = { path = "crates/channel-telegram" }
 ardur-server = { path = "crates/server" }
+ardur-browser = { path = "crates/browser" }
+ardur-terminal = { path = "crates/terminal" }
+ardur-web = { path = "crates/web" }

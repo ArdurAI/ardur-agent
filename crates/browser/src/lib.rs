@@ -29,11 +29,11 @@ mod tools;
 
 pub use cdp::{CdpBrowser, CdpConfig, CdpConnection};
 pub use error::{BrowserError, Result};
-pub use policy::{BrowserPolicy, SiteAction, ConfirmationLevel};
-pub use receipt::{BrowserReceipt, BrowserActionReceipt};
+pub use policy::{BrowserPolicy, ConfirmationLevel, SiteAction};
+pub use receipt::{BrowserActionReceipt, BrowserReceipt};
 pub use tools::{ClickTool, ExtractTool, NavigateTool, ScreenshotTool, SharedBrowser, TypeTool};
 
-use ardur_tool_registry::{Capability, Tool, ToolContext, ToolId, ToolOutput, ToolSchema};
+use ardur_tool_registry::{Capability, Tool};
 use async_trait::async_trait;
 
 /// The shared browser context that all browser tools operate against.
@@ -67,9 +67,8 @@ impl BrowserContext {
 }
 
 /// Shared browser capability required by all browser tools.
-pub static BROWSER_CAPABILITY: std::sync::LazyLock<Capability> = std::sync::LazyLock::new(|| {
-    Capability::Custom(String::from("browser"))
-});
+pub static BROWSER_CAPABILITY: std::sync::LazyLock<Capability> =
+    std::sync::LazyLock::new(|| Capability::Custom(String::from("browser")));
 
 /// The base trait for all browser automation tools.
 ///
@@ -98,12 +97,7 @@ mod tests {
         let cdp = CdpConnection::mock();
         let policy = BrowserPolicy::default();
         let mut ctx = BrowserContext::new(cdp, policy);
-        let receipt = BrowserReceipt::new(
-            "navigate",
-            "https://example.com",
-            true,
-            None,
-        );
+        let receipt = BrowserReceipt::new("navigate", "https://example.com", true, None);
         ctx.record_receipt(receipt);
         assert_eq!(ctx.receipts.len(), 1);
     }

@@ -2,6 +2,7 @@
 //!
 //! Provides a lightweight wrapper over CDP's JSON-RPC WebSocket interface.
 
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -63,11 +64,7 @@ impl CdpConnection {
     /// Send a CDP command and return the result.
     ///
     /// In Phase 1 (mock), returns a canned response based on the method name.
-    pub async fn send(
-        &self,
-        method: &str,
-        params: Value,
-    ) -> Result<Value, CdpError> {
+    pub async fn send(&self, method: &str, params: Value) -> Result<Value, CdpError> {
         if self.is_mock {
             return Ok(mock_response(method, params));
         }
@@ -201,13 +198,15 @@ impl CdpBrowser {
     pub async fn screenshot(&self) -> Result<Vec<u8>, CdpError> {
         let result = self
             .connection
-            .send("Page.captureScreenshot", serde_json::json!({"format": "png"}))
+            .send(
+                "Page.captureScreenshot",
+                serde_json::json!({"format": "png"}),
+            )
             .await?;
-        let data = result
-            .get("data")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        Ok(base64::decode(data).unwrap_or_default())
+        let data = result.get("data").and_then(|v| v.as_str()).unwrap_or("");
+        Ok(base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .unwrap_or_default())
     }
 
     /// Extract the page text content.

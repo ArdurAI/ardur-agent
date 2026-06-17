@@ -1,10 +1,14 @@
 //! Receipts for browser automation actions.
 //!
 //! Every browser UI action (navigate, click, type, screenshot, extract) is
-//! receipted for audit. Receipts are signed and chained.
+//! receipted for audit. Receipts are chained by parent id so downstream runtime
+//! receipts can fold in a deterministic browser-action transcript.
 
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+static RECEIPT_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// A receipt for a single browser action.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,13 +42,14 @@ impl BrowserReceipt {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64;
+        let seq = RECEIPT_COUNTER.fetch_add(1, Ordering::Relaxed);
         Self {
             action: action.into(),
             target: target.into(),
             permitted,
             denial_reason,
             timestamp_ms: now,
-            receipt_id: format!("br-{}", now),
+            receipt_id: format!("br-{now}-{seq}"),
             parent_receipt_id: None,
         }
     }
@@ -54,6 +59,20 @@ impl BrowserReceipt {
     pub fn with_parent(mut self, parent_id: impl Into<String>) -> Self {
         self.parent_receipt_id = Some(parent_id.into());
         self
+    }
+
+    /// Render this receipt as the JSON object placed in `ToolOutput.receipt_data`.
+    #[must_use]
+    pub fn to_receipt_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "id": self.receipt_id,
+            "parent_id": self.parent_receipt_id,
+            "action": self.action,
+            "target": self.target,
+            "permitted": self.permitted,
+            "denial_reason": self.denial_reason,
+            "timestamp_ms": self.timestamp_ms,
+        })
     }
 }
 
@@ -77,6 +96,15 @@ impl BrowserActionReceipt {
             receipt.parent_receipt_id = Some(last.receipt_id.clone());
         }
         self.receipts.push(receipt);
+    }
+
+    /// Add a receipt and return the stored, parent-linked value.
+    pub fn push_and_clone(&mut self, mut receipt: BrowserReceipt) -> BrowserReceipt {
+        if let Some(last) = self.receipts.last() {
+            receipt.parent_receipt_id = Some(last.receipt_id.clone());
+        }
+        self.receipts.push(receipt.clone());
+        receipt
     }
 
     /// Verify the chain is intact (every receipt's parent exists).
@@ -120,8 +148,7 @@ mod tests {
 
     #[test]
     fn receipt_with_parent() {
-        let r = BrowserReceipt::new("click", "#btn", true, None)
-            .with_parent("parent-123");
+        let r = BrowserReceipt::new("click", "#btn", true, None).with_parent("parent-123");
         assert_eq!(r.parent_receipt_id, Some("parent-123".to_string()));
     }
 

@@ -24,6 +24,7 @@ use serde_json::json;
 use ardur_runtime::SessionId;
 use ardur_slack_adapter::{SlackError, SlackEvent, SlackHeaders};
 
+use crate::openapi::{generate_python_client, generate_rust_client, openapi_spec};
 use crate::state::{AppState, ChatSubmitError, ChatTurnOutcome};
 
 /// Build the application router over the shared [`AppState`].
@@ -35,7 +36,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     let mut router = Router::new()
         .route("/slack/events", post(slack_events))
         .route("/chat", post(chat))
-        .route("/healthz", get(healthz));
+        .route("/healthz", get(healthz))
+        .route("/openapi.json", get(openapi_json))
+        .route("/openapi/clients/rust", get(openapi_rust_client))
+        .route("/openapi/clients/python", get(openapi_python_client));
 
     if let Some(mcp) = state.mcp() {
         router = router.merge(crate::build_mcp_router(
@@ -56,6 +60,35 @@ async fn healthz() -> Response {
         "tests": "147",
     }))
     .into_response()
+}
+
+/// `GET /openapi.json` — return the generated OpenAPI 3.0 document.
+async fn openapi_json() -> Response {
+    Json(openapi_spec()).into_response()
+}
+
+/// `GET /openapi/clients/rust` — return generated Rust client source.
+async fn openapi_rust_client() -> Response {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; charset=utf-8",
+        )],
+        generate_rust_client(),
+    )
+        .into_response()
+}
+
+/// `GET /openapi/clients/python` — return generated Python client source.
+async fn openapi_python_client() -> Response {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; charset=utf-8",
+        )],
+        generate_python_client(),
+    )
+        .into_response()
 }
 
 /// The `POST /chat` request body.
