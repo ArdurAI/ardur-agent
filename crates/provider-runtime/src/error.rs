@@ -45,4 +45,17 @@ pub enum ProviderError {
     /// the upstream message verbatim.
     #[error("upstream provider error: {0}")]
     Upstream(String),
+
+    /// The provider selector received an invalid or unrecognized provider name.
+    #[error("invalid provider selection: {0}")]
+    InvalidSelection(String),
+
+    /// An unknown provider was requested. Lists the supported providers.
+    #[error("unknown provider '{name}': supported values are {supported:?}")]
+    UnknownProvider {
+        /// The requested provider name.
+        name: String,
+        /// The list of supported provider names.
+        supported: Vec<String>,
+    },
 }

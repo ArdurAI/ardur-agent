@@ -10,6 +10,8 @@ fn prices_input_and_output_tokens() {
     let cost = card.price(Usage {
         tokens_in: 10_000,
         tokens_out: 10_000,
+
+        ..Default::default()
     });
 
     assert_eq!(cost.tokens_in, 10_000);
@@ -33,6 +35,8 @@ fn rounds_to_whole_cents() {
     let cost = RateCard::anthropic_2026_q2_v1().price(Usage {
         tokens_in: 1_000,
         tokens_out: 1_000,
+
+        ..Default::default()
     });
     assert_eq!(cost.cents, 2);
 }
