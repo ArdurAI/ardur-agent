@@ -18,9 +18,9 @@
 //! (`claude-cli` also answers to the alias `claude-subscription`.)
 //!
 //! Parsing is case-insensitive; an unset (or empty) value selects the default,
-//! `anthropic`. An **unrecognized** value is a boot misconfiguration: [`select`]
-//! and [`from_env`] panic with a message listing the supported values, so a
-//! typo aborts the process loudly rather than silently falling back.
+//! `anthropic`. An unrecognized value is returned as a [`ProviderError`] whose
+//! message lists the supported values, so a typo aborts boot cleanly without a
+//! panic or silent fallback.
 //!
 //! The credentialed backends ([`ProviderKind::Anthropic`],
 //! [`ProviderKind::OpenRouter`], [`ProviderKind::OpenAiCompat`]) can still fail
@@ -84,13 +84,14 @@ impl ProviderKind {
 
     /// Every recognized selector spelling, in selection order — the canonical
     /// list surfaced in the unknown-value error.
-    pub const ALL: [ProviderKind; 6] = [
+    pub const ALL: [ProviderKind; 7] = [
         ProviderKind::Anthropic,
         ProviderKind::OpenRouter,
         ProviderKind::OpenAiCompat,
         ProviderKind::Ollama,
         ProviderKind::Codex,
         ProviderKind::ClaudeCli,
+        ProviderKind::OpenAiCompat, // openai alias
     ];
 
     /// The canonical lowercase spelling — matches each backend's `id()`.
@@ -197,21 +198,17 @@ impl std::error::Error for UnknownProvider {}
 /// is the env-free core that [`from_env`] wraps — the CLI/server boot tests call
 /// it directly with a fixed value so they need not mutate process environment.
 ///
-/// # Panics
-///
-/// Panics when `selector` is `Some(value)` and `value` matches no known backend
-/// — an unrecognized `ARDUR_PROVIDER` is a boot misconfiguration that should
-/// abort the process. The panic message lists the supported values.
-///
 /// # Errors
 ///
 /// Returns [`ProviderError`] when the selected (valid) backend cannot be built
 /// from the environment — e.g. a missing `ANTHROPIC_API_KEY`,
 /// `OPENROUTER_API_KEY`, or `OPENAI_COMPAT_API_KEY` /
-/// `OPENAI_API_KEY` yields [`ProviderError::Unauthorized`].
+/// `OPENAI_API_KEY` yields [`ProviderError::Unauthorized`]. An unrecognized
+/// selector is returned as [`ProviderError::InvalidRequest`] with a message that
+/// lists all supported values.
 pub fn select(selector: Option<&str>, model: ModelId) -> Result<Arc<dyn Provider>, ProviderError> {
     let kind = ProviderKind::resolve(selector)
-        .unwrap_or_else(|e| panic!("invalid provider selection: {e}"));
+        .map_err(|e| ProviderError::InvalidRequest(format!("invalid provider selection: {e}")))?;
     kind.build(model)
 }
 
@@ -221,14 +218,11 @@ pub fn select(selector: Option<&str>, model: ModelId) -> Result<Arc<dyn Provider
 /// This is the boot entry point the CLI and server call in place of the old
 /// hard-coded `AnthropicProvider::from_env`.
 ///
-/// # Panics
-///
-/// Panics when `ARDUR_PROVIDER` is set to an unrecognized value (see [`select`]).
-///
 /// # Errors
 ///
 /// Returns [`ProviderError`] when the selected backend cannot be built from the
-/// environment (e.g. a missing API key).
+/// environment (e.g. a missing API key), or when `ARDUR_PROVIDER` is set to an
+/// unrecognized value.
 pub fn from_env(model: ModelId) -> Result<Arc<dyn Provider>, ProviderError> {
     let raw = std::env::var(SELECTOR_ENV).ok();
     select(raw.as_deref(), model)
@@ -336,9 +330,15 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "supported values are")]
-    fn unknown_provider_panics_with_helpful_error() {
-        let _ = select(Some("mistral"), model());
+    fn unknown_provider_returns_helpful_error() {
+        let result = select(Some("mistral"), model());
+        assert!(result.is_err(), "unknown provider should error");
+        let message = match result {
+            Err(e) => format!("{}", e),
+            Ok(_) => panic!("expected error"),
+        };
+        assert!(message.contains("supported values are"), "{message}");
+        assert!(message.contains("openai-compat"), "{message}");
     }
 
     #[test]

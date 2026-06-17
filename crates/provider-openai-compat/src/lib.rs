@@ -46,6 +46,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+use std::fmt;
 use std::time::Duration;
 
 use ardur_provider_runtime::{
@@ -81,11 +82,29 @@ pub const TIMEOUT_SECS_ENV: &str = "OPENAI_COMPAT_TIMEOUT_SECS";
 /// Build it from an API key with [`OpenAiCompatConfig::new`] (or
 /// [`OpenAiCompatConfig::from_env`]) and tune the optional fields with the
 /// builder methods; every field but the key has a sensible default.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct OpenAiCompatConfig {
     api_key: String,
     base_url: String,
     request_timeout: Duration,
+}
+
+impl fmt::Debug for OpenAiCompatConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OpenAiCompatConfig")
+            .field("api_key", &redacted_present(&self.api_key))
+            .field("base_url", &self.base_url)
+            .field("request_timeout", &self.request_timeout)
+            .finish()
+    }
+}
+
+fn redacted_present(value: &str) -> &'static str {
+    if value.is_empty() {
+        "<unset>"
+    } else {
+        "<redacted>"
+    }
 }
 
 impl OpenAiCompatConfig {
@@ -115,7 +134,7 @@ impl OpenAiCompatConfig {
 
         let mut config = Self::new(key);
         if let Some(base_url) = nonempty_env(BASE_URL_ENV) {
-            validate_env_base_url(&base_url)?;
+            validate_base_url(&base_url)?;
             config = config.base_url(base_url);
         }
         if let Some(raw_timeout) = nonempty_env(TIMEOUT_SECS_ENV) {
@@ -222,6 +241,9 @@ impl OpenAiCompatProvider {
         if self.config.api_key.is_empty() {
             return error_stream(ProviderError::Unauthorized);
         }
+        if let Err(err) = validate_base_url(&self.config.base_url) {
+            return error_stream(err);
+        }
 
         let body = build_stream_request_body(&req);
         let send = self
@@ -278,7 +300,7 @@ fn nonempty_env(key: &str) -> Option<String> {
 /// HTTPS is always allowed. Plain HTTP is allowed only for loopback hosts so
 /// local vLLM-style development remains possible without sending bearer tokens
 /// over cleartext networks.
-fn validate_env_base_url(base_url: &str) -> Result<(), ProviderError> {
+fn validate_base_url(base_url: &str) -> Result<(), ProviderError> {
     let parsed = url::Url::parse(base_url).map_err(|e| {
         ProviderError::InvalidRequest(format!("{BASE_URL_ENV} is not a valid URL: {e}"))
     })?;
@@ -309,6 +331,7 @@ impl Provider for OpenAiCompatProvider {
         if self.config.api_key.is_empty() {
             return Err(ProviderError::Unauthorized);
         }
+        validate_base_url(&self.config.base_url)?;
 
         let body = build_request_body(&req);
 
@@ -359,6 +382,7 @@ impl Provider for OpenAiCompatProvider {
         if self.config.api_key.is_empty() {
             return Err(ProviderError::Unauthorized);
         }
+        validate_base_url(&self.config.base_url)?;
 
         let body = build_stream_request_body(&req);
         let resp = self
@@ -976,6 +1000,14 @@ mod tests {
     }
 
     #[test]
+    fn debug_redacts_api_key() {
+        let cfg = OpenAiCompatConfig::new("sk-openai-compat-secret");
+        let rendered = format!("{cfg:?}");
+        assert!(!rendered.contains("sk-openai-compat-secret"), "{rendered}");
+        assert!(rendered.contains("<redacted>"), "{rendered}");
+    }
+
+    #[test]
     fn provider_id_is_openai_compat() {
         let provider =
             OpenAiCompatProvider::new(OpenAiCompatConfig::new("k"), ModelId::new("openai/gpt-4o"));
@@ -985,12 +1017,12 @@ mod tests {
 
     #[test]
     fn env_base_url_policy_requires_https_or_loopback_http() {
-        assert!(validate_env_base_url("https://api.openai.com/v1").is_ok());
-        assert!(validate_env_base_url("http://localhost:8000/v1").is_ok());
-        assert!(validate_env_base_url("http://127.0.0.1:8000/v1").is_ok());
-        assert!(validate_env_base_url("http://[::1]:8000/v1").is_ok());
+        assert!(validate_base_url("https://api.openai.com/v1").is_ok());
+        assert!(validate_base_url("http://localhost:8000/v1").is_ok());
+        assert!(validate_base_url("http://127.0.0.1:8000/v1").is_ok());
+        assert!(validate_base_url("http://[::1]:8000/v1").is_ok());
         assert!(matches!(
-            validate_env_base_url("http://example.com/v1"),
+            validate_base_url("http://example.com/v1"),
             Err(ProviderError::InvalidRequest(_))
         ));
     }

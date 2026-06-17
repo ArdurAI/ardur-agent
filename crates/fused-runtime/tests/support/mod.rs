@@ -91,7 +91,12 @@ pub fn mint_token(expires_unix: u64, budget_remaining: u64) -> String {
                 audience: AUDIENCE.to_string(),
                 expires_unix,
                 budget_remaining,
-                tool_allowlist: vec![TOOL.to_string()],
+                tool_allowlist: vec![
+                    TOOL.to_string(),
+                    "echo".to_string(),
+                    "slow".to_string(),
+                    "boom".to_string(),
+                ],
             },
         )
         .expect("the cap-token issues")

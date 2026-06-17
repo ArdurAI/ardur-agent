@@ -28,6 +28,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use ardur_cedar_policy::{CedarPolicyBundle, PolicyBundle, PolicySource};
 use ardur_fused_runtime::{load_persisted_chain, verify_persisted_chain};
 use ardur_injection_defense::{FilterRegistry, PatternBasedFilter};
 use ardur_provider_runtime::{
@@ -42,7 +43,10 @@ use async_trait::async_trait;
 use parking_lot::Mutex;
 use serde_json::json;
 
-use support::{runtime_builder, user_request, valid_token};
+use support::{
+    AUDIENCE, HOLDER, TOOL, mint_token_as, runtime_builder, runtime_builder_with_policy,
+    user_request, valid_token,
+};
 
 // ---- scripted provider -----------------------------------------------------
 
@@ -204,6 +208,54 @@ impl Tool for FailingTool {
     }
 }
 
+/// A tool that records whether it was invoked; used to prove authorization gates
+/// run before `invoke`.
+struct CountingTool {
+    id: ToolId,
+    schema: ToolSchema,
+    invocations: Arc<AtomicUsize>,
+}
+
+impl CountingTool {
+    fn new(name: &str, invocations: Arc<AtomicUsize>) -> Self {
+        Self {
+            id: ToolId::new(name),
+            schema: ToolSchema {
+                description: "counts invocations".to_string(),
+                input_schema: json!({ "type": "object" }),
+                output_schema: json!({ "type": "object" }),
+                examples: vec![],
+            },
+            invocations,
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for CountingTool {
+    fn id(&self) -> ToolId {
+        self.id.clone()
+    }
+    fn schema(&self) -> &ToolSchema {
+        &self.schema
+    }
+    async fn invoke(
+        &self,
+        _ctx: &ToolContext,
+        _args: serde_json::Value,
+    ) -> Result<ToolOutput, ToolError> {
+        self.invocations.fetch_add(1, Ordering::SeqCst);
+        Ok(ToolOutput {
+            content: json!({ "ok": true }),
+            cost: CostTuple::default(),
+            receipt_data: json!({ "ok": true }),
+        })
+    }
+    fn required_capabilities(&self) -> &[Capability] {
+        &[]
+    }
+}
+
 /// A registry holding just the built-in echo tool.
 fn echo_registry() -> Arc<ToolRegistry> {
     let mut registry = ToolRegistry::new();
@@ -211,6 +263,21 @@ fn echo_registry() -> Arc<ToolRegistry> {
         .register(Box::new(EchoTool::new()))
         .expect("echo id is unique");
     Arc::new(registry)
+}
+
+fn counted_registry(tool_name: &str, invocations: Arc<AtomicUsize>) -> Arc<ToolRegistry> {
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(Box::new(CountingTool::new(tool_name, invocations)))
+        .expect("counted id is unique");
+    Arc::new(registry)
+}
+
+fn submit_only_policy() -> CedarPolicyBundle {
+    CedarPolicyBundle::load(PolicySource::Embedded(
+        "permit(principal, action == Action::\"Submit\", resource);".to_string(),
+    ))
+    .expect("submit-only policy compiles")
 }
 
 // ---- tests -----------------------------------------------------------------
@@ -256,6 +323,58 @@ async fn single_round_trip() {
         provider.call_count(),
         2,
         "one call requested the tool, the second produced the answer"
+    );
+}
+
+#[tokio::test]
+async fn tool_cap_token_denial_happens_before_invoke() {
+    let invocations = Arc::new(AtomicUsize::new(0));
+    let provider = Arc::new(ScriptedProvider::new(
+        vec![tool_call("call_1", "counted", json!({}))],
+        stop("default"),
+    ));
+    let runtime = runtime_builder(provider.clone())
+        .with_tools(counted_registry("counted", invocations.clone()))
+        .build()
+        .expect("runtime builds");
+    let submit_only_token = mint_token_as(HOLDER, AUDIENCE, &[TOOL]);
+
+    let err = runtime
+        .submit(user_request("use denied tool", &submit_only_token))
+        .await
+        .expect_err("tool-specific cap-token caveat denies before invoke");
+
+    assert!(matches!(err, RuntimeError::CapDenied { .. }));
+    assert_eq!(
+        invocations.load(Ordering::SeqCst),
+        0,
+        "denied tool was not invoked"
+    );
+}
+
+#[tokio::test]
+async fn tool_cedar_denial_happens_before_invoke() {
+    let invocations = Arc::new(AtomicUsize::new(0));
+    let provider = Arc::new(ScriptedProvider::new(
+        vec![tool_call("call_1", "counted", json!({}))],
+        stop("default"),
+    ));
+    let runtime = runtime_builder_with_policy(provider.clone(), submit_only_policy())
+        .with_tools(counted_registry("counted", invocations.clone()))
+        .build()
+        .expect("runtime builds");
+    let token = mint_token_as(HOLDER, AUDIENCE, &[TOOL, "counted"]);
+
+    let err = runtime
+        .submit(user_request("use cedar-denied tool", &token))
+        .await
+        .expect_err("tool-specific Cedar policy denies before invoke");
+
+    assert!(matches!(err, RuntimeError::PolicyDenied { .. }));
+    assert_eq!(
+        invocations.load(Ordering::SeqCst),
+        0,
+        "Cedar-denied tool was not invoked"
     );
 }
 

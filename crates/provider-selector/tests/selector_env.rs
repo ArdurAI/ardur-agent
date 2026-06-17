@@ -165,17 +165,17 @@ fn from_env_claude_cli_selects_claude_cli() {
 }
 
 #[test]
-#[should_panic(expected = "supported values are")]
-fn from_env_unknown_provider_panics() {
+fn from_env_unknown_provider_returns_helpful_error() {
     let _guard = env_lock();
     let prior_sel = swap("ARDUR_PROVIDER", Some("mistral"));
-    // Restore eagerly: the panic unwinds out of `from_env`, and a poisoned
-    // `env_lock` is tolerated by the next test, but the stray var must not leak.
-    let result = std::panic::catch_unwind(|| from_env(model()));
+
+    let result = from_env(model());
     restore("ARDUR_PROVIDER", prior_sel);
-    // Re-raise so the `#[should_panic]` assertion still sees the message.
-    match result {
-        Ok(_) => panic!("expected an unknown-provider panic, but selection succeeded"),
-        Err(payload) => std::panic::resume_unwind(payload),
-    }
+    assert!(result.is_err(), "unknown provider should return an error");
+    let message = match result {
+        Err(e) => format!("{}", e),
+        Ok(_) => panic!("expected error"),
+    };
+    assert!(message.contains("supported values are"), "{message}");
+    assert!(message.contains("openai-compat"), "{message}");
 }

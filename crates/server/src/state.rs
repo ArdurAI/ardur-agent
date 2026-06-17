@@ -92,10 +92,17 @@ pub const CAP_TTL_SECS: u64 = 5 * 60;
 /// down to the configured budget so a tiny budget still admits its first turn.
 const PER_TURN_CENTS_CAP: u64 = 1_000;
 
-/// The built-in permissive-but-bounded Cedar policy: permit the one action the
-/// server performs (`Action::Submit`) and nothing else. Used when
-/// `ARDUR_CEDAR_POLICY_PATH` is unset or its file is absent.
-const DEFAULT_POLICY: &str = "permit(principal, action == Action::\"Submit\", resource);";
+/// The built-in development Cedar policy: permit chat submission plus the
+/// tool-invocation action that is still constrained by cap-token tool caveats.
+/// It is available only when `ARDUR_DEV_PERMISSIVE_POLICY=true` is explicitly set.
+const DEFAULT_POLICY: &str = r#"
+permit(principal, action == Action::"Submit", resource);
+permit(principal, action == Action::"ToolInvoke", resource);
+"#;
+
+/// Production fallback when no explicit Cedar policy is configured: deny every
+/// action. This keeps missing policy configuration fail-closed.
+const DENY_ALL_POLICY: &str = "forbid(principal, action, resource);";
 
 /// A unit of work handed to the turn worker. Both variants run the identical
 /// fused-runtime pipeline; they differ only in where the reply goes — a
@@ -163,6 +170,7 @@ pub struct AppState {
     work_tx: mpsc::UnboundedSender<WorkItem>,
     journal: Arc<dyn SessionJournal>,
     data_dir: PathBuf,
+    chat_bearer_tokens: Vec<String>,
     mcp: Option<McpSurface>,
     /// The Matrix channel, once [`attach_matrix`](AppState::attach_matrix) wires
     /// it (only when `ARDUR_CHANNEL_MATRIX=true`). Shared with the worker's
@@ -230,7 +238,10 @@ impl AppState {
         let receipt_key = load_or_generate_receipt_key(&keys_dir)?;
 
         // 3. Policy: the operator's file if configured + present, else built-in.
-        let policy = load_policy(config.cedar_policy_path.as_deref())?;
+        let policy = load_policy(
+            config.cedar_policy_path.as_deref(),
+            config.dev_permissive_policy,
+        )?;
 
         // 4. Substrate sinks. Memory is selected by `ARDUR_MEMORY`: the
         //    in-process §7.0 Phase 1 store (default — fast, lost on restart), the
@@ -337,6 +348,7 @@ impl AppState {
             telegram: telegram.clone(),
             issuer,
             cap_budget_remaining: config.cost_budget_cents,
+            tool_allowlist: tool_allowlist_for_runtime(&tools),
             receipt_log,
         };
         let work_tx = spawn_worker(processor);
@@ -364,11 +376,18 @@ impl AppState {
             work_tx,
             journal,
             data_dir,
+            chat_bearer_tokens: config.chat_bearer_tokens.clone(),
             mcp,
             matrix,
             discord,
             telegram,
         }))
+    }
+
+    /// The bearer tokens admitted to `POST /chat`.
+    #[must_use]
+    pub fn chat_bearer_tokens(&self) -> &[String] {
+        &self.chat_bearer_tokens
     }
 
     /// The MCP surface to mount, if `ARDUR_MCP_ENABLED` was set at boot.
@@ -490,6 +509,17 @@ impl AppState {
     }
 }
 
+fn tool_allowlist_for_runtime(tools: &ToolRegistry) -> Vec<String> {
+    let mut allowlist = vec![TOOL.to_string()];
+    for tool in tools.list() {
+        let id = tool.id().0;
+        if !allowlist.contains(&id) {
+            allowlist.push(id);
+        }
+    }
+    allowlist
+}
+
 /// The turn-processing core, owned by the worker thread. Drives the `!Send`
 /// fused-runtime pipeline and posts the reply.
 struct Processor {
@@ -506,6 +536,7 @@ struct Processor {
     telegram: Arc<OnceLock<Arc<TelegramChannel>>>,
     issuer: BiscuitCapTokenIssuer,
     cap_budget_remaining: u64,
+    tool_allowlist: Vec<String>,
     /// The append-only receipt-chain log the fused runtime writes to. Read
     /// before/after an HTTP turn to recover the tools it called (the worker is
     /// single-threaded, so the receipts appended across one `submit` belong to
@@ -741,7 +772,7 @@ impl Processor {
                 audience: AUDIENCE.to_string(),
                 expires_unix: now_unix.saturating_add(CAP_TTL_SECS),
                 budget_remaining: self.cap_budget_remaining,
-                tool_allowlist: vec![TOOL.to_string()],
+                tool_allowlist: self.tool_allowlist.clone(),
             },
         )?;
         Ok(token.to_base64()?)
@@ -918,12 +949,20 @@ fn load_or_generate_receipt_key(keys_dir: &Path) -> anyhow::Result<Es256SigningK
     }
 }
 
-/// Compile the Cedar policy: the operator's file when configured and present,
-/// otherwise the built-in [`DEFAULT_POLICY`].
-fn load_policy(path: Option<&Path>) -> anyhow::Result<CedarPolicyBundle> {
+/// Compile the Cedar policy: a configured operator file must exist and compile.
+/// Without a configured path, production uses deny-all; tests/lab boots may opt
+/// into the embedded permissive policy with an explicit dev flag.
+fn load_policy(path: Option<&Path>, dev_permissive: bool) -> anyhow::Result<CedarPolicyBundle> {
     let source = match path {
         Some(p) if p.exists() => PolicySource::File(p.to_path_buf()),
-        _ => PolicySource::Embedded(DEFAULT_POLICY.to_string()),
+        Some(p) => {
+            return Err(anyhow::anyhow!(
+                "configured Cedar policy path does not exist: {}",
+                p.display()
+            ));
+        }
+        None if dev_permissive => PolicySource::Embedded(DEFAULT_POLICY.to_string()),
+        None => PolicySource::Embedded(DENY_ALL_POLICY.to_string()),
     };
     CedarPolicyBundle::load(source).map_err(|e| anyhow::anyhow!("compiling cedar policy: {e}"))
 }

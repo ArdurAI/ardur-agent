@@ -69,6 +69,8 @@ impl From<String> for HookId {
 pub enum LifecyclePhase {
     /// Request admission, before the provider call (e.g. a missing cap-token).
     Submit,
+    /// Cost-gate reservation or finalization.
+    CostGate,
     /// The provider completion call itself.
     Provider,
     /// Minting the turn's receipt.

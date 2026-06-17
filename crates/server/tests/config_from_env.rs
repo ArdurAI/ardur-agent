@@ -33,6 +33,8 @@ const TOUCHED: &[&str] = &[
     "SLACK_APP_ID",
     "ARDUR_DATA_DIR",
     "ARDUR_BIND_ADDR",
+    "ARDUR_CHAT_BEARER_TOKENS",
+    "ARDUR_DEV_PERMISSIVE_POLICY",
     "ARDUR_MODEL",
     "ARDUR_COST_BUDGET_CENTS",
     "ARDUR_CEDAR_POLICY_PATH",
@@ -137,6 +139,9 @@ fn from_env_ollama_does_not_require_anthropic_key() {
     );
     // Sanity: the rest still resolved to their defaults.
     assert_eq!(config.model, "claude-opus-4-8");
+    assert_eq!(config.bind_addr, "127.0.0.1:3000");
+    assert!(config.chat_bearer_tokens.is_empty());
+    assert!(!config.dev_permissive_policy);
     assert_eq!(config.slack_app_id, "A0TEST");
 }
 
@@ -161,6 +166,22 @@ fn from_env_unknown_provider_does_not_require_anthropic_key() {
     let config =
         Config::from_env().expect("an unknown provider must not require an anthropic key here");
     assert_eq!(config.anthropic_api_key, "");
+}
+
+#[test]
+fn from_env_parses_chat_auth_tokens_and_dev_policy_flag() {
+    let _guard = env_lock();
+    let _env = CleanEnv::new().with_slack();
+    set("ARDUR_PROVIDER", "ollama");
+    set("ARDUR_CHAT_BEARER_TOKENS", "chat-a, chat-b ,chat-c");
+    set("ARDUR_DEV_PERMISSIVE_POLICY", "true");
+
+    let config = Config::from_env().expect("chat auth config parses");
+    assert_eq!(
+        config.chat_bearer_tokens,
+        vec!["chat-a", "chat-b", "chat-c"]
+    );
+    assert!(config.dev_permissive_policy);
 }
 
 #[test]
