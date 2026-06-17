@@ -78,6 +78,7 @@ impl Provider for MultiDeltaProvider {
             usage: Usage {
                 tokens_in: 5,
                 tokens_out: 7,
+                cost_cents: None,
             },
             cost: CostTuple::default(),
             raw_provider_response: None,
@@ -93,6 +94,7 @@ impl Provider for MultiDeltaProvider {
         events.push(StreamEvent::Usage(Usage {
             tokens_in: 5,
             tokens_out: 7,
+            cost_cents: None,
         }));
         events.push(StreamEvent::Finish(FinishReason::Stop));
         Ok(Box::pin(futures::stream::iter(events.into_iter().map(Ok))))
@@ -299,7 +301,8 @@ async fn fused_stream_forwards_content_deltas() {
         usages,
         vec![Usage {
             tokens_in: 5,
-            tokens_out: 7
+            tokens_out: 7,
+            cost_cents: None,
         }]
     );
 }

@@ -693,6 +693,7 @@ impl ChatCompletion {
                 let usage = Usage {
                     tokens_in: u.prompt_tokens,
                     tokens_out: u.completion_tokens,
+                    cost_cents: None,
                 };
                 (usage, dollars_to_cents(u.cost))
             }

@@ -376,5 +376,6 @@ fn ardur_usage(tokens_in: u32, tokens_out: u32) -> ardur_provider_runtime::Usage
     ardur_provider_runtime::Usage {
         tokens_in,
         tokens_out,
+        cost_cents: None,
     }
 }

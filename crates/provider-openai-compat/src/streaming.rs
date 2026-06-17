@@ -291,6 +291,7 @@ fn process_chunk(
         out.push_back(Ok(OpenAiCompatChunk::Usage(Usage {
             tokens_in: u.prompt_tokens,
             tokens_out: u.completion_tokens,
+            cost_cents: None,
         })));
     }
 }
@@ -651,7 +652,8 @@ mod tests {
             events,
             vec![OpenAiCompatChunk::Usage(Usage {
                 tokens_in: 11,
-                tokens_out: 4
+                tokens_out: 4,
+                cost_cents: None,
             })]
         );
     }
@@ -694,6 +696,7 @@ mod tests {
             OpenAiCompatChunk::Usage(Usage {
                 tokens_in: 3,
                 tokens_out: 1,
+                cost_cents: None,
             }),
             OpenAiCompatChunk::Done(FinishReason::Stop),
         ]);
@@ -703,7 +706,8 @@ mod tests {
                 StreamEvent::ContentDelta("hi".to_string()),
                 StreamEvent::Usage(Usage {
                     tokens_in: 3,
-                    tokens_out: 1
+                    tokens_out: 1,
+                    cost_cents: None,
                 }),
                 StreamEvent::Finish(FinishReason::Stop),
             ]

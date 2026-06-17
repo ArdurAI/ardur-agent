@@ -152,6 +152,8 @@ fn error_type(err: &ProviderError) -> &'static str {
         ProviderError::RateLimited { .. } => "RateLimited",
         ProviderError::InvalidRequest(_) => "InvalidRequest",
         ProviderError::ModelNotAvailable(_) => "ModelNotAvailable",
+        ProviderError::InvalidSelection(_) => "InvalidSelection",
+        ProviderError::UnknownProvider { .. } => "UnknownProvider",
         ProviderError::CostCeilingExceeded => "CostCeilingExceeded",
         ProviderError::Unauthorized => "Unauthorized",
         ProviderError::Upstream(_) => "Upstream",

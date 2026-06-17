@@ -144,6 +144,7 @@ impl Provider for FakeProvider {
             usage: Usage {
                 tokens_in: 11,
                 tokens_out: 7,
+                cost_cents: None,
             },
             cost: CostTuple::default(),
             raw_provider_response: None,

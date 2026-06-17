@@ -625,6 +625,7 @@ impl ChatResponse {
         let usage = Usage {
             tokens_in: self.prompt_eval_count,
             tokens_out: self.eval_count,
+            cost_cents: None,
         };
 
         let cost = CostTuple {
@@ -725,6 +726,7 @@ impl OllamaChatChunk {
         Usage {
             tokens_in: self.prompt_eval_count.unwrap_or(0),
             tokens_out: self.eval_count.unwrap_or(0),
+            cost_cents: None,
         }
     }
 
@@ -1085,7 +1087,8 @@ mod tests {
             done.usage(),
             Usage {
                 tokens_in: 9,
-                tokens_out: 4
+                tokens_out: 4,
+                cost_cents: None,
             }
         );
         assert!(matches!(done.finish_reason(), FinishReason::Stop));
@@ -1117,7 +1120,8 @@ mod tests {
                 StreamEvent::ContentDelta("hi".to_string()),
                 StreamEvent::Usage(Usage {
                     tokens_in: 9,
-                    tokens_out: 4
+                    tokens_out: 4,
+                    cost_cents: None,
                 }),
                 StreamEvent::Finish(FinishReason::Stop),
             ]
