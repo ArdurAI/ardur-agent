@@ -115,6 +115,46 @@ impl SessionJournal for FileSessionJournal {
         Ok(id)
     }
 
+    async fn len(&self) -> Result<u64, JournalError> {
+        Ok(self.state.lock().count)
+    }
+
+    async fn is_empty(&self) -> Result<bool, JournalError> {
+        Ok(self.state.lock().count == 0)
+    }
+
+    async fn truncate(&self, len: u64) -> Result<(), JournalError> {
+        let mut state = self.state.lock();
+        if len > state.count {
+            return Err(JournalError::EntryNotFound(EntryId(len)));
+        }
+        if len == state.count {
+            return Ok(());
+        }
+        state.handle.flush()?;
+        state.handle.sync_all()?;
+        let contents = match fs::read_to_string(&self.path) {
+            Ok(contents) => contents,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(JournalError::Io(e)),
+        };
+        let mut lines = contents
+            .lines()
+            .filter(|line| !line.is_empty())
+            .take(len as usize)
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !lines.is_empty() {
+            lines.push('\n');
+        }
+        state.handle.set_len(0)?;
+        state.handle.write_all(lines.as_bytes())?;
+        state.handle.flush()?;
+        state.handle.sync_all()?;
+        state.count = len;
+        Ok(())
+    }
+
     async fn replay(&self, session_id: SessionId) -> Result<Vec<JournalEntry>, JournalError> {
         if session_id != self.session_id {
             return Err(JournalError::SessionNotFound(session_id));
