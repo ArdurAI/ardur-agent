@@ -69,6 +69,66 @@ unless it targets loopback HTTP for local tests. The Ollama, Codex, and
 Claude-CLI backends need no credentials to wire — they fail later, per-turn, if
 the daemon/binary is unreachable or the CLI is not logged in.
 
+## Observability, health, metrics, and diagnostics
+
+Provider calls are wrapped once at the provider-runtime boundary with
+OpenTelemetry GenAI semantic-convention spans named `provider.send`. Both
+`complete()` and streaming `stream()` calls record:
+
+- `gen_ai.system` (provider id) and `gen_ai.operation.name=chat`
+- `gen_ai.request.model`, `gen_ai.request.temperature`, and
+  `gen_ai.request.max_tokens`
+- `gen_ai.response.model` (actual response model from the provider raw response
+  when present; otherwise the requested model)
+- `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, and the custom
+  `gen_ai.usage.cost_cents`
+- `gen_ai.response.finish_reasons` and `error.type` on failure paths
+
+Enable OTLP export from the CLI or server with:
+
+```sh
+ARDUR_OTEL_ENABLED=true \
+ARDUR_OTEL_ENDPOINT=http://localhost:4317 \
+ARDUR_OTEL_SERVICE_NAME=ardur-dev \
+ardur chat
+```
+
+The server also exposes operational HTTP endpoints:
+
+```sh
+# Readiness with dependency checks (data dir, journal dir, worker)
+curl http://127.0.0.1:3000/health
+
+# Prometheus text exposition. Counts only; token/key values are never emitted.
+curl http://127.0.0.1:3000/metrics
+
+# Redacted runtime inspection. Fails closed when no admin tokens are configured.
+export ARDUR_ADMIN_BEARER_TOKENS='dev-admin-token'
+curl -H 'Authorization: Bearer dev-admin-token' \
+  http://127.0.0.1:3000/admin/runtime
+```
+
+`/admin/runtime` reports cap-token posture (audience, gateway subject, TTL,
+tool-allowlist count), receipt count, cost-gate budget, and enabled surfaces.
+It never returns bearer tokens, Slack/Discord/Telegram credentials, API keys, or
+raw key material. `/metrics` similarly reports only counters/gauges and redacted
+counts such as `ardur_server_admin_bearer_tokens_configured`.
+
+The CLI has matching local diagnostics:
+
+```sh
+ardur config                         # redacted config summary
+ardur config set model claude-opus-4-8
+ardur logs --lines 50                # tails ~/.ardur/logs/ardur.log with secret fields redacted
+ardur debug                          # redacted state-dir snapshot (keys present, receipt count)
+ardur doctor                         # local checks; warns if no key but offline stub is usable
+ardur doctor --require-api-key        # fail if ANTHROPIC_API_KEY is missing
+```
+
+Sensitive keys (`api_key`, `token`, `secret`, `authorization`) are redacted when
+logs are tailed. Debug output reports only presence/counts and never file
+contents.
+
 ## Selecting a memory backend
 
 `ardur-server` picks its bi-temporal memory substrate at boot from the
