@@ -220,6 +220,8 @@ name = "ardur-admin"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "ardur-cap-token",
+ "ardur-cedar-policy",
  "ardur-memory-qdrant",
  "ardur-receipt",
  "ardur-session-journals",
@@ -237,6 +239,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

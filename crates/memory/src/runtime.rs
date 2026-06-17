@@ -95,6 +95,33 @@ pub trait MemoryRuntime {
         let _ = (query, top_k);
         Ok(Vec::new())
     }
+
+    /// Recall the `top_k` records most relevant to `query`, restricted to a
+    /// single holder/workspace.
+    ///
+    /// Backends with native subject filters should override this so cross-
+    /// workspace candidates are never fetched. The default uses [`search`] and
+    /// filters the returned records by subject, preserving isolation for simple
+    /// implementations.
+    ///
+    /// # Errors
+    /// Backend-specific failures from the recall path.
+    fn search_scoped(
+        &self,
+        subject: &HolderId,
+        query: &str,
+        top_k: usize,
+    ) -> Result<Vec<MemoryRecord>> {
+        if query.trim().is_empty() || top_k == 0 {
+            return Ok(Vec::new());
+        }
+        Ok(self
+            .search(query, top_k)?
+            .into_iter()
+            .filter(|r| &r.subject == subject)
+            .take(top_k)
+            .collect())
+    }
 }
 
 /// The Phase 1 in-process store: an append-only log behind an `RwLock`, with a
@@ -236,6 +263,103 @@ impl MemoryRuntime for InMemoryMemoryRuntime {
         store.by_subject.entry(subject).or_default().push(pos);
         Ok(())
     }
+
+    fn search(&self, query: &str, top_k: usize) -> Result<Vec<MemoryRecord>> {
+        if query.trim().is_empty() || top_k == 0 {
+            return Ok(Vec::new());
+        }
+        let store = self.inner.read();
+        Ok(search_records(store.records.iter(), query, top_k, None))
+    }
+
+    fn search_scoped(
+        &self,
+        subject: &HolderId,
+        query: &str,
+        top_k: usize,
+    ) -> Result<Vec<MemoryRecord>> {
+        if query.trim().is_empty() || top_k == 0 {
+            return Ok(Vec::new());
+        }
+        let store = self.inner.read();
+        let Some(positions) = store.by_subject.get(subject) else {
+            return Ok(Vec::new());
+        };
+        Ok(search_records(
+            positions.iter().map(|&p| &store.records[p]),
+            query,
+            top_k,
+            Some(subject),
+        ))
+    }
+}
+
+fn search_records<'a, I>(
+    records: I,
+    query: &str,
+    top_k: usize,
+    subject: Option<&HolderId>,
+) -> Vec<MemoryRecord>
+where
+    I: IntoIterator<Item = &'a MemoryRecord>,
+{
+    let terms = query_terms(query);
+    if terms.is_empty() || top_k == 0 {
+        return Vec::new();
+    }
+    let mut scored: Vec<(usize, UnixTsMillis, MemoryRecord)> = records
+        .into_iter()
+        .filter(|r| r.invalidation_time.is_none())
+        .filter(|r| subject.is_none_or(|s| &r.subject == s))
+        .filter_map(|r| {
+            let text = record_text(r);
+            let score = terms
+                .iter()
+                .filter(|term| text.contains(term.as_str()))
+                .count();
+            (score > 0).then(|| (score, r.recorded_at, r.clone()))
+        })
+        .collect();
+    scored.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| b.1.cmp(&a.1))
+            .then_with(|| a.2.record_id.cmp(&b.2.record_id))
+    });
+    scored.into_iter().take(top_k).map(|(_, _, r)| r).collect()
+}
+
+fn query_terms(query: &str) -> Vec<String> {
+    query
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_ascii_lowercase())
+        .collect()
+}
+
+fn record_text(rec: &MemoryRecord) -> String {
+    let mut parts = Vec::new();
+    if let Some(predicate) = rec
+        .payload
+        .get("predicate")
+        .and_then(serde_json::Value::as_str)
+    {
+        parts.push(predicate.to_string());
+    }
+    if let Some(object) = rec.payload.get("object") {
+        parts.push(match object {
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        });
+    }
+    if parts.is_empty() {
+        match &rec.payload {
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        }
+    } else {
+        parts.join(" ")
+    }
+    .to_ascii_lowercase()
 }
 
 #[cfg(test)]
@@ -243,12 +367,12 @@ mod tests {
     use super::*;
     use crate::types::RecordKind;
 
-    /// The §7.0c recall seam: the in-process store has no recall index, so it
-    /// inherits the trait's default `search`, which returns an empty `Vec`
-    /// regardless of what has been recorded — even for a query that exactly
-    /// matches a stored record's text. Only `HybridMemoryRetriever` overrides it.
+    /// The in-process store provides a deterministic lexical fallback for
+    /// offline/unit-test recall. Dense+sparse production recall is still owned by
+    /// `HybridMemoryRetriever`, but this path lets the turn pipeline and CLI
+    /// memory explorer work without Qdrant.
     #[test]
-    fn default_search_empty() {
+    fn in_memory_search_returns_lexical_hits() {
         let rt = InMemoryMemoryRuntime::new();
         rt.record(MemoryRecord::new(
             HolderId::from("user:search"),
@@ -263,11 +387,8 @@ mod tests {
 
         let hits = rt
             .search("oolong tea", 5)
-            .expect("default search never errors");
-        assert!(
-            hits.is_empty(),
-            "the default recall seam returns nothing, got {} records",
-            hits.len()
-        );
+            .expect("in-memory search never errors");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].subject, HolderId::from("user:search"));
     }
 }

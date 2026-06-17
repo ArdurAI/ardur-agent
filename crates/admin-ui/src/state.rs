@@ -3,6 +3,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use ardur_cap_token::VerifiedClaims;
+use ardur_cedar_policy::CedarPolicyBundle;
 use qdrant_client::Qdrant;
 
 use crate::auth::BasicAuth;
@@ -36,6 +38,10 @@ pub struct AppState {
     pub memory: Option<MemorySource>,
     /// Required HTTP Basic credentials, if the operator configured a gate.
     pub basic_auth: Option<BasicAuth>,
+    /// Verified active cap-token grants displayed by the capability wallet.
+    pub capabilities: Vec<VerifiedClaims>,
+    /// Cedar policy bundle used by the policy debugger.
+    pub policies: Option<CedarPolicyBundle>,
 }
 
 impl AppState {
@@ -47,6 +53,8 @@ impl AppState {
             receipt_store: receipt_store.into(),
             memory: None,
             basic_auth: None,
+            capabilities: Vec::new(),
+            policies: None,
         }
     }
 
@@ -61,6 +69,20 @@ impl AppState {
     #[must_use]
     pub fn with_basic_auth(mut self, auth: BasicAuth) -> Self {
         self.basic_auth = Some(auth);
+        self
+    }
+
+    /// Attach verified capability grants for the wallet view.
+    #[must_use]
+    pub fn with_capabilities(mut self, capabilities: Vec<VerifiedClaims>) -> Self {
+        self.capabilities = capabilities;
+        self
+    }
+
+    /// Attach a Cedar policy bundle for policy-debugger traces.
+    #[must_use]
+    pub fn with_policies(mut self, policies: CedarPolicyBundle) -> Self {
+        self.policies = Some(policies);
         self
     }
 

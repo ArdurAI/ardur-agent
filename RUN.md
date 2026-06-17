@@ -122,11 +122,29 @@ is meaningless).
 
 `HybridMemoryRetriever` (in `ardur-memory-qdrant`) layers **dense** vector search
 and **sparse** BM25 lexical search over the same store and fuses them with
-reciprocal-rank fusion — see that crate's `README.md`. As of §7.0c the server's
-`ARDUR_MEMORY` seam selects it directly (`ARDUR_MEMORY=hybrid`): it implements the
-same `MemoryRuntime`, additionally overriding `MemoryRuntime::search` with the
-fused recall (the in-process and bare-durable backends return nothing from
-`search`).
+reciprocal-rank fusion — see that crate's `README.md`. As of EPIC-TRUST the
+turn path calls `MemoryRuntime::search_scoped` after cap-token verification and
+Cedar authorization, then injects matching memory cards into the provider
+request. The hybrid backend implements that seam with dense+sparse recall and a
+subject/workspace filter; the in-process backend provides a deterministic
+lexical fallback for local/offline runs.
+
+### CLI memory explorer
+
+Interactive `ardur chat` sessions expose a scoped memory explorer. The commands
+operate only on the verified session holder's memory view and show provenance,
+confidence, validity, TTL, and receipt ids when present:
+
+```text
+/memory list          # list current memory cards for this holder
+/memory list --json   # export cards as JSON
+/memory show <id>     # show one card with full payload/provenance
+/memory forget <id>   # append a receipt-linked tombstone for the card
+```
+
+Writes made by the fused turn path are receipt-chained (`source_receipt_id` is
+set to the turn receipt). `forget` is append-only: the original card remains in
+history, and a tombstone/invalidation row carries the receipt linkage forward.
 
 ## Slack app setup
 
@@ -566,6 +584,28 @@ process.
   treat its port like the data directory and keep it on a trusted/private
   network behind your own auth.
 
+  Trust Center APIs are exposed under `/api/trust/*` on the same read-only
+  server:
+
+  ```sh
+  # Capability Wallet: active verified grants, tool allowlists, expiry, budget,
+  # and a read-only revoke-button affordance for operators.
+  curl -sS http://localhost:8090/api/trust/wallet
+
+  # Receipt Explorer: verify the on-disk parent-hash chain.
+  curl -sS http://localhost:8090/api/trust/receipts/verify
+
+  # Policy Debugger: explain Cedar allow/deny/indeterminate with matched policy ids.
+  curl -sG http://localhost:8090/api/trust/policy/debug \
+    --data-urlencode 'principal=User::"alice"' \
+    --data-urlencode 'action=Action::"Submit"' \
+    --data-urlencode 'resource=Session::"s1"'
+  ```
+
+  `ardur-admin` remains read-only: wallet revocation is shown as an operator
+  affordance, while actual cap-token revocation still flows through the runtime
+  deny-list API.
+
 - **`ardur-eval`** (`crates/eval-harness`) — a CLI that POSTs scenario files
   to a server chat endpoint and grades the results, emitting `json`, `junit`,
   or `markdown`:
@@ -579,6 +619,28 @@ process.
   It targets the `POST <server-url>/chat` JSON contract that `ardur-server`
   now exposes (see [HTTP endpoints](#http-endpoints)). The path is overridable
   with `--chat-path` if you front the server with a different route.
+
+## Closed learning loop
+
+`ardur-automation::learning` implements the closed self-improvement loop. A
+scheduled job supplies already-verified cap-token claims and a Cedar policy
+bundle, reads the past N sessions for one workspace, normalizes/merges duplicate
+patterns, and writes structured playbook proposals. The job requires:
+
+- cap-token tool grant `learning.dream`;
+- Cedar allow for action `Action::"LearningDream"` on the workspace resource;
+- human approval before any proposal can transition from
+  `PendingHumanApproval` to `Approved`.
+
+The generated proposals are receipt-style hash chained (`parent_hash` points to
+`SHA256(previous proposal)`), so a later approval/audit can prove ordering.
+Useful checks while developing the loop:
+
+```sh
+cargo test -p ardur-automation learning
+cargo test -p ardur-fused-runtime --test receipt_atomic_commit
+cargo test -p ardur-fused-runtime --test memory_recall
+```
 
 ## Cost ceilings
 
@@ -609,17 +671,11 @@ error to the channel before the next provider call when the ceiling is hit.
 Open tickets that an operator should know about before depending on this
 deployment for anything sensitive:
 
-- **ARD-17** — Orphan-receipt durability: the two-phase commit between
-  journal append and receipt sign is still single-phase. A crash in the
-  window can leave an orphan receipt.
-- **ARD-19** — Runtime ↔ memory wiring is still partial; some recall paths
-  bypass the bi-temporal store. The durable Qdrant memory backend
-  (`ARDUR_MEMORY=qdrant`) persists writes across restarts and now embeds records
-  with a real local model (`EMBED_MODEL`), and `HybridMemoryRetriever` adds fused
-  dense + sparse recall — but the runtime's recall side does not yet call the
-  hybrid surface, so semantic recall is not wired into the turn path.
 - **ARD-21** — Dependabot triage queue is unmanaged; pin reviews land
   ad-hoc.
 
-Until ARD-17 and ARD-19 land, this is **dev fidelity**, not **production**.
-Use it in a private Slack channel first.
+EPIC-TRUST closes the ARD-17/ARD-19 trust-substrate gaps: receipt and journal
+commit are atomic from the runtime's perspective, boot verifies persisted chain
+integrity, orphan reconciliation remains available, and scoped hybrid memory
+recall is wired into the turn path after cap-token and Cedar enforcement. This
+is still **dev fidelity**, not **production**; use it in a private channel first.

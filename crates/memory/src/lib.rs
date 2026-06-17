@@ -26,5 +26,6 @@ mod types;
 pub use error::{MemoryError, Result};
 pub use runtime::{InMemoryMemoryRuntime, MemoryRuntime};
 pub use types::{
-    HolderId, InvalidationReason, MemoryRecord, ReceiptId, RecordId, RecordKind, UnixTsMillis,
+    HolderId, InvalidationReason, MemoryCard, MemoryRecord, ReceiptId, RecordId, RecordKind,
+    UnixTsMillis,
 };
