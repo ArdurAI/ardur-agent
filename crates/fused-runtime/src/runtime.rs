@@ -29,7 +29,7 @@ use ardur_lifecycle_hooks::{
     ErrorCtx, HookError, HookRegistry, LifecyclePhase, PostReceiptCtx, PreSubmitCtx,
     PreSubmitOutcome, RevokeCtx,
 };
-use ardur_memory::MemoryRuntime;
+use ardur_memory::{HolderId as MemoryHolderId, MemoryCard, MemoryRuntime};
 use ardur_provider_runtime::{
     CompletionRequest, CompletionResponse, FinishReason, ModelId, Provider, ProviderError,
     StreamEvent, ToolDef, Usage,
@@ -491,6 +491,135 @@ impl FusedRuntime {
         }
     }
 
+    /// Recall memories for the verified cap-token subject and inject them as a
+    /// system context block before provider dispatch.
+    ///
+    /// This runs only after cap-token verification and Cedar authorization have
+    /// succeeded, so memory reads inherit the same security gate as the turn. The
+    /// search itself is subject-scoped; a backend bug that returns another
+    /// workspace's record is filtered by the memory runtime before this formatter
+    /// can see it.
+    fn inject_recalled_memories(
+        &self,
+        mut request: CompletionRequest,
+        claims: &VerifiedClaims,
+    ) -> Result<CompletionRequest, RuntimeError> {
+        let Some(memory) = &self.memory else {
+            return Ok(request);
+        };
+        let Some(query) = request
+            .messages
+            .iter()
+            .rev()
+            .find(|m| matches!(m.role, Role::User))
+            .map(|m| m.content.as_str())
+        else {
+            return Ok(request);
+        };
+        if query.trim().is_empty() {
+            return Ok(request);
+        }
+        let subject = MemoryHolderId(claims.subject.0.clone());
+        let hits = memory
+            .search_scoped(&subject, query, 5)
+            .map_err(|e| RuntimeError::Internal(anyhow::anyhow!("memory recall failed: {e}")))?;
+        if hits.is_empty() {
+            return Ok(request);
+        }
+
+        let mut block = format!(
+            "Relevant memories (scoped to verified subject {}):\n",
+            claims.subject.0
+        );
+        for rec in hits {
+            let card = MemoryCard::from_record(&rec);
+            let receipt = card
+                .receipt_id
+                .map(|r| r.0.to_string())
+                .unwrap_or_else(|| "unreceipted".to_string());
+            let source = card.source.unwrap_or_else(|| "unknown".to_string());
+            let scope = card.scope.unwrap_or_else(|| card.subject.0.clone());
+            let confidence = card
+                .confidence
+                .map(|c| format!("{c:.2}"))
+                .unwrap_or_else(|| "unknown".to_string());
+            block.push_str(&format!(
+                "- id={} source={} scope={} confidence={} receipt={} valid_from={}: {}\n",
+                card.record_id,
+                source,
+                scope,
+                confidence,
+                receipt,
+                card.valid_from.0,
+                memory_payload_text(&card.payload)
+            ));
+        }
+        request.messages.insert(0, ChatMessage::system(block));
+        Ok(request)
+    }
+
+    async fn commit_receipt_and_journal(
+        &self,
+        _session_id: SessionId,
+        iteration: u32,
+        req: &SubmitRequest,
+        response: &CompletionResponse,
+        signed: &ardur_receipt::SignedReceipt,
+        now_ms: u64,
+    ) -> Result<ReceiptBody, RuntimeError> {
+        let receipt = signed.body().clone();
+        let mut assistant_entry: Option<ardur_session_journals::EntryId> = None;
+
+        if let Some(journal) = &self.journal {
+            if iteration == 1 {
+                if let Some(prompt) = last_user_message(&req.messages) {
+                    journal
+                        .append(JournalEntry::UserMessage {
+                            content: prompt.to_string(),
+                            at: now_ms,
+                        })
+                        .await
+                        .map_err(|e| {
+                            RuntimeError::Internal(anyhow::anyhow!(
+                                "journal user append failed before receipt commit: {e}"
+                            ))
+                        })?;
+                }
+            }
+            assistant_entry = Some(
+                journal
+                    .append(JournalEntry::AssistantMessage {
+                        content: response.content.clone(),
+                        at: now_ms,
+                        receipt_id: ReceiptId(receipt.receipt_id),
+                    })
+                    .await
+                    .map_err(|e| {
+                        RuntimeError::Internal(anyhow::anyhow!(
+                            "journal assistant append failed before receipt commit: {e}"
+                        ))
+                    })?,
+            );
+        }
+
+        if let Err(e) = self.persist_receipt(signed.jws_compact()) {
+            if let (Some(journal), Some(target_entry_id)) = (&self.journal, assistant_entry) {
+                let _ = journal
+                    .append(JournalEntry::Invalidation {
+                        target_entry_id,
+                        reason: format!("receipt commit failed after journal append: {e}"),
+                        at: now_ms,
+                    })
+                    .await;
+            }
+            return Err(RuntimeError::Internal(anyhow::anyhow!(
+                "receipt persist failed after journal append: {e}"
+            )));
+        }
+        *self.chain_tail.lock() = Some(Sha256Digest::of(signed.jws_compact().as_bytes()));
+        Ok(receipt)
+    }
+
     /// Append a signed receipt's compact JWS to the durable receipt log
     /// (one line, fsynced), if a log path is configured.
     fn persist_receipt(&self, jws_compact: &str) -> std::io::Result<()> {
@@ -787,6 +916,14 @@ impl FusedRuntime {
             Ok(request) => request,
             Err(err) => return Err(err),
         };
+        let initial = match self.inject_recalled_memories(initial, &claims) {
+            Ok(request) => request,
+            Err(err) => {
+                self.fire_error(session_id, LifecyclePhase::MemoryWrite, &err)
+                    .await;
+                return Err(err);
+            }
+        };
 
         // The working transcript the loop grows with each tool round trip, plus
         // the request knobs (a hook may have rewritten temperature / stops) that
@@ -999,17 +1136,18 @@ impl FusedRuntime {
                     )));
                 }
             };
-            let chain_hash = Sha256Digest::of(signed.jws_compact().as_bytes());
-            if let Err(e) = self.persist_receipt(signed.jws_compact()) {
-                self.release(reservation).await;
-                self.fire_error(session_id, LifecyclePhase::Receipt, &e)
-                    .await;
-                return Err(RuntimeError::Internal(anyhow::anyhow!(
-                    "receipt persistence failed: {e}"
-                )));
-            }
-            *self.chain_tail.lock() = Some(chain_hash);
-            let receipt = signed.body().clone();
+            let receipt = match self
+                .commit_receipt_and_journal(session_id, iteration, &req, &response, &signed, now_ms)
+                .await
+            {
+                Ok(receipt) => receipt,
+                Err(err) => {
+                    self.release(reservation).await;
+                    self.fire_error(session_id, LifecyclePhase::Receipt, &err)
+                        .await;
+                    return Err(err);
+                }
+            };
 
             // 7. post-receipt hooks (observational; the call already happened).
             let post_ctx = PostReceiptCtx {
@@ -1045,35 +1183,9 @@ impl FusedRuntime {
                 }
             }
 
-            // 10. session-journal: append the original user prompt once (on the
-            //     first iteration) and this round's assistant message. Non-fatal.
-            if let Some(journal) = &self.journal {
-                if iteration == 1 {
-                    if let Some(prompt) = last_user_message(&req.messages) {
-                        if let Err(e) = journal
-                            .append(JournalEntry::UserMessage {
-                                content: prompt.to_string(),
-                                at: now_ms,
-                            })
-                            .await
-                        {
-                            self.fire_error(session_id, LifecyclePhase::JournalAppend, &e)
-                                .await;
-                        }
-                    }
-                }
-                if let Err(e) = journal
-                    .append(JournalEntry::AssistantMessage {
-                        content: response.content.clone(),
-                        at: now_ms,
-                        receipt_id: ReceiptId(receipt.receipt_id),
-                    })
-                    .await
-                {
-                    self.fire_error(session_id, LifecyclePhase::JournalAppend, &e)
-                        .await;
-                }
-            }
+            // 10. session-journal + receipt were committed atomically before
+            //     post-receipt hooks/finalize/memory, so no separate journal append
+            //     runs here.
 
             total_cost = add_cost(total_cost, &combined_cost);
 
@@ -1208,6 +1320,14 @@ impl FusedRuntime {
             let initial = match self.stage_pre_submit(&req, tool_defs.clone()).await {
                 Ok(request) => request,
                 Err(err) => {
+                    Err(err)?;
+                    unreachable!()
+                }
+            };
+            let initial = match self.inject_recalled_memories(initial, &claims) {
+                Ok(request) => request,
+                Err(err) => {
+                    self.fire_error(session_id, LifecyclePhase::MemoryWrite, &err).await;
                     Err(err)?;
                     unreachable!()
                 }
@@ -1753,6 +1873,9 @@ fn turn_record(
         serde_json::json!({
             "response": response.content,
             "receipt_id": receipt.receipt_id,
+            "source": "turn",
+            "workspace_id": subject,
+            "confidence": 1.0,
         }),
         now,
         now,
@@ -1761,6 +1884,20 @@ fn turn_record(
     );
     record.source_receipt_id = Some(ardur_memory::ReceiptId(receipt.receipt_id));
     record
+}
+
+/// Render a memory payload into a compact context string.
+fn memory_payload_text(payload: &serde_json::Value) -> String {
+    if let Some(object) = payload.get("object") {
+        return match object {
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+    }
+    match payload {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
 }
 
 /// The most recent user message in a transcript — the prompt journaled for the

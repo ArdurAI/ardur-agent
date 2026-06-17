@@ -2,7 +2,8 @@
 //!
 //! Kill a turn *mid-flight*, restart over the same on-disk state, replay, and
 //! assert the receipt chain stays internally linkable across the crash — while
-//! documenting, not papering over, the durability gap the crash exposes.
+//! proving EPIC-TRUST's atomic journal+receipt commit closes the old orphan
+//! receipt window.
 //!
 //! # What the journal actually logs per turn (read first, designed around)
 //!
@@ -23,37 +24,16 @@
 //! meaningful crash-safety question is therefore the one the brief flags as the
 //! *critical security property*: **can a crash leave an orphan receipt?**
 //!
-//! # The durability gap this test proves (and does NOT fake away)
+//! # The durability gap this test used to prove
 //!
 //! Stage ordering matters. Per turn:
 //!
-//! - **Stage 6** mints the receipt, advances the in-memory chain tail, and
-//!   `persist_receipt` appends the compact JWS to the receipt log **with an
-//!   `fsync` (`sync_all`)** — the receipt is durable here.
-//! - **Stage 8** finalizes the cost reservation (refunds `reserved − actual`).
-//! - **Stage 10** appends the journal entries (each fsynced), and is documented
-//!   **non-fatal** — a journal append that errors is routed to `on_error` and
-//!   the turn still returns `Ok`.
-//!
-//! A crash (or even a transient journal I/O error, given stage 10 is non-fatal)
-//! in the window **after stage 6 and before stage 10 completes** leaves the
-//! turn's receipt durably in the chain with **no journal `AssistantMessage`
-//! referencing its `receipt_id`** — an *orphan receipt*. The receipt chain
-//! itself stays hash-linkable (`verify_persisted_chain` passes; a later turn
-//! chains onto the orphan's JWS with no `parent_hash` divergence), but the
-//! journal under-counts turns relative to the receipt log, permanently.
-//!
-//! **This is a real Phase-3 durability gap**: the receipt log and the session
-//! journal are two independent append-only stores committed in sequence, not
-//! atomically, with the receipt committed strictly first. This test first
-//! asserts what the pipeline does on such a crash (an orphan receipt survives),
-//! then exercises the **ARD-17 remediation**: a fresh runtime's boot-time
-//! [`reconcile_receipts`](ardur_fused_runtime::FusedRuntime::reconcile_receipts)
-//! sweep detects the orphan and heals the journal (default
-//! `AppendSyntheticJournal` strategy), so the "exactly one orphan" assertion of
-//! the pre-fix world **inverts to zero orphans** once reconciliation runs. The
-//! receipt chain — the source of truth — is left untouched; only the derived
-//! journal view is repaired, with a visible recovery entry.
+//! EPIC-TRUST moved receipt persistence behind a commit helper that first proves
+//! the journal entries can be appended and only then persists the receipt and
+//! advances the chain tail. Therefore the same crash at the first journal append
+//! for turn three must now leave **neither** a journal entry **nor** a receipt.
+//! Boot reconciliation still runs, but it should report `NoOrphans` because the
+//! receipt log never got ahead of the journal.
 //!
 //! # Crash-simulation approach (highest fidelity available)
 //!
@@ -105,8 +85,8 @@ use support::EchoProvider;
 /// The 0-based journal-append index at which the simulated crash fires. Each
 /// clean turn appends two entries (user + assistant), so turns one and two
 /// consume appends 0..=3 and the third turn's *first* append is index 4 — the
-/// moment to die, with that turn's receipt already minted, persisted, and
-/// fsynced one stage earlier.
+/// moment to die. Under EPIC-TRUST this happens before receipt persistence, so
+/// the crashed turn rolls back cleanly from durable state.
 const CRASH_AT_APPEND: u64 = 4;
 
 /// A [`SessionJournal`] decorator that delegates every call to an inner
@@ -271,24 +251,27 @@ async fn journal_mid_turn_crash_orphan_receipt_is_reconciled_at_boot() {
 
             // ---- On-disk state immediately after the crash. ----
 
-            // The third turn's receipt IS durable — persisted+fsynced at stage 6,
-            // before the stage-10 crash.
+            // EPIC-TRUST atomic commit: the crash fires before the journal append
+            // can complete, and the receipt is not persisted until the journal
+            // append succeeds. Durable state therefore remains exactly the two
+            // clean pre-crash turns.
             let chain = load_persisted_chain(&receipt_log).expect("chain reloads post-crash");
             assert_eq!(
                 chain.len(),
-                3,
-                "turn three's receipt survived the crash (stage 6 precedes the journal)"
+                2,
+                "turn three left no durable receipt because journal+receipt commit is atomic"
             );
             verify_persisted_chain(&chain)
                 .expect("the receipt chain is still internally linkable after the crash");
             assert_eq!(
-                chain[2].body.parent_hash,
-                Some(pre_crash_tail),
-                "turn three's receipt chained onto the pre-crash tail before the crash"
+                Sha256Digest::of(chain[1].jws_compact.as_bytes()),
+                pre_crash_tail,
+                "the pre-crash chain tail is unchanged"
             );
 
-            // The journal did NOT record turn three — its append is exactly where
-            // we died. The file is byte-for-byte what it was before the crash.
+            // The journal also did NOT record turn three — its append is exactly
+            // where we died. The file is byte-for-byte what it was before the
+            // crash.
             let replayed = crashing
                 .replay(session_id)
                 .await
@@ -311,7 +294,7 @@ async fn journal_mid_turn_crash_orphan_receipt_is_reconciled_at_boot() {
                 "not one byte was appended to the journal for the crashed turn"
             );
 
-            // THE GAP: 3 receipts on disk, only 2 turns journaled → 1 orphan.
+            // No gap: 2 receipts on disk, 2 turns journaled → 0 orphans.
             let journaled = journaled_receipt_ids(&replayed);
             assert_eq!(journaled.len(), 2, "the journal accounts for two turns");
             let orphans = chain
@@ -319,35 +302,19 @@ async fn journal_mid_turn_crash_orphan_receipt_is_reconciled_at_boot() {
                 .filter(|r| !journaled.contains(&r.body.receipt_id))
                 .count();
             assert_eq!(
-                orphans, 1,
-                "turn three's receipt is an orphan: durable in the chain, absent from the journal"
+                orphans, 0,
+                "atomic commit prevents the old durable-receipt/no-journal orphan"
             );
 
-            // No leaked cost reservation: stage 8 finalized turn three's hold
-            // BEFORE the stage-10 crash, so the budget is whole. (EchoProvider
-            // bills zero, so every reserved-then-finalized turn nets to zero and
-            // the balance returns to its provisioned value; a stranded hold would
-            // show the envelope still deducted.)
-            let remaining = runtime_a
-                .remaining_budget(&fixtures::gate_holder())
-                .await
-                .expect("the holder's budget is readable");
-            assert_eq!(
-                remaining.cents, 1_000_000,
-                "turn three's reservation was finalized, not stranded — no leaked budget"
-            );
+            // The in-process Runtime A just panicked while holding an admission
+            // reservation, so its in-memory budget is not inspected here. A real
+            // process death drops that volatile reservation; Runtime B below
+            // restarts from the durable receipt+journal state.
         })
         .await;
 
-    // ---- 3. Runtime B over the SAME paths: replay, prove the gap, then
-    //         RECONCILE it away (ARD-17). ----
-    //
-    // A real boot would call `FusedRuntimeBuilder::build_reconciled().await` to
-    // build-and-heal in one step; here we build, *prove the pre-reconciliation
-    // orphan still exists* (the durability gap this scenario documents), and
-    // then call `reconcile_receipts` explicitly so the recovery is legible as
-    // its own step. The builder's default strategy is `AppendSyntheticJournal`,
-    // so no strategy is set.
+    // ---- 3. Runtime B over the SAME paths: replay, prove no durable gap, then
+    //         run reconciliation as a no-op. ----
     let provider_b = Arc::new(EchoProvider::new());
     let journal_b =
         Arc::new(FileSessionJournal::new(root.path(), session_id).expect("journal B reopens"));
@@ -360,7 +327,11 @@ async fn journal_mid_turn_crash_orphan_receipt_is_reconciled_at_boot() {
     // The two clean turns are intact in BOTH stores, and cross-reference: each
     // journaled assistant entry names a receipt that is actually in the chain.
     let chain = load_persisted_chain(&receipt_log).expect("chain loads on restart");
-    assert_eq!(chain.len(), 3, "restart sees the three persisted receipts");
+    assert_eq!(
+        chain.len(),
+        2,
+        "restart sees only the two committed receipts"
+    );
     verify_persisted_chain(&chain).expect("the chain verifies on restart");
 
     let replayed = journal_b
@@ -374,42 +345,34 @@ async fn journal_mid_turn_crash_orphan_receipt_is_reconciled_at_boot() {
         vec![chain[0].body.receipt_id, chain[1].body.receipt_id],
         "the journaled turns reference receipts one and two, in order"
     );
+    let orphans = chain
+        .iter()
+        .filter(|r| !journaled.contains(&r.body.receipt_id))
+        .count();
+    assert_eq!(orphans, 0, "restart has no orphan receipts to heal");
 
-    // PRE-RECONCILIATION: the orphan survives the restart — turn three's receipt
-    // is in the chain but no journal entry accounts for it. This is the gap.
-    let orphan_id = chain[2].body.receipt_id;
-    assert!(
-        !journaled.contains(&orphan_id),
-        "turn three's receipt is an orphan at boot — the journal never recorded it"
-    );
-
-    // ---- ARD-17 reconciliation sweep. The "exactly one orphan" assertion of
-    //      the pre-fix world now INVERTS: after the sweep, the journal accounts
-    //      for turn three's receipt too, so zero orphans remain. The durable
-    //      receipt chain is left untouched (it is the source of truth); only the
-    //      journal is healed, with a *visible* recovery entry.
+    // ---- ARD-17 reconciliation sweep. With atomic commit there is nothing to
+    //      repair: the receipt log never got ahead of the journal.
     let report = runtime_b
         .reconcile_receipts(false)
         .await
         .expect("reconciliation succeeds at boot");
-    assert_eq!(report.receipt_count, 3);
-    assert_eq!(
-        report.orphan_receipt_ids,
-        vec![orphan_id],
-        "the sweep detects exactly the turn-three orphan"
+    assert_eq!(report.receipt_count, 2);
+    assert!(
+        report.orphan_receipt_ids.is_empty(),
+        "no turn-three receipt exists to be orphaned"
     );
     assert_eq!(
         report.action,
-        ReconciliationAction::AppendedSyntheticJournal { count: 1 },
-        "the default strategy heals the journal rather than destroying the receipt"
+        ReconciliationAction::NoOrphans,
+        "atomic commit makes boot reconciliation a no-op"
     );
 
-    // The receipt chain is unchanged; the journal gained one recovery entry that
-    // closes the gap — zero orphans now.
+    // The receipt chain and journal are unchanged by the no-op reconciliation.
     let chain = load_persisted_chain(&receipt_log).expect("chain reloads post-reconcile");
     assert_eq!(
         chain.len(),
-        3,
+        2,
         "reconciliation did not touch the receipt log"
     );
     let replayed = journal_b
@@ -418,8 +381,8 @@ async fn journal_mid_turn_crash_orphan_receipt_is_reconciled_at_boot() {
         .expect("journal B replays post-reconcile");
     assert_eq!(
         replayed.len(),
-        5,
-        "two clean turns (4 entries) + one recovery entry for the orphan"
+        4,
+        "two clean turns remain the whole journal after no-op reconciliation"
     );
     let journaled = journaled_receipt_ids(&replayed);
     let orphans = chain
@@ -428,10 +391,10 @@ async fn journal_mid_turn_crash_orphan_receipt_is_reconciled_at_boot() {
         .count();
     assert_eq!(
         orphans, 0,
-        "ZERO orphans after reconciliation — turn three's receipt is now journaled (the inversion)"
+        "ZERO orphans after reconciliation — no synthetic recovery needed"
     );
 
-    // ---- 4. A fourth turn recovers cleanly, chaining onto turn three's JWS. ----
+    // ---- 4. A fourth turn recovers cleanly, chaining onto turn two's JWS. ----
     runtime_b
         .submit(request("turn four"))
         .await
@@ -441,29 +404,28 @@ async fn journal_mid_turn_crash_orphan_receipt_is_reconciled_at_boot() {
     let chain = load_persisted_chain(&receipt_log).expect("chain reloads after turn four");
     assert_eq!(
         chain.len(),
-        4,
+        3,
         "the restart appended, not restarted, the chain"
     );
     assert!(chain[0].body.parent_hash.is_none(), "genesis unchanged");
     assert_eq!(
-        chain[3].body.parent_hash,
-        Some(Sha256Digest::of(chain[2].jws_compact.as_bytes())),
-        "turn four chains onto the (now-reconciled) turn-three receipt — no parent_hash divergence"
+        chain[2].body.parent_hash,
+        Some(Sha256Digest::of(chain[1].jws_compact.as_bytes())),
+        "turn four chains onto turn two's receipt — the crashed turn left no receipt gap"
     );
     verify_persisted_chain(&chain)
-        .expect("the full four-receipt chain verifies across the restart");
+        .expect("the full three-receipt chain verifies across the restart");
 
-    // The journal now accounts for ALL four receipts: turns one, two, four, and
-    // the recovered turn three. The receipt log (4) and the journaled turns (4)
-    // agree — the gap is closed, permanently.
+    // The journal now accounts for all three durable receipts: turns one, two,
+    // and four. The crashed turn did not produce durable commit artifacts.
     let replayed = journal_b
         .replay(session_id)
         .await
         .expect("journal B replays after turn four");
     assert_eq!(
         replayed.len(),
-        7,
-        "4 clean-turn entries + 1 recovery entry + 2 for turn four"
+        6,
+        "2 clean-turn entries + 2 for turn two + 2 for turn four"
     );
     let journaled = journaled_receipt_ids(&replayed);
     let orphans = chain
@@ -473,10 +435,6 @@ async fn journal_mid_turn_crash_orphan_receipt_is_reconciled_at_boot() {
     assert_eq!(
         orphans, 0,
         "zero orphans remain: every receipt in the chain is accounted for by the journal"
-    );
-    assert!(
-        journaled.contains(&orphan_id),
-        "the once-orphaned turn-three receipt stays accounted for after the fourth turn"
     );
 
     drop(root);

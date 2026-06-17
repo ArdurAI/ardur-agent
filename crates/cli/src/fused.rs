@@ -37,7 +37,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use ardur_cap_token::{CapScope, CapTokenIssuer, HolderId as CapHolderId};
 use ardur_cost_gate::{CostEnvelope, CostTuple as GateCostTuple, HolderId as GateHolderId};
 use ardur_fused_runtime::FusedRuntimeBuilder;
-use ardur_memory::InMemoryMemoryRuntime;
+use ardur_memory::{
+    HolderId as MemoryHolderId, InMemoryMemoryRuntime, InvalidationReason, MemoryCard,
+    MemoryRuntime, RecordId, UnixTsMillis,
+};
 use ardur_provider_runtime::{
     AnthropicProvider, CompletionRequest, InstrumentedProvider, ModelId, Provider,
 };
@@ -80,6 +83,7 @@ pub struct FusedEngine {
     model: ModelId,
     cap_token: CapTokenRef,
     holder: GateHolderId,
+    memory: Arc<InMemoryMemoryRuntime>,
     session_id: SessionId,
     remaining: Arc<AtomicU64>,
     offline: bool,
@@ -173,7 +177,7 @@ impl FusedEngine {
         // TODO §7.0: no file-backed `MemoryRuntime` exists yet, so the bi-temporal
         // memory sink is in-process for now (the `~/.ardur/memory/` dir is created
         // for the persistent store that replaces this).
-        let memory = InMemoryMemoryRuntime::new();
+        let memory = Arc::new(InMemoryMemoryRuntime::new());
 
         let runtime =
             FusedRuntimeBuilder::new(cap_root, policies, provider, receipt_key, model.clone())
@@ -190,7 +194,7 @@ impl FusedEngine {
                     },
                 )
                 .projected_envelope(envelope)
-                .with_memory(Arc::new(memory))
+                .with_memory(memory.clone())
                 .with_journal(Arc::new(journal))
                 .receipt_log(dirs.receipt_log())
                 .build()
@@ -202,6 +206,7 @@ impl FusedEngine {
             model,
             cap_token,
             holder,
+            memory,
             session_id,
             remaining: Arc::new(AtomicU64::new(budget_cents)),
             offline,
@@ -246,6 +251,88 @@ impl FusedEngine {
     #[must_use]
     pub fn should_stream(&self) -> bool {
         !self.offline && self.provider.supports_streaming()
+    }
+
+    /// Run a `/memory ...` explorer command against this session's scoped memory.
+    #[must_use]
+    pub fn memory_command(&self, args: &str) -> String {
+        Self::memory_command_on(&self.memory, &self.holder.0, args, now_ms())
+    }
+
+    /// Pure helper for the CLI memory explorer. Kept public so integration tests
+    /// can exercise CRUD, workspace isolation, and export formatting without
+    /// booting providers or touching `~/.ardur`.
+    #[must_use]
+    pub fn memory_command_on(
+        memory: &Arc<InMemoryMemoryRuntime>,
+        subject: &str,
+        args: &str,
+        now_ms: u64,
+    ) -> String {
+        let mut parts = args.split_whitespace();
+        let command = parts.next().unwrap_or("list");
+        let rest: Vec<&str> = parts.collect();
+        let holder = MemoryHolderId(subject.to_string());
+        match command {
+            "" | "list" => {
+                let cards: Vec<MemoryCard> = memory
+                    .current_as_of(&holder, UnixTsMillis(now_ms))
+                    .into_iter()
+                    .map(|rec| MemoryCard::from_record(&rec))
+                    .collect();
+                if rest
+                    .iter()
+                    .any(|arg| matches!(*arg, "--json" | "--export=json"))
+                {
+                    return serde_json::to_string_pretty(&cards)
+                        .unwrap_or_else(|e| format!("memory export error: {e}"));
+                }
+                if cards.is_empty() {
+                    return "memory: no current cards".to_string();
+                }
+                cards
+                    .iter()
+                    .map(memory_card_line)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+            "show" => {
+                let Some(id) = rest.first().and_then(|raw| uuid::Uuid::parse_str(raw).ok()) else {
+                    return "usage: /memory show <id>".to_string();
+                };
+                let history = memory.history_of(RecordId(id));
+                let Some(rec) = history
+                    .into_iter()
+                    .filter(|rec| rec.subject == holder)
+                    .filter(|rec| rec.invalidation_time.is_none())
+                    .max_by_key(|rec| rec.recorded_at)
+                else {
+                    return format!("memory {id} not found");
+                };
+                serde_json::to_string_pretty(&MemoryCard::from_record(&rec))
+                    .unwrap_or_else(|e| format!("memory show error: {e}"))
+            }
+            "forget" => {
+                let Some(id) = rest.first().and_then(|raw| uuid::Uuid::parse_str(raw).ok()) else {
+                    return "usage: /memory forget <id>".to_string();
+                };
+                let current = memory.current_as_of(&holder, UnixTsMillis(now_ms));
+                if !current.iter().any(|rec| rec.record_id == id) {
+                    return format!("memory {id} not found");
+                }
+                match memory.invalidate(
+                    RecordId(id),
+                    UnixTsMillis(now_ms),
+                    InvalidationReason::UserCorrection,
+                ) {
+                    Ok(()) => format!("forgot memory {id}"),
+                    Err(e) => format!("memory forget error: {e}"),
+                }
+            }
+            _ => {
+                "usage: /memory list [--json] | /memory show <id> | /memory forget <id>".to_string()
+            }
+        }
     }
 
     /// Run one chat turn by streaming the provider **directly**, rendering tokens
@@ -316,6 +403,49 @@ impl FusedEngine {
             remaining_cents,
         })
     }
+}
+
+fn memory_card_line(card: &MemoryCard) -> String {
+    let receipt = card
+        .receipt_id
+        .map(|r| r.0.to_string())
+        .unwrap_or_else(|| "unreceipted".to_string());
+    let source = card.source.as_deref().unwrap_or("unknown");
+    let scope = card.scope.as_deref().unwrap_or(card.subject.0.as_str());
+    let confidence = card
+        .confidence
+        .map(|c| format!("{c:.2}"))
+        .unwrap_or_else(|| "unknown".to_string());
+    format!(
+        "{} source={} scope={} confidence={} receipt={} valid_from={} {}",
+        card.record_id,
+        source,
+        scope,
+        confidence,
+        receipt,
+        card.valid_from.0,
+        memory_payload_text(&card.payload)
+    )
+}
+
+fn memory_payload_text(payload: &serde_json::Value) -> String {
+    if let Some(object) = payload.get("object") {
+        return match object {
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+    }
+    match payload {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis().try_into().unwrap_or(u64::MAX))
+        .unwrap_or(0)
 }
 
 /// The per-turn cents ceiling: `ARDUR_CLI_PER_TURN_CENTS` if set and parseable,

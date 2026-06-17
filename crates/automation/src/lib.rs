@@ -24,6 +24,7 @@
 #![warn(missing_docs)]
 
 mod error;
+pub mod learning;
 mod task_record;
 pub mod tasks;
 

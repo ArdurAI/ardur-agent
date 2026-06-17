@@ -26,6 +26,7 @@ pub mod memory;
 pub mod receipts;
 pub mod routes;
 pub mod state;
+pub mod trust;
 
 pub use config::Cli;
 pub use routes::build_router;

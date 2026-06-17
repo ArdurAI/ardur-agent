@@ -124,6 +124,31 @@ impl HybridMemoryRetriever {
     /// [`MemoryError::Backend`] if the query embed, the vector search, or the BM25
     /// query fails.
     pub async fn search(&self, query: &str, top_k: usize) -> Result<Vec<MemoryRecord>> {
+        self.search_filtered(query, top_k, None).await
+    }
+
+    /// Recall memories relevant to `query`, restricted to one holder/workspace.
+    ///
+    /// The filter is applied before hydration returns records to callers, so a
+    /// memory hit from another workspace can never cross the API boundary. The
+    /// dense and sparse candidate pools are still over-fetched before filtering;
+    /// a future Qdrant-side subject filter can make this cheaper without
+    /// changing the isolation semantics.
+    pub async fn search_for_subject(
+        &self,
+        subject: &HolderId,
+        query: &str,
+        top_k: usize,
+    ) -> Result<Vec<MemoryRecord>> {
+        self.search_filtered(query, top_k, Some(subject)).await
+    }
+
+    async fn search_filtered(
+        &self,
+        query: &str,
+        top_k: usize,
+        subject: Option<&HolderId>,
+    ) -> Result<Vec<MemoryRecord>> {
         if top_k == 0 {
             return Ok(Vec::new());
         }
@@ -137,6 +162,9 @@ impl HybridMemoryRetriever {
         let mut vector_list: Vec<ScoredDoc> = Vec::with_capacity(vector_hits.len());
         for (rec, score) in vector_hits {
             if rec.invalidation_time.is_some() {
+                continue;
+            }
+            if subject.is_some_and(|s| &rec.subject != s) {
                 continue;
             }
             let id = rec.record_id.to_string();
@@ -166,7 +194,7 @@ impl HybridMemoryRetriever {
             }
             let rec = match hydrated.remove(&doc.doc_id) {
                 Some(rec) => rec,
-                None => match self.fetch_live(&doc.doc_id)? {
+                None => match self.fetch_live(&doc.doc_id, subject)? {
                     Some(rec) => rec,
                     None => continue,
                 },
@@ -190,14 +218,15 @@ impl HybridMemoryRetriever {
     /// Hydrate a fused `doc_id` from the durable store, returning it only if it is
     /// a live (non-tombstone) record. An unparseable id or a missing point yields
     /// `None`.
-    fn fetch_live(&self, doc_id: &str) -> Result<Option<MemoryRecord>> {
+    fn fetch_live(&self, doc_id: &str, subject: Option<&HolderId>) -> Result<Option<MemoryRecord>> {
         let Ok(uuid) = Uuid::parse_str(doc_id) else {
             return Ok(None);
         };
         Ok(self
             .qdrant
             .fetch_record(RecordId(uuid))?
-            .filter(|rec| rec.invalidation_time.is_none()))
+            .filter(|rec| rec.invalidation_time.is_none())
+            .filter(|rec| subject.is_none_or(|s| &rec.subject == s)))
     }
 }
 
@@ -242,6 +271,16 @@ impl MemoryRuntime for HybridMemoryRetriever {
 
     fn search(&self, query: &str, top_k: usize) -> Result<Vec<MemoryRecord>> {
         self.qdrant.block_on(self.search(query, top_k))
+    }
+
+    fn search_scoped(
+        &self,
+        subject: &HolderId,
+        query: &str,
+        top_k: usize,
+    ) -> Result<Vec<MemoryRecord>> {
+        self.qdrant
+            .block_on(self.search_for_subject(subject, query, top_k))
     }
 }
 

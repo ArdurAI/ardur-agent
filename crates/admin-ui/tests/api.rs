@@ -536,6 +536,84 @@ async fn dashboard_html_renders() {
 }
 
 #[tokio::test]
+async fn trust_center_wallet_receipts_and_policy_debugger() {
+    use ardur_cap_token::{HolderId, VerifiedClaims};
+    use ardur_cedar_policy::{CedarPolicyBundle, PolicyBundle, PolicySource};
+    use ardur_receipt::Sha256Digest;
+
+    fn receipt_line(receipt_id: &str, parent_hash: Option<String>, issued_ms: u64) -> String {
+        let body = serde_json::json!({
+            "receipt_id": receipt_id,
+            "parent_hash": parent_hash,
+            "verb": "llm.completion.minted.v1",
+            "issued_at": issued_ms,
+            "subject": "user:test",
+            "cap_token_id": "tok-test",
+            "payload_digest": "0".repeat(64),
+            "cost": { "tokens_in": 1, "tokens_out": 1, "cents": 1, "wall_ms": 1, "attention_score": 0.0 },
+            "provider": "anthropic",
+        });
+        let payload = B64URL.encode(serde_json::to_vec(&body).unwrap());
+        format!("aGVhZGVy.{payload}.c2ln")
+    }
+
+    let fx = Fixture::new();
+    let first = receipt_line("44444444-4444-4444-8444-444444444444", None, 1_000);
+    let second_parent = Sha256Digest::of(first.as_bytes()).to_string();
+    let second = receipt_line(
+        "55555555-5555-4555-8555-555555555555",
+        Some(second_parent),
+        2_000,
+    );
+    fs::write(
+        fx.receipt_store.join("chain.jsonl"),
+        format!("{first}\n{second}\n"),
+    )
+    .unwrap();
+
+    let policies = CedarPolicyBundle::load(PolicySource::Embedded(
+        "permit(principal, action, resource);".to_string(),
+    ))
+    .unwrap();
+    let claims = VerifiedClaims {
+        token_id: ::uuid::Uuid::parse_str("66666666-6666-4666-8666-666666666666").unwrap(),
+        audience: "ardur".to_string(),
+        subject: HolderId("user:wallet".to_string()),
+        expires_unix: 2_000_000_000,
+        budget_remaining: 42,
+        tool_allowlist: vec!["chat.submit".to_string(), "memory.read".to_string()],
+    };
+    let state = AppState::new(&fx.journal_dir, &fx.receipt_store)
+        .with_capabilities(vec![claims])
+        .with_policies(policies);
+    let server = TestServer::new(build_router(state.shared()));
+
+    let wallet: Value = server.get("/api/trust/wallet").await.json();
+    let grants = wallet["grants"].as_array().unwrap();
+    assert_eq!(grants.len(), 1);
+    assert_eq!(grants[0]["subject"], "user:wallet");
+    assert_eq!(grants[0]["revoke_button_label"], "Revoke");
+    assert_eq!(grants[0]["tools"].as_array().unwrap().len(), 2);
+
+    let verification: Value = server.get("/api/trust/receipts/verify").await.json();
+    assert_eq!(verification["receipt_count"], 2);
+    assert_eq!(verification["chain_valid"], true);
+
+    let debug: Value = server
+        .get(
+            "/api/trust/policy/debug?principal=User::%22alice%22&action=Action::%22Submit%22&resource=Session::%22s1%22",
+        )
+        .await
+        .json();
+    assert_eq!(debug["decision"], "Allow");
+    assert_eq!(debug["policy_count"], 1);
+    assert!(
+        debug["reason"].as_str().unwrap().contains("allowed"),
+        "policy debugger explains why: {debug}"
+    );
+}
+
+#[tokio::test]
 async fn read_only_no_write_endpoints() {
     let fx = Fixture::new();
     let server = fx.server();
