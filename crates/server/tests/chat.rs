@@ -24,10 +24,22 @@ use serde_json::{Value, json};
 
 /// POST a JSON body to `/chat` on `router`, returning the status and parsed JSON.
 async fn post_chat(router: Router, body: Value) -> (StatusCode, Value) {
-    let request = Request::builder()
+    post_chat_with_auth(router, body, Some(support::CHAT_TOKEN)).await
+}
+
+async fn post_chat_with_auth(
+    router: Router,
+    body: Value,
+    bearer: Option<&str>,
+) -> (StatusCode, Value) {
+    let mut builder = Request::builder()
         .method("POST")
         .uri("/chat")
-        .header("content-type", "application/json")
+        .header("content-type", "application/json");
+    if let Some(token) = bearer {
+        builder = builder.header("authorization", format!("Bearer {token}"));
+    }
+    let request = builder
         .body(Body::from(body.to_string()))
         .expect("request builds");
     let (status, bytes) = support::oneshot(router, request).await;
@@ -138,6 +150,36 @@ impl Provider for ScriptedProvider {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn chat_rejects_missing_bearer_before_body_processing() {
+    let (status, json) =
+        post_chat_with_auth(stub_router(), json!({ "message": "hello" }), None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("bearer")
+    );
+}
+
+#[tokio::test]
+async fn chat_rejects_invalid_bearer() {
+    let (status, json) = post_chat_with_auth(
+        stub_router(),
+        json!({ "message": "hello" }),
+        Some("wrong-token"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("bearer")
+    );
+}
 
 #[tokio::test]
 async fn chat_returns_reply_with_offline_provider() {

@@ -167,15 +167,16 @@ enable it with `ARDUR_CHANNEL_MATRIX=true`.
    MATRIX_ACCESS_TOKEN=syt_…
    MATRIX_DEVICE_ID=ARDUR_BOT            # use the device_id from step 2 for E2EE
    MATRIX_STATE_DIR=/var/lib/ardur/matrix-state
-   MATRIX_AUTO_JOIN_INVITES=true
-   MATRIX_ALLOWED_ROOMS=                 # optional: restrict to specific room ids
+   MATRIX_AUTO_JOIN_INVITES=false
+   MATRIX_ALLOWED_ROOMS=!abc:your.hs     # required: comma-separated room allowlist
    ```
    When `ARDUR_CHANNEL_MATRIX=true`, the three `MATRIX_*` credentials are
    required at startup (the boot fails fast if any is missing).
-4. **Opt into rooms.** With `MATRIX_AUTO_JOIN_INVITES=true`, invite the bot to a
-   room and it joins automatically. To restrict it, set `MATRIX_ALLOWED_ROOMS`
-   to a comma-separated list of room ids (`!abc:your.hs,!def:your.hs`); messages
-   from rooms outside the list are dropped. An empty value means all rooms.
+4. **Opt into rooms.** Set `MATRIX_ALLOWED_ROOMS` to a comma-separated list of
+   room ids (`!abc:your.hs,!def:your.hs`) before enabling the channel. The bot
+   ignores all messages outside that allowlist. `MATRIX_AUTO_JOIN_INVITES=false`
+   is the safe default; if you temporarily set it to `true`, auto-join still only
+   joins rooms already present in `MATRIX_ALLOWED_ROOMS`.
 5. **End-to-end encryption.** The adapter is built with E2EE on. For encrypted
    rooms, give the bot a **stable `MATRIX_DEVICE_ID`** and a durable
    `MATRIX_STATE_DIR` (it holds the sqlite crypto store — treat it as a secret),
@@ -266,6 +267,7 @@ docker run -d \
     --restart=unless-stopped \
     -p 3000:3000 \
     -v ardur-data:/var/lib/ardur \
+    -e ARDUR_BIND_ADDR=0.0.0.0:3000 \
     --env-file .env \
     ardur-server:latest
 ```
@@ -274,7 +276,9 @@ docker run -d \
 behind a TLS-terminating proxy — nginx, Caddy, Traefik, or a Cloudflare
 Tunnel — so Slack's signed requests arrive over HTTPS and the signature
 verification basestring includes a real `Host`. The container itself
-listens on plain HTTP at `$ARDUR_BIND_ADDR` (default `0.0.0.0:3000`).
+listens on plain HTTP at `$ARDUR_BIND_ADDR` (default `127.0.0.1:3000`; set
+`ARDUR_BIND_ADDR=0.0.0.0:3000` inside containers behind a private Docker network
+or reverse proxy).
 
 ## Persistent state
 
@@ -316,7 +320,7 @@ ARDUR_MCP_PATH_PREFIX=/mcp                     # default
 | `echo` | returns its input arguments unchanged (round-trip check) |
 | `health_check` | reports uptime, selected provider, and memory backend |
 
-**Auth.** Every MCP request must carry `Authorization: Bearer <token>` matching
+**Auth.** Every MCP request must carry `Authorization: Bearer ***` matching
 `ARDUR_MCP_BEARER_TOKENS` (constant-time compare); anything else is `401`. The
 bearer allowlist is the security boundary — the transport's default loopback-only
 DNS-rebinding guard is lifted so remote clients can connect, so **front the
@@ -326,7 +330,7 @@ Quick check against a running server:
 
 ```bash
 curl -sS http://localhost:3000/mcp/ardur \
-  -H 'Authorization: Bearer token-one' \
+  -H "Authorization: Bearer ${ARDUR_MCP_TOKEN}" \
   -H 'Content-Type: application/json' \
   -H 'Accept: application/json, text/event-stream' \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"curl","version":"1"}}}'

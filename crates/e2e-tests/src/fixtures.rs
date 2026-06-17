@@ -137,10 +137,27 @@ pub fn dev_cap_token(expires_unix: u64, budget_remaining: u64) -> String {
         .expect("the cap-token serializes")
 }
 
-/// A valid (well-funded, unexpired) cap-token for the fused-runtime scenarios.
-#[must_use]
 pub fn dev_valid_cap_token() -> String {
     dev_cap_token(NOW_UNIX + 3_600, 1_000_000)
+}
+
+/// A valid cap-token that also includes `echo` in the tool allowlist, for
+/// scenarios that exercise tool use.
+#[must_use]
+pub fn dev_valid_cap_token_with_echo() -> String {
+    dev_cap_issuer()
+        .issue(
+            CapHolderId(TEST_HOLDER.to_string()),
+            CapScope {
+                audience: AUDIENCE.to_string(),
+                expires_unix: NOW_UNIX + 3_600,
+                budget_remaining: 1_000_000,
+                tool_allowlist: vec![TOOL.to_string(), "echo".to_string()],
+            },
+        )
+        .expect("the cap-token issues")
+        .to_base64()
+        .expect("the cap-token serializes")
 }
 
 /// A [`FusedRuntimeBuilder`] pre-wired with the deterministic cap-token root, the

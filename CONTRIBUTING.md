@@ -34,15 +34,21 @@ Then add the corresponding public key to your GitHub account as a **signing key*
 
 ## Operating rules
 
-Ardur follows a set of internal **Operating Rules** that govern engineering discipline, verification gates, and review expectations.
+Ardur's public contribution contract is this file, the pull-request template, `SECURITY.md`, and the checks in `.github/workflows/`. Contributors do **not** need private Linear access or private helper scripts to open a correct PR.
 
-> **Note:** The full OPERATING-RULES document is private during early development and is not yet published in this repository. This section is a placeholder; it will be filled in (or linked) once the rules are ready for public release. In the meantime, the requirements on this page plus the PR template are the operative contract.
+Required gates for code changes:
+
+- `cargo fmt --all --check`
+- `cargo clippy --workspace --all-targets -- -D warnings`
+- `cargo check --workspace --all-targets`
+- `cargo test --workspace`
+- site build, Docker build/healthcheck, dependency audit, SBOM, and secret-scan CI jobs when they apply
+
+Reference public GitHub issues in PRs when available. Maintainers may mirror accepted work into private planning systems after the fact; that mirror is not part of the contributor workflow.
 
 ## Plan-doc discipline
 
-Substantive design and implementation work is tracked through structured **plan documents**. Each plan doc follows the project's **13-canonical-section template** (problem statement, prior art, design, interfaces, data model, security, testing/verification gates, rollout, risks, alternatives considered, open questions, references, and changelog). When your contribution maps to a plan section, reference it by its `§X.Y` identifier in your commits and PR.
-
-> The plan-doc template itself is maintained alongside the (currently private) operating rules and will be published with them.
+Substantive design and implementation work should explain its problem statement, security impact, testing/verification gates, rollout risk, and alternatives considered either in the PR description or in a public design note under `docs/`. If a private planning section exists, maintainers can add that mapping during review; external contributors are not expected to know it.
 
 ## Commit-scope discipline
 

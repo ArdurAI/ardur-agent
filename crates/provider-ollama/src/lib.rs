@@ -66,6 +66,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+use std::fmt;
 use std::pin::Pin;
 use std::time::Duration;
 
@@ -111,12 +112,31 @@ pub const API_KEY_ENV: &str = "OLLAMA_API_KEY";
 /// [`OllamaConfig::from_env`], then tune the optional fields with the builder
 /// methods. Set an [`api_key`](OllamaConfig::api_key) to talk to the hosted
 /// cloud instead of a local daemon; every field has a sensible default.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct OllamaConfig {
     base_url: String,
     api_key: Option<String>,
     request_timeout: Duration,
     default_model: ModelId,
+}
+
+impl fmt::Debug for OllamaConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OllamaConfig")
+            .field("base_url", &self.base_url)
+            .field("api_key", &redacted_present(self.api_key.as_deref()))
+            .field("request_timeout", &self.request_timeout)
+            .field("default_model", &self.default_model)
+            .finish()
+    }
+}
+
+fn redacted_present(value: Option<&str>) -> &'static str {
+    if value.is_some_and(|v| !v.is_empty()) {
+        "<redacted>"
+    } else {
+        "<unset>"
+    }
 }
 
 impl OllamaConfig {
@@ -259,6 +279,9 @@ impl OllamaProvider {
         &self,
         req: CompletionRequest,
     ) -> Result<OllamaChunkStream, ProviderError> {
+        if self.config.api_key.is_some() {
+            validate_base_url_for_bearer(&self.config.base_url)?;
+        }
         let body = build_request_body(&req, true);
         self.open_ndjson(self.config.chat_url(), body, req.model)
             .await
@@ -274,6 +297,9 @@ impl OllamaProvider {
         &self,
         req: CompletionRequest,
     ) -> Result<OllamaChunkStream, ProviderError> {
+        if self.config.api_key.is_some() {
+            validate_base_url_for_bearer(&self.config.base_url)?;
+        }
         let body = build_generate_body(&req, true);
         self.open_ndjson(self.config.generate_url(), body, req.model)
             .await
@@ -318,10 +344,36 @@ impl OllamaProvider {
     }
 }
 
+fn validate_base_url_for_bearer(base_url: &str) -> Result<(), ProviderError> {
+    let parsed = reqwest::Url::parse(base_url).map_err(|e| {
+        ProviderError::InvalidRequest(format!("Ollama base URL is not a valid URL: {e}"))
+    })?;
+    match parsed.scheme() {
+        "https" => Ok(()),
+        "http" if is_loopback_host(&parsed) => Ok(()),
+        "http" => Err(ProviderError::InvalidRequest(
+            "Ollama base URL must use https unless it points at localhost/loopback when a bearer token is configured".to_string(),
+        )),
+        other => Err(ProviderError::InvalidRequest(format!(
+            "Ollama base URL must use https or loopback http when a bearer token is configured, got scheme {other:?}"
+        ))),
+    }
+}
+
+fn is_loopback_host(url: &reqwest::Url) -> bool {
+    matches!(
+        url.host_str(),
+        Some("localhost") | Some("127.0.0.1") | Some("::1") | Some("[::1]")
+    )
+}
+
 #[async_trait]
 impl Provider for OllamaProvider {
     async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
         // The non-streaming path pins `stream: false` — a single buffered reply.
+        if self.config.api_key.is_some() {
+            validate_base_url_for_bearer(&self.config.base_url)?;
+        }
         let body = build_request_body(&req, false);
 
         let mut request = self

@@ -342,6 +342,16 @@ impl FusedRuntime {
         provisioning: &PerRequestProvisioning,
         now_unix: u64,
     ) -> Result<VerifiedClaims, RuntimeError> {
+        self.stage_cap_token_for_tool(req, provisioning, now_unix, &self.tool)
+    }
+
+    fn stage_cap_token_for_tool(
+        &self,
+        req: &SubmitRequest,
+        provisioning: &PerRequestProvisioning,
+        now_unix: u64,
+        tool: &str,
+    ) -> Result<VerifiedClaims, RuntimeError> {
         if req.cap_token.0.is_empty() {
             return Err(RuntimeError::CapTokenMissing);
         }
@@ -361,7 +371,7 @@ impl FusedRuntime {
                 &RequiredCaveats {
                     now_unix,
                     audience,
-                    tool: self.tool.clone(),
+                    tool: tool.to_string(),
                     cost: self.cost_units,
                 },
             )
@@ -382,12 +392,21 @@ impl FusedRuntime {
         session_id: SessionId,
         claims: &VerifiedClaims,
     ) -> Result<(), RuntimeError> {
+        self.stage_cedar_with_action(session_id, claims, self.action.clone())
+    }
+
+    fn stage_cedar_with_action(
+        &self,
+        session_id: SessionId,
+        claims: &VerifiedClaims,
+        action: ActionRef,
+    ) -> Result<(), RuntimeError> {
         let principal = derive_principal(&self.principal_entity_type, claims);
         let resource = derive_resource(session_id);
         let attributes = cedar_attributes_from_claims(&self.cedar_attributes, claims);
         match self.policies.evaluate(&EvaluationContext {
             principal,
-            action: self.action.clone(),
+            action,
             resource,
             attributes,
         }) {
@@ -397,6 +416,22 @@ impl FusedRuntime {
                 reason: format!("indeterminate: {reason}"),
             }),
         }
+    }
+
+    fn authorize_tool_invocation(
+        &self,
+        req: &SubmitRequest,
+        provisioning: &PerRequestProvisioning,
+        session_id: SessionId,
+        now_unix: u64,
+        tool_name: &str,
+    ) -> Result<(), RuntimeError> {
+        let claims = self.stage_cap_token_for_tool(req, provisioning, now_unix, tool_name)?;
+        self.stage_cedar_with_action(
+            session_id,
+            &claims,
+            ActionRef("Action::ToolInvoke".to_string()),
+        )
     }
 
     /// **Stage 3 (setup).** Resolve the budget holder (the verified subject
@@ -856,6 +891,18 @@ impl FusedRuntime {
                             .await;
                         return Err(err);
                     };
+                    if let Err(err) = self.authorize_tool_invocation(
+                        &req,
+                        &provisioning,
+                        session_id,
+                        now_unix,
+                        &call.name,
+                    ) {
+                        self.release(reservation).await;
+                        self.fire_error(session_id, LifecyclePhase::Submit, &err)
+                            .await;
+                        return Err(err);
+                    }
                     let ctx = self.tool_context(&req.cap_token, session_id);
                     let output = match tokio::time::timeout(
                         self.tool_timeout,
@@ -952,11 +999,16 @@ impl FusedRuntime {
                     )));
                 }
             };
-            *self.chain_tail.lock() = Some(Sha256Digest::of(signed.jws_compact().as_bytes()));
+            let chain_hash = Sha256Digest::of(signed.jws_compact().as_bytes());
             if let Err(e) = self.persist_receipt(signed.jws_compact()) {
+                self.release(reservation).await;
                 self.fire_error(session_id, LifecyclePhase::Receipt, &e)
                     .await;
+                return Err(RuntimeError::Internal(anyhow::anyhow!(
+                    "receipt persistence failed: {e}"
+                )));
             }
+            *self.chain_tail.lock() = Some(chain_hash);
             let receipt = signed.body().clone();
 
             // 7. post-receipt hooks (observational; the call already happened).
@@ -965,7 +1017,7 @@ impl FusedRuntime {
                 signed_receipt: &signed,
                 receipt: &receipt,
                 response: &response,
-                cost: response.cost,
+                cost: combined_cost,
             };
             for err in self.registry.run_post_receipt(&post_ctx).await {
                 let _ = err;
@@ -974,7 +1026,15 @@ impl FusedRuntime {
             // 8. cost-gate finalize: settle this iteration against the combined
             //    actual (provider + the tools it triggered).
             let actual = runtime_cost_to_gate(&combined_cost);
-            let _ = self.gate.finalize(reservation, actual).await;
+            match self.gate.finalize(reservation, actual).await {
+                Ok(_) => {}
+                Err(e) => {
+                    let err = map_admission_error(e);
+                    self.fire_error(session_id, LifecyclePhase::CostGate, &err)
+                        .await;
+                    return Err(err);
+                }
+            }
 
             // 9. memory: record this round as a bi-temporal fact. Non-fatal.
             if let Some(memory) = &self.memory {
@@ -1304,6 +1364,19 @@ impl FusedRuntime {
                             Err(err)?;
                             unreachable!()
                         };
+                        if let Err(err) = self.authorize_tool_invocation(
+                            &req,
+                            &provisioning,
+                            session_id,
+                            now_unix,
+                            &call.name,
+                        ) {
+                            self.release(reservation.take().expect("reservation held")).await;
+                            yield FusedEvent::StageEnd { stage: StageKind::ToolExec, ok: false };
+                            self.fire_error(session_id, LifecyclePhase::Submit, &err).await;
+                            Err(err)?;
+                            unreachable!()
+                        }
                         let ctx = self.tool_context(&req.cap_token, session_id);
                         let output = match tokio::time::timeout(
                             self.tool_timeout,
@@ -1408,10 +1481,16 @@ impl FusedRuntime {
                     }
                 };
                 let chain_hash = Sha256Digest::of(signed.jws_compact().as_bytes());
-                *self.chain_tail.lock() = Some(chain_hash);
                 if let Err(e) = self.persist_receipt(signed.jws_compact()) {
+                    self.release(reservation.take().expect("reservation held")).await;
                     self.fire_error(session_id, LifecyclePhase::Receipt, &e).await;
+                    yield FusedEvent::StageEnd { stage: StageKind::ReceiptMint, ok: false };
+                    Err(RuntimeError::Internal(anyhow::anyhow!(
+                        "receipt persistence failed: {e}"
+                    )))?;
+                    unreachable!()
                 }
+                *self.chain_tail.lock() = Some(chain_hash);
                 let receipt = signed.body().clone();
                 yield FusedEvent::Receipt {
                     receipt_id: ReceiptId(receipt.receipt_id),
@@ -1425,7 +1504,7 @@ impl FusedRuntime {
                     signed_receipt: &signed,
                     receipt: &receipt,
                     response: &response,
-                    cost: response.cost,
+                    cost: combined_cost,
                 };
                 for err in self.registry.run_post_receipt(&post_ctx).await {
                     let _ = err;
@@ -1434,11 +1513,22 @@ impl FusedRuntime {
                 // 8. cost-gate finalize.
                 yield FusedEvent::StageStart { stage: StageKind::CostGateFinalize };
                 let actual = runtime_cost_to_gate(&combined_cost);
-                let _ = self
+                match self
                     .gate
                     .finalize(reservation.take().expect("reservation held"), actual)
-                    .await;
-                yield FusedEvent::StageEnd { stage: StageKind::CostGateFinalize, ok: true };
+                    .await
+                {
+                    Ok(_) => {
+                        yield FusedEvent::StageEnd { stage: StageKind::CostGateFinalize, ok: true };
+                    }
+                    Err(e) => {
+                        let err = map_admission_error(e);
+                        self.fire_error(session_id, LifecyclePhase::CostGate, &err).await;
+                        yield FusedEvent::StageEnd { stage: StageKind::CostGateFinalize, ok: false };
+                        Err(err)?;
+                        unreachable!()
+                    }
+                }
 
                 // 9. memory (only when a backend is configured).
                 if let Some(memory) = &self.memory {

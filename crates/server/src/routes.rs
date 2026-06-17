@@ -126,7 +126,15 @@ impl From<ChatTurnOutcome> for ChatResponse {
 /// `400` for a malformed body, a missing/empty `message`, or `stream: true`
 /// (unsupported); `502` when the runtime rejects or fails the turn (cost gate
 /// denied, injection blocked, provider error, …); `200` otherwise.
-async fn chat(State(state): State<Arc<AppState>>, body: Bytes) -> Response {
+async fn chat(State(state): State<Arc<AppState>>, headers: HeaderMap, body: Bytes) -> Response {
+    if let Err(response) = authorize_chat(&state, &headers) {
+        return *response;
+    }
+
+    if body.len() > 64 * 1024 {
+        return bad_request("request body exceeds 64KiB".to_string());
+    }
+
     let request: ChatRequest = match serde_json::from_slice(&body) {
         Ok(request) => request,
         Err(e) => return bad_request(format!("invalid request body: {e}")),
@@ -163,6 +171,34 @@ async fn chat(State(state): State<Arc<AppState>>, body: Bytes) -> Response {
         )
             .into_response(),
     }
+}
+
+/// Verify the `POST /chat` bearer token before body processing or provider work.
+fn authorize_chat(state: &AppState, headers: &HeaderMap) -> Result<(), Box<Response>> {
+    let presented = header_str(headers, "Authorization");
+    if presented.is_empty() {
+        return Err(Box::new(unauthorized_chat()));
+    }
+    let Some(token) = presented.strip_prefix("Bearer ") else {
+        return Err(Box::new(unauthorized_chat()));
+    };
+    if state
+        .chat_bearer_tokens()
+        .iter()
+        .any(|allowed| allowed == token)
+    {
+        Ok(())
+    } else {
+        Err(Box::new(unauthorized_chat()))
+    }
+}
+
+fn unauthorized_chat() -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(json!({ "error": "missing or invalid bearer token" })),
+    )
+        .into_response()
 }
 
 /// A `400` with a JSON `{ "error": … }` body.

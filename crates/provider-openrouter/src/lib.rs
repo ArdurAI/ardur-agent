@@ -52,6 +52,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+use std::fmt;
 use std::time::Duration;
 
 use ardur_provider_runtime::{
@@ -85,13 +86,33 @@ pub const API_KEY_ENV: &str = "OPENROUTER_API_KEY";
 /// Build it from an API key with [`OpenRouterConfig::new`] (or
 /// [`OpenRouterConfig::from_env`]) and tune the optional fields with the
 /// builder methods; every field but the key has a sensible default.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct OpenRouterConfig {
     api_key: String,
     base_url: String,
     referer: String,
     title: String,
     request_timeout: Duration,
+}
+
+impl fmt::Debug for OpenRouterConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OpenRouterConfig")
+            .field("api_key", &redacted_present(&self.api_key))
+            .field("base_url", &self.base_url)
+            .field("referer", &self.referer)
+            .field("title", &self.title)
+            .field("request_timeout", &self.request_timeout)
+            .finish()
+    }
+}
+
+fn redacted_present(value: &str) -> &'static str {
+    if value.is_empty() {
+        "<unset>"
+    } else {
+        "<redacted>"
+    }
 }
 
 impl OpenRouterConfig {
@@ -219,6 +240,9 @@ impl OpenRouterProvider {
         if self.config.api_key.is_empty() {
             return error_stream(ProviderError::Unauthorized);
         }
+        if let Err(err) = validate_base_url(&self.config.base_url) {
+            return error_stream(err);
+        }
 
         let body = build_stream_request_body(&req);
         let send = self
@@ -250,6 +274,29 @@ impl OpenRouterProvider {
     }
 }
 
+fn validate_base_url(base_url: &str) -> Result<(), ProviderError> {
+    let parsed = reqwest::Url::parse(base_url).map_err(|e| {
+        ProviderError::InvalidRequest(format!("OpenRouter base URL is not a valid URL: {e}"))
+    })?;
+    match parsed.scheme() {
+        "https" => Ok(()),
+        "http" if is_loopback_host(&parsed) => Ok(()),
+        "http" => Err(ProviderError::InvalidRequest(
+            "OpenRouter base URL must use https unless it points at localhost/loopback".to_string(),
+        )),
+        other => Err(ProviderError::InvalidRequest(format!(
+            "OpenRouter base URL must use https or loopback http, got scheme {other:?}"
+        ))),
+    }
+}
+
+fn is_loopback_host(url: &reqwest::Url) -> bool {
+    matches!(
+        url.host_str(),
+        Some("localhost") | Some("127.0.0.1") | Some("::1") | Some("[::1]")
+    )
+}
+
 /// A terminal one-item stream carrying a connect-time error, boxed so it shares
 /// the concrete return type of [`OpenRouterProvider::stream_chat`]'s success
 /// path.
@@ -265,6 +312,7 @@ impl Provider for OpenRouterProvider {
         if self.config.api_key.is_empty() {
             return Err(ProviderError::Unauthorized);
         }
+        validate_base_url(&self.config.base_url)?;
 
         let body = build_request_body(&req);
 
@@ -317,6 +365,7 @@ impl Provider for OpenRouterProvider {
         if self.config.api_key.is_empty() {
             return Err(ProviderError::Unauthorized);
         }
+        validate_base_url(&self.config.base_url)?;
 
         let body = build_stream_request_body(&req);
         let resp = self
@@ -932,6 +981,30 @@ mod tests {
             cfg.completions_url(),
             "http://localhost:1234/api/v1/chat/completions"
         );
+    }
+
+    #[test]
+    fn debug_redacts_api_key() {
+        let cfg = OpenRouterConfig::new("sk-openrouter-secret");
+        let rendered = format!("{cfg:?}");
+        assert!(!rendered.contains("sk-openrouter-secret"), "{rendered}");
+        assert!(rendered.contains("<redacted>"), "{rendered}");
+    }
+
+    #[test]
+    fn base_url_policy_requires_https_or_loopback_http() {
+        assert!(validate_base_url("https://openrouter.ai/api/v1").is_ok());
+        assert!(validate_base_url("http://localhost:8000/api/v1").is_ok());
+        assert!(validate_base_url("http://127.0.0.1:8000/api/v1").is_ok());
+        assert!(validate_base_url("http://[::1]:8000/api/v1").is_ok());
+        assert!(matches!(
+            validate_base_url("http://example.com/api/v1"),
+            Err(ProviderError::InvalidRequest(_))
+        ));
+        assert!(matches!(
+            validate_base_url("ftp://example.com/api/v1"),
+            Err(ProviderError::InvalidRequest(_))
+        ));
     }
 
     #[test]
