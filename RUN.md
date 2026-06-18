@@ -331,19 +331,25 @@ ARDUR_MCP_PATH_PREFIX=/mcp                     # default
 
 **Server.** When enabled, the Streamable-HTTP transport mounts at
 `<prefix>/{server_name}` (e.g. `POST /mcp/ardur`), handling the MCP
-`GET`/`POST`/`DELETE` methods. The example deployment exposes two tools:
+`GET`/`POST`/`DELETE` methods. Direct MCP currently exposes only
+capability-free tools because the direct MCP path has bearer auth but does not yet
+derive a fused-runtime cap-token/Cedar context:
 
 | Tool | Purpose |
 |---|---|
 | `echo` | returns its input arguments unchanged (round-trip check) |
 | `health_check` | reports uptime, selected provider, and memory backend |
-| `voice.transcribe` | optional Whisper-backed audio transcription tool; registered only when `OPENAI_WHISPER_API_KEY` or `OPENAI_API_KEY` is set |
 
-**Auth.** Every MCP request must carry `Authorization: Bearer ***` matching
-`ARDUR_MCP_BEARER_TOKENS` (constant-time compare); anything else is `401`. The
-bearer allowlist is the security boundary — the transport's default loopback-only
-DNS-rebinding guard is lifted so remote clients can connect, so **front the
-endpoint with your own TLS/ingress.**
+Capability-bearing tools such as `voice.transcribe` remain available to fused
+runtime turns, where `ToolInvoke` cap-token/Cedar checks and signed tool receipts
+are enforced, but they are filtered out of direct MCP `tools/list` and rejected
+from direct MCP `tools/call` until MCP gets the same scoped invocation context.
+
+**Auth.** Every MCP request must carry `Authorization: Bearer $ARDUR_MCP_TOKEN`
+where the token matches one entry in `ARDUR_MCP_BEARER_TOKENS` (constant-time
+compare); anything else is `401`. The bearer allowlist is the security boundary —
+the transport's default loopback-only DNS-rebinding guard is lifted so remote
+clients can connect, so **front the endpoint with your own TLS/ingress.**
 
 Quick check against a running server:
 

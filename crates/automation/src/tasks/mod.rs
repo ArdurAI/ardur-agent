@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::TaskFlowError;
 use crate::tasks::flow::{
-    FlowControl, FlowNode, FlowStep, ParallelWait, RetryPolicy, StepFailureKind, StepId,
-    StepOutcome, TaskFlowDag, TaskId, TaskOutcome,
+    FlowControl, FlowNode, FlowStep, ParallelWait, RetryPolicy, StepDispatch, StepFailureKind,
+    StepId, StepOutcome, TaskFlowDag, TaskId, TaskOutcome,
 };
 
 /// Domain types for declared task-flow DAGs.
@@ -145,7 +145,7 @@ impl TaskFlowOrchestrator for DefaultTaskFlowOrchestrator {
     ) -> Result<TaskHandle, TaskFlowError> {
         validate_creation_request(token, &request)?;
         if let Some(dag) = &request.flow_dag {
-            validate_dag(dag)?;
+            validate_dag(token, dag)?;
         }
 
         let task_id = TaskId::new();
@@ -199,7 +199,7 @@ impl TaskFlowOrchestrator for DefaultTaskFlowOrchestrator {
 
     async fn operator_override_verification(
         &self,
-        _token: &VerifiedClaims,
+        token: &VerifiedClaims,
         task_id: TaskId,
         step_id: StepId,
         reason: String,
@@ -209,6 +209,15 @@ impl TaskFlowOrchestrator for DefaultTaskFlowOrchestrator {
                 "override reason must not be empty".to_string(),
             ));
         }
+        if !token
+            .tool_allowlist
+            .iter()
+            .any(|allowed| allowed == "task.override")
+        {
+            return Err(TaskFlowError::InvalidRequest(
+                "task.override not in cap-token allowlist".to_string(),
+            ));
+        }
         let mut states = self
             .states
             .lock()
@@ -216,6 +225,21 @@ impl TaskFlowOrchestrator for DefaultTaskFlowOrchestrator {
         let state = states
             .get_mut(&task_id)
             .ok_or(TaskFlowError::TaskNotFound(task_id))?;
+        match state.step_outcomes.get(&step_id) {
+            Some(StepOutcome::Failed {
+                failure_kind: StepFailureKind::VerificationFailed,
+            }) => {}
+            Some(_) => {
+                return Err(TaskFlowError::InvalidRequest(
+                    "operator override is only valid for verification-failed steps".to_string(),
+                ));
+            }
+            None => {
+                return Err(TaskFlowError::InvalidRequest(format!(
+                    "step {step_id:?} is not part of the recorded task state"
+                )));
+            }
+        }
         state.step_outcomes.insert(step_id, StepOutcome::Succeeded);
         if state
             .step_outcomes
@@ -245,10 +269,15 @@ fn validate_creation_request(
     Ok(())
 }
 
-fn validate_dag(dag: &TaskFlowDag) -> Result<(), TaskFlowError> {
+fn validate_dag(token: &VerifiedClaims, dag: &TaskFlowDag) -> Result<(), TaskFlowError> {
     if dag.version == 0 {
         return Err(TaskFlowError::InvalidRequest(
             "DAG version must be non-zero".to_string(),
+        ));
+    }
+    if !dag.invariants.is_empty() {
+        return Err(TaskFlowError::InvalidRequest(
+            "unsupported Cedar invariants in default orchestrator".to_string(),
         ));
     }
     let depth = node_depth(&dag.root);
@@ -265,7 +294,84 @@ fn validate_dag(dag: &TaskFlowDag) -> Result<(), TaskFlowError> {
             dag.max_fanout
         )));
     }
+    validate_node(token, &dag.root)
+}
+
+fn validate_node(token: &VerifiedClaims, node: &FlowNode) -> Result<(), TaskFlowError> {
+    match node {
+        FlowNode::Step(step) => validate_step_dispatch(token, step),
+        FlowNode::Control(FlowControl::Sequence(nodes)) => {
+            if nodes.is_empty() {
+                return Err(TaskFlowError::InvalidRequest(
+                    "empty sequence control is unsupported".to_string(),
+                ));
+            }
+            for child in nodes {
+                validate_node(token, child)?;
+            }
+            Ok(())
+        }
+        FlowNode::Control(FlowControl::Parallel { branches, wait }) => {
+            if branches.is_empty() {
+                return Err(TaskFlowError::InvalidRequest(
+                    "empty parallel control is unsupported".to_string(),
+                ));
+            }
+            if let ParallelWait::AnyN(n) = wait {
+                if *n == 0 || *n > branches.len() as u32 {
+                    return Err(TaskFlowError::InvalidRequest(format!(
+                        "AnyN wait must be between 1 and branch count {}, got {n}",
+                        branches.len()
+                    )));
+                }
+            }
+            for branch in branches {
+                validate_node(token, branch)?;
+            }
+            Ok(())
+        }
+        FlowNode::Control(FlowControl::Conditional { .. }) => Err(TaskFlowError::InvalidRequest(
+            "unsupported conditional control requires Cedar predicate evaluation".to_string(),
+        )),
+        FlowNode::Control(FlowControl::Retry { step, policy }) => {
+            if policy.max_attempts == 0 {
+                return Err(TaskFlowError::InvalidRequest(
+                    "retry max_attempts must be non-zero".to_string(),
+                ));
+            }
+            validate_node(token, step)
+        }
+    }
+}
+
+fn validate_step_dispatch(token: &VerifiedClaims, step: &FlowStep) -> Result<(), TaskFlowError> {
+    if step.step_name.trim().is_empty() {
+        return Err(TaskFlowError::InvalidRequest(
+            "step name must not be empty".to_string(),
+        ));
+    }
+    let required = dispatch_allowlist_key(&step.dispatch);
+    if !token
+        .tool_allowlist
+        .iter()
+        .any(|allowed| allowed == &required)
+    {
+        return Err(TaskFlowError::InvalidRequest(format!(
+            "dispatch `{required}` not in cap-token allowlist"
+        )));
+    }
     Ok(())
+}
+
+fn dispatch_allowlist_key(dispatch: &StepDispatch) -> String {
+    match dispatch {
+        StepDispatch::ToolCall { tool_id, .. } => tool_id.0.clone(),
+        StepDispatch::ProviderCall { provider_id, .. } => format!("provider.{}", provider_id.0),
+        StepDispatch::WebhookEmit { endpoint_id, .. } => format!("webhook.{}", endpoint_id.0),
+        StepDispatch::SubagentDelegate { .. } => "subagent.delegate".to_string(),
+        StepDispatch::MemoryWrite { scope, .. } => format!("memory.{}", scope.0),
+        StepDispatch::Composite { sub_dag_ref } => format!("composite.{}", sub_dag_ref.0),
+    }
 }
 
 fn node_depth(node: &FlowNode) -> u32 {

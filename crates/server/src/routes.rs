@@ -240,7 +240,9 @@ async fn acp(State(state): State<Arc<AppState>>, headers: HeaderMap, body: Bytes
         Err(error) => {
             return (
                 StatusCode::OK,
-                Json(AcpMessage::Response(AcpResponse::failure(request.id, error))),
+                Json(AcpMessage::Response(AcpResponse::failure(
+                    request.id, error,
+                ))),
             )
                 .into_response();
         }

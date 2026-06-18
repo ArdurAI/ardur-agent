@@ -83,3 +83,47 @@ async fn post_acp_rejects_missing_bearer_and_invalid_messages() {
     assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
     assert!(String::from_utf8_lossy(&body).contains("invalid ACP message"));
 }
+
+#[tokio::test]
+async fn post_acp_rejects_unsupported_methods_without_forwarding_params() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config = support::test_config(&dir, None);
+    let router = support::boot_router(&config);
+    let body = serde_json::to_vec(&AcpMessage::Request(AcpRequest::new(
+        99_i64,
+        "fs/read_text_file",
+        Some(json!({ "path": "/tmp/secret", "token": "should-not-hit-provider" })),
+    )))
+    .expect("serialize acp request");
+
+    let (status, bytes) = support::oneshot(
+        router,
+        Request::builder()
+            .method("POST")
+            .uri("/acp")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {}", support::CHAT_TOKEN))
+            .body(axum::body::Body::from(body))
+            .expect("request"),
+    )
+    .await;
+
+    assert_eq!(status, axum::http::StatusCode::OK);
+    let message: AcpMessage = serde_json::from_slice(&bytes).expect("ACP response parses");
+    let AcpMessage::Response(response) = message else {
+        panic!("expected ACP response, got {message:?}");
+    };
+    match response.payload().expect("valid response payload") {
+        AcpResponsePayload::Error(error) => {
+            assert_eq!(error.code, -32601);
+            assert!(error.message.contains("unsupported ACP method"));
+        }
+        AcpResponsePayload::Result(value) => panic!("unsupported method succeeded: {value:?}"),
+    }
+
+    let receipt_log = dir.path().join("receipts/chain.jsonl");
+    assert!(
+        !receipt_log.exists(),
+        "unsupported ACP methods must fail before fused-runtime/provider receipt work"
+    );
+}

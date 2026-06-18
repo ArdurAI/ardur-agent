@@ -20,11 +20,13 @@ use crate::{
     TranscriptionCapabilitySurface, TranscriptionProvider,
 };
 
-const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
+const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1/";
 const DEFAULT_MODEL: &str = "whisper-1";
 const DEFAULT_PROVIDER_ID: &str = "openai-whisper";
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
 const MAX_DURATION_SECONDS: u32 = 2 * 60 * 60;
+const MAX_INLINE_AUDIO_BYTES: usize = 25 * 1024 * 1024;
+const MAX_UPSTREAM_ERROR_BYTES: usize = 512;
 
 /// Configuration for [`WhisperApiTranscriptionProvider`].
 #[derive(Clone)]
@@ -235,7 +237,7 @@ impl TranscriptionProvider for WhisperApiTranscriptionProvider {
         if !status.is_success() {
             return Err(AudioError::Provider(format!(
                 "Whisper API returned {status}: {}",
-                String::from_utf8_lossy(&body)
+                sanitize_upstream_error(&body)
             )));
         }
         let whisper: WhisperTranscriptionResponse = serde_json::from_slice(&body)
@@ -429,7 +431,7 @@ impl ardur_tool_registry::Tool for VoiceTranscribeTool {
             scope: AudioScope {
                 verb: AudioVerb::TranscribeFile,
                 provider_id: self.provider.media_provider_id().clone(),
-                duration_seconds_ceiling: request.duration_seconds_upper_bound,
+                duration_seconds_ceiling: MAX_DURATION_SECONDS,
                 content_class_ceiling: ContentClass::Safe,
             },
         };
@@ -521,6 +523,11 @@ impl VoiceTranscribeArgs {
                     "duration_seconds_upper_bound must be a positive integer".to_string(),
                 )
             })?;
+        if duration_seconds_upper_bound > MAX_DURATION_SECONDS {
+            return Err(ardur_tool_registry::ToolError::InvalidArgs(format!(
+                "duration_seconds_upper_bound {duration_seconds_upper_bound} exceeds maximum {MAX_DURATION_SECONDS}"
+            )));
+        }
         let language_hint = object
             .get("language_hint")
             .and_then(serde_json::Value::as_str)
@@ -556,6 +563,12 @@ impl VoiceTranscribeArgs {
             .map_err(|e| {
                 ardur_tool_registry::ToolError::InvalidArgs(format!("invalid audio_base64: {e}"))
             })?;
+        if bytes.len() > MAX_INLINE_AUDIO_BYTES {
+            return Err(ardur_tool_registry::ToolError::InvalidArgs(format!(
+                "audio_base64 decodes to {} bytes, exceeding maximum {MAX_INLINE_AUDIO_BYTES}",
+                bytes.len()
+            )));
+        }
         Ok(TranscribeFileRequest {
             provider_id,
             model_id: self.model_id.clone().unwrap_or(default_model),
@@ -712,15 +725,28 @@ fn mime_and_extension(format: AudioFormat) -> (&'static str, &'static str) {
 }
 
 fn validate_base_url(raw: &str) -> Result<Url, AudioError> {
-    let parsed = Url::parse(raw)
+    let mut parsed = Url::parse(raw)
         .map_err(|e| AudioError::InvalidRequest(format!("invalid Whisper base URL: {e}")))?;
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(AudioError::InvalidRequest(
+            "Whisper base URL must not contain query or fragment components".to_string(),
+        ));
+    }
     match parsed.scheme() {
-        "https" => Ok(parsed),
-        "http" if is_loopback_url(&parsed) => Ok(parsed),
+        "https" => normalize_directory_base_url(&mut parsed),
+        "http" if is_loopback_url(&parsed) => normalize_directory_base_url(&mut parsed),
         scheme => Err(AudioError::InvalidRequest(format!(
             "Whisper base URL must be HTTPS or loopback HTTP, got `{scheme}`"
         ))),
     }
+}
+
+fn normalize_directory_base_url(url: &mut Url) -> Result<Url, AudioError> {
+    if !url.path().ends_with('/') {
+        let path = format!("{}/", url.path());
+        url.set_path(&path);
+    }
+    Ok(url.clone())
 }
 
 fn is_loopback_url(url: &Url) -> bool {
@@ -737,6 +763,15 @@ fn is_loopback_url(url: &Url) -> bool {
 
 fn digest_hex(bytes: impl AsRef<[u8]>) -> String {
     hex::encode(Sha256::digest(bytes.as_ref()))
+}
+
+fn sanitize_upstream_error(body: &[u8]) -> String {
+    let clipped = &body[..body.len().min(MAX_UPSTREAM_ERROR_BYTES)];
+    let mut message = String::from_utf8_lossy(clipped).to_string();
+    if body.len() > clipped.len() {
+        message.push_str("...<truncated>");
+    }
+    message.replace(|ch: char| ch.is_control() && ch != '\n' && ch != '\t', " ")
 }
 
 fn unix_millis_now() -> u64 {
