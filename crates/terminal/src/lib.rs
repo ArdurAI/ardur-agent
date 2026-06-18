@@ -9,6 +9,9 @@ mod backends;
 mod error;
 mod tools;
 
-pub use backends::{BackendKind, DockerBackend, LocalBackend, SshBackend, TerminalBackend};
+pub use backends::{
+    BackendKind, DockerBackend, ExecResult, LocalBackend, ModalBackend, SshBackend,
+    TerminalBackend, TerminalPolicy,
+};
 pub use error::{Result, TerminalError};
 pub use tools::{TerminalExecTool, TerminalSessionTool};

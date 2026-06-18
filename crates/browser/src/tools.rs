@@ -1,20 +1,22 @@
 //! Browser automation tools implementing the [`Tool`] trait.
 //!
 //! Each tool wraps a CDP operation and is capability-gated, policy-checked,
-//! and receipted.
+//! human-confirmed when necessary, and receipt-chained.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use base64::Engine;
 use serde_json::json;
+use url::Url;
 
 use ardur_runtime::CostTuple;
 use ardur_tool_registry::{Capability, Tool, ToolContext, ToolId, ToolOutput, ToolSchema};
 
+use crate::BrowserTool;
 use crate::cdp::CdpBrowser;
 use crate::policy::{BrowserPolicy, ConfirmationLevel};
-use crate::receipt::BrowserReceipt;
-use crate::{BrowserContext, BrowserTool};
+use crate::receipt::{BrowserActionReceipt, BrowserReceipt};
 
 /// Shared browser state for all tools.
 #[derive(Clone)]
@@ -23,14 +25,96 @@ pub struct SharedBrowser {
     pub browser: CdpBrowser,
     /// The active policy.
     pub policy: BrowserPolicy,
+    /// Browser-action receipt chain for this shared browser session.
+    pub receipts: BrowserActionReceipt,
 }
 
 impl SharedBrowser {
     /// Create a new shared browser state.
     #[must_use]
     pub fn new(browser: CdpBrowser, policy: BrowserPolicy) -> Self {
-        Self { browser, policy }
+        Self {
+            browser,
+            policy,
+            receipts: BrowserActionReceipt::new(),
+        }
     }
+
+    fn record_receipt(&mut self, receipt: BrowserReceipt) -> BrowserReceipt {
+        self.receipts.push_and_clone(receipt)
+    }
+}
+
+fn ensure_authorized(
+    ctx: &ToolContext,
+    cap: Capability,
+) -> Result<(), ardur_tool_registry::ToolError> {
+    if ctx.cap_token.0.trim().is_empty() {
+        return Err(ardur_tool_registry::ToolError::CapabilityDenied(cap));
+    }
+    if ctx
+        .env
+        .get("ARDUR_CEDAR_DECISION")
+        .is_some_and(|decision| decision.eq_ignore_ascii_case("deny"))
+    {
+        return Err(ardur_tool_registry::ToolError::Denied {
+            reason: "Cedar policy denied browser automation action".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn confirmed(args: &serde_json::Value) -> bool {
+    args.get("confirmed")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn current_domain(browser: &SharedBrowser) -> Result<String, ardur_tool_registry::ToolError> {
+    if browser
+        .policy
+        .allowlist
+        .iter()
+        .any(|entry| entry.domain == "*")
+    {
+        return Ok("*".to_string());
+    }
+    let Some(url) = browser.browser.current_url.as_deref() else {
+        return Err(ardur_tool_registry::ToolError::Denied {
+            reason: "browser action requires a current page URL for site/action policy".to_string(),
+        });
+    };
+    let parsed = Url::parse(url).map_err(|e| ardur_tool_registry::ToolError::Denied {
+        reason: format!("current browser URL `{url}` is invalid: {e}"),
+    })?;
+    Ok(parsed.host_str().unwrap_or_default().to_string())
+}
+
+fn receipt_payload(
+    receipt: &BrowserReceipt,
+    action: &str,
+    target: &str,
+    extra: serde_json::Value,
+) -> serde_json::Value {
+    json!({
+        "action": action,
+        "target": target,
+        "permitted": true,
+        "policy": { "decision": "allow" },
+        "receipt": receipt.to_receipt_json(),
+        "extra": extra,
+    })
+}
+
+fn deny_receipt(
+    browser: &mut SharedBrowser,
+    action: &str,
+    target: &str,
+    reason: String,
+) -> ardur_tool_registry::ToolError {
+    let receipt = BrowserReceipt::new(action, target, false, Some(reason.clone()));
+    let _stored = browser.record_receipt(receipt);
+    ardur_tool_registry::ToolError::Denied { reason }
 }
 
 /// `browser.navigate` — navigate to a URL.
@@ -59,7 +143,8 @@ impl Tool for NavigateTool {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "url": { "type": "string", "description": "The URL to navigate to" }
+                    "url": { "type": "string", "description": "The URL to navigate to" },
+                    "confirmed": { "type": "boolean", "description": "Human confirmation for sensitive navigation" }
                 },
                 "required": ["url"]
             }),
@@ -76,28 +161,24 @@ impl Tool for NavigateTool {
 
     async fn invoke(
         &self,
-        _ctx: &ToolContext,
+        ctx: &ToolContext,
         args: serde_json::Value,
     ) -> std::result::Result<ToolOutput, ardur_tool_registry::ToolError> {
-        let url = args
-            .get("url")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-
+        ensure_authorized(ctx, Capability::NetworkOut)?;
+        let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("");
         let mut guard = self.browser.write().await;
 
-        // Policy check
-        if let Err(reason) = guard.policy.check_url(url) {
-            return Err(ardur_tool_registry::ToolError::ExecutionFailed(format!(
-                "policy denied: {reason}"
-            )));
+        if let Err(reason) = guard.policy.check_url_for_action(url, "navigate") {
+            return Err(deny_receipt(&mut guard, "navigate", url, reason));
         }
-
-        // Injection check
+        if let Err(reason) = guard
+            .policy
+            .check_confirmation("navigate", confirmed(&args))
+        {
+            return Err(deny_receipt(&mut guard, "navigate", url, reason));
+        }
         if let Err(reason) = guard.policy.check_injection(url) {
-            return Err(ardur_tool_registry::ToolError::ExecutionFailed(format!(
-                "injection blocked: {reason}"
-            )));
+            return Err(deny_receipt(&mut guard, "navigate", url, reason));
         }
 
         let result = guard
@@ -111,21 +192,21 @@ impl Tool for NavigateTool {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+        let receipt = guard.record_receipt(BrowserReceipt::new("navigate", url, true, None));
 
         Ok(ToolOutput {
             content: json!({ "success": true, "frame_id": frame_id }),
             cost: CostTuple::default(),
-            receipt_data: json!({
-                "action": "navigate",
-                "url": url,
-                "permitted": true
-            }),
+            receipt_data: receipt_payload(&receipt, "navigate", url, json!({"frame_id": frame_id})),
         })
     }
 
     fn required_capabilities(&self) -> &[Capability] {
         static CAPS: std::sync::LazyLock<Vec<Capability>> = std::sync::LazyLock::new(|| {
-            vec![Capability::NetworkOut, Capability::Custom(String::from("browser"))]
+            vec![
+                Capability::NetworkOut,
+                Capability::Custom(String::from("browser")),
+            ]
         });
         &CAPS
     }
@@ -164,37 +245,34 @@ impl Tool for ClickTool {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "selector": { "type": "string", "description": "CSS selector of the element to click" }
+                    "selector": { "type": "string", "description": "CSS selector of the element to click" },
+                    "confirmed": { "type": "boolean", "description": "Human confirmation for sensitive clicks" }
                 },
                 "required": ["selector"]
             }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "success": { "type": "boolean" }
-                }
-            }),
+            output_schema: json!({"type": "object", "properties": {"success": {"type": "boolean"}}}),
             examples: vec![],
         })
     }
 
     async fn invoke(
         &self,
-        _ctx: &ToolContext,
+        ctx: &ToolContext,
         args: serde_json::Value,
     ) -> std::result::Result<ToolOutput, ardur_tool_registry::ToolError> {
-        let selector = args
-            .get("selector")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        ensure_authorized(ctx, Capability::NetworkOut)?;
+        let selector = args.get("selector").and_then(|v| v.as_str()).unwrap_or("");
+        let mut guard = self.browser.write().await;
+        let domain = current_domain(&guard)?;
 
-        let guard = self.browser.read().await;
-
-        // Injection check on selector
+        if let Err(reason) = guard.policy.check_action(&domain, "click") {
+            return Err(deny_receipt(&mut guard, "click", selector, reason));
+        }
+        if let Err(reason) = guard.policy.check_confirmation("click", confirmed(&args)) {
+            return Err(deny_receipt(&mut guard, "click", selector, reason));
+        }
         if let Err(reason) = guard.policy.check_injection(selector) {
-            return Err(ardur_tool_registry::ToolError::ExecutionFailed(format!(
-                "injection blocked: {reason}"
-            )));
+            return Err(deny_receipt(&mut guard, "click", selector, reason));
         }
 
         guard
@@ -202,21 +280,21 @@ impl Tool for ClickTool {
             .click(selector)
             .await
             .map_err(|e| ardur_tool_registry::ToolError::ExecutionFailed(e.to_string()))?;
+        let receipt = guard.record_receipt(BrowserReceipt::new("click", selector, true, None));
 
         Ok(ToolOutput {
             content: json!({ "success": true }),
             cost: CostTuple::default(),
-            receipt_data: json!({
-                "action": "click",
-                "selector": selector,
-                "permitted": true
-            }),
+            receipt_data: receipt_payload(&receipt, "click", selector, json!({"domain": domain})),
         })
     }
 
     fn required_capabilities(&self) -> &[Capability] {
         static CAPS: std::sync::LazyLock<Vec<Capability>> = std::sync::LazyLock::new(|| {
-            vec![Capability::NetworkOut, Capability::Custom(String::from("browser"))]
+            vec![
+                Capability::NetworkOut,
+                Capability::Custom(String::from("browser")),
+            ]
         });
         &CAPS
     }
@@ -256,46 +334,38 @@ impl Tool for TypeTool {
                 "type": "object",
                 "properties": {
                     "selector": { "type": "string", "description": "CSS selector of the input field" },
-                    "text": { "type": "string", "description": "Text to type" }
+                    "text": { "type": "string", "description": "Text to type" },
+                    "confirmed": { "type": "boolean", "description": "Human confirmation for sensitive form entry" }
                 },
                 "required": ["selector", "text"]
             }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "success": { "type": "boolean" }
-                }
-            }),
+            output_schema: json!({"type": "object", "properties": {"success": {"type": "boolean"}}}),
             examples: vec![],
         })
     }
 
     async fn invoke(
         &self,
-        _ctx: &ToolContext,
+        ctx: &ToolContext,
         args: serde_json::Value,
     ) -> std::result::Result<ToolOutput, ardur_tool_registry::ToolError> {
-        let selector = args
-            .get("selector")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let text = args
-            .get("text")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        ensure_authorized(ctx, Capability::NetworkOut)?;
+        let selector = args.get("selector").and_then(|v| v.as_str()).unwrap_or("");
+        let text = args.get("text").and_then(|v| v.as_str()).unwrap_or("");
+        let mut guard = self.browser.write().await;
+        let domain = current_domain(&guard)?;
 
-        let guard = self.browser.read().await;
-
-        // Injection check
+        if let Err(reason) = guard.policy.check_action(&domain, "type") {
+            return Err(deny_receipt(&mut guard, "type", selector, reason));
+        }
+        if let Err(reason) = guard.policy.check_confirmation("type", confirmed(&args)) {
+            return Err(deny_receipt(&mut guard, "type", selector, reason));
+        }
         if let Err(reason) = guard.policy.check_injection(selector) {
-            return Err(ardur_tool_registry::ToolError::ExecutionFailed(format!(
-                "injection blocked: {reason}"
-            )));
+            return Err(deny_receipt(&mut guard, "type", selector, reason));
         }
         if let Err(reason) = guard.policy.check_injection(text) {
-            return Err(ardur_tool_registry::ToolError::ExecutionFailed(format!(
-                "injection blocked: {reason}"
-            )));
+            return Err(deny_receipt(&mut guard, "type", selector, reason));
         }
 
         guard
@@ -303,21 +373,21 @@ impl Tool for TypeTool {
             .type_text(selector, text)
             .await
             .map_err(|e| ardur_tool_registry::ToolError::ExecutionFailed(e.to_string()))?;
+        let receipt = guard.record_receipt(BrowserReceipt::new("type", selector, true, None));
 
         Ok(ToolOutput {
             content: json!({ "success": true }),
             cost: CostTuple::default(),
-            receipt_data: json!({
-                "action": "type",
-                "selector": selector,
-                "permitted": true
-            }),
+            receipt_data: receipt_payload(&receipt, "type", selector, json!({"domain": domain})),
         })
     }
 
     fn required_capabilities(&self) -> &[Capability] {
         static CAPS: std::sync::LazyLock<Vec<Capability>> = std::sync::LazyLock::new(|| {
-            vec![Capability::NetworkOut, Capability::Custom(String::from("browser"))]
+            vec![
+                Capability::NetworkOut,
+                Capability::Custom(String::from("browser")),
+            ]
         });
         &CAPS
     }
@@ -353,51 +423,41 @@ impl Tool for ScreenshotTool {
         static SCHEMA: std::sync::OnceLock<ToolSchema> = std::sync::OnceLock::new();
         SCHEMA.get_or_init(|| ToolSchema {
             description: "Capture a PNG screenshot of the current page.".to_string(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "format": { "type": "string", "enum": ["png", "jpeg"], "default": "png" }
-                }
-            }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "data": { "type": "string", "description": "Base64-encoded image data" },
-                    "format": { "type": "string" }
-                }
-            }),
+            input_schema: json!({"type": "object", "properties": {"format": {"type": "string", "enum": ["png", "jpeg"], "default": "png"}}}),
+            output_schema: json!({"type": "object", "properties": {"data": {"type": "string"}, "format": {"type": "string"}}}),
             examples: vec![],
         })
     }
 
     async fn invoke(
         &self,
-        _ctx: &ToolContext,
+        ctx: &ToolContext,
         _args: serde_json::Value,
     ) -> std::result::Result<ToolOutput, ardur_tool_registry::ToolError> {
-        let guard = self.browser.read().await;
-
+        ensure_authorized(ctx, Capability::NetworkOut)?;
+        let mut guard = self.browser.write().await;
         let data = guard
             .browser
             .screenshot()
             .await
             .map_err(|e| ardur_tool_registry::ToolError::ExecutionFailed(e.to_string()))?;
 
-        let b64 = base64::encode(&data);
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
+        let receipt = guard.record_receipt(BrowserReceipt::new("screenshot", "page", true, None));
 
         Ok(ToolOutput {
             content: json!({ "data": b64, "format": "png" }),
             cost: CostTuple::default(),
-            receipt_data: json!({
-                "action": "screenshot",
-                "permitted": true
-            }),
+            receipt_data: receipt_payload(&receipt, "screenshot", "page", json!({"format": "png"})),
         })
     }
 
     fn required_capabilities(&self) -> &[Capability] {
         static CAPS: std::sync::LazyLock<Vec<Capability>> = std::sync::LazyLock::new(|| {
-            vec![Capability::NetworkOut, Capability::Custom(String::from("browser"))]
+            vec![
+                Capability::NetworkOut,
+                Capability::Custom(String::from("browser")),
+            ]
         });
         &CAPS
     }
@@ -433,34 +493,23 @@ impl Tool for ExtractTool {
         static SCHEMA: std::sync::OnceLock<ToolSchema> = std::sync::OnceLock::new();
         SCHEMA.get_or_init(|| ToolSchema {
             description: "Extract text or HTML from the current page.".to_string(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "format": { "type": "string", "enum": ["text", "html"], "default": "text" }
-                }
-            }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "content": { "type": "string" },
-                    "format": { "type": "string" }
-                }
-            }),
+            input_schema: json!({"type": "object", "properties": {"format": {"type": "string", "enum": ["text", "html"], "default": "text"}}}),
+            output_schema: json!({"type": "object", "properties": {"content": {"type": "string"}, "format": {"type": "string"}}}),
             examples: vec![],
         })
     }
 
     async fn invoke(
         &self,
-        _ctx: &ToolContext,
+        ctx: &ToolContext,
         args: serde_json::Value,
     ) -> std::result::Result<ToolOutput, ardur_tool_registry::ToolError> {
+        ensure_authorized(ctx, Capability::NetworkOut)?;
         let format = args
             .get("format")
             .and_then(|v| v.as_str())
             .unwrap_or("text");
-
-        let guard = self.browser.read().await;
+        let mut guard = self.browser.write().await;
 
         let content = if format == "html" {
             guard
@@ -475,21 +524,21 @@ impl Tool for ExtractTool {
                 .await
                 .map_err(|e| ardur_tool_registry::ToolError::ExecutionFailed(e.to_string()))?
         };
+        let receipt = guard.record_receipt(BrowserReceipt::new("extract", format, true, None));
 
         Ok(ToolOutput {
             content: json!({ "content": content, "format": format }),
             cost: CostTuple::default(),
-            receipt_data: json!({
-                "action": "extract",
-                "format": format,
-                "permitted": true
-            }),
+            receipt_data: receipt_payload(&receipt, "extract", format, json!({"format": format})),
         })
     }
 
     fn required_capabilities(&self) -> &[Capability] {
         static CAPS: std::sync::LazyLock<Vec<Capability>> = std::sync::LazyLock::new(|| {
-            vec![Capability::NetworkOut, Capability::Custom(String::from("browser"))]
+            vec![
+                Capability::NetworkOut,
+                Capability::Custom(String::from("browser")),
+            ]
         });
         &CAPS
     }

@@ -22,6 +22,7 @@
 
 mod config;
 mod mcp;
+pub mod openapi;
 mod routes;
 mod state;
 
