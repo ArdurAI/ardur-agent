@@ -1,5 +1,3 @@
-use std::fmt;
-
 #[derive(Debug, thiserror::Error)]
 pub enum HealthError {
     #[error("health check failed: {0}")]

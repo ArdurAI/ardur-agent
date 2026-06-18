@@ -21,9 +21,10 @@
 //! - **Inbound**: unlike the webhook-push Slack adapter,
 //!   [`MessagingGateway::receive`] is a real long-poll here — the sync task's
 //!   event handler forwards each room text event onto an internal queue, gating
-//!   on the room allowlist and dropping the bot's own messages (echo
-//!   prevention). Invites are auto-accepted when
-//!   [`MatrixConfig::auto_join_invites`] is set.
+//!   on the room allowlist (deny-by-default when empty) and dropping the bot's
+//!   own messages (echo prevention). Invites are auto-accepted only when
+//!   [`MatrixConfig::auto_join_invites`] is `true` (default `false`, ARD-422)
+//!   and the room clears the allowlist.
 //! - [`MatrixConfig`] — built via [`MatrixConfig::builder`] or
 //!   [`MatrixConfig::from_env`] (`MATRIX_HOMESERVER_URL`, `MATRIX_USER_ID`,
 //!   `MATRIX_ACCESS_TOKEN`, `MATRIX_DEVICE_ID`, `MATRIX_STATE_DIR`,
@@ -118,12 +119,16 @@ mod tests {
         assert_eq!(config.device_id, None);
         assert_eq!(config.resolved_device_id(), DEFAULT_DEVICE_ID);
         assert!(
-            config.auto_join_invites,
-            "auto-join defaults to true when unset"
+            !config.auto_join_invites,
+            "auto-join defaults to false when unset (ARD-422)"
         );
         assert!(
             config.allowed_rooms.is_empty(),
-            "an unset allowlist means all rooms"
+            "an unset allowlist means all rooms denied (deny-by-default)"
+        );
+        assert!(
+            !config.room_allowed("!any:hs"),
+            "empty allowlist denies all rooms"
         );
         assert!(
             config.state_dir.ends_with("matrix-state"),
@@ -186,7 +191,7 @@ mod tests {
                 "!c:hs".to_string()
             ]
         );
-        // None (and an all-blank value) parse to an empty list = "all rooms".
+        // None (and an all-blank value) parse to an empty list = "all denied".
         assert!(parse_allowed_rooms(None).is_empty());
         assert!(parse_allowed_rooms(Some("   ,  , ")).is_empty());
     }

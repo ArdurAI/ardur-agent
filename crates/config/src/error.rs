@@ -1,5 +1,3 @@
-use std::fmt;
-
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
     #[error("config key not found: {0}")]

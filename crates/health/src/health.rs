@@ -62,23 +62,19 @@ impl HealthMonitor {
     }
 
     pub fn record(&self, check: HealthCheck) -> crate::error::Result<()> {
-        let mut checks = self.checks.write().map_err(|_| {
-            crate::error::HealthError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "poisoned lock",
-            ))
-        })?;
+        let mut checks = self
+            .checks
+            .write()
+            .map_err(|_| crate::error::HealthError::Io(std::io::Error::other("poisoned lock")))?;
         checks.insert(check.name.clone(), check);
         Ok(())
     }
 
     pub fn get(&self, name: &str) -> crate::error::Result<HealthCheck> {
-        let checks = self.checks.read().map_err(|_| {
-            crate::error::HealthError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "poisoned lock",
-            ))
-        })?;
+        let checks = self
+            .checks
+            .read()
+            .map_err(|_| crate::error::HealthError::Io(std::io::Error::other("poisoned lock")))?;
         checks
             .get(name)
             .cloned()
@@ -86,12 +82,10 @@ impl HealthMonitor {
     }
 
     pub fn overall(&self) -> crate::error::Result<HealthStatus> {
-        let checks = self.checks.read().map_err(|_| {
-            crate::error::HealthError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "poisoned lock",
-            ))
-        })?;
+        let checks = self
+            .checks
+            .read()
+            .map_err(|_| crate::error::HealthError::Io(std::io::Error::other("poisoned lock")))?;
         if checks.is_empty() {
             return Ok(HealthStatus::Unknown);
         }
@@ -111,12 +105,10 @@ impl HealthMonitor {
     }
 
     pub fn list(&self) -> crate::error::Result<Vec<HealthCheck>> {
-        let checks = self.checks.read().map_err(|_| {
-            crate::error::HealthError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "poisoned lock",
-            ))
-        })?;
+        let checks = self
+            .checks
+            .read()
+            .map_err(|_| crate::error::HealthError::Io(std::io::Error::other("poisoned lock")))?;
         Ok(checks.values().cloned().collect())
     }
 }

@@ -130,6 +130,7 @@ impl OutboundWebhookClient {
     }
 
     /// Build a signed request without sending it (useful for testing or custom transport).
+    #[allow(clippy::type_complexity)]
     pub fn build_request(
         &self,
         event: &WebhookEvent,

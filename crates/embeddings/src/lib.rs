@@ -226,7 +226,7 @@ mod tests {
     #[tokio::test]
     async fn embed_empty_returns_empty() {
         let e = MockEmbedder::new(384);
-        let out = e.embed(vec![]).await.unwrap();
+        let out = e.embed(vec![]).await.expect("mock embed should not fail");
         assert!(out.is_empty());
         assert_eq!(e.dimension(), 384);
     }
@@ -237,7 +237,7 @@ mod tests {
         let out = e
             .embed(vec!["hello".into(), "world".into(), "hello".into()])
             .await
-            .unwrap();
+            .expect("mock embed should not fail");
         assert_eq!(out.len(), 3);
         for v in &out {
             assert_eq!(v.len(), 16);
@@ -270,12 +270,13 @@ mod tests {
             eprintln!("skipping bge_small_returns_384_dim (set EMBEDDINGS_LIVE_TEST=1 to run)");
             return;
         }
-        let e = FastEmbedEmbedder::new(ModelChoice::BgeSmallEnV15).unwrap();
+        let e = FastEmbedEmbedder::new(ModelChoice::BgeSmallEnV15)
+            .expect("model should load when EMBEDDINGS_LIVE_TEST=1");
         assert_eq!(e.dimension(), 384);
         let out = e
             .embed(vec!["the quick brown fox".into(), "a lazy dog".into()])
             .await
-            .unwrap();
+            .expect("embed should succeed with a loaded model");
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].len(), 384);
         // fastembed L2-normalizes BGE output.

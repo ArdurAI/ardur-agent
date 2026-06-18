@@ -64,6 +64,12 @@ ardur-media-audio = { workspace = true }
 # gates the surface with the registry's bearer-token allowlist helpers.
 ardur-tool-registry = { workspace = true }
 rmcp = { workspace = true }
+# ARD-426: OpenClaw hook compatibility — register_openclaw_hooks at boot when
+# ARDUR_HOOKS_DIRS contains an OpenClaw-format hook directory.
+ardur-hooks-openclaw-compat = { workspace = true }
+# ARD-426: automation — the task-flow orchestrator trait for `ardur task`
+# commands surfaced through the server's API.
+ardur-automation = { workspace = true }
 
 # `ardur-cap-token` re-exports `KeyPair`/`PublicKey` but not `PrivateKey`, and
 # loading the persisted issuer key needs `PrivateKey::from_bytes_hex`. Pulled

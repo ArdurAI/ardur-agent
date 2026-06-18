@@ -9,7 +9,7 @@ use clap::Parser;
 
 use ardur_admin::auth::BasicAuth;
 use ardur_admin::build_router;
-use ardur_admin::config::Cli;
+use ardur_admin::config::{Cli, resolve_bind_addr, validate_bind};
 use ardur_admin::state::{AppState, MemorySource};
 
 #[tokio::main]
@@ -19,6 +19,12 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
+
+    // Resolve + validate the bind address before doing anything else: a
+    // non-loopback bind without --basic-auth (and without --unsafe-bind) is
+    // a startup error.
+    let bind_ip = resolve_bind_addr(&cli).map_err(anyhow::Error::msg)?;
+    validate_bind(&cli, &bind_ip).map_err(anyhow::Error::msg)?;
 
     // Optional, read-only Qdrant connection for the memory endpoint.
     let memory = match &cli.qdrant_url {
@@ -46,7 +52,7 @@ async fn main() -> anyhow::Result<()> {
 
     let app = build_router(state.shared());
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], cli.port));
+    let addr = SocketAddr::from((bind_ip, cli.port));
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!(
         %addr,

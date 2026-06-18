@@ -42,7 +42,7 @@ use ardur_runtime::{
     RuntimeError, SessionId, SubmitRequest, SubmitResult, ToolCall,
 };
 use ardur_session_journals::{JournalEntry, SessionJournal};
-use ardur_tool_registry::{InvocationId, ToolContext, ToolError, ToolId, ToolRegistry};
+use ardur_tool_registry::{Capability, InvocationId, ToolContext, ToolError, ToolId, ToolRegistry};
 use parking_lot::Mutex;
 
 use crate::receipts::{PersistedReceipt, load_persisted_chain};
@@ -459,6 +459,36 @@ impl FusedRuntime {
             &claims,
             ActionRef("Action::ToolInvoke".to_string()),
         )
+    }
+
+    /// **ARD-420.** Check the tool's declared [`Capability`]s against the
+    /// verified cap-token claims before `invoke` runs. Each required capability
+    /// (as a `cap.*` string via [`Capability::as_str`]) must appear in the
+    /// cap-token's `tool_allowlist`; otherwise the call is denied with
+    /// [`RuntimeError::CapDenied`] before the tool body executes.
+    fn authorize_tool_capabilities(
+        &self,
+        req: &SubmitRequest,
+        provisioning: &PerRequestProvisioning,
+        now_unix: u64,
+        tool_name: &str,
+        required: &[Capability],
+    ) -> Result<(), RuntimeError> {
+        if required.is_empty() {
+            return Ok(());
+        }
+        let claims = self.stage_cap_token_for_tool(req, provisioning, now_unix, tool_name)?;
+        for cap in required {
+            let label = cap.as_str();
+            if !claims.tool_allowlist.iter().any(|t| t == &label) {
+                return Err(RuntimeError::CapDenied {
+                    reason: format!(
+                        "tool `{tool_name}` requires capability `{label}` which is not granted by the cap-token"
+                    ),
+                });
+            }
+        }
+        Ok(())
     }
 
     /// **Stage 3 (setup).** Resolve the budget holder (the verified subject
@@ -1073,6 +1103,20 @@ impl FusedRuntime {
                             .await;
                         return Err(err);
                     }
+                    // ARD-420: enforce required_capabilities() against the
+                    // cap-token's tool allowlist before the tool body runs.
+                    if let Err(err) = self.authorize_tool_capabilities(
+                        &req,
+                        &provisioning,
+                        now_unix,
+                        &call.name,
+                        tool.required_capabilities(),
+                    ) {
+                        self.release(reservation).await;
+                        self.fire_error(session_id, LifecyclePhase::Submit, &err)
+                            .await;
+                        return Err(err);
+                    }
                     let ctx = self.tool_context(&req.cap_token, session_id);
                     let output = match tokio::time::timeout(
                         self.tool_timeout,
@@ -1527,6 +1571,21 @@ impl FusedRuntime {
                             session_id,
                             now_unix,
                             &call.name,
+                        ) {
+                            self.release(reservation.take().expect("reservation held")).await;
+                            yield FusedEvent::StageEnd { stage: StageKind::ToolExec, ok: false };
+                            self.fire_error(session_id, LifecyclePhase::Submit, &err).await;
+                            Err(err)?;
+                            unreachable!()
+                        }
+                        // ARD-420: enforce required_capabilities() against the
+                        // cap-token's tool allowlist before the tool body runs.
+                        if let Err(err) = self.authorize_tool_capabilities(
+                            &req,
+                            &provisioning,
+                            now_unix,
+                            &call.name,
+                            tool.required_capabilities(),
                         ) {
                             self.release(reservation.take().expect("reservation held")).await;
                             yield FusedEvent::StageEnd { stage: StageKind::ToolExec, ok: false };
