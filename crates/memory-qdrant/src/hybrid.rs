@@ -149,7 +149,7 @@ impl HybridMemoryRetriever {
         top_k: usize,
         subject: Option<&HolderId>,
     ) -> Result<Vec<MemoryRecord>> {
-        if top_k == 0 {
+        if query.trim().is_empty() || top_k == 0 {
             return Ok(Vec::new());
         }
         let candidate_k = candidate_pool(top_k);

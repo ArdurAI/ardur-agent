@@ -84,6 +84,24 @@ fn authorized_memory_record_list_show_and_forget_are_cap_cedar_and_receipt_chain
 
     let current = runtime.current_as_of(&HolderId::from("workspace:alpha"), UnixTsMillis(4_000));
     assert!(current.is_empty(), "forgotten memory is no longer current");
+    let shown_after_forget = plane
+        .show(&claims, &HolderId::from("workspace:alpha"), id)
+        .expect("authorized show after forget succeeds");
+    assert!(
+        shown_after_forget.is_none(),
+        "forgotten memory must not be disclosed by direct show"
+    );
+    let repeated_forget = plane.forget(
+        &claims,
+        &HolderId::from("workspace:alpha"),
+        id,
+        UnixTsMillis(4_000),
+        ReceiptId(uuid::Uuid::new_v4()),
+    );
+    assert!(
+        matches!(repeated_forget, Err(MemoryError::NotFound(_))),
+        "forget on an already-forgotten memory must fail closed"
+    );
     let history = runtime.history_of(id);
     assert!(
         history.iter().any(|rec| {

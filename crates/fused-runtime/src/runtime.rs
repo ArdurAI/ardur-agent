@@ -29,7 +29,7 @@ use ardur_lifecycle_hooks::{
     ErrorCtx, HookError, HookRegistry, LifecyclePhase, PostReceiptCtx, PreSubmitCtx,
     PreSubmitOutcome, RevokeCtx,
 };
-use ardur_memory::{HolderId as MemoryHolderId, MemoryCard, MemoryRuntime};
+use ardur_memory::{HolderId as MemoryHolderId, MemoryCard, MemoryControlPlane, MemoryRuntime};
 use ardur_provider_runtime::{
     CompletionRequest, CompletionResponse, FinishReason, ModelId, Provider, ProviderError,
     StreamEvent, ToolDef, Usage,
@@ -149,6 +149,33 @@ impl FusedRuntime {
         ardur_cost_gate::BudgetStore::current_balance(&self.budget, holder)
             .await
             .ok()
+    }
+
+    /// Verify `cap_token` for an operator/control-plane capability under this
+    /// runtime's issuer root, audience, deny-list, clock, and cost units.
+    ///
+    /// This lets surfaces such as the CLI memory explorer reuse the exact
+    /// cap-token verification substrate instead of manufacturing claims locally.
+    ///
+    /// # Errors
+    /// Returns [`RuntimeError`] when the token is missing, expired, revoked,
+    /// malformed, or does not grant `tool`.
+    pub fn verify_cap_token_for_tool(
+        &self,
+        cap_token: &CapTokenRef,
+        tool: &str,
+    ) -> Result<VerifiedClaims, RuntimeError> {
+        self.stage_cap_token_for_tool(
+            &SubmitRequest {
+                messages: Vec::new(),
+                cap_token: cap_token.clone(),
+                session_id: SessionId::new(),
+                requested_provider: None,
+            },
+            &PerRequestProvisioning::default(),
+            self.clock.now_ms() / 1000,
+            tool,
+        )
     }
 
     /// Revoke a capability token mid-session: add its revocation ids to the
@@ -1180,10 +1207,14 @@ impl FusedRuntime {
                 }
             }
 
-            // 9. memory: record this round as a bi-temporal fact. Non-fatal.
+            // 9. memory: record this round as a bi-temporal fact. Non-fatal, but
+            //    still authorized by the same verified cap-token claims and Cedar
+            //    bundle; tokens without `memory.write` simply do not get a memory
+            //    side effect.
             if let Some(memory) = &self.memory {
                 let record = turn_record(&claims.subject.0, &response, &receipt, now_ms);
-                if let Err(mem_err) = memory.record(record) {
+                let plane = MemoryControlPlane::new(memory.as_ref(), self.policies.clone());
+                if let Err(mem_err) = plane.record(&claims, record) {
                     self.fire_error(session_id, LifecyclePhase::MemoryWrite, &mem_err)
                         .await;
                 }
@@ -1606,18 +1637,20 @@ impl FusedRuntime {
                         unreachable!()
                     }
                 };
+                let receipt = match self
+                    .commit_receipt_and_journal(session_id, iteration, &req, &response, &signed, now_ms)
+                    .await
+                {
+                    Ok(receipt) => receipt,
+                    Err(err) => {
+                        self.release(reservation.take().expect("reservation held")).await;
+                        self.fire_error(session_id, LifecyclePhase::Receipt, &err).await;
+                        yield FusedEvent::StageEnd { stage: StageKind::ReceiptMint, ok: false };
+                        Err(err)?;
+                        unreachable!()
+                    }
+                };
                 let chain_hash = Sha256Digest::of(signed.jws_compact().as_bytes());
-                if let Err(e) = self.persist_receipt(signed.jws_compact()) {
-                    self.release(reservation.take().expect("reservation held")).await;
-                    self.fire_error(session_id, LifecyclePhase::Receipt, &e).await;
-                    yield FusedEvent::StageEnd { stage: StageKind::ReceiptMint, ok: false };
-                    Err(RuntimeError::Internal(anyhow::anyhow!(
-                        "receipt persistence failed: {e}"
-                    )))?;
-                    unreachable!()
-                }
-                *self.chain_tail.lock() = Some(chain_hash);
-                let receipt = signed.body().clone();
                 yield FusedEvent::Receipt {
                     receipt_id: ReceiptId(receipt.receipt_id),
                     chain_hash: format!("{chain_hash}"),
@@ -1656,47 +1689,23 @@ impl FusedRuntime {
                     }
                 }
 
-                // 9. memory (only when a backend is configured).
+                // 9. memory (only when a backend is configured). The write is
+                // authorized against the verified cap-token claims and Cedar, and
+                // remains non-fatal if the token lacks `memory.write`.
                 if let Some(memory) = &self.memory {
                     yield FusedEvent::StageStart { stage: StageKind::MemoryRecord };
                     let record = turn_record(&claims.subject.0, &response, &receipt, now_ms);
-                    if let Err(mem_err) = memory.record(record) {
+                    let plane = MemoryControlPlane::new(memory.as_ref(), self.policies.clone());
+                    if let Err(mem_err) = plane.record(&claims, record) {
                         self.fire_error(session_id, LifecyclePhase::MemoryWrite, &mem_err)
                             .await;
                     }
                     yield FusedEvent::StageEnd { stage: StageKind::MemoryRecord, ok: true };
                 }
 
-                // 10. session-journal (only when a journal is configured).
-                if let Some(journal) = &self.journal {
-                    yield FusedEvent::StageStart { stage: StageKind::JournalAppend };
-                    if iteration == 1 {
-                        if let Some(prompt) = last_user_message(&req.messages) {
-                            if let Err(e) = journal
-                                .append(JournalEntry::UserMessage {
-                                    content: prompt.to_string(),
-                                    at: now_ms,
-                                })
-                                .await
-                            {
-                                self.fire_error(session_id, LifecyclePhase::JournalAppend, &e)
-                                    .await;
-                            }
-                        }
-                    }
-                    if let Err(e) = journal
-                        .append(JournalEntry::AssistantMessage {
-                            content: response.content.clone(),
-                            at: now_ms,
-                            receipt_id: ReceiptId(receipt.receipt_id),
-                        })
-                        .await
-                    {
-                        self.fire_error(session_id, LifecyclePhase::JournalAppend, &e)
-                            .await;
-                    }
-                    yield FusedEvent::StageEnd { stage: StageKind::JournalAppend, ok: true };
-                }
+                // 10. session-journal + receipt were committed atomically before
+                //     post-receipt hooks/finalize/memory, so no separate journal
+                //     append runs here.
 
                 // Termination: a response with no tool calls settles the turn; a
                 // tool-wanting response at the ceiling aborts; otherwise fold the

@@ -93,6 +93,7 @@ pub fn mint_token(expires_unix: u64, budget_remaining: u64) -> String {
                 budget_remaining,
                 tool_allowlist: vec![
                     TOOL.to_string(),
+                    "memory.write".to_string(),
                     "echo".to_string(),
                     "slow".to_string(),
                     "boom".to_string(),
