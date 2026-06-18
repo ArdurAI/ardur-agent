@@ -203,14 +203,18 @@ struct DeltaFunction {
     arguments: Option<String>,
 }
 
-/// The streamed `usage` object (final chunk). Only token counts are surfaced;
-/// streamed chunks do not carry OpenRouter's per-call `cost`.
+/// The streamed `usage` object (final chunk). OpenRouter includes token counts
+/// and optionally the exact dollar `cost` of the call (OpenRouter-specific).
 #[derive(Debug, Deserialize)]
 struct StreamUsage {
     #[serde(default)]
     prompt_tokens: u32,
     #[serde(default)]
     completion_tokens: u32,
+    /// OpenRouter's exact per-call cost in dollars. Preserved with full
+    /// precision for exact cost tracking (ARD-295).
+    #[serde(default)]
+    cost: Option<f64>,
 }
 
 /// Lift one streamed wire tool-call into the public [`ToolCallDelta`], dropping
@@ -288,10 +292,19 @@ fn process_chunk(
     }
 
     if let Some(u) = parsed.usage {
+        // ARD-295: Preserve exact streaming cost from OpenRouter.
+        // Convert dollars to whole cents, rounding to nearest cent.
+        let cost_cents = u.cost.and_then(|d| {
+            if d.is_finite() && d > 0.0 {
+                Some((d * 100.0).round() as u64)
+            } else {
+                None
+            }
+        });
         out.push_back(Ok(OpenRouterChunk::Usage(Usage {
             tokens_in: u.prompt_tokens,
             tokens_out: u.completion_tokens,
-            cost_cents: None,
+            cost_cents,
         })));
     }
 }
@@ -654,6 +667,54 @@ mod tests {
                 tokens_in: 11,
                 tokens_out: 4,
                 cost_cents: None,
+            })]
+        );
+    }
+
+    #[test]
+    fn usage_chunk_with_cost_preserves_exact_cost() {
+        // ARD-295: OpenRouter streaming includes exact cost in usage.
+        let events = events_of(
+            r#"{"choices":[],"usage":{"prompt_tokens":11,"completion_tokens":4,"cost":0.012345}}"#,
+        );
+        assert_eq!(
+            events,
+            vec![OpenRouterChunk::Usage(Usage {
+                tokens_in: 11,
+                tokens_out: 4,
+                cost_cents: Some(1), // 0.012345 USD → 1.2345¢ → rounds to 1¢
+            })]
+        );
+    }
+
+    #[test]
+    fn usage_chunk_with_zero_cost_is_none() {
+        // ARD-295: Zero cost should be treated as absent (no cost reported).
+        let events = events_of(
+            r#"{"choices":[],"usage":{"prompt_tokens":11,"completion_tokens":4,"cost":0.0}}"#,
+        );
+        assert_eq!(
+            events,
+            vec![OpenRouterChunk::Usage(Usage {
+                tokens_in: 11,
+                tokens_out: 4,
+                cost_cents: None,
+            })]
+        );
+    }
+
+    #[test]
+    fn usage_chunk_with_high_cost_rounds_correctly() {
+        // ARD-295: Test rounding behavior for exact cost preservation.
+        let events = events_of(
+            r#"{"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":50,"cost":0.123456}}"#,
+        );
+        assert_eq!(
+            events,
+            vec![OpenRouterChunk::Usage(Usage {
+                tokens_in: 100,
+                tokens_out: 50,
+                cost_cents: Some(12), // 0.123456 USD → 12.3456¢ → rounds to 12¢
             })]
         );
     }
