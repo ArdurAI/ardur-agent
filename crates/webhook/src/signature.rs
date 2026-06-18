@@ -48,7 +48,7 @@ mod tests {
     fn test_sign_and_verify() {
         let secret = SecretString::new("test-secret".into());
         let body = b"test body";
-        let sig = sign_body(body, &secret);
+        let sig = sign_body(body, &secret).unwrap();
         assert_eq!(sig.len(), 64);
         assert!(verify_signature(body, &secret, &sig).is_ok());
     }
@@ -57,16 +57,21 @@ mod tests {
     fn test_verify_bad_secret() {
         let secret = SecretString::new("test-secret".into());
         let body = b"test body";
-        let sig = sign_body(body, &secret);
+        let sig = sign_body(body, &secret).unwrap();
         let bad = SecretString::new("wrong".into());
         assert!(verify_signature(body, &bad, &sig).is_err());
     }
 
     #[test]
-    fn test_verify_tampered_body() {
+    fn test_tampered_body() {
         let secret = SecretString::new("test-secret".into());
         let body = b"test body";
-        let sig = sign_body(body, &secret);
-        assert!(verify_signature(b"tampered", &secret, &sig).is_err());
+        let signature = sign_body(body, &secret).unwrap();
+        let tampered = b"tampered body";
+        let result = verify_signature(tampered, &secret, &signature);
+        assert!(matches!(
+            result,
+            Err(WebhookError::SignatureVerificationFailed)
+        ));
     }
 }

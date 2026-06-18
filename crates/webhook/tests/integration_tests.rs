@@ -5,7 +5,7 @@ use secrecy::SecretString;
 fn test_verify_signature_round_trip() {
     let secret = SecretString::new("super-secret".into());
     let body = b"hello webhook";
-    let signature = ardur_webhook::signature::sign_body(body, &secret);
+    let signature = ardur_webhook::signature::sign_body(body, &secret).unwrap();
     assert!(!signature.is_empty());
     assert_eq!(signature.len(), 64); // SHA-256 hex = 64 chars
 
@@ -17,7 +17,7 @@ fn test_verify_signature_round_trip() {
 fn test_verify_signature_bad_secret() {
     let secret = SecretString::new("super-secret".into());
     let body = b"hello webhook";
-    let signature = ardur_webhook::signature::sign_body(body, &secret);
+    let signature = ardur_webhook::signature::sign_body(body, &secret).unwrap();
 
     let bad_secret = SecretString::new("wrong-secret".into());
     let result = verify_signature(body, &bad_secret, &signature);
@@ -31,7 +31,7 @@ fn test_verify_signature_bad_secret() {
 fn test_verify_signature_tampered_body() {
     let secret = SecretString::new("super-secret".into());
     let body = b"hello webhook";
-    let signature = ardur_webhook::signature::sign_body(body, &secret);
+    let signature = ardur_webhook::signature::sign_body(body, &secret).unwrap();
 
     let tampered = b"tampered body";
     let result = verify_signature(tampered, &secret, &signature);
