@@ -450,6 +450,69 @@ Provider support (Phase 1): **anthropic** (Messages API `tool_use`),
 `claude` CLI providers orchestrate their own tools internally, so the runtime
 loop does not drive tools through them.
 
+## Platform integrations
+
+EPIC-PLATFORM adds dedicated platform crates for browser, terminal, and web
+operations. They are designed to be registered as tools through the same runtime
+path described above, so a model-requested call is admitted only after cap-token
+verification, Cedar `Action::ToolInvoke`, cost-gate admission, injection-defense
+output scanning, and signed runtime receipt creation. The tool implementations
+also carry local fail-closed checks for direct use in tests and offline harnesses:
+an empty cap-token is denied, and a direct `ToolContext` with
+`ARDUR_CEDAR_DECISION=deny` is refused.
+
+### Browser automation (`ardur-browser`)
+
+Tools: `browser.navigate`, `browser.click`, `browser.type`,
+`browser.screenshot`, and `browser.extract`.
+
+- Configure a `BrowserPolicy` with `SiteAction::new("example.com", "click")`
+  style site/action allowlist entries. Empty allowlists deny external sites.
+- `ConfirmationLevel::ExternalConsequences` requires a `confirmed: true`
+  argument for sensitive write actions such as clicking, typing, form-fill, form
+  submit, and downloads. `ConfirmationLevel::EveryAction` requires confirmation
+  for read-only actions too.
+- Every browser action appends a browser-action receipt with `{id, parent_id,
+  action, target, timestamp_ms}` and includes it in `ToolOutput.receipt_data`, so
+  browser actions can be chained into the signed runtime receipt.
+
+### Terminal backends (`ardur-terminal`)
+
+Backends: local shell, Docker exec, SSH remote, and Modal/cloud sandbox.
+
+- `TerminalPolicy::allow_commands(["printf", "python"])` allowlists commands by
+  first shell token; the default policy is deny-all. Each backend checks policy
+  before execution.
+- Local execution runs `/bin/sh -c <command>` with timeout and bounded stdout /
+  stderr capture.
+- Docker execution uses the [`bollard`](https://crates.io/crates/bollard) Docker
+  daemon API (`create_exec` + `start_exec`) against an existing container. For
+  live tests or operations, start Docker Desktop / the Docker daemon first and
+  pass a running container id/name.
+- SSH execution requires a configured host-key fingerprint and uses strict host
+  key checking for live command execution. The backend carries a `russh` client
+  config so the implementation can move fully native without changing callers.
+- Modal/cloud execution posts `{ "command": ... }` to a configured HTTPS sandbox
+  endpoint and requires `MODAL_TOKEN_ID` for live use. Offline tests use mock
+  backends when cloud credentials are absent.
+- `terminal.exec` receipts include backend name, action, command digest, and
+  timestamp; runtime receipts still sign the enclosing tool-call digest.
+
+### Web capabilities (`ardur-web`)
+
+Tools: `web.fetch`, `web.parse`, `web.screenshot`, and `web.form_fill`.
+
+- `web.fetch` enforces HTTPS for external URLs. HTTP is allowed only for loopback
+  development URLs when `WebPolicy::dev_loopback()` is used.
+- `WebPolicy::with_allowlist(["example.com"])` narrows eligible hosts; each
+  fetch/screenshot/form-fill validates the URL before network or browser work.
+- `web.parse` extracts titles, selector text, links, and form metadata from HTML
+  without network access.
+- `web.form_fill` denies `submit: true` unless the caller supplies
+  `confirmed: true`; field-fill previews without submit remain allowed under the
+  URL policy.
+- Each web operation returns receipt metadata under `ToolOutput.receipt_data`.
+
 ## Streaming
 
 Every provider exposes a streaming surface on the `Provider` trait
@@ -510,12 +573,15 @@ skills ship under `examples/skills/`.
 
 `ardur-server` exposes a small HTTP surface over the fused runtime:
 
-| Method & path        | Purpose                                                        |
-| -------------------- | ------------------------------------------------------------- |
-| `POST /slack/events` | Slack Events-API webhook (HMAC-verified; replies to channel). |
-| `POST /chat`         | Generic synchronous chat — run one turn, get the reply back.  |
-| `GET  /healthz`      | Liveness probe with build metadata.                           |
-| `…/mcp` (optional)   | Bearer-gated MCP surface (see [MCP](#mcp-model-context-protocol)). |
+| Method & path                   | Purpose                                                        |
+| ------------------------------- | -------------------------------------------------------------- |
+| `POST /slack/events`            | Slack Events-API webhook (HMAC-verified; replies to channel).  |
+| `POST /chat`                    | Generic synchronous chat — run one turn, get the reply back.   |
+| `GET  /healthz`                 | Liveness probe with build metadata.                            |
+| `GET  /openapi.json`            | OpenAPI 3.0 document for the mounted HTTP surface.              |
+| `GET  /openapi/clients/rust`    | Generated Rust client source.                                  |
+| `GET  /openapi/clients/python`  | Generated Python client source.                                |
+| `…/mcp` (optional)              | Bearer-gated MCP surface (see [MCP](#mcp-model-context-protocol)). |
 
 ### `POST /chat`
 
@@ -577,6 +643,20 @@ Status codes:
 `Provider::stream` events) is **not yet implemented** — a `true` value is
 rejected with `400` rather than silently answered with a consolidated body. It
 is a planned P1.5 follow-up.
+
+### OpenAPI and generated clients
+
+Fetch the OpenAPI spec and generated client sources from a running server:
+
+```sh
+curl -sS http://localhost:3000/openapi.json | python3 -m json.tool
+curl -sS http://localhost:3000/openapi/clients/rust -o ardur_client.rs
+curl -sS http://localhost:3000/openapi/clients/python -o ardur_client.py
+```
+
+The Rust and Python client templates include `healthz()` and `chat(message)`
+helpers. `chat` attaches `Authorization: Bearer <token>` when a token is
+configured; `/healthz` is unauthenticated.
 
 ## Monitoring
 

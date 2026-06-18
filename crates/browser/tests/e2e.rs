@@ -4,9 +4,8 @@
 //! policy enforcement, receipt generation, and prompt-injection blocking.
 
 use ardur_browser::{
-    BrowserActionReceipt, BrowserPolicy, BrowserReceipt, BrowserTool,
-    CdpBrowser, ClickTool, ConfirmationLevel, ExtractTool, NavigateTool,
-    ScreenshotTool, SiteAction, TypeTool, SharedBrowser,
+    BrowserActionReceipt, BrowserPolicy, BrowserReceipt, CdpBrowser, ClickTool, ExtractTool,
+    NavigateTool, ScreenshotTool, SharedBrowser, SiteAction, TypeTool,
 };
 use ardur_tool_registry::{Capability, Tool, ToolContext};
 use std::sync::Arc;
@@ -49,10 +48,7 @@ async fn e2e_click_tool_invokes() {
     let tool = ClickTool::new(browser);
 
     let result = tool
-        .invoke(
-            &mock_tool_ctx(),
-            serde_json::json!({"selector": "#btn"}),
-        )
+        .invoke(&mock_tool_ctx(), serde_json::json!({"selector": "#btn"}))
         .await;
     assert!(result.is_ok());
 }
@@ -86,10 +82,7 @@ async fn e2e_extract_tool_invokes() {
     let tool = ExtractTool::new(browser);
 
     let result = tool
-        .invoke(
-            &mock_tool_ctx(),
-            serde_json::json!({"format": "text"}),
-        )
+        .invoke(&mock_tool_ctx(), serde_json::json!({"format": "text"}))
         .await;
     assert!(result.is_ok());
 }
@@ -181,7 +174,8 @@ fn e2e_all_browser_tools_declare_capabilities() {
             tool.id()
         );
         assert!(
-            caps.iter().any(|c| matches!(c, Capability::Custom(s) if s == "browser")),
+            caps.iter()
+                .any(|c| matches!(c, Capability::Custom(s) if s == "browser")),
             "{} must require browser capability",
             tool.id()
         );

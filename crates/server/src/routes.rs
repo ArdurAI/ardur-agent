@@ -28,6 +28,7 @@ use serde_json::json;
 use ardur_runtime::SessionId;
 use ardur_slack_adapter::{SlackError, SlackEvent, SlackHeaders};
 
+use crate::openapi::{generate_python_client, generate_rust_client, openapi_spec};
 use crate::state::{
     AUDIENCE, AppState, CAP_TTL_SECS, ChatSubmitError, ChatTurnOutcome, GATEWAY_SUBJECT,
 };
@@ -44,7 +45,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/healthz", get(healthz))
         .route("/health", get(health))
         .route("/metrics", get(metrics))
-        .route("/admin/runtime", get(admin_runtime));
+        .route("/admin/runtime", get(admin_runtime))
+        .route("/openapi.json", get(openapi_json))
+        .route("/openapi/clients/rust", get(openapi_rust_client))
+        .route("/openapi/clients/python", get(openapi_python_client));
 
     if let Some(mcp) = state.mcp() {
         router = router.merge(crate::build_mcp_router(
@@ -149,6 +153,23 @@ async fn metrics(State(state): State<Arc<AppState>>) -> Response {
         .into_response()
 }
 
+/// `GET /openapi.json` — return the generated OpenAPI 3.0 document.
+async fn openapi_json() -> Response {
+    Json(openapi_spec()).into_response()
+}
+
+/// `GET /openapi/clients/rust` — return generated Rust client source.
+async fn openapi_rust_client() -> Response {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; charset=utf-8",
+        )],
+        generate_rust_client(),
+    )
+        .into_response()
+}
+
 /// `GET /admin/runtime` — a bearer-gated, redacted snapshot of runtime security
 /// posture and receipt/gate counters. Missing admin tokens fail closed.
 async fn admin_runtime(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
@@ -185,6 +206,18 @@ fn prometheus_label_value(raw: &str) -> String {
     raw.replace('\\', "\\\\")
         .replace('"', "\\\"")
         .replace('\n', "\\n")
+}
+
+/// `GET /openapi/clients/python` — return generated Python client source.
+async fn openapi_python_client() -> Response {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; charset=utf-8",
+        )],
+        generate_python_client(),
+    )
+        .into_response()
 }
 
 /// The `POST /chat` request body.
