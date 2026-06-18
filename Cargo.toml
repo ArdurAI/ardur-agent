@@ -137,7 +137,7 @@ tracing = "0.1"
 # for tracing 0.1.x (tracing-opentelemetry 0.31 requires opentelemetry ^0.30 and
 # tracing ^0.1.35). default-features are stripped so we pull only the trace
 # signal — no metrics/logs pipelines we don't emit.
-opentelemetry = { version = "0.30", default-features = false, features = ["trace"] }
+opentelemetry = { version = "0.32", default-features = false, features = ["trace"] }
 opentelemetry_sdk = { version = "0.30", default-features = false, features = ["rt-tokio", "trace"] }
 opentelemetry-otlp = { version = "0.30", default-features = false, features = ["grpc-tonic", "trace"] }
 tracing-opentelemetry = "0.31"
