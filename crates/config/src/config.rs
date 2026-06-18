@@ -20,19 +20,10 @@ pub enum ConfigSource {
     Default,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
     pub values: HashMap<String, ConfigValue>,
     pub sources: HashMap<String, ConfigSource>,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            values: HashMap::new(),
-            sources: HashMap::new(),
-        }
-    }
 }
 
 impl Config {

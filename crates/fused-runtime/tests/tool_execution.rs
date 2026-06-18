@@ -256,6 +256,57 @@ impl Tool for CountingTool {
     }
 }
 
+/// A tool that requires a specific capability, used to prove ARD-420 capability
+/// enforcement denies invocation when the cap-token lacks the matching `cap.*`
+/// label.
+struct CapabilityGatedTool {
+    id: ToolId,
+    schema: ToolSchema,
+    caps: Vec<Capability>,
+    invocations: Arc<AtomicUsize>,
+}
+
+impl CapabilityGatedTool {
+    fn new(name: &str, caps: Vec<Capability>, invocations: Arc<AtomicUsize>) -> Self {
+        Self {
+            id: ToolId::new(name),
+            schema: ToolSchema {
+                description: "capability-gated tool".to_string(),
+                input_schema: json!({ "type": "object" }),
+                output_schema: json!({ "type": "object" }),
+                examples: vec![],
+            },
+            caps,
+            invocations,
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for CapabilityGatedTool {
+    fn id(&self) -> ToolId {
+        self.id.clone()
+    }
+    fn schema(&self) -> &ToolSchema {
+        &self.schema
+    }
+    async fn invoke(
+        &self,
+        _ctx: &ToolContext,
+        _args: serde_json::Value,
+    ) -> Result<ToolOutput, ToolError> {
+        self.invocations.fetch_add(1, Ordering::SeqCst);
+        Ok(ToolOutput {
+            content: json!({ "ok": true }),
+            cost: CostTuple::default(),
+            receipt_data: json!({ "ok": true }),
+        })
+    }
+    fn required_capabilities(&self) -> &[Capability] {
+        &self.caps
+    }
+}
+
 /// A registry holding just the built-in echo tool.
 fn echo_registry() -> Arc<ToolRegistry> {
     let mut registry = ToolRegistry::new();
@@ -578,5 +629,185 @@ async fn receipt_audit() {
     assert!(
         chain[1].body.tool_calls.is_empty(),
         "the final answer round records no tool calls"
+    );
+}
+
+// ---- ARD-420: capability enforcement denial tests ---------------------------
+
+/// A registry with a single capability-gated tool.
+fn gated_registry(
+    name: &str,
+    caps: Vec<Capability>,
+    invocations: Arc<AtomicUsize>,
+) -> Arc<ToolRegistry> {
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(Box::new(CapabilityGatedTool::new(name, caps, invocations)))
+        .expect("gated id is unique");
+    Arc::new(registry)
+}
+
+#[tokio::test]
+async fn shell_tool_denied_without_shell_exec_capability() {
+    let invocations = Arc::new(AtomicUsize::new(0));
+    let provider = Arc::new(ScriptedProvider::new(
+        vec![tool_call("call_1", "gated.shell", json!({}))],
+        stop("default"),
+    ));
+    let runtime = runtime_builder(provider.clone())
+        .with_tools(gated_registry(
+            "gated.shell",
+            vec![Capability::ShellExec, Capability::ProcessSpawn],
+            invocations.clone(),
+        ))
+        .build()
+        .expect("runtime builds");
+    // Token grants TOOL + memory.write + echo + caps, but NOT cap.shell_exec
+    // or cap.process_spawn.
+    let token = mint_token_as(HOLDER, AUDIENCE, &[TOOL, "gated.shell"]);
+
+    let err = runtime
+        .submit(user_request("use shell tool", &token))
+        .await
+        .expect_err("capability-gated shell tool denied without cap.shell_exec");
+
+    assert!(
+        matches!(err, RuntimeError::CapDenied { .. }),
+        "expected CapDenied, got {err:?}"
+    );
+    assert_eq!(
+        invocations.load(Ordering::SeqCst),
+        0,
+        "denied tool was not invoked"
+    );
+}
+
+#[tokio::test]
+async fn file_read_tool_denied_without_fs_read_capability() {
+    let invocations = Arc::new(AtomicUsize::new(0));
+    let provider = Arc::new(ScriptedProvider::new(
+        vec![tool_call("call_1", "gated.fread", json!({}))],
+        stop("default"),
+    ));
+    let runtime = runtime_builder(provider.clone())
+        .with_tools(gated_registry(
+            "gated.fread",
+            vec![Capability::FsRead],
+            invocations.clone(),
+        ))
+        .build()
+        .expect("runtime builds");
+    let token = mint_token_as(HOLDER, AUDIENCE, &[TOOL, "gated.fread"]);
+
+    let err = runtime
+        .submit(user_request("read a file", &token))
+        .await
+        .expect_err("capability-gated file.read denied without cap.fs_read");
+
+    assert!(
+        matches!(err, RuntimeError::CapDenied { .. }),
+        "expected CapDenied, got {err:?}"
+    );
+    assert_eq!(
+        invocations.load(Ordering::SeqCst),
+        0,
+        "denied tool was not invoked"
+    );
+}
+
+#[tokio::test]
+async fn file_write_tool_denied_without_fs_write_capability() {
+    let invocations = Arc::new(AtomicUsize::new(0));
+    let provider = Arc::new(ScriptedProvider::new(
+        vec![tool_call("call_1", "gated.fwrite", json!({}))],
+        stop("default"),
+    ));
+    let runtime = runtime_builder(provider.clone())
+        .with_tools(gated_registry(
+            "gated.fwrite",
+            vec![Capability::FsWrite],
+            invocations.clone(),
+        ))
+        .build()
+        .expect("runtime builds");
+    let token = mint_token_as(HOLDER, AUDIENCE, &[TOOL, "gated.fwrite"]);
+
+    let err = runtime
+        .submit(user_request("write a file", &token))
+        .await
+        .expect_err("capability-gated file.write denied without cap.fs_write");
+
+    assert!(
+        matches!(err, RuntimeError::CapDenied { .. }),
+        "expected CapDenied, got {err:?}"
+    );
+    assert_eq!(
+        invocations.load(Ordering::SeqCst),
+        0,
+        "denied tool was not invoked"
+    );
+}
+
+#[tokio::test]
+async fn http_fetch_denied_without_network_out_capability() {
+    let invocations = Arc::new(AtomicUsize::new(0));
+    let provider = Arc::new(ScriptedProvider::new(
+        vec![tool_call("call_1", "gated.http", json!({}))],
+        stop("default"),
+    ));
+    let runtime = runtime_builder(provider.clone())
+        .with_tools(gated_registry(
+            "gated.http",
+            vec![Capability::NetworkOut],
+            invocations.clone(),
+        ))
+        .build()
+        .expect("runtime builds");
+    let token = mint_token_as(HOLDER, AUDIENCE, &[TOOL, "gated.http"]);
+
+    let err = runtime
+        .submit(user_request("fetch a url", &token))
+        .await
+        .expect_err("capability-gated http.fetch denied without cap.network_out");
+
+    assert!(
+        matches!(err, RuntimeError::CapDenied { .. }),
+        "expected CapDenied, got {err:?}"
+    );
+    assert_eq!(
+        invocations.load(Ordering::SeqCst),
+        0,
+        "denied tool was not invoked"
+    );
+}
+
+#[tokio::test]
+async fn capability_gated_tool_allowed_with_matching_capability() {
+    let invocations = Arc::new(AtomicUsize::new(0));
+    let provider = Arc::new(ScriptedProvider::new(
+        vec![tool_call("call_1", "gated.read", json!({})), stop("done")],
+        stop("default"),
+    ));
+    let runtime = runtime_builder(provider.clone())
+        .with_tools(gated_registry(
+            "gated.read",
+            vec![Capability::FsRead],
+            invocations.clone(),
+        ))
+        .build()
+        .expect("runtime builds");
+    // Token grants TOOL + the cap.fs_read capability label.
+    let token = mint_token_as(HOLDER, AUDIENCE, &[TOOL, "gated.read", "cap.fs_read"]);
+
+    let result = runtime
+        .submit(user_request("read a file", &token))
+        .await
+        .expect("capability-gated tool allowed with matching cap");
+
+    assert_eq!(result.response.content, "done");
+    assert_eq!(
+        invocations.load(Ordering::SeqCst),
+        1,
+        "the tool was invoked once"
     );
 }

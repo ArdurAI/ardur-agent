@@ -3,6 +3,7 @@
 # Builder: rust:1.85-slim matches the workspace MSRV in Cargo.toml.
 # Runtime: distroless cc-debian12 nonroot. The healthcheck is a small Rust
 # binary, so the runtime image does not need curl/wget/shell packages.
+# ARD-424: Docker build is validated in CI with a /healthz smoke test.
 
 FROM rust:1.85-slim AS builder
 

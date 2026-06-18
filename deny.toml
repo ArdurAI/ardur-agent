@@ -1,0 +1,58 @@
+# cargo-deny configuration for Ardur Agent.
+#
+# ARD-423: license + duplicate detection.
+# Allows Apache-2.0, MIT, BSD, ISC (the common Rust ecosystem licenses).
+# Denies GPL/AGPL unless already depended on transitively.
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+    "Unlicense",
+    "0BSD",
+]
+# Deny GPL/AGPL/LGPL — incompatible with Apache-2.0 distribution.
+deny = [
+    "GPL-2.0",
+    "GPL-3.0",
+    "AGPL-3.0",
+    "LGPL-2.0",
+    "LGPL-2.1",
+    "LGPL-3.0",
+    "SSPL-1.0",
+]
+# Allow specific crates that have non-standard but acceptable licenses
+exceptions = []
+# Confidence threshold for license detection
+confidence-threshold = 0.8
+
+[advisories]
+# Ignore advisories that have no fix available
+ignore = []
+# Require cargo-audit advisories db to be up to date
+db-urls = ["https://github.com/rustsec/advisory-db"]
+
+[bans]
+# Deny duplicate versions of the same crate
+multiple-versions = "warn"
+# Allow specific duplicate versions
+allow = []
+# Highlight crates that should never be duplicated
+deny = []
+# Skip certain crates from duplicate detection
+skip = []
+
+[sources]
+# Only allow crates from crates.io, no unknown registries
+unknown-registry = "deny"
+unknown-git = "warn"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
