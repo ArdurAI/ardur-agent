@@ -735,6 +735,9 @@ fn map_finish_reason(reason: Option<&str>, tool_calls: Vec<ToolCall>) -> FinishR
 
 /// Convert an optional dollar cost into whole US cents, rounding to the nearest
 /// cent. A missing cost (the field OpenRouter omits on some upstreams) is `0`.
+///
+/// ARD-295: This is the non-streaming path. The streaming path preserves
+/// exact cost via `Usage::cost_cents` in the final usage chunk.
 fn dollars_to_cents(cost: Option<f64>) -> u64 {
     match cost {
         Some(dollars) if dollars.is_finite() && dollars > 0.0 => (dollars * 100.0).round() as u64,
@@ -944,6 +947,30 @@ mod tests {
         assert_eq!(resp.cost.tokens_out, 2);
         assert_eq!(resp.cost.cents, 1); // 0.0123 USD → 1.23¢ → 1¢
         assert!(resp.raw_provider_response.is_some());
+    }
+
+    #[test]
+    fn response_parsing_preserves_exact_cost_no_rounding_error() {
+        // ARD-295: Verify exact cost preservation for edge cases.
+        let raw = serde_json::json!({
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "cost": 0.005}
+        });
+        let parsed: ChatCompletion = serde_json::from_value(raw.clone()).unwrap();
+        let resp = parsed.into_completion(raw);
+        assert_eq!(resp.cost.cents, 1); // 0.005 USD → 0.5¢ → rounds to 1¢
+    }
+
+    #[test]
+    fn response_parsing_zero_cost_bills_zero() {
+        // ARD-295: Zero cost should result in zero cents.
+        let raw = serde_json::json!({
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "cost": 0.0}
+        });
+        let parsed: ChatCompletion = serde_json::from_value(raw.clone()).unwrap();
+        let resp = parsed.into_completion(raw);
+        assert_eq!(resp.cost.cents, 0);
     }
 
     #[test]

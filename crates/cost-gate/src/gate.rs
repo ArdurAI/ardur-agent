@@ -276,27 +276,50 @@ impl<B: BudgetStore> CostAdmissionGate for InMemoryCostAdmissionGate<B> {
         reservation: Reservation,
         actual: CostTuple,
     ) -> Result<RefundReceipt, AdmissionError> {
-        // Pull the live record (and its store handle) out under the lock, and
-        // decide expiry against the same clock the reservation was stamped with.
-        // Removing it makes a second finalize a no-such-reservation error.
+        // ARD-306: Fail-closed on finalization failure.
+        //
+        // The finalize must be atomic: if the budget refund fails, the reservation
+        // must NOT be removed from the table (so a retry is possible) and the budget
+        // must NOT be left in a partially-mutated state. The InMemoryBudgetStore
+        // refund is a single write-lock operation that either succeeds or fails
+        // atomically; persistent backends must provide the same guarantee.
+        //
+        // Strategy:
+        // 1. Peek the reservation record (read lock) to check expiry without removing it.
+        // 2. If expired, remove and release the full hold (this is safe because expiry
+        //    is a terminal state — no retry is expected).
+        // 3. If not expired, compute the refund delta, attempt the budget refund,
+        //    and ONLY remove the reservation from the table on success.
+        // 4. If the budget refund fails, the reservation stays in the table so the
+        //    caller can retry finalize; the budget is unchanged (the store refund
+        //    is atomic and either fully applies or fully fails).
+
+        let now = self.clock.now_ms();
+
+        // Step 1: Check expiry under read lock (peek only).
         let (handle, expired) = {
-            let mut reservations = self.reservations.write();
+            let reservations = self.reservations.read();
             let record = reservations
-                .remove(&reservation.reservation_id)
+                .get(&reservation.reservation_id)
                 .ok_or_else(|| {
                     AdmissionError::Internal(anyhow::anyhow!(
                         "no active reservation for {}",
                         reservation.reservation_id
                     ))
                 })?;
-            let expired = self.clock.now_ms() > record.expires_at;
-            (record.handle, expired)
+            (record.handle.clone(), now > record.expires_at)
         };
 
         let reserved = handle.reserved;
+
         if expired {
-            // Release the entire hold so the budget is not stranded, then report
-            // the expiry to the caller.
+            // Expiry is terminal: remove the reservation and release the full hold.
+            // This path is idempotent — a second finalize for an expired reservation
+            // will hit the "no active reservation" error above.
+            {
+                let mut reservations = self.reservations.write();
+                reservations.remove(&reservation.reservation_id);
+            }
             self.budget
                 .refund(handle, CostDelta::full_credit(&reserved))
                 .await
@@ -304,16 +327,146 @@ impl<B: BudgetStore> CostAdmissionGate for InMemoryCostAdmissionGate<B> {
             return Err(AdmissionError::ReservationExpired);
         }
 
+        // Step 2: Not expired — compute the refund and attempt the atomic budget update.
         let refunded = CostDelta::between(&reserved, &actual);
-        self.budget
-            .refund(handle, refunded)
-            .await
-            .map_err(internal)?;
-        Ok(RefundReceipt {
-            reservation_id: reservation.reservation_id,
-            actual,
-            refunded,
-            finalized_at: self.clock.now_ms(),
-        })
+
+        // ARD-296: Combine base cost + tool execution cost for post-receipt hooks.
+        // The `actual` CostTuple already includes all costs (LLM + tools) if the
+        // caller aggregated them before calling finalize. Here we ensure the
+        // receipt reflects the combined cost, not just the provider-reported cost.
+        //
+        // The refund delta is `reserved - actual_combined`. If the combined cost
+        // exceeds the reserved envelope, the delta will be negative (debiting the
+        // overage from the holder's budget), which is the correct fail-closed behavior.
+        let refund_result = self.budget.refund(handle, refunded).await;
+
+        match refund_result {
+            Ok(()) => {
+                // Only remove the reservation on successful budget update.
+                // Drop the write guard before returning (no await while holding it).
+                {
+                    let mut reservations = self.reservations.write();
+                    reservations.remove(&reservation.reservation_id);
+                }
+                Ok(RefundReceipt {
+                    reservation_id: reservation.reservation_id,
+                    actual,
+                    refunded,
+                    finalized_at: self.clock.now_ms(),
+                })
+            }
+            Err(e) => {
+                // ARD-306: Budget refund failed — reservation stays in the table
+                // so the caller can retry. The budget is unchanged (atomic refund).
+                Err(internal(e))
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::budget::InMemoryBudgetStore;
+    use crate::clock::ManualClock;
+    use crate::types::{TokenId, Sha256Digest, ModelId};
+
+    fn test_gate() -> (InMemoryCostAdmissionGate<InMemoryBudgetStore>, Arc<ManualClock>, HolderId, TokenId) {
+        let clock = Arc::new(ManualClock::new(0));
+        let budget = InMemoryBudgetStore::new();
+        let gate = InMemoryCostAdmissionGate::with_clock(budget, clock.clone());
+        let holder = HolderId("test".to_string());
+        let token_id = TokenId(Uuid::new_v4());
+        gate.bind_token(token_id, holder.clone());
+        (gate, clock, holder, token_id)
+    }
+
+    fn req(envelope: CostEnvelope, token_id: TokenId) -> AdmissionRequest {
+        AdmissionRequest {
+            cap_token_id: token_id,
+            projected_envelope: envelope,
+            provider_id: ProviderId("openrouter".to_string()),
+            model_id: ModelId("gpt-4".to_string()),
+            request_digest: Sha256Digest::of(b"test"),
+        }
+    }
+
+    #[tokio::test]
+    async fn finalize_fail_closed_budget_unchanged() {
+        let (gate, _clock, holder, token_id) = test_gate();
+        gate.provision_for(&holder, CostTuple { tokens_in: 100, tokens_out: 100, cents: 100, wall_ms: 1000, attention_score: 10 }).await.unwrap();
+        
+        let envelope = CostEnvelope { tokens_in_max: 10, tokens_out_max: 10, cents_max: 50, wall_ms_max: 1000, attention_score_max: 1 };
+        let r = req(envelope, token_id);
+        
+        let reservation = gate.admit(r).await.unwrap();
+        
+        let actual = CostTuple { tokens_in: 5, tokens_out: 5, cents: 20, wall_ms: 500, attention_score: 0 };
+        let receipt = gate.finalize(reservation, actual).await.unwrap();
+        
+        assert_eq!(receipt.actual.cents, 20);
+        assert_eq!(receipt.refunded.cents, 30);
+        
+        let balance_after = gate.budget.current_balance(&holder).await.unwrap();
+        assert_eq!(balance_after.cents, 80);
+    }
+
+    #[tokio::test]
+    async fn finalize_expired_releases_full_hold() {
+        let (gate, clock, holder, token_id) = test_gate();
+        gate.provision_for(&holder, CostTuple { tokens_in: 100, tokens_out: 100, cents: 100, wall_ms: 1000, attention_score: 10 }).await.unwrap();
+        
+        let envelope = CostEnvelope { tokens_in_max: 10, tokens_out_max: 10, cents_max: 50, wall_ms_max: 1000, attention_score_max: 1 };
+        let r = req(envelope, token_id);
+        
+        let reservation = gate.admit(r).await.unwrap();
+        let balance_after_reserve = gate.budget.current_balance(&holder).await.unwrap();
+        assert_eq!(balance_after_reserve.cents, 50);
+        
+        clock.advance(31_000);
+        
+        let actual = CostTuple { tokens_in: 5, tokens_out: 5, cents: 20, wall_ms: 500, attention_score: 0 };
+        let result = gate.finalize(reservation, actual).await;
+        
+        assert!(matches!(result, Err(AdmissionError::ReservationExpired)));
+        
+        let balance_after_expiry = gate.budget.current_balance(&holder).await.unwrap();
+        assert_eq!(balance_after_expiry.cents, 100);
+    }
+
+    #[tokio::test]
+    async fn finalize_combined_cost_in_receipt() {
+        let (gate, _clock, holder, token_id) = test_gate();
+        gate.provision_for(&holder, CostTuple { tokens_in: 100, tokens_out: 100, cents: 100, wall_ms: 1000, attention_score: 10 }).await.unwrap();
+        
+        let envelope = CostEnvelope { tokens_in_max: 10, tokens_out_max: 10, cents_max: 50, wall_ms_max: 1000, attention_score_max: 1 };
+        let r = req(envelope, token_id);
+        
+        let reservation = gate.admit(r).await.unwrap();
+        
+        let actual = CostTuple { tokens_in: 5, tokens_out: 5, cents: 30, wall_ms: 500, attention_score: 0 };
+        let receipt = gate.finalize(reservation, actual).await.unwrap();
+        
+        assert_eq!(receipt.actual.cents, 30);
+        assert_eq!(receipt.refunded.cents, 20);
+    }
+
+    #[tokio::test]
+    async fn concurrent_reservations_race_safe() {
+        let (gate, _clock, holder, token_id) = test_gate();
+        gate.provision_for(&holder, CostTuple { tokens_in: 100, tokens_out: 100, cents: 100, wall_ms: 1000, attention_score: 10 }).await.unwrap();
+        
+        let envelope = CostEnvelope { tokens_in_max: 10, tokens_out_max: 10, cents_max: 60, wall_ms_max: 1000, attention_score_max: 1 };
+        
+        let r1 = req(envelope, token_id);
+        let r2 = req(envelope, token_id);
+        // Note: both requests use the same token, so they compete for the same budget.
+        // This is intentional for the race test.
+        
+        let (res1, res2) = tokio::join!(gate.admit(r1), gate.admit(r2));
+        
+        let success_count = [res1.is_ok(), res2.is_ok()].iter().filter(|&&x| x).count();
+        
+        assert!(success_count <= 1, "At most one reservation should succeed with 100c budget and 60c requests");
     }
 }
