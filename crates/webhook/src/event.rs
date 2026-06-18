@@ -38,11 +38,18 @@ impl WebhookEvent {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum EventType {
+    /// A push event (e.g., git push).
     Push,
+    /// A pull request event.
     PullRequest,
+    /// An issue event.
     Issue,
+    /// A comment event.
     Comment,
+    /// A deployment event.
     Deploy,
+    /// A build event.
     Build,
+    /// A custom event type with an arbitrary name.
     Custom(String),
 }

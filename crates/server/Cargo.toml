@@ -42,6 +42,9 @@ ardur-channel-matrix = { workspace = true }
 # `ARDUR_CHANNEL_TELEGRAM` are set.
 ardur-channel-discord = { workspace = true }
 ardur-channel-telegram = { workspace = true }
+# Automation orchestrator + OpenClaw hook compat (ARD-426/427).
+ardur-automation = { workspace = true }
+ardur-hooks-openclaw-compat = { workspace = true }
 ardur-provider-runtime = { workspace = true }
 # §3.0 provider selection — reads ARDUR_PROVIDER and boxes the chosen backend
 # (anthropic | openrouter | ollama | codex) the bin hands to AppState::boot.

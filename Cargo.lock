@@ -401,10 +401,12 @@ name = "ardur-cli"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "ardur-automation",
  "ardur-cap-token",
  "ardur-cedar-policy",
  "ardur-cost-gate",
  "ardur-fused-runtime",
+ "ardur-hooks-openclaw-compat",
  "ardur-memory",
  "ardur-provider-runtime",
  "ardur-provider-selector",
@@ -848,6 +850,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "ardur-acp",
+ "ardur-automation",
  "ardur-cap-token",
  "ardur-cedar-policy",
  "ardur-channel-discord",
@@ -855,6 +858,7 @@ dependencies = [
  "ardur-channel-telegram",
  "ardur-cost-gate",
  "ardur-fused-runtime",
+ "ardur-hooks-openclaw-compat",
  "ardur-media-audio",
  "ardur-memory",
  "ardur-memory-qdrant",
