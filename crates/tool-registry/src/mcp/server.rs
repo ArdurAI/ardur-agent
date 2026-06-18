@@ -87,6 +87,7 @@ impl ServerHandler for ArdurMcpServer {
             .registry
             .list()
             .into_iter()
+            .filter(|tool| tool.required_capabilities().is_empty())
             .map(Self::to_mcp_tool)
             .collect();
         Ok(ListToolsResult::with_all_items(tools))
@@ -104,6 +105,15 @@ impl ServerHandler for ArdurMcpServer {
                 None,
             ));
         };
+        if !tool.required_capabilities().is_empty() {
+            return Err(McpError::invalid_params(
+                format!(
+                    "tool {} requires fused-runtime cap-token/Cedar context and is not callable over direct MCP",
+                    request.name
+                ),
+                None,
+            ));
+        }
 
         // MCP arguments are an object (or absent); pass them through as the
         // tool's JSON `args`, defaulting an omitted object to `{}`.

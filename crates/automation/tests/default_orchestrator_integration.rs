@@ -1,7 +1,7 @@
 use ardur_automation::{
-    BundleHash, DefaultTaskFlowOrchestrator, FlowControl, FlowNode, FlowStep, ProviderId,
-    Sha256Digest, StepDispatch, StepFailureKind, StepId, StepOutcome, TaskCreationRequest,
-    TaskFlowDag, TaskFlowOrchestrator, ToolId,
+    BundleHash, CedarExpression, DefaultTaskFlowOrchestrator, FlowControl, FlowNode, FlowStep,
+    ParallelWait, ProviderId, Sha256Digest, StepDispatch, StepFailureKind, StepId, StepOutcome,
+    TaskCreationRequest, TaskFlowDag, TaskFlowOrchestrator, ToolId,
 };
 use ardur_cap_token::{HolderId, VerifiedClaims};
 use uuid::Uuid;
@@ -10,15 +10,19 @@ fn digest(byte: u8) -> Sha256Digest {
     Sha256Digest([byte; 32])
 }
 
-fn verified_claims() -> VerifiedClaims {
+fn claims_with(allowlist: &[&str]) -> VerifiedClaims {
     VerifiedClaims {
         token_id: Uuid::now_v7(),
         audience: "ardur-automation".to_string(),
         subject: HolderId("spiffe://tenant/user".to_string()),
         expires_unix: 4_102_444_800,
         budget_remaining: 1_000,
-        tool_allowlist: vec!["task.create".to_string()],
+        tool_allowlist: allowlist.iter().map(|value| (*value).to_string()).collect(),
     }
+}
+
+fn verified_claims() -> VerifiedClaims {
+    claims_with(&["task.create", "tool.echo", "provider.stub", "task.override"])
 }
 
 fn step(name: &str, estimated_duration_ms: u32) -> FlowStep {
@@ -144,4 +148,111 @@ async fn default_orchestrator_rejects_invalid_empty_description() {
         .await
         .expect_err("empty description is invalid");
     assert!(err.to_string().contains("description must not be empty"));
+}
+
+#[tokio::test]
+async fn default_orchestrator_rejects_step_dispatch_outside_cap_token_allowlist() {
+    let orchestrator = DefaultTaskFlowOrchestrator::new();
+    let err = orchestrator
+        .create_task(
+            &claims_with(&["task.create"]),
+            TaskCreationRequest {
+                description: "unauthorized dispatch".to_string(),
+                flow_dag: Some(sequence_dag(vec![step("not allowed", 5)])),
+            },
+        )
+        .await
+        .expect_err("tool.echo is not in the cap-token allowlist");
+
+    assert!(err.to_string().contains("tool.echo"));
+    assert!(err.to_string().contains("cap-token"));
+}
+
+#[tokio::test]
+async fn default_orchestrator_rejects_unsupported_or_empty_control_flow() {
+    let orchestrator = DefaultTaskFlowOrchestrator::new();
+    let cases = vec![
+        (
+            "empty sequence",
+            FlowNode::Control(FlowControl::Sequence(Vec::new())),
+        ),
+        (
+            "empty parallel all",
+            FlowNode::Control(FlowControl::Parallel {
+                branches: Vec::new(),
+                wait: ParallelWait::All,
+            }),
+        ),
+        (
+            "anyn zero",
+            FlowNode::Control(FlowControl::Parallel {
+                branches: vec![FlowNode::Step(step("branch", 5))],
+                wait: ParallelWait::AnyN(0),
+            }),
+        ),
+        (
+            "conditional without Cedar evaluator",
+            FlowNode::Control(FlowControl::Conditional {
+                predicate: CedarExpression(serde_json::json!({ "op": "eq", "value": true })),
+                then_branch: Box::new(FlowNode::Step(step("then", 5))),
+                else_branch: None,
+            }),
+        ),
+    ];
+
+    for (label, root) in cases {
+        let err = orchestrator
+            .create_task(
+                &verified_claims(),
+                TaskCreationRequest {
+                    description: label.to_string(),
+                    flow_dag: Some(TaskFlowDag {
+                        dag_hash: BundleHash(digest(7)),
+                        version: 1,
+                        root,
+                        max_depth: 4,
+                        max_fanout: 4,
+                        invariants: Vec::new(),
+                        estimated_total_cost_micro_usd: 10,
+                    }),
+                },
+            )
+            .await
+            .expect_err(&format!("{label} should be rejected fail-closed"));
+        assert!(
+            err.to_string().contains("unsupported")
+                || err.to_string().contains("empty")
+                || err.to_string().contains("AnyN"),
+            "{label}: unexpected error {err}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn operator_override_rejects_steps_that_are_not_verification_failed() {
+    let orchestrator = DefaultTaskFlowOrchestrator::new().with_step_timeout_ms(10);
+    let slow_step = step("slow", 25);
+    let slow_step_id = slow_step.step_id;
+    let handle = orchestrator
+        .create_task(
+            &verified_claims(),
+            TaskCreationRequest {
+                description: "timeout flow".to_string(),
+                flow_dag: Some(sequence_dag(vec![slow_step])),
+            },
+        )
+        .await
+        .expect("timeout is recorded, not a create error");
+
+    let err = orchestrator
+        .operator_override_verification(
+            &verified_claims(),
+            handle.task_id,
+            slow_step_id,
+            "operator saw enough evidence".to_string(),
+        )
+        .await
+        .expect_err("only verification-failed steps may be overridden");
+
+    assert!(err.to_string().contains("verification"));
 }

@@ -18,6 +18,36 @@ fn tiny_wav() -> Vec<u8> {
     b"RIFF$\0\0\0WAVEfmt \x10\0\0\0\x01\0\x01\0@\x1f\0\0@\x1f\0\0\x01\0\x08\0data\0\0\0\0".to_vec()
 }
 
+#[tokio::test]
+async fn whisper_base_url_with_path_preserves_v1_segment() {
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/audio/transcriptions"))
+        .and(header("authorization", "Bearer test-openai-key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "text": "hello from v1 whisper",
+            "language": "en"
+        })))
+        .mount(&mock)
+        .await;
+
+    let config = WhisperApiConfig::new("test-openai-key")
+        .with_base_url(format!("{}/v1", mock.uri()))
+        .expect("loopback mock base URL with path is accepted");
+    let provider = WhisperApiTranscriptionProvider::new(config).expect("provider config is valid");
+    let provider_id = provider.media_provider_id().clone();
+
+    let transcript = provider
+        .transcribe_file(
+            &token(provider_id.clone()),
+            request(provider_id, AudioModelId::new("whisper-1"), tiny_wav()),
+        )
+        .await
+        .expect("nested /v1 endpoint is called");
+
+    assert_eq!(transcript.segments[0].text, "hello from v1 whisper");
+}
+
 fn token(provider_id: AudioProviderId) -> AuthorizedAudioToken {
     AuthorizedAudioToken {
         cap_token: CapTokenRef("cap-token-for-voice.transcribe".to_string()),
@@ -150,4 +180,46 @@ async fn voice_transcribe_tool_requires_a_non_empty_cap_token() {
         .expect_err("empty cap token is denied before provider call");
 
     assert!(err.to_string().contains("cap-token"));
+}
+
+#[tokio::test]
+async fn voice_transcribe_tool_rejects_audio_duration_above_local_ceiling() {
+    let mock = MockServer::start().await;
+    let config = WhisperApiConfig::new("test-openai-key")
+        .with_base_url(mock.uri())
+        .expect("loopback mock base URL is accepted");
+    let provider = WhisperApiTranscriptionProvider::new(config).expect("provider config is valid");
+    let tool = VoiceTranscribeTool::new(provider);
+    let ctx = ToolContext {
+        cap_token: CapTokenRef("cap-token-for-voice.transcribe".to_string()),
+        session_id: SessionId::new(),
+        invocation_id: Default::default(),
+        cwd: std::env::current_dir().expect("cwd"),
+        env: Default::default(),
+        cost_budget_cents: 100,
+    };
+
+    let err = tool
+        .invoke(
+            &ctx,
+            json!({
+                "audio_base64": BASE64_STANDARD.encode(tiny_wav()),
+                "format": "wav",
+                "duration_seconds_upper_bound": 7_201
+            }),
+        )
+        .await
+        .expect_err("duration above the tool ceiling is denied before provider call");
+
+    assert!(
+        err.to_string().contains("duration_seconds_upper_bound")
+            || err.to_string().contains("duration")
+    );
+    assert_eq!(
+        mock.received_requests()
+            .await
+            .expect("requests queried")
+            .len(),
+        0
+    );
 }

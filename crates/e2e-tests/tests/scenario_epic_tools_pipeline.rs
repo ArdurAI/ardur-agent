@@ -39,7 +39,7 @@ fn verified_claims() -> VerifiedClaims {
         subject: HolderId("spiffe://tenant/user".to_string()),
         expires_unix: 4_102_444_800,
         budget_remaining: 1_000,
-        tool_allowlist: vec!["task.create".to_string()],
+        tool_allowlist: vec!["task.create".to_string(), "tool.echo".to_string()],
     }
 }
 
