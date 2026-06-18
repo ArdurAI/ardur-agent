@@ -15,10 +15,14 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+/// Error types for webhook operations.
 pub mod error;
+/// Webhook event types and normalized envelope.
 pub mod event;
 mod inbound;
+/// Outbound webhook client and configuration.
 pub mod outbound;
+/// Webhook signature generation and verification.
 pub mod signature;
 
 pub use error::{Result, WebhookError};

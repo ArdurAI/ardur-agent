@@ -290,6 +290,7 @@ mod tests {
             expires_unix: 2_000_000_000,
             budget_remaining: 100,
             tool_allowlist: tools.iter().map(|tool| (*tool).to_string()).collect(),
+            capabilities: Vec::new(),
         }
     }
 

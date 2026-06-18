@@ -158,6 +158,7 @@ impl FusedEngine {
                         ardur_memory::MEMORY_READ_CAPABILITY.to_string(),
                         ardur_memory::MEMORY_WRITE_CAPABILITY.to_string(),
                     ],
+                    capabilities: Vec::new(),
                 },
             )
             .map_err(|e| CliError::State(format!("minting the session cap-token: {e}")))?;

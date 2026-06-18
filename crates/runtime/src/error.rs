@@ -195,6 +195,15 @@ pub enum RuntimeError {
         tool: String,
     },
 
+    /// A tool's `required_capabilities` were not all granted by the verified
+    /// cap-token (ARD-420). Carries the human-readable reason naming the missing
+    /// capability and the tool that required it.
+    #[error("capability denied: {reason}")]
+    CapabilityDenied {
+        /// The human-readable reason the capability check failed.
+        reason: String,
+    },
+
     /// No command was registered under the dispatched name.
     #[error("command not found: {0}")]
     CommandNotFound(String),

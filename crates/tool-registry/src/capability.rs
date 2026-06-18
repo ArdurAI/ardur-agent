@@ -3,9 +3,9 @@
 //!
 //! A tool advertises the capabilities it needs through
 //! [`Tool::required_capabilities`](crate::Tool::required_capabilities). The
-//! registry never enforces them in Phase 1; the set is the contract the
+//! fused runtime enforces them before every invocation (ARD-420): the
 //! cap-token verifier (§11.14) and the Cedar policy engine (§11.0) gate against
-//! before a [`Tool::invoke`](crate::Tool::invoke) is admitted.
+//! the set before a [`Tool::invoke`](crate::Tool::invoke) is admitted.
 
 use serde::{Deserialize, Serialize};
 
@@ -33,4 +33,24 @@ pub enum Capability {
     ClipboardRead,
     /// A capability outside the built-in classes, named by the tool author.
     Custom(String),
+}
+
+impl Capability {
+    /// The canonical string form used to carry the capability through the
+    /// cap-token's `capabilities` claim (which is a `Vec<String>` so the
+    /// cap-token crate never depends on this one). Built-in capabilities use
+    /// their variant name; [`Capability::Custom`] is `custom:<name>`.
+    #[must_use]
+    pub fn as_str(&self) -> String {
+        match self {
+            Capability::FsRead => "FsRead".to_string(),
+            Capability::FsWrite => "FsWrite".to_string(),
+            Capability::ShellExec => "ShellExec".to_string(),
+            Capability::NetworkOut => "NetworkOut".to_string(),
+            Capability::ProcessSpawn => "ProcessSpawn".to_string(),
+            Capability::EnvRead => "EnvRead".to_string(),
+            Capability::ClipboardRead => "ClipboardRead".to_string(),
+            Capability::Custom(name) => format!("custom:{name}"),
+        }
+    }
 }

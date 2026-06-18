@@ -18,6 +18,7 @@ fn scope(audience: &str, expires_unix: u64, budget: u64, tools: &[&str]) -> CapS
         expires_unix,
         budget_remaining: budget,
         tool_allowlist: tools.iter().map(|t| t.to_string()).collect(),
+        capabilities: Vec::new(),
     }
 }
 

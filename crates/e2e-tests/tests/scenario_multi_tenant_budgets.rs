@@ -45,6 +45,7 @@ fn token_for(subject: &str) -> String {
                 expires_unix: fixtures::NOW_UNIX + 3_600,
                 budget_remaining: 1_000_000,
                 tool_allowlist: vec![fixtures::TOOL.to_string()],
+                capabilities: Vec::new(),
             },
         )
         .expect("the cap-token issues")

@@ -30,6 +30,7 @@ pub fn parent_token(tools: &[&str], budget: u64) -> (CapToken, PublicKey) {
                 expires_unix: EXPIRY_UNIX,
                 budget_remaining: budget,
                 tool_allowlist: tools.iter().map(|t| t.to_string()).collect(),
+                capabilities: Vec::new(),
             },
         )
         .expect("issue parent token");

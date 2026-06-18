@@ -98,6 +98,7 @@ pub fn mint_token(expires_unix: u64, budget_remaining: u64) -> String {
                     "slow".to_string(),
                     "boom".to_string(),
                 ],
+                capabilities: Vec::new(),
             },
         )
         .expect("the cap-token issues")
@@ -124,6 +125,37 @@ pub fn mint_token_as(subject: &str, audience: &str, tools: &[&str]) -> String {
                 expires_unix: NOW_UNIX + 3_600,
                 budget_remaining: 1_000_000,
                 tool_allowlist: tools.iter().map(|t| (*t).to_string()).collect(),
+                capabilities: Vec::new(),
+            },
+        )
+        .expect("the cap-token issues")
+        .to_base64()
+        .expect("the cap-token serializes")
+}
+
+/// Mint a cap-token (base64) for [`HOLDER`] / [`AUDIENCE`] with the given
+/// capabilities. Used by ARD-420 capability-enforcement tests.
+pub fn mint_token_with_capabilities(caps: &[&str]) -> String {
+    cap_issuer()
+        .issue(
+            CapHolderId(HOLDER.to_string()),
+            CapScope {
+                audience: AUDIENCE.to_string(),
+                expires_unix: NOW_UNIX + 3_600,
+                budget_remaining: 1_000_000,
+                tool_allowlist: vec![
+                    TOOL.to_string(),
+                    "memory.write".to_string(),
+                    "echo".to_string(),
+                    "slow".to_string(),
+                    "boom".to_string(),
+                    "shell".to_string(),
+                    "file.read".to_string(),
+                    "file.write".to_string(),
+                    "http.fetch".to_string(),
+                    "no-caps".to_string(),
+                ],
+                capabilities: caps.iter().map(|c| c.to_string()).collect(),
             },
         )
         .expect("the cap-token issues")

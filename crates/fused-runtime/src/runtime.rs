@@ -452,13 +452,41 @@ impl FusedRuntime {
         session_id: SessionId,
         now_unix: u64,
         tool_name: &str,
-    ) -> Result<(), RuntimeError> {
+    ) -> Result<VerifiedClaims, RuntimeError> {
         let claims = self.stage_cap_token_for_tool(req, provisioning, now_unix, tool_name)?;
         self.stage_cedar_with_action(
             session_id,
             &claims,
             ActionRef("Action::ToolInvoke".to_string()),
-        )
+        )?;
+        Ok(claims)
+    }
+
+    /// **ARD-420.** Enforce a tool's `required_capabilities` against the verified
+    /// cap-token's granted capabilities. Returns [`RuntimeError::CapabilityDenied`]
+    /// naming the first missing capability and the tool that required it.
+    fn enforce_required_capabilities(
+        &self,
+        tool: &dyn ardur_tool_registry::Tool,
+        claims: &VerifiedClaims,
+        call_name: &str,
+    ) -> Result<(), RuntimeError> {
+        let required = tool.required_capabilities();
+        if required.is_empty() {
+            return Ok(());
+        }
+        for cap in required {
+            if !claims.has_capability(&cap.as_str()) {
+                return Err(RuntimeError::CapabilityDenied {
+                    reason: format!(
+                        "tool `{}` requires capability `{}` which is not granted",
+                        call_name,
+                        cap.as_str()
+                    ),
+                });
+            }
+        }
+        Ok(())
     }
 
     /// **Stage 3 (setup).** Resolve the budget holder (the verified subject
@@ -1061,13 +1089,25 @@ impl FusedRuntime {
                             .await;
                         return Err(err);
                     };
-                    if let Err(err) = self.authorize_tool_invocation(
+                    let claims = match self.authorize_tool_invocation(
                         &req,
                         &provisioning,
                         session_id,
                         now_unix,
                         &call.name,
                     ) {
+                        Ok(claims) => claims,
+                        Err(err) => {
+                            self.release(reservation).await;
+                            self.fire_error(session_id, LifecyclePhase::Submit, &err)
+                                .await;
+                            return Err(err);
+                        }
+                    };
+                    // ARD-420: enforce per-tool capability requirements against
+                    // the verified cap-token before the tool is invoked.
+                    if let Err(err) = self.enforce_required_capabilities(tool, &claims, &call.name)
+                    {
                         self.release(reservation).await;
                         self.fire_error(session_id, LifecyclePhase::Submit, &err)
                             .await;
@@ -1521,13 +1561,28 @@ impl FusedRuntime {
                             Err(err)?;
                             unreachable!()
                         };
-                        if let Err(err) = self.authorize_tool_invocation(
+                        let claims = match self.authorize_tool_invocation(
                             &req,
                             &provisioning,
                             session_id,
                             now_unix,
                             &call.name,
                         ) {
+                            Ok(claims) => claims,
+                            Err(err) => {
+                                self.release(reservation.take().expect("reservation held")).await;
+                                yield FusedEvent::StageEnd { stage: StageKind::ToolExec, ok: false };
+                                self.fire_error(session_id, LifecyclePhase::Submit, &err).await;
+                                Err(err)?;
+                                unreachable!()
+                            }
+                        };
+                        // ARD-420: enforce per-tool capability requirements
+                        // against the verified cap-token before the tool is
+                        // invoked.
+                        if let Err(err) =
+                            self.enforce_required_capabilities(tool, &claims, &call.name)
+                        {
                             self.release(reservation.take().expect("reservation held")).await;
                             yield FusedEvent::StageEnd { stage: StageKind::ToolExec, ok: false };
                             self.fire_error(session_id, LifecyclePhase::Submit, &err).await;

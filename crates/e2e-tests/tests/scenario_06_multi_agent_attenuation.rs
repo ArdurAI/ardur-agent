@@ -109,6 +109,7 @@ async fn parent_child_grandchild_chain_narrows_each_generation() {
                 expires_unix: PARENT_EXPIRY,
                 budget_remaining: BIG_BUDGET,
                 tool_allowlist: vec![CHAT_SUBMIT_TOOL.to_string(), MEMORY_WRITE_TOOL.to_string()],
+                capabilities: Vec::new(),
             },
         )
         .expect("issue parent root cap");
@@ -307,6 +308,7 @@ async fn grandchild_cannot_re_grant_a_dropped_capability() {
                 expires_unix: PARENT_EXPIRY,
                 budget_remaining: BIG_BUDGET,
                 tool_allowlist: vec![CHAT_SUBMIT_TOOL.to_string(), MEMORY_WRITE_TOOL.to_string()],
+                capabilities: Vec::new(),
             },
         )
         .expect("issue parent");

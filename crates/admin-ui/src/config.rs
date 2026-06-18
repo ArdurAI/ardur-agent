@@ -50,6 +50,21 @@ pub struct Cli {
     #[arg(long, default_value_t = DEFAULT_PORT)]
     pub port: u16,
 
+    /// Address to bind the dashboard on (default: 127.0.0.1 — loopback only).
+    /// Override with `ARDUR_ADMIN_BIND` env var. Non-loopback addresses
+    /// require `--basic-auth` unless `--unsafe-bind` is also set.
+    #[arg(
+        long,
+        value_name = "ADDR",
+        env = "ARDUR_ADMIN_BIND",
+        default_value = "127.0.0.1"
+    )]
+    pub bind_addr: String,
+
+    /// Allow non-loopback bind without `--basic-auth` (NOT recommended).
+    #[arg(long)]
+    pub unsafe_bind: bool,
+
     /// Optional HTTP Basic credentials as `user:pass`. When set, every endpoint
     /// requires them. Meant for a light gate on a shared network — not a
     /// substitute for real auth (see README).

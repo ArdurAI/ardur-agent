@@ -68,9 +68,9 @@ struct Forwarder {
 }
 
 impl Forwarder {
-    /// Whether `room_id` is permitted (empty allowlist = all rooms).
+    /// Whether `room_id` is permitted (empty allowlist = no rooms, ARD-422).
     fn room_allowed(&self, room_id: &str) -> bool {
-        self.allowed_rooms.is_empty() || self.allowed_rooms.contains(room_id)
+        !self.allowed_rooms.is_empty() && self.allowed_rooms.contains(room_id)
     }
 }
 

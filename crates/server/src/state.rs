@@ -812,6 +812,7 @@ impl Processor {
                 expires_unix: now_unix.saturating_add(CAP_TTL_SECS),
                 budget_remaining: self.cap_budget_remaining,
                 tool_allowlist: self.tool_allowlist.clone(),
+                capabilities: Vec::new(),
             },
         )?;
         Ok(token.to_base64()?)

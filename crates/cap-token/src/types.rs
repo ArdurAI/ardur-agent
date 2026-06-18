@@ -12,8 +12,9 @@ use crate::error::{CapTokenError, map_parse_error};
 pub struct HolderId(pub String);
 
 /// The capability scope a cap-token grants: the audience it is valid for, when
-/// it expires, the spend ceiling, and the tools it may invoke. These become the
-/// authority block's claims and the checks that bind every future request.
+/// it expires, the spend ceiling, the tools it may invoke, and the
+/// capability-level permissions it grants. These become the authority block's
+/// claims and the checks that bind every future request.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CapScope {
     /// The single audience (service / boundary) the token authorizes.
@@ -28,6 +29,11 @@ pub struct CapScope {
     /// is [`CapTokenError::ToolNotAllowed`]. An empty allowlist denies all
     /// tools.
     pub tool_allowlist: Vec<String>,
+    /// The capabilities this token grants, as their canonical string forms.
+    /// The fused runtime checks a tool's `required_capabilities` against this
+    /// set before every invocation (ARD-420). Empty means no tool may declare
+    /// a non-empty `required_capabilities`.
+    pub capabilities: Vec<String>,
 }
 
 /// A single strictly-narrowing rule applied during attenuation. Each variant
@@ -145,6 +151,19 @@ pub struct VerifiedClaims {
     pub budget_remaining: u64,
     /// The issued tool allowlist.
     pub tool_allowlist: Vec<String>,
+    /// The issued capability grants, as canonical capability strings.
+    pub capabilities: Vec<String>,
+}
+
+impl VerifiedClaims {
+    /// Whether the token grants the given capability string. Used by the fused
+    /// runtime (ARD-420) to enforce a tool's `required_capabilities` before
+    /// every invocation. The string is the canonical form a tool's
+    /// `required_capabilities` produces (e.g. `Capability::as_str()`).
+    #[must_use]
+    pub fn has_capability(&self, cap: &str) -> bool {
+        self.capabilities.iter().any(|c| c == cap)
+    }
 }
 
 /// The issued claims, serialized into the authority block's context so the
@@ -159,4 +178,5 @@ pub(crate) struct CapClaims {
     pub expires_unix: u64,
     pub budget_remaining: u64,
     pub tool_allowlist: Vec<String>,
+    pub capabilities: Vec<String>,
 }

@@ -81,6 +81,7 @@ async fn single_turn_through_full_substrate() {
                 // The plan's "chat.submit" + "memory.write" capability names —
                 // the crate models these as opaque tool-allowlist strings.
                 tool_allowlist: vec!["chat.submit".to_string(), "memory.write".to_string()],
+                capabilities: Vec::new(),
             },
         )
         .expect("the root cap-token issues");

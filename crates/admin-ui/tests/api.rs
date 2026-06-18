@@ -582,6 +582,7 @@ async fn trust_center_wallet_receipts_and_policy_debugger() {
         expires_unix: 2_000_000_000,
         budget_remaining: 42,
         tool_allowlist: vec!["chat.submit".to_string(), "memory.read".to_string()],
+        capabilities: Vec::new(),
     };
     let state = AppState::new(&fx.journal_dir, &fx.receipt_store)
         .with_capabilities(vec![claims])

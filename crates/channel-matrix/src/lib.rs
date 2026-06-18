@@ -118,12 +118,12 @@ mod tests {
         assert_eq!(config.device_id, None);
         assert_eq!(config.resolved_device_id(), DEFAULT_DEVICE_ID);
         assert!(
-            config.auto_join_invites,
-            "auto-join defaults to true when unset"
+            !config.auto_join_invites,
+            "auto-join defaults to false when unset (ARD-422)"
         );
         assert!(
             config.allowed_rooms.is_empty(),
-            "an unset allowlist means all rooms"
+            "an unset allowlist means no rooms allowed (ARD-422)"
         );
         assert!(
             config.state_dir.ends_with("matrix-state"),
@@ -186,9 +186,46 @@ mod tests {
                 "!c:hs".to_string()
             ]
         );
-        // None (and an all-blank value) parse to an empty list = "all rooms".
+        // None (and an all-blank value) parse to an empty list = no rooms allowed.
         assert!(parse_allowed_rooms(None).is_empty());
         assert!(parse_allowed_rooms(Some("   ,  , ")).is_empty());
+    }
+
+    #[test]
+    fn empty_allowlist_denies_all_rooms() {
+        // ARD-422: empty allowlist means NO rooms are allowed.
+        let config = FakeEnv::required().resolve().expect("required vars set");
+        assert!(config.allowed_rooms.is_empty());
+        assert!(
+            !config.room_allowed("!any:example.org"),
+            "empty allowlist must deny all rooms (ARD-422)"
+        );
+    }
+
+    #[test]
+    fn auto_join_warning_when_allowlist_empty() {
+        // ARD-422: auto_join_invites=true with empty allowlist should warn.
+        let config = FakeEnv::required()
+            .with(ENV_AUTO_JOIN, "true")
+            .resolve()
+            .expect("required vars set");
+        assert!(config.auto_join_invites);
+        assert!(config.allowed_rooms.is_empty());
+        assert!(
+            config.auto_join_without_allowlist_warning().is_some(),
+            "auto_join + empty allowlist should produce a warning"
+        );
+    }
+
+    #[test]
+    fn no_warning_when_auto_join_disabled() {
+        // ARD-422: no warning when auto_join is false even with empty allowlist.
+        let config = FakeEnv::required().resolve().expect("required vars set");
+        assert!(!config.auto_join_invites);
+        assert!(
+            config.auto_join_without_allowlist_warning().is_none(),
+            "no warning when auto_join is disabled"
+        );
     }
 
     #[test]

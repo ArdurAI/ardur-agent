@@ -50,6 +50,7 @@ impl CapTokenIssuer for BiscuitCapTokenIssuer {
             expires_unix: scope.expires_unix,
             budget_remaining: scope.budget_remaining,
             tool_allowlist: scope.tool_allowlist.clone(),
+            capabilities: scope.capabilities.clone(),
         };
         let context = serde_json::to_string(&claims)?;
 

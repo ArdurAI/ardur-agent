@@ -20,6 +20,17 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
+    // ARD-421: Security check — non-loopback bind requires --basic-auth unless
+    // --unsafe-bind is explicitly set.
+    let bind_is_loopback = is_loopback(&cli.bind_addr);
+    if !bind_is_loopback && cli.basic_auth.is_none() && !cli.unsafe_bind {
+        anyhow::bail!(
+            "Non-loopback bind (--bind-addr {}) requires --basic-auth for security.\n\
+             Use --unsafe-bind to override this check (NOT recommended).",
+            cli.bind_addr
+        );
+    }
+
     // Optional, read-only Qdrant connection for the memory endpoint.
     let memory = match &cli.qdrant_url {
         Some(url) => {
@@ -46,7 +57,11 @@ async fn main() -> anyhow::Result<()> {
 
     let app = build_router(state.shared());
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], cli.port));
+    let ip: std::net::IpAddr = cli
+        .bind_addr
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid --bind-addr `{}`: {e}", cli.bind_addr))?;
+    let addr = SocketAddr::from((ip, cli.port));
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!(
         %addr,
@@ -56,4 +71,13 @@ async fn main() -> anyhow::Result<()> {
     );
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// Returns true if the address is loopback (127.0.0.1 or ::1).
+fn is_loopback(addr: &str) -> bool {
+    match addr.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(v4)) => v4.is_loopback(),
+        Ok(std::net::IpAddr::V6(v6)) => v6.is_loopback(),
+        Err(_) => false,
+    }
 }

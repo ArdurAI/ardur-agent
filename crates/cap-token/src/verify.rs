@@ -115,6 +115,7 @@ impl<D: DenyList> CapTokenVerifier for BiscuitCapTokenVerifier<D> {
             expires_unix: claims.expires_unix,
             budget_remaining: claims.budget_remaining,
             tool_allowlist: claims.tool_allowlist,
+            capabilities: claims.capabilities,
         })
     }
 }

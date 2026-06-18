@@ -39,10 +39,10 @@ pub struct MatrixConfig {
     /// Directory backing the sqlite state + crypto store. Defaults to
     /// `~/.ardur/matrix-state` (see [`default_state_dir`]).
     pub state_dir: PathBuf,
-    /// Whether the bot accepts room invites automatically (default `true`).
+    /// Whether the bot accepts room invites automatically (default `false`).
     pub auto_join_invites: bool,
-    /// Room-id allowlist. Empty means "all rooms"; otherwise inbound messages
-    /// from rooms not in this list are dropped.
+    /// Room-id allowlist. Empty means NO rooms are allowed; otherwise inbound
+    /// messages from rooms not in this list are dropped.
     pub allowed_rooms: Vec<String>,
 }
 
@@ -80,7 +80,7 @@ impl MatrixConfig {
             access_token: access_token.into(),
             device_id: None,
             state_dir: None,
-            auto_join_invites: true,
+            auto_join_invites: false,
             allowed_rooms: Vec::new(),
         }
     }
@@ -90,7 +90,7 @@ impl MatrixConfig {
     /// Required: `MATRIX_HOMESERVER_URL`, `MATRIX_USER_ID`,
     /// `MATRIX_ACCESS_TOKEN`. Optional: `MATRIX_DEVICE_ID`, `MATRIX_STATE_DIR`
     /// (default `~/.ardur/matrix-state`), `MATRIX_AUTO_JOIN_INVITES`
-    /// (default `true`), `MATRIX_ALLOWED_ROOMS` (comma-separated; empty = all).
+    /// (default `false`), `MATRIX_ALLOWED_ROOMS` (comma-separated; empty = no rooms).
     ///
     /// # Errors
     /// [`MatrixError::MissingEnvVar`] naming the first required variable that is
@@ -122,7 +122,7 @@ impl MatrixConfig {
 
         let device_id = get(ENV_DEVICE_ID);
         let state_dir = get(ENV_STATE_DIR).map_or_else(default_state_dir, PathBuf::from);
-        let auto_join_invites = get(ENV_AUTO_JOIN).is_none_or(|v| parse_bool(&v));
+        let auto_join_invites = get(ENV_AUTO_JOIN).map(|v| parse_bool(&v)).unwrap_or(false);
         let allowed_rooms = parse_allowed_rooms(get(ENV_ALLOWED_ROOMS).as_deref());
 
         Ok(Self {
@@ -143,11 +143,29 @@ impl MatrixConfig {
         self.device_id.as_deref().unwrap_or(DEFAULT_DEVICE_ID)
     }
 
-    /// Whether `room_id` is permitted: true when the allowlist is empty
-    /// (all rooms) or contains the id.
+    /// Whether `room_id` is permitted: true only when the allowlist is
+    /// non-empty and contains the id. An empty allowlist denies all rooms
+    /// (ARD-422).
     #[must_use]
     pub fn room_allowed(&self, room_id: &str) -> bool {
-        self.allowed_rooms.is_empty() || self.allowed_rooms.iter().any(|r| r == room_id)
+        !self.allowed_rooms.is_empty() && self.allowed_rooms.iter().any(|r| r == room_id)
+    }
+
+    /// Returns a startup warning if `auto_join_invites` is enabled but no
+    /// rooms are allowlisted — a dangerous combination that would cause the
+    /// bot to join every room it's invited to with no filter (ARD-422).
+    #[must_use]
+    pub fn auto_join_without_allowlist_warning(&self) -> Option<String> {
+        if self.auto_join_invites && self.allowed_rooms.is_empty() {
+            Some(
+                "auto_join_invites is enabled but allowed_rooms is empty — \
+                 the bot will join every room it's invited to with no filter. \
+                 Set allowed_rooms or disable auto_join_invites."
+                    .to_owned(),
+            )
+        } else {
+            None
+        }
     }
 }
 
@@ -178,14 +196,14 @@ impl MatrixConfigBuilder {
         self
     }
 
-    /// Set whether the bot auto-joins room invites (default `true`).
+    /// Set whether the bot auto-joins room invites (default `false`).
     #[must_use]
     pub fn auto_join_invites(mut self, auto_join: bool) -> Self {
         self.auto_join_invites = auto_join;
         self
     }
 
-    /// Set the room-id allowlist (empty = all rooms).
+    /// Set the room-id allowlist (empty = no rooms allowed).
     #[must_use]
     pub fn allowed_rooms(mut self, rooms: Vec<String>) -> Self {
         self.allowed_rooms = rooms;
@@ -230,7 +248,7 @@ pub fn default_state_dir() -> PathBuf {
 }
 
 /// Parse the `MATRIX_ALLOWED_ROOMS` value: comma-separated, each entry trimmed,
-/// blanks dropped. `None` (or all-blank) yields an empty list = "all rooms".
+/// blanks dropped. `None` (or all-blank) yields an empty list = no rooms allowed.
 #[must_use]
 pub fn parse_allowed_rooms(raw: Option<&str>) -> Vec<String> {
     raw.map(|s| {

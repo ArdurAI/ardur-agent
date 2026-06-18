@@ -18,6 +18,7 @@ fn verified_claims() -> VerifiedClaims {
         expires_unix: 4_102_444_800,
         budget_remaining: 1_000,
         tool_allowlist: vec!["task.create".to_string()],
+        capabilities: Vec::new(),
     }
 }
 

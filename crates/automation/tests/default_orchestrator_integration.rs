@@ -18,6 +18,7 @@ fn claims_with(allowlist: &[&str]) -> VerifiedClaims {
         expires_unix: 4_102_444_800,
         budget_remaining: 1_000,
         tool_allowlist: allowlist.iter().map(|value| (*value).to_string()).collect(),
+        capabilities: Vec::new(),
     }
 }
 
