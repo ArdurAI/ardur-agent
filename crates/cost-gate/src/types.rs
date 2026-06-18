@@ -371,7 +371,7 @@ mod prop_tests {
         fn cost_delta_between_is_correct(reserved in arb_cost_tuple(), actual in arb_cost_tuple()) {
             // ARD-322: Property-based test for CostDelta::between.
             let delta = CostDelta::between(&reserved, &actual);
-            
+
             // Verify that applying the negative delta to actual gives back reserved.
             // This only works when the values are small enough to avoid clamping.
             let reconstructed = actual.apply_delta(&CostDelta {
@@ -381,7 +381,7 @@ mod prop_tests {
                 wall_ms: -delta.wall_ms,
                 attention_score: -delta.attention_score,
             });
-            
+
             // For small values (where no clamping occurs), reconstruction should be exact.
             // The i128 arithmetic in apply_delta clamps at 0 and u64::MAX.
             // Only check when both values are small enough to avoid overflow/underflow

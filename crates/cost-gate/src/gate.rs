@@ -369,9 +369,14 @@ mod tests {
     use super::*;
     use crate::budget::InMemoryBudgetStore;
     use crate::clock::ManualClock;
-    use crate::types::{TokenId, Sha256Digest, ModelId};
+    use crate::types::{ModelId, Sha256Digest, TokenId};
 
-    fn test_gate() -> (InMemoryCostAdmissionGate<InMemoryBudgetStore>, Arc<ManualClock>, HolderId, TokenId) {
+    fn test_gate() -> (
+        InMemoryCostAdmissionGate<InMemoryBudgetStore>,
+        Arc<ManualClock>,
+        HolderId,
+        TokenId,
+    ) {
         let clock = Arc::new(ManualClock::new(0));
         let budget = InMemoryBudgetStore::new();
         let gate = InMemoryCostAdmissionGate::with_clock(budget, clock.clone());
@@ -394,19 +399,42 @@ mod tests {
     #[tokio::test]
     async fn finalize_fail_closed_budget_unchanged() {
         let (gate, _clock, holder, token_id) = test_gate();
-        gate.provision_for(&holder, CostTuple { tokens_in: 100, tokens_out: 100, cents: 100, wall_ms: 1000, attention_score: 10 }).await.unwrap();
-        
-        let envelope = CostEnvelope { tokens_in_max: 10, tokens_out_max: 10, cents_max: 50, wall_ms_max: 1000, attention_score_max: 1 };
+        gate.provision_for(
+            &holder,
+            CostTuple {
+                tokens_in: 100,
+                tokens_out: 100,
+                cents: 100,
+                wall_ms: 1000,
+                attention_score: 10,
+            },
+        )
+        .await
+        .unwrap();
+
+        let envelope = CostEnvelope {
+            tokens_in_max: 10,
+            tokens_out_max: 10,
+            cents_max: 50,
+            wall_ms_max: 1000,
+            attention_score_max: 1,
+        };
         let r = req(envelope, token_id);
-        
+
         let reservation = gate.admit(r).await.unwrap();
-        
-        let actual = CostTuple { tokens_in: 5, tokens_out: 5, cents: 20, wall_ms: 500, attention_score: 0 };
+
+        let actual = CostTuple {
+            tokens_in: 5,
+            tokens_out: 5,
+            cents: 20,
+            wall_ms: 500,
+            attention_score: 0,
+        };
         let receipt = gate.finalize(reservation, actual).await.unwrap();
-        
+
         assert_eq!(receipt.actual.cents, 20);
         assert_eq!(receipt.refunded.cents, 30);
-        
+
         let balance_after = gate.budget.current_balance(&holder).await.unwrap();
         assert_eq!(balance_after.cents, 80);
     }
@@ -414,22 +442,45 @@ mod tests {
     #[tokio::test]
     async fn finalize_expired_releases_full_hold() {
         let (gate, clock, holder, token_id) = test_gate();
-        gate.provision_for(&holder, CostTuple { tokens_in: 100, tokens_out: 100, cents: 100, wall_ms: 1000, attention_score: 10 }).await.unwrap();
-        
-        let envelope = CostEnvelope { tokens_in_max: 10, tokens_out_max: 10, cents_max: 50, wall_ms_max: 1000, attention_score_max: 1 };
+        gate.provision_for(
+            &holder,
+            CostTuple {
+                tokens_in: 100,
+                tokens_out: 100,
+                cents: 100,
+                wall_ms: 1000,
+                attention_score: 10,
+            },
+        )
+        .await
+        .unwrap();
+
+        let envelope = CostEnvelope {
+            tokens_in_max: 10,
+            tokens_out_max: 10,
+            cents_max: 50,
+            wall_ms_max: 1000,
+            attention_score_max: 1,
+        };
         let r = req(envelope, token_id);
-        
+
         let reservation = gate.admit(r).await.unwrap();
         let balance_after_reserve = gate.budget.current_balance(&holder).await.unwrap();
         assert_eq!(balance_after_reserve.cents, 50);
-        
+
         clock.advance(31_000);
-        
-        let actual = CostTuple { tokens_in: 5, tokens_out: 5, cents: 20, wall_ms: 500, attention_score: 0 };
+
+        let actual = CostTuple {
+            tokens_in: 5,
+            tokens_out: 5,
+            cents: 20,
+            wall_ms: 500,
+            attention_score: 0,
+        };
         let result = gate.finalize(reservation, actual).await;
-        
+
         assert!(matches!(result, Err(AdmissionError::ReservationExpired)));
-        
+
         let balance_after_expiry = gate.budget.current_balance(&holder).await.unwrap();
         assert_eq!(balance_after_expiry.cents, 100);
     }
@@ -437,16 +488,39 @@ mod tests {
     #[tokio::test]
     async fn finalize_combined_cost_in_receipt() {
         let (gate, _clock, holder, token_id) = test_gate();
-        gate.provision_for(&holder, CostTuple { tokens_in: 100, tokens_out: 100, cents: 100, wall_ms: 1000, attention_score: 10 }).await.unwrap();
-        
-        let envelope = CostEnvelope { tokens_in_max: 10, tokens_out_max: 10, cents_max: 50, wall_ms_max: 1000, attention_score_max: 1 };
+        gate.provision_for(
+            &holder,
+            CostTuple {
+                tokens_in: 100,
+                tokens_out: 100,
+                cents: 100,
+                wall_ms: 1000,
+                attention_score: 10,
+            },
+        )
+        .await
+        .unwrap();
+
+        let envelope = CostEnvelope {
+            tokens_in_max: 10,
+            tokens_out_max: 10,
+            cents_max: 50,
+            wall_ms_max: 1000,
+            attention_score_max: 1,
+        };
         let r = req(envelope, token_id);
-        
+
         let reservation = gate.admit(r).await.unwrap();
-        
-        let actual = CostTuple { tokens_in: 5, tokens_out: 5, cents: 30, wall_ms: 500, attention_score: 0 };
+
+        let actual = CostTuple {
+            tokens_in: 5,
+            tokens_out: 5,
+            cents: 30,
+            wall_ms: 500,
+            attention_score: 0,
+        };
         let receipt = gate.finalize(reservation, actual).await.unwrap();
-        
+
         assert_eq!(receipt.actual.cents, 30);
         assert_eq!(receipt.refunded.cents, 20);
     }
@@ -454,19 +528,39 @@ mod tests {
     #[tokio::test]
     async fn concurrent_reservations_race_safe() {
         let (gate, _clock, holder, token_id) = test_gate();
-        gate.provision_for(&holder, CostTuple { tokens_in: 100, tokens_out: 100, cents: 100, wall_ms: 1000, attention_score: 10 }).await.unwrap();
-        
-        let envelope = CostEnvelope { tokens_in_max: 10, tokens_out_max: 10, cents_max: 60, wall_ms_max: 1000, attention_score_max: 1 };
-        
+        gate.provision_for(
+            &holder,
+            CostTuple {
+                tokens_in: 100,
+                tokens_out: 100,
+                cents: 100,
+                wall_ms: 1000,
+                attention_score: 10,
+            },
+        )
+        .await
+        .unwrap();
+
+        let envelope = CostEnvelope {
+            tokens_in_max: 10,
+            tokens_out_max: 10,
+            cents_max: 60,
+            wall_ms_max: 1000,
+            attention_score_max: 1,
+        };
+
         let r1 = req(envelope, token_id);
         let r2 = req(envelope, token_id);
         // Note: both requests use the same token, so they compete for the same budget.
         // This is intentional for the race test.
-        
+
         let (res1, res2) = tokio::join!(gate.admit(r1), gate.admit(r2));
-        
+
         let success_count = [res1.is_ok(), res2.is_ok()].iter().filter(|&&x| x).count();
-        
-        assert!(success_count <= 1, "At most one reservation should succeed with 100c budget and 60c requests");
+
+        assert!(
+            success_count <= 1,
+            "At most one reservation should succeed with 100c budget and 60c requests"
+        );
     }
 }

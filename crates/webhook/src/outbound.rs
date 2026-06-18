@@ -60,12 +60,12 @@ pub struct OutboundWebhookClient {
 
 impl OutboundWebhookClient {
     /// Create a new client from the given config.
-    pub fn new(config: OutboundWebhookConfig) -> Self {
+    pub fn new(config: OutboundWebhookConfig) -> Result<Self, WebhookError> {
         let client = Client::builder()
             .timeout(config.timeout)
             .build()
-            .expect("reqwest client build with only timeout should not fail");
-        Self { config, client }
+            .map_err(|e| WebhookError::Internal(format!("reqwest client build failed: {e}")))?;
+        Ok(Self { config, client })
     }
 
     /// Send a webhook event.
@@ -75,7 +75,7 @@ impl OutboundWebhookClient {
     pub async fn send(&self, event: &WebhookEvent) -> Result<(), WebhookError> {
         let body = serde_json::to_vec(&event.payload)
             .map_err(|e| WebhookError::PayloadParseFailed(e.to_string()))?;
-        let signature = crate::inbound::sign_body(&body, &self.config.secret);
+        let signature = crate::inbound::sign_body(&body, &self.config.secret)?;
 
         let mut last_err = None;
         for attempt in 0..=self.config.max_retries {
@@ -136,7 +136,7 @@ impl OutboundWebhookClient {
     ) -> Result<(Vec<u8>, Vec<(String, String)>), WebhookError> {
         let body = serde_json::to_vec(&event.payload)
             .map_err(|e| WebhookError::PayloadParseFailed(e.to_string()))?;
-        let signature = crate::inbound::sign_body(&body, &self.config.secret);
+        let signature = crate::inbound::sign_body(&body, &self.config.secret)?;
         let headers = vec![
             (self.config.signature_header.clone(), signature),
             ("content-type".to_string(), "application/json".to_string()),

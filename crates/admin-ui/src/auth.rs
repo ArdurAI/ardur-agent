@@ -12,6 +12,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
+use subtle::ConstantTimeEq;
 
 use crate::state::SharedState;
 
@@ -40,9 +41,12 @@ impl BasicAuth {
 
     /// Whether a presented `Authorization` header value matches.
     fn matches(&self, header_value: &str) -> bool {
-        // Constant-time-ish: equal length then byte compare. The credential is
-        // low-value (read-only data) so this is belt-and-suspenders.
-        header_value.as_bytes() == self.expected_header.as_bytes()
+        // Constant-time comparison via `subtle` — prevents timing side-channel
+        // attacks that could leak the bearer token byte-by-byte.
+        header_value
+            .as_bytes()
+            .ct_eq(self.expected_header.as_bytes())
+            .into()
     }
 }
 

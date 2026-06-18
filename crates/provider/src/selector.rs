@@ -75,7 +75,7 @@ impl ProviderSelector {
                         .iter()
                         .map(|m| m.cost_per_1k_input)
                         .fold(f64::INFINITY, f64::min);
-                    a_cost.partial_cmp(&b_cost).unwrap()
+                    a_cost.partial_cmp(&b_cost).unwrap_or(std::cmp::Ordering::Equal)
                 })
                 .cloned()
                 .ok_or_else(|| {

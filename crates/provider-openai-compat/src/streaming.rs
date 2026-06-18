@@ -634,7 +634,7 @@ mod tests {
                 assert_eq!(calls[0].name, "echo");
                 assert_eq!(calls[0].arguments, serde_json::json!({"msg": "hi"}));
             }
-            other => panic!("expected Done(ToolUse), got {other:?}"),
+            other => unreachable!("expected Done(ToolUse), got {other:?}"),
         }
     }
 

@@ -41,3 +41,8 @@ ardur-provider-codex = { workspace = true }
 # The Claude Code CLI subscription backend (§3.3c) — selected by
 # `ARDUR_PROVIDER=claude-cli` (alias `claude-subscription`).
 ardur-provider-claude-cli = { workspace = true }
+
+[dev-dependencies]
+# Serial test execution for env-mutating integration tests (selector_env) —
+# prevents races on process-global environment variables.
+serial_test = { workspace = true }

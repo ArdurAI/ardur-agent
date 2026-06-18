@@ -17,7 +17,7 @@ use crate::error::ReceiptError;
 /// Canonical verb grammar: `verb.object.state.vN`, all lowercase/underscore
 /// segments, integer version suffix. E.g. `cost.admission.allow.v1`.
 static VERB_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^[a-z_]+\.[a-z_]+\.[a-z_]+\.v[0-9]+$").unwrap());
+    Lazy::new(|| Regex::new(r"^[a-z_]+\.[a-z_]+\.[a-z_]+\.v[0-9]+$").expect("valid verb regex"));
 
 /// A 32-byte SHA-256 digest. Used both for receipt chaining (`parent_hash`,
 /// the hash of the prior receipt's compact JWS) and for the opaque

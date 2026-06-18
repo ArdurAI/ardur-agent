@@ -943,12 +943,15 @@ fn now_unix() -> u64 {
 /// The key is stored as the Biscuit private key's canonical hex (not PKCS#8 PEM
 /// — `biscuit-auth` exposes no PEM writer for Ed25519), one line.
 /// The Qdrant connection config shared by the `qdrant` and `hybrid` backends:
-/// the collection/dim/api-key knobs come from `QDRANT_*`, with the URL
-/// overridden from the validated [`Config::qdrant_url`] when set.
+/// collection/dim/api-key defaults come from `ardur-memory-qdrant`, with URL and
+/// collection overridden from the validated [`Config`] when set.
 fn qdrant_config(config: &Config) -> QdrantMemoryConfig {
     let mut qcfg = QdrantMemoryConfig::from_env();
     if let Some(url) = &config.qdrant_url {
         qcfg = qcfg.with_url(url.clone());
+    }
+    if let Some(collection) = &config.qdrant_collection {
+        qcfg = qcfg.with_collection_name(collection.clone());
     }
     qcfg
 }

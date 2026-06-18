@@ -67,7 +67,9 @@ impl Tool for LlmTaskTool {
             return Err(ardur_tool_registry::ToolError::ExecutionFailed(e));
         }
 
-        let budget = accountant.get_budget(&task_id).unwrap();
+        let budget = accountant.get_budget(&task_id).ok_or_else(|| {
+            ardur_tool_registry::ToolError::ExecutionFailed("budget lookup failed: task not found".to_string())
+        })?;
 
         Ok(ToolOutput {
             content: json!({

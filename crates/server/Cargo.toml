@@ -104,3 +104,6 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
+# Serial test execution for env-mutating integration tests (config_from_env,
+# boot_hybrid) — prevents races on process-global environment variables.
+serial_test = { workspace = true }

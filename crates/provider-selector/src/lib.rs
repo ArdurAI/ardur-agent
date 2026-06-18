@@ -335,7 +335,7 @@ mod tests {
         assert!(result.is_err(), "unknown provider should error");
         let message = match result {
             Err(e) => format!("{}", e),
-            Ok(_) => panic!("expected error"),
+            Ok(_) => unreachable!("expected error"),
         };
         assert!(message.contains("supported values are"), "{message}");
         assert!(message.contains("openai-compat"), "{message}");
