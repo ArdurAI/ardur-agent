@@ -146,6 +146,25 @@ Writes made by the fused turn path are receipt-chained (`source_receipt_id` is
 set to the turn receipt). `forget` is append-only: the original card remains in
 history, and a tombstone/invalidation row carries the receipt linkage forward.
 
+Programmatic/operator memory mutations should use `ardur_memory::MemoryControlPlane`
+rather than calling a backend directly. The control plane enforces cap-token
+claims (`memory.read` for list/show, `memory.write` for record/forget), evaluates
+Cedar (`Action::"MemoryList"`, `Action::"MemoryShow"`, `Action::"MemoryRecord"`,
+`Action::"MemoryForget"`), rejects cross-workspace subjects, and rejects memory
+writes that are not linked to a receipt.
+
+Useful memory verification commands:
+
+```sh
+cargo test -p ardur-memory --test authorized_operations
+cargo test -p ardur-fused-runtime --test memory_recall
+
+# Full chat → hybrid memory store → Qdrant/BM25 recall → memory display pipeline.
+docker run -p 6333:6333 -p 6334:6334 qdrant/qdrant
+QDRANT_INTEGRATION_TEST=1 QDRANT_URL=http://localhost:6334 \
+  cargo test -p ardur-e2e-tests --test scenario_hybrid_memory_full_pipeline
+```
+
 ## Slack app setup
 
 1. Create a Slack app at https://api.slack.com/apps → **From scratch**.
