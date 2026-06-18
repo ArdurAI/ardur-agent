@@ -39,11 +39,12 @@ impl TaskGraph {
 
         if self.has_cycle() {
             // Rollback
-            self.edges.get_mut(&from).unwrap().retain(|&id| id != to);
-            self.reverse_edges
-                .get_mut(&to)
-                .unwrap()
-                .retain(|&id| id != from);
+            if let Some(edges) = self.edges.get_mut(&from) {
+                edges.retain(|&id| id != to);
+            }
+            if let Some(rev_edges) = self.reverse_edges.get_mut(&to) {
+                rev_edges.retain(|&id| id != from);
+            }
             return Err(TaskFlowError::CycleDetected);
         }
 
@@ -101,10 +102,11 @@ impl TaskGraph {
         while let Some(id) = queue.pop_front() {
             sorted.push(id);
             for &dep in self.edges.get(&id).unwrap_or(&Vec::new()) {
-                let deg = in_degree.get_mut(&dep).unwrap();
-                *deg -= 1;
-                if *deg == 0 {
-                    queue.push_back(dep);
+                if let Some(deg) = in_degree.get_mut(&dep) {
+                    *deg -= 1;
+                    if *deg == 0 {
+                        queue.push_back(dep);
+                    }
                 }
             }
         }

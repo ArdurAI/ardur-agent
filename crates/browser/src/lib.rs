@@ -106,7 +106,7 @@ mod tests {
     fn browser_capability_is_custom() {
         match *BROWSER_CAPABILITY {
             Capability::Custom(ref s) => assert_eq!(s, "browser"),
-            _ => panic!("BROWSER_CAPABILITY should be Custom"),
+            _ => unreachable!("BROWSER_CAPABILITY should be Custom"),
         }
     }
 }

@@ -91,6 +91,7 @@ async fn server_routes_signed_slack_message_through_runtime_to_chat_post_message
         skills_dirs: Vec::new(),
         memory_backend: MemoryBackend::InMemory,
         qdrant_url: None,
+        qdrant_collection: None,
     };
     let provider: Arc<dyn Provider> =
         Arc::new(AnthropicProvider::stub(ModelId::new(&config.model)));

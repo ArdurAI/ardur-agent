@@ -900,7 +900,7 @@ mod tests {
                 assert_eq!(calls[0].name, "echo");
                 assert_eq!(calls[0].arguments, serde_json::json!({"msg": "hi"}));
             }
-            other => panic!("expected ToolUse, got {other:?}"),
+            other => unreachable!("expected ToolUse, got {other:?}"),
         }
     }
 
@@ -1002,9 +1002,12 @@ mod tests {
 
     #[test]
     fn debug_redacts_api_key() {
-        let cfg = OpenAiCompatConfig::new("sk-openai-compat-secret");
+        let cfg = OpenAiCompatConfig::new("DUMMY_KEY_FOR_TESTING_ONLY");
         let rendered = format!("{cfg:?}");
-        assert!(!rendered.contains("sk-openai-compat-secret"), "{rendered}");
+        assert!(
+            !rendered.contains("DUMMY_KEY_FOR_TESTING_ONLY"),
+            "{rendered}"
+        );
         assert!(rendered.contains("<redacted>"), "{rendered}");
     }
 

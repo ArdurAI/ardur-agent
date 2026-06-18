@@ -76,6 +76,7 @@ pub fn test_config(data_dir: &TempDir, slack_base: Option<String>) -> Config {
         skills_dirs: Vec::new(),
         memory_backend: MemoryBackend::InMemory,
         qdrant_url: None,
+        qdrant_collection: None,
     }
 }
 

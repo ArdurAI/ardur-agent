@@ -75,11 +75,11 @@ pub fn verify_signature(
 }
 
 /// Generate an HMAC-SHA256 signature for a body (hex-encoded).
-pub fn sign_body(body: &[u8], secret: &SecretString) -> String {
+pub fn sign_body(body: &[u8], secret: &SecretString) -> Result<String, WebhookError> {
     let mut mac = HmacSha256::new_from_slice(secret.expose_secret().as_bytes())
-        .expect("HMAC init with any length key is infallible for HmacSha256");
+        .map_err(|e| WebhookError::Internal(format!("HMAC init failed: {e}")))?;
     mac.update(body);
-    hex::encode(mac.finalize().into_bytes())
+    Ok(hex::encode(mac.finalize().into_bytes()))
 }
 
 /// Axum state shared with the inbound handler.

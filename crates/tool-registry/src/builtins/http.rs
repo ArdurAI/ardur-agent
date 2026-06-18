@@ -391,7 +391,11 @@ impl Tool for HttpFetchTool {
             })?;
             let host_str = current
                 .host_str()
-                .expect("a url with a host has a host_str")
+                .ok_or_else(|| {
+                    ToolError::Internal(anyhow::anyhow!(
+                        "url has host but host_str returned None: {current}"
+                    ))
+                })?
                 .to_string();
             let port = current
                 .port_or_known_default()

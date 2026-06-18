@@ -128,12 +128,15 @@ pub struct Config {
     pub memory_backend: MemoryBackend,
     /// The Qdrant endpoint (`QDRANT_URL`) — required only when the Qdrant memory
     /// backend is selected, mirroring how [`anthropic_api_key`] gates the
-    /// Anthropic provider. The full Qdrant config (collection, dim, api key) is
-    /// read by `ardur-memory-qdrant`'s own `from_env`; this field exists so the
-    /// missing-URL failure surfaces at config time rather than at first use.
+    /// Anthropic provider. The rest of the Qdrant config defaults through
+    /// `ardur-memory-qdrant`, but URL is lifted here so a missing required
+    /// endpoint surfaces at config time rather than at first use.
     ///
     /// [`anthropic_api_key`]: Config::anthropic_api_key
     pub qdrant_url: Option<String>,
+    /// Optional Qdrant collection override (`QDRANT_COLLECTION`). Tests can set
+    /// this field directly instead of mutating process-global environment.
+    pub qdrant_collection: Option<String>,
 }
 
 /// A required environment variable was unset or empty.
@@ -183,6 +186,7 @@ impl fmt::Debug for Config {
             .field("skills_dirs", &self.skills_dirs)
             .field("memory_backend", &self.memory_backend)
             .field("qdrant_url", &self.qdrant_url)
+            .field("qdrant_collection", &self.qdrant_collection)
             .finish()
     }
 }
@@ -327,6 +331,7 @@ impl Config {
                 .collect(),
             memory_backend,
             qdrant_url,
+            qdrant_collection: optional("QDRANT_COLLECTION"),
         })
     }
 }

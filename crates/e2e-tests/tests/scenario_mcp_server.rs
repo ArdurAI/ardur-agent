@@ -53,6 +53,7 @@ async fn spawn_server(bearer: &str) -> String {
         skills_dirs: Vec::new(),
         memory_backend: ardur_server::MemoryBackend::InMemory,
         qdrant_url: None,
+        qdrant_collection: None,
     };
     let provider: Arc<dyn Provider> =
         Arc::new(AnthropicProvider::stub(ModelId::new(&config.model)));
