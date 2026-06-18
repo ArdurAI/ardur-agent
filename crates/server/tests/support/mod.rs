@@ -59,6 +59,7 @@ pub fn test_config(data_dir: &TempDir, slack_base: Option<String>) -> Config {
         data_dir: data_dir.path().to_path_buf(),
         bind_addr: "127.0.0.1:0".to_string(),
         chat_bearer_tokens: vec![CHAT_TOKEN.to_string()],
+        admin_bearer_tokens: Vec::new(),
         dev_permissive_policy: true,
         model: "claude-opus-4-8".to_string(),
         cost_budget_cents: 10_000,
@@ -89,6 +90,20 @@ pub fn test_config_with_mcp(
     Config {
         mcp_enabled: true,
         mcp_bearer_tokens: bearer_tokens,
+        ..test_config(data_dir, slack_base)
+    }
+}
+
+/// A [`Config`] like [`test_config`] but with the admin runtime-inspection API
+/// bearer-gated by `admin_tokens`.
+#[must_use]
+pub fn test_config_with_admin(
+    data_dir: &TempDir,
+    slack_base: Option<String>,
+    admin_tokens: Vec<String>,
+) -> Config {
+    Config {
+        admin_bearer_tokens: admin_tokens,
         ..test_config(data_dir, slack_base)
     }
 }
