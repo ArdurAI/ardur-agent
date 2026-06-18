@@ -142,9 +142,13 @@ confidence, validity, TTL, and receipt ids when present:
 /memory forget <id>   # append a receipt-linked tombstone for the card
 ```
 
-Writes made by the fused turn path are receipt-chained (`source_receipt_id` is
-set to the turn receipt). `forget` is append-only: the original card remains in
-history, and a tombstone/invalidation row carries the receipt linkage forward.
+Writes made by the fused turn path are authorized through `MemoryControlPlane`,
+so the verified cap-token must include `memory.write` before the turn can create
+memory side effects. Successful writes are receipt-chained (`source_receipt_id`
+is set to the turn receipt). `forget` is append-only: the original card remains
+in history, and a tombstone/invalidation row carries the receipt linkage forward.
+Direct `/memory show <id>` only returns live cards; after a successful forget,
+show returns not-found rather than disclosing the historical payload.
 
 Programmatic/operator memory mutations should use `ardur_memory::MemoryControlPlane`
 rather than calling a backend directly. The control plane enforces cap-token
@@ -157,10 +161,16 @@ Useful memory verification commands:
 
 ```sh
 cargo test -p ardur-memory --test authorized_operations
+cargo test -p ardur-cli --test memory_commands
 cargo test -p ardur-fused-runtime --test memory_recall
+cargo test -p ardur-fused-runtime --test receipt_atomic_commit
+
+# Full hybrid retriever tests with real Qdrant and deterministic mock embeddings.
+docker run -p 6333:6333 -p 6334:6334 qdrant/qdrant
+QDRANT_INTEGRATION_TEST=1 QDRANT_URL=http://localhost:6334 \
+  cargo test -p ardur-memory-qdrant --test hybrid_integration
 
 # Full chat → hybrid memory store → Qdrant/BM25 recall → memory display pipeline.
-docker run -p 6333:6333 -p 6334:6334 qdrant/qdrant
 QDRANT_INTEGRATION_TEST=1 QDRANT_URL=http://localhost:6334 \
   cargo test -p ardur-e2e-tests --test scenario_hybrid_memory_full_pipeline
 ```

@@ -116,13 +116,42 @@ impl<'a, R: MemoryRuntime + ?Sized> MemoryControlPlane<'a, R> {
         subject: &HolderId,
         record_id: RecordId,
     ) -> Result<Option<MemoryCard>> {
+        self.show_as_of(claims, subject, record_id, UnixTsMillis(u64::MAX - 1))
+    }
+
+    /// Show one live memory card by id for `subject` as of `as_of`.
+    ///
+    /// # Errors
+    /// Returns [`MemoryError`] if cap-token/Cedar authorization fails or the
+    /// requested subject does not match the verified holder.
+    pub fn show_as_of(
+        &self,
+        claims: &VerifiedClaims,
+        subject: &HolderId,
+        record_id: RecordId,
+        as_of: UnixTsMillis,
+    ) -> Result<Option<MemoryCard>> {
         self.authorize(MemoryAction::Show, claims, subject)?;
         require_same_subject(claims, subject)?;
-        Ok(self
+        let history = self
             .runtime
             .history_of(record_id)
             .into_iter()
             .filter(|rec| rec.subject == *subject)
+            .collect::<Vec<_>>();
+        let Some(root) = history.first().map(|rec| rec.correction_chain_root) else {
+            return Ok(None);
+        };
+        if !self
+            .runtime
+            .current_as_of(subject, as_of)
+            .iter()
+            .any(|rec| rec.correction_chain_root == root)
+        {
+            return Ok(None);
+        }
+        Ok(history
+            .into_iter()
             .filter(|rec| rec.invalidation_time.is_none())
             .max_by_key(|rec| rec.recorded_at)
             .map(|rec| MemoryCard::from_record(&rec)))
@@ -149,6 +178,14 @@ impl<'a, R: MemoryRuntime + ?Sized> MemoryControlPlane<'a, R> {
             .into_iter()
             .find(|rec| rec.record_id == record_id.0 && rec.subject == *subject)
             .ok_or(MemoryError::NotFound(record_id.0))?;
+        if !self
+            .runtime
+            .current_as_of(subject, at)
+            .iter()
+            .any(|rec| rec.correction_chain_root == target.correction_chain_root)
+        {
+            return Err(MemoryError::NotFound(record_id.0));
+        }
         let tombstone = MemoryRecord {
             record_id: Uuid::new_v4(),
             subject: target.subject.clone(),

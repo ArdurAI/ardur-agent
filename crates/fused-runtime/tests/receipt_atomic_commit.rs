@@ -5,6 +5,7 @@ use ardur_receipt::{ReceiptBody, ReceiptSigner, Sha256Digest, VerbObject};
 use ardur_runtime::{ChatRuntime, SessionId};
 use ardur_session_journals::{EntryId, JournalEntry, JournalError, SessionJournal};
 use async_trait::async_trait;
+use futures::StreamExt as _;
 
 mod support;
 use support::{EchoProvider, request_for, runtime_builder, valid_token};
@@ -107,6 +108,77 @@ async fn receipt_persist_failure_rolls_back_journal_entries() {
     assert!(
         entries.is_empty(),
         "two-phase commit rolls back journal entries when the receipt cannot persist: {entries:?}"
+    );
+}
+
+#[tokio::test]
+async fn stream_journal_append_failure_does_not_persist_receipt() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let receipt_log = root.path().join("receipts.jsonl");
+    let session_id = SessionId::new();
+    let provider = Arc::new(EchoProvider::new());
+    let journal = Arc::new(FailingAppendJournal { session_id });
+
+    let runtime = runtime_builder(provider)
+        .with_journal(journal)
+        .receipt_log(&receipt_log)
+        .build()
+        .expect("runtime builds");
+
+    let events = Box::pin(runtime.stream(request_for(
+        "atomic stream commit",
+        &valid_token(),
+        session_id,
+    )))
+    .collect::<Vec<_>>()
+    .await;
+
+    assert!(
+        events.iter().any(Result::is_err),
+        "stream journal failure must fail the turn commit: {events:?}"
+    );
+    let chain = load_persisted_chain(&receipt_log).expect("chain load succeeds");
+    assert!(
+        chain.is_empty(),
+        "stream receipt must not be durable without its journal entry"
+    );
+}
+
+#[tokio::test]
+async fn stream_receipt_persist_failure_rolls_back_journal_entries() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let receipt_log_is_directory = root.path().join("missing-parent").join("receipts.jsonl");
+    let session_id = SessionId::new();
+    let provider = Arc::new(EchoProvider::new());
+    let journal = Arc::new(ardur_session_journals::InMemorySessionJournal::new(
+        session_id,
+    ));
+
+    let runtime = runtime_builder(provider)
+        .with_journal(journal.clone())
+        .receipt_log(&receipt_log_is_directory)
+        .build()
+        .expect("runtime builds even before opening receipt log for append");
+
+    let events = Box::pin(runtime.stream(request_for(
+        "stream receipt persist fails",
+        &valid_token(),
+        session_id,
+    )))
+    .collect::<Vec<_>>()
+    .await;
+
+    assert!(
+        events.iter().any(Result::is_err),
+        "stream receipt persistence failure must fail the turn"
+    );
+    let entries = journal
+        .replay(session_id)
+        .await
+        .expect("journal replay succeeds");
+    assert!(
+        entries.is_empty(),
+        "stream two-phase commit rolls back journal entries when the receipt cannot persist: {entries:?}"
     );
 }
 

@@ -129,7 +129,7 @@ pub fn dev_cap_token(expires_unix: u64, budget_remaining: u64) -> String {
                 audience: AUDIENCE.to_string(),
                 expires_unix,
                 budget_remaining,
-                tool_allowlist: vec![TOOL.to_string()],
+                tool_allowlist: vec![TOOL.to_string(), "memory.write".to_string()],
             },
         )
         .expect("the cap-token issues")
@@ -152,7 +152,11 @@ pub fn dev_valid_cap_token_with_echo() -> String {
                 audience: AUDIENCE.to_string(),
                 expires_unix: NOW_UNIX + 3_600,
                 budget_remaining: 1_000_000,
-                tool_allowlist: vec![TOOL.to_string(), "echo".to_string()],
+                tool_allowlist: vec![
+                    TOOL.to_string(),
+                    "memory.write".to_string(),
+                    "echo".to_string(),
+                ],
             },
         )
         .expect("the cap-token issues")

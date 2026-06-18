@@ -429,8 +429,7 @@ async fn fused_stream_journal_persisted_after_turn() {
     )
     .await;
 
-    // The JournalAppend stage ran and the turn finished.
-    assert!(has_stage_executed(&events, StageKind::JournalAppend));
+    // The turn finished and the atomically committed journal is replayable.
     assert!(matches!(events.last(), Some(Ok(FusedEvent::Finish(_)))));
 
     // The user + assistant messages are durably replayable.
