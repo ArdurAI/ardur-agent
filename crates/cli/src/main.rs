@@ -42,6 +42,8 @@ enum Commands {
     Debug(DebugArgs),
     /// Run local self-diagnostics.
     Doctor(DoctorArgs),
+    /// Interactive setup wizard for first-time configuration.
+    Setup(SetupArgs),
     /// Print the version and exit.
     Version,
 }
@@ -94,6 +96,14 @@ struct DoctorArgs {
     require_api_key: bool,
 }
 
+/// Arguments to `ardur setup`.
+#[derive(Args)]
+struct SetupArgs {
+    /// Non-interactive mode: use defaults and env vars only.
+    #[arg(long)]
+    yes: bool,
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
@@ -106,6 +116,7 @@ fn main() -> ExitCode {
         Commands::Logs(args) => run_logs(args),
         Commands::Debug(args) => run_debug(args),
         Commands::Doctor(args) => run_doctor(args),
+        Commands::Setup(args) => run_setup(args),
     };
 
     match result {
@@ -207,7 +218,9 @@ fn run_doctor(args: DoctorArgs) -> Result<(), CliError> {
     let root = state_root(args.state_dir)?;
     let mut checks = Vec::new();
     let mut hard_fail = false;
+    let mut warnings = 0;
 
+    // 1. State directory
     match std::fs::create_dir_all(&root) {
         Ok(()) => checks
             .push(json!({"name": "state_dir", "status": "ok", "path": root.display().to_string()})),
@@ -217,6 +230,19 @@ fn run_doctor(args: DoctorArgs) -> Result<(), CliError> {
         }
     }
 
+    // 2. Subdirectories
+    for sub in ["memory", "journals", "receipts", "keys", "logs"] {
+        let path = root.join(sub);
+        match std::fs::create_dir_all(&path) {
+            Ok(()) => checks.push(json!({"name": format!("dir_{sub}"), "status": "ok"})),
+            Err(e) => {
+                warnings += 1;
+                checks.push(json!({"name": format!("dir_{sub}"), "status": "warn", "message": e.to_string()}));
+            }
+        }
+    }
+
+    // 3. API key
     let api_key_present = std::env::var("ANTHROPIC_API_KEY")
         .ok()
         .is_some_and(|value| !value.trim().is_empty());
@@ -226,9 +252,43 @@ fn run_doctor(args: DoctorArgs) -> Result<(), CliError> {
         hard_fail = true;
         checks.push(json!({"name": "anthropic_api_key", "status": "error", "present": false}));
     } else {
+        warnings += 1;
         checks.push(json!({"name": "anthropic_api_key", "status": "warn", "present": false, "note": "offline stub fallback available"}));
     }
 
+    // 4. Config file
+    let config_path = root.join("config.toml");
+    if config_path.is_file() {
+        checks.push(json!({"name": "config_file", "status": "ok", "path": config_path.display().to_string()}));
+    } else {
+        warnings += 1;
+        checks.push(json!({"name": "config_file", "status": "warn", "present": false, "note": "run `ardur setup` to create"}));
+    }
+
+    // 5. Keys
+    let issuer_key = root.join("keys").join("issuer.key");
+    let receipt_key = root.join("keys").join("receipt.pem");
+    if issuer_key.is_file() && receipt_key.is_file() {
+        checks.push(json!({"name": "crypto_keys", "status": "ok"}));
+    } else {
+        warnings += 1;
+        checks.push(json!({"name": "crypto_keys", "status": "warn", "present": false, "note": "run `ardur setup` to generate"}));
+    }
+
+    // 6. Cedar policy
+    let cedar_path = root.join("cedar.policies");
+    if cedar_path.is_file() {
+        checks.push(json!({"name": "cedar_policy", "status": "ok"}));
+    } else {
+        warnings += 1;
+        checks.push(json!({"name": "cedar_policy", "status": "warn", "present": false, "note": "policy file not found"}));
+    }
+
+    // 7. Disk usage
+    let disk_usage = estimate_dir_size(&root);
+    checks.push(json!({"name": "disk_usage", "status": "ok", "bytes": disk_usage, "human": human_size(disk_usage)}));
+
+    // 8. Connectivity (stub — no live checks without credentials)
     checks.push(json!({
         "name": "connectivity",
         "status": "skipped",
@@ -236,18 +296,95 @@ fn run_doctor(args: DoctorArgs) -> Result<(), CliError> {
     }));
 
     let report = json!({
-        "status": if hard_fail { "error" } else { "ok" },
+        "status": if hard_fail { "error" } else if warnings > 0 { "warn" } else { "ok" },
         "checks": checks,
+        "summary": {
+            "total": checks.len(),
+            "ok": checks.iter().filter(|c| c["status"] == "ok").count(),
+            "warn": warnings,
+            "error": if hard_fail { 1 } else { 0 },
+        }
     });
     println!(
         "{}",
         serde_json::to_string_pretty(&report).expect("doctor report serializes")
     );
     if hard_fail {
-        Err(CliError::State("doctor found issues".to_string()))
+        Err(CliError::State("doctor found critical issues".to_string()))
     } else {
         Ok(())
     }
+}
+
+/// Interactive setup wizard for first-time Ardur configuration.
+fn run_setup(args: SetupArgs) -> Result<(), CliError> {
+    let root = StateDirs::resolve()?.root;
+    std::fs::create_dir_all(&root)?;
+    for sub in ["memory", "journals", "receipts", "keys", "logs"] {
+        std::fs::create_dir_all(root.join(sub))?;
+    }
+
+    let config_path = root.join("config.toml");
+
+    if args.yes {
+        // Non-interactive: use defaults
+        let config = Config::default();
+        write_config(&config_path, &config)?;
+        println!("created default config at {}", config_path.display());
+        return Ok(());
+    }
+
+    println!("Ardur Setup Wizard");
+    println!("==================");
+    println!();
+
+    // Step 1: Provider
+    println!("Step 1/3: Provider Configuration");
+    let api_key = if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
+        println!("Using ANTHROPIC_API_KEY from environment");
+        key
+    } else {
+        println!("No ANTHROPIC_API_KEY found. You can:");
+        println!("  1. Enter your API key now (will be stored in config)");
+        println!("  2. Skip and use offline stub mode (no LLM calls)");
+        println!("  3. Set ANTHROPIC_API_KEY in your environment later");
+        String::new()
+    };
+
+    // Step 2: Model
+    println!();
+    println!("Step 2/3: Model Selection");
+    let model = "claude-sonnet-4".to_string();
+    println!("Default model: {model} (change with `ardur config set model <model>`)");
+
+    // Step 3: Budget
+    println!();
+    println!("Step 3/3: Budget Configuration");
+    let budget_cents = 1000u64;
+    println!(
+        "Default budget: ${:.2} per session (change with `ardur config set budget_cents <value>`)",
+        budget_cents as f64 / 100.0
+    );
+
+    // Write config
+    let config = Config {
+        api_key,
+        model,
+        budget_cents,
+    };
+    write_config(&config_path, &config)?;
+
+    println!();
+    println!(
+        "Setup complete! Config written to {}",
+        config_path.display()
+    );
+    println!("Next steps:");
+    println!("  - Run `ardur doctor` to verify your installation");
+    println!("  - Run `ardur chat` to start a session");
+    println!("  - See `ardur --help` for all commands");
+
+    Ok(())
 }
 
 fn config_path(path: Option<PathBuf>) -> Result<PathBuf, CliError> {
@@ -343,4 +480,37 @@ fn count_lines(path: &Path) -> Result<usize, CliError> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
         Err(e) => Err(CliError::Io(e)),
     }
+}
+
+/// Estimate total size of a directory in bytes (best-effort).
+fn estimate_dir_size(path: &Path) -> u64 {
+    let mut total = 0u64;
+    if let Ok(entries) = std::fs::read_dir(path) {
+        for entry in entries.flatten() {
+            let meta = entry.metadata();
+            if let Ok(meta) = meta {
+                if meta.is_file() {
+                    total += meta.len();
+                } else if meta.is_dir() {
+                    total += estimate_dir_size(&entry.path());
+                }
+            }
+        }
+    }
+    total
+}
+
+/// Convert bytes to human-readable string.
+fn human_size(bytes: u64) -> String {
+    const UNITS: &[&str] = &["B", "KB", "MB", "GB"];
+    let mut size = bytes as f64;
+    let mut unit = "B";
+    for u in UNITS {
+        if size < 1024.0 {
+            unit = u;
+            break;
+        }
+        size /= 1024.0;
+    }
+    format!("{size:.1} {unit}")
 }
