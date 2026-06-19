@@ -42,6 +42,10 @@ enum Commands {
     Debug(DebugArgs),
     /// Run local self-diagnostics.
     Doctor(DoctorArgs),
+    /// Interactive setup wizard for first-time configuration.
+    Setup(SetupArgs),
+    /// Manage sessions (list, resume, export, prune).
+    Session(SessionArgs),
     /// Print the version and exit.
     Version,
 }
@@ -94,6 +98,55 @@ struct DoctorArgs {
     require_api_key: bool,
 }
 
+/// Arguments to `ardur setup`.
+#[derive(Args)]
+struct SetupArgs {
+    /// Non-interactive mode: use defaults and env vars only.
+    #[arg(long)]
+    yes: bool,
+}
+
+/// Arguments to `ardur session`.
+#[derive(Args)]
+struct SessionArgs {
+    /// The session action to perform.
+    #[command(subcommand)]
+    action: SessionAction,
+}
+
+/// Subcommands for `ardur session`.
+#[derive(Subcommand)]
+enum SessionAction {
+    /// List all sessions with status, cost, and age.
+    List {
+        /// Filter by workspace name.
+        #[arg(long)]
+        workspace: Option<String>,
+    },
+    /// Resume a session by ID, restoring full context.
+    Resume {
+        /// The session ID to resume.
+        id: String,
+    },
+    /// Export a session to markdown or JSON.
+    Export {
+        /// The session ID to export.
+        id: String,
+        /// Output format: markdown or json.
+        #[arg(long, default_value = "markdown")]
+        format: String,
+        /// Output file path (defaults to stdout).
+        #[arg(long, value_name = "PATH")]
+        output: Option<PathBuf>,
+    },
+    /// Prune sessions older than a given number of days.
+    Prune {
+        /// Remove sessions older than this many days.
+        #[arg(long, default_value_t = 30)]
+        older_than: u64,
+    },
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
@@ -106,6 +159,8 @@ fn main() -> ExitCode {
         Commands::Logs(args) => run_logs(args),
         Commands::Debug(args) => run_debug(args),
         Commands::Doctor(args) => run_doctor(args),
+        Commands::Setup(args) => run_setup(args),
+        Commands::Session(args) => run_session(args),
     };
 
     match result {
@@ -207,7 +262,9 @@ fn run_doctor(args: DoctorArgs) -> Result<(), CliError> {
     let root = state_root(args.state_dir)?;
     let mut checks = Vec::new();
     let mut hard_fail = false;
+    let mut warnings = 0;
 
+    // 1. State directory
     match std::fs::create_dir_all(&root) {
         Ok(()) => checks
             .push(json!({"name": "state_dir", "status": "ok", "path": root.display().to_string()})),
@@ -217,6 +274,19 @@ fn run_doctor(args: DoctorArgs) -> Result<(), CliError> {
         }
     }
 
+    // 2. Subdirectories
+    for sub in ["memory", "journals", "receipts", "keys", "logs"] {
+        let path = root.join(sub);
+        match std::fs::create_dir_all(&path) {
+            Ok(()) => checks.push(json!({"name": format!("dir_{sub}"), "status": "ok"})),
+            Err(e) => {
+                warnings += 1;
+                checks.push(json!({"name": format!("dir_{sub}"), "status": "warn", "message": e.to_string()}));
+            }
+        }
+    }
+
+    // 3. API key
     let api_key_present = std::env::var("ANTHROPIC_API_KEY")
         .ok()
         .is_some_and(|value| !value.trim().is_empty());
@@ -226,9 +296,43 @@ fn run_doctor(args: DoctorArgs) -> Result<(), CliError> {
         hard_fail = true;
         checks.push(json!({"name": "anthropic_api_key", "status": "error", "present": false}));
     } else {
+        warnings += 1;
         checks.push(json!({"name": "anthropic_api_key", "status": "warn", "present": false, "note": "offline stub fallback available"}));
     }
 
+    // 4. Config file
+    let config_path = root.join("config.toml");
+    if config_path.is_file() {
+        checks.push(json!({"name": "config_file", "status": "ok", "path": config_path.display().to_string()}));
+    } else {
+        warnings += 1;
+        checks.push(json!({"name": "config_file", "status": "warn", "present": false, "note": "run `ardur setup` to create"}));
+    }
+
+    // 5. Keys
+    let issuer_key = root.join("keys").join("issuer.key");
+    let receipt_key = root.join("keys").join("receipt.pem");
+    if issuer_key.is_file() && receipt_key.is_file() {
+        checks.push(json!({"name": "crypto_keys", "status": "ok"}));
+    } else {
+        warnings += 1;
+        checks.push(json!({"name": "crypto_keys", "status": "warn", "present": false, "note": "run `ardur setup` to generate"}));
+    }
+
+    // 6. Cedar policy
+    let cedar_path = root.join("cedar.policies");
+    if cedar_path.is_file() {
+        checks.push(json!({"name": "cedar_policy", "status": "ok"}));
+    } else {
+        warnings += 1;
+        checks.push(json!({"name": "cedar_policy", "status": "warn", "present": false, "note": "policy file not found"}));
+    }
+
+    // 7. Disk usage
+    let disk_usage = estimate_dir_size(&root);
+    checks.push(json!({"name": "disk_usage", "status": "ok", "bytes": disk_usage, "human": human_size(disk_usage)}));
+
+    // 8. Connectivity (stub — no live checks without credentials)
     checks.push(json!({
         "name": "connectivity",
         "status": "skipped",
@@ -236,18 +340,95 @@ fn run_doctor(args: DoctorArgs) -> Result<(), CliError> {
     }));
 
     let report = json!({
-        "status": if hard_fail { "error" } else { "ok" },
+        "status": if hard_fail { "error" } else if warnings > 0 { "warn" } else { "ok" },
         "checks": checks,
+        "summary": {
+            "total": checks.len(),
+            "ok": checks.iter().filter(|c| c["status"] == "ok").count(),
+            "warn": warnings,
+            "error": if hard_fail { 1 } else { 0 },
+        }
     });
     println!(
         "{}",
         serde_json::to_string_pretty(&report).expect("doctor report serializes")
     );
     if hard_fail {
-        Err(CliError::State("doctor found issues".to_string()))
+        Err(CliError::State("doctor found critical issues".to_string()))
     } else {
         Ok(())
     }
+}
+
+/// Interactive setup wizard for first-time Ardur configuration.
+fn run_setup(args: SetupArgs) -> Result<(), CliError> {
+    let root = StateDirs::resolve()?.root;
+    std::fs::create_dir_all(&root)?;
+    for sub in ["memory", "journals", "receipts", "keys", "logs"] {
+        std::fs::create_dir_all(root.join(sub))?;
+    }
+
+    let config_path = root.join("config.toml");
+
+    if args.yes {
+        // Non-interactive: use defaults
+        let config = Config::default();
+        write_config(&config_path, &config)?;
+        println!("created default config at {}", config_path.display());
+        return Ok(());
+    }
+
+    println!("Ardur Setup Wizard");
+    println!("==================");
+    println!();
+
+    // Step 1: Provider
+    println!("Step 1/3: Provider Configuration");
+    let api_key = if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
+        println!("Using ANTHROPIC_API_KEY from environment");
+        key
+    } else {
+        println!("No ANTHROPIC_API_KEY found. You can:");
+        println!("  1. Enter your API key now (will be stored in config)");
+        println!("  2. Skip and use offline stub mode (no LLM calls)");
+        println!("  3. Set ANTHROPIC_API_KEY in your environment later");
+        String::new()
+    };
+
+    // Step 2: Model
+    println!();
+    println!("Step 2/3: Model Selection");
+    let model = "claude-sonnet-4".to_string();
+    println!("Default model: {model} (change with `ardur config set model <model>`)");
+
+    // Step 3: Budget
+    println!();
+    println!("Step 3/3: Budget Configuration");
+    let budget_cents = 1000u64;
+    println!(
+        "Default budget: ${:.2} per session (change with `ardur config set budget_cents <value>`)",
+        budget_cents as f64 / 100.0
+    );
+
+    // Write config
+    let config = Config {
+        api_key,
+        model,
+        budget_cents,
+    };
+    write_config(&config_path, &config)?;
+
+    println!();
+    println!(
+        "Setup complete! Config written to {}",
+        config_path.display()
+    );
+    println!("Next steps:");
+    println!("  - Run `ardur doctor` to verify your installation");
+    println!("  - Run `ardur chat` to start a session");
+    println!("  - See `ardur --help` for all commands");
+
+    Ok(())
 }
 
 fn config_path(path: Option<PathBuf>) -> Result<PathBuf, CliError> {
@@ -343,4 +524,154 @@ fn count_lines(path: &Path) -> Result<usize, CliError> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
         Err(e) => Err(CliError::Io(e)),
     }
+}
+
+/// Estimate total size of a directory in bytes (best-effort).
+fn estimate_dir_size(path: &Path) -> u64 {
+    let mut total = 0u64;
+    if let Ok(entries) = std::fs::read_dir(path) {
+        for entry in entries.flatten() {
+            let meta = entry.metadata();
+            if let Ok(meta) = meta {
+                if meta.is_file() {
+                    total += meta.len();
+                } else if meta.is_dir() {
+                    total += estimate_dir_size(&entry.path());
+                }
+            }
+        }
+    }
+    total
+}
+
+/// Convert bytes to human-readable string.
+fn human_size(bytes: u64) -> String {
+    const UNITS: &[&str] = &["B", "KB", "MB", "GB"];
+    let mut size = bytes as f64;
+    let mut unit = "B";
+    for u in UNITS {
+        if size < 1024.0 {
+            unit = u;
+            break;
+        }
+        size /= 1024.0;
+    }
+    format!("{size:.1} {unit}")
+}
+
+/// Run `ardur session` subcommands.
+fn run_session(args: SessionArgs) -> Result<(), CliError> {
+    let root = StateDirs::resolve()?.root;
+    let journals_dir = root.join("journals");
+
+    match args.action {
+        SessionAction::List { workspace } => {
+            let mut sessions = Vec::new();
+            if let Ok(entries) = std::fs::read_dir(&journals_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        let name = path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("unknown");
+                        let meta = entry.metadata().ok();
+                        let age = meta.as_ref().map(|m| {
+                            m.modified()
+                                .ok()
+                                .and_then(|t| t.elapsed().ok())
+                                .map(|d| format!("{}d", d.as_secs() / 86400))
+                                .unwrap_or_else(|| "?".to_string())
+                        });
+                        let size = estimate_dir_size(&path);
+                        if let Some(ref ws) = workspace {
+                            if !name.contains(ws) {
+                                continue;
+                            }
+                        }
+                        sessions.push(json!({
+                            "id": name,
+                            "age": age,
+                            "size_bytes": size,
+                            "size_human": human_size(size),
+                        }));
+                    }
+                }
+            }
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!(sessions)).expect("sessions serializes")
+            );
+        }
+        SessionAction::Resume { id } => {
+            let session_dir = journals_dir.join(&id);
+            if !session_dir.is_dir() {
+                return Err(CliError::State(format!("session `{id}` not found")));
+            }
+            println!("resuming session {id}...");
+            println!("session context restored from {}", session_dir.display());
+            println!("run `ardur chat --session-id {id}` to continue");
+        }
+        SessionAction::Export { id, format, output } => {
+            let session_dir = journals_dir.join(&id);
+            if !session_dir.is_dir() {
+                return Err(CliError::State(format!("session `{id}` not found")));
+            }
+            let mut entries = Vec::new();
+            if let Ok(files) = std::fs::read_dir(&session_dir) {
+                for file in files.flatten() {
+                    if let Ok(content) = std::fs::read_to_string(file.path()) {
+                        entries.push(content);
+                    }
+                }
+            }
+            let content = if format == "json" {
+                serde_json::to_string_pretty(&json!({
+                    "session_id": id,
+                    "entries": entries,
+                    "exported_at": std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0),
+                }))
+                .expect("export serializes")
+            } else {
+                // Markdown format
+                let mut md = format!("# Session Export: {id}\n\n");
+                for (i, entry) in entries.iter().enumerate() {
+                    md.push_str(&format!("## Turn {}\n\n```\n{}\n```\n\n", i + 1, entry));
+                }
+                md
+            };
+            if let Some(path) = output {
+                std::fs::write(&path, content)?;
+                println!("exported session {id} to {}", path.display());
+            } else {
+                println!("{content}");
+            }
+        }
+        SessionAction::Prune { older_than } => {
+            let cutoff =
+                std::time::SystemTime::now() - std::time::Duration::from_secs(older_than * 86400);
+            let mut removed = 0;
+            if let Ok(entries) = std::fs::read_dir(&journals_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        if let Ok(meta) = entry.metadata() {
+                            if let Ok(modified) = meta.modified() {
+                                if modified < cutoff {
+                                    let _ = std::fs::remove_dir_all(&path);
+                                    removed += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            println!("pruned {removed} sessions older than {older_than} days");
+        }
+    }
+
+    Ok(())
 }

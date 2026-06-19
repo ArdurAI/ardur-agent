@@ -312,12 +312,11 @@ async fn chat(State(state): State<Arc<AppState>>, headers: HeaderMap, body: Byte
         return bad_request("`message` is required and must be non-empty".to_string());
     }
 
-    // Streaming (SSE) is the P1.5 follow-up — fail loudly rather than silently
-    // returning a non-streamed body the caller did not ask for.
+    // Streaming (SSE) is the P1.5 follow-up — for now, we accept the flag and
+    // return a mock SSE stream that yields the consolidated reply as a single
+    // event. This unblocks the API contract while full streaming is implemented.
     if request.stream {
-        return bad_request(
-            "`stream: true` is not yet supported; omit it for a consolidated reply".to_string(),
-        );
+        return stream_chat(state, request.message, request.session_id).await;
     }
 
     // A provided session id threads a follow-up onto the same session; an absent
@@ -336,6 +335,48 @@ async fn chat(State(state): State<Arc<AppState>>, headers: HeaderMap, body: Byte
         Err(ChatSubmitError::WorkerGone) => (
             StatusCode::BAD_GATEWAY,
             Json(json!({ "error": "turn worker is unavailable" })),
+        )
+            .into_response(),
+    }
+}
+
+/// `POST /chat` streaming variant — returns SSE with a single consolidated event.
+///
+/// This is a pragmatic interim implementation (P1.5): the full token-by-token
+/// streaming pipeline will replace this once the worker thread can share the
+/// fused runtime for concurrent streaming and non-streaming turns.
+async fn stream_chat(
+    state: Arc<AppState>,
+    message: String,
+    session_id: Option<SessionId>,
+) -> Response {
+    let session_id = session_id.unwrap_or_default();
+
+    // Run the turn synchronously through the worker, then wrap the result as
+    // one SSE event. This preserves the exact same semantics (receipt, cost,
+    // journal) while satisfying the `text/event-stream` contract.
+    match state.submit_chat(message, session_id).await {
+        Ok(outcome) => {
+            let response = ChatResponse::from(outcome);
+            let json = serde_json::to_string(&response).expect("ChatResponse serializes");
+            let sse_body = format!("data: {json}\n\n");
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "text/event-stream")],
+                sse_body,
+            )
+                .into_response()
+        }
+        Err(ChatSubmitError::Runtime(e)) => (
+            StatusCode::BAD_GATEWAY,
+            [(header::CONTENT_TYPE, "text/event-stream")],
+            format!("data: {{\"error\":\"{}\"}}\n\n", e.to_string()),
+        )
+            .into_response(),
+        Err(ChatSubmitError::WorkerGone) => (
+            StatusCode::BAD_GATEWAY,
+            [(header::CONTENT_TYPE, "text/event-stream")],
+            "data: {\"error\":\"turn worker is unavailable\"}\n\n",
         )
             .into_response(),
     }
