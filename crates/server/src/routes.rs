@@ -486,22 +486,23 @@ fn authorize_bearer(allowed_tokens: &[String], headers: &HeaderMap) -> Result<()
         return Err(());
     }
     // Constant-time comparison to prevent timing side-channel attacks that
-    // could leak the correct token byte-by-byte. We compare lengths first
-    // (constant-time via ct_eq on a bool) and then each candidate; the OR-fold
-    // is also constant-time so the number of matching bytes does not leak.
+    // could leak the correct token byte-by-byte. We compare every allowed
+    // token against the presented value regardless of length mismatch, using
+    // a fixed-length pad so ct_eq always runs on equal-length slices.
     let presented_bytes = token.as_bytes();
     let mut found = subtle::Choice::from(0);
     for allowed in allowed_tokens {
         let allowed_bytes = allowed.as_bytes();
-        // Only compare when lengths match; ct_eq panics on mismatched lengths.
-        let len_match =
-            subtle::Choice::from(u8::from(presented_bytes.len() == allowed_bytes.len()));
-        if presented_bytes.len() == allowed_bytes.len() {
-            found |= presented_bytes.ct_eq(allowed_bytes);
-        } else {
-            // Consume the comparison to keep timing uniform regardless.
-            found |= len_match & subtle::Choice::from(0);
-        }
+        // ct_eq requires equal-length slices. When lengths differ, compare
+        // the shorter against a zero-padded version of the longer so the
+        // comparison still runs in constant time (the result is always
+        // false, but the operation takes the same path).
+        let max_len = presented_bytes.len().max(allowed_bytes.len());
+        let mut padded_presented = vec![0u8; max_len];
+        let mut padded_allowed = vec![0u8; max_len];
+        padded_presented[..presented_bytes.len()].copy_from_slice(presented_bytes);
+        padded_allowed[..allowed_bytes.len()].copy_from_slice(allowed_bytes);
+        found |= padded_presented.ct_eq(&padded_allowed);
     }
     if found.into() { Ok(()) } else { Err(()) }
 }

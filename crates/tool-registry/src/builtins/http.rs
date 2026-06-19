@@ -104,6 +104,13 @@ fn is_internal_ip(ip: IpAddr) -> bool {
                 || (octets[0] == 100 && (octets[1] & 0xC0) == 64)
         }
         IpAddr::V6(v6) => {
+            // Check native IPv6 loopback first — ::1 must be classified as
+            // internal before the IPv4-compatible extraction below rewrites it
+            // to 0.0.0.1 (which is only caught by the 0.0.0.0/8 check, not by
+            // is_loopback).
+            if v6.is_loopback() {
+                return true;
+            }
             // Normalise IPv4-mapped (::ffff:a.b.c.d) down to its v4 address.
             if let Some(mapped) = v6.to_ipv4_mapped() {
                 return is_internal_ip(IpAddr::V4(mapped));
