@@ -50,6 +50,9 @@ members = [
     "crates/terminal",
     "crates/web",
     "crates/webhook",
+    "crates/config",
+    "crates/health",
+    "crates/logs",
 ]
 
 [workspace.package]
@@ -251,3 +254,6 @@ ardur-server = { path = "crates/server" }
 ardur-browser = { path = "crates/browser" }
 ardur-terminal = { path = "crates/terminal" }
 ardur-web = { path = "crates/web" }
+ardur-config = { path = "crates/config" }
+ardur-health = { path = "crates/health" }
+ardur-logs = { path = "crates/logs" }

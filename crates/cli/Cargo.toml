@@ -42,6 +42,8 @@ ardur-cedar-policy = { workspace = true }
 ardur-memory = { workspace = true }
 # §7.10 session journals — the durable per-session journal stage 10 appends to.
 ardur-session-journals = { workspace = true }
+# Configuration loading (ARD-425).
+ardur-config = { workspace = true }
 # Ed25519 cap-token issuer key custody: load/persist the issuer private key so
 # the session's cap-token root is stable across runs.
 biscuit-auth = { workspace = true }

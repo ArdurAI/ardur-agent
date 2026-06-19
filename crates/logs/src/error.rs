@@ -1,5 +1,3 @@
-use std::fmt;
-
 #[derive(Debug, thiserror::Error)]
 pub enum LogError {
     #[error("log not found: {0}")]

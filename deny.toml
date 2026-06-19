@@ -1,0 +1,39 @@
+# cargo-deny configuration (ARD-423).
+#
+# Licenses: allow the common permissive licenses used by the workspace's
+# transitive dependency tree, deny copyleft licenses that would force
+# redistribution obligations on downstream consumers.
+
+[licenses]
+allow = [
+    "Apache-2.0",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "MPL-2.0",
+    "Unicode-3.0",
+]
+deny = [
+    "GPL-2.0",
+    "GPL-3.0",
+    "AGPL-3.0",
+]
+# Confidence threshold for license expression detection (0.0–1.0).
+confidence-threshold = 0.8
+
+# Fail the build if any dependency has an unmapped license.
+[licenses.unmapped]
+gapless = true
+
+[bans]
+# Deny duplicates of the same crate at different versions in the dependency
+# tree. We allow some known transitive duplicates for now.
+multiple-versions = "warn"
+wildcards = "deny"
+
+[advisories]
+# Fail on any RUSTSEC advisory that affects the dependency tree.
+vulnerability = "deny"
+unmaintained = "warn"
+yanked = "deny"

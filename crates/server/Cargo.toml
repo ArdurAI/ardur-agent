@@ -56,6 +56,10 @@ ardur-session-journals = { workspace = true }
 ardur-receipt = { workspace = true }
 ardur-runtime = { workspace = true }
 ardur-messaging-gateway = { workspace = true }
+# Configuration, health, and logging crates (ARD-425).
+ardur-config = { workspace = true }
+ardur-health = { workspace = true }
+ardur-logs = { workspace = true }
 # Optional Whisper-backed voice.transcribe tool registration; missing API keys
 # degrade gracefully at boot.
 ardur-media-audio = { workspace = true }

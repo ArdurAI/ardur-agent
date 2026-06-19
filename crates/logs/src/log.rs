@@ -61,12 +61,10 @@ impl LogStream {
     }
 
     pub fn append(&self, entry: LogEntry) -> crate::error::Result<()> {
-        let mut entries = self.entries.write().map_err(|_| {
-            crate::error::LogError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "poisoned lock",
-            ))
-        })?;
+        let mut entries = self
+            .entries
+            .write()
+            .map_err(|_| crate::error::LogError::Io(std::io::Error::other("poisoned lock")))?;
         if entries.len() >= self.max_size {
             entries.remove(0);
         }
@@ -75,12 +73,10 @@ impl LogStream {
     }
 
     pub fn tail(&self, n: usize) -> crate::error::Result<Vec<LogEntry>> {
-        let entries = self.entries.read().map_err(|_| {
-            crate::error::LogError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "poisoned lock",
-            ))
-        })?;
+        let entries = self
+            .entries
+            .read()
+            .map_err(|_| crate::error::LogError::Io(std::io::Error::other("poisoned lock")))?;
         let start = entries.len().saturating_sub(n);
         Ok(entries[start..].to_vec())
     }
@@ -89,12 +85,10 @@ impl LogStream {
         &self,
         criteria: &crate::filter::FilterCriteria,
     ) -> crate::error::Result<Vec<LogEntry>> {
-        let entries = self.entries.read().map_err(|_| {
-            crate::error::LogError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "poisoned lock",
-            ))
-        })?;
+        let entries = self
+            .entries
+            .read()
+            .map_err(|_| crate::error::LogError::Io(std::io::Error::other("poisoned lock")))?;
         Ok(entries
             .iter()
             .filter(|e| criteria.matches(e))
@@ -103,12 +97,10 @@ impl LogStream {
     }
 
     pub fn count(&self) -> crate::error::Result<usize> {
-        let entries = self.entries.read().map_err(|_| {
-            crate::error::LogError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "poisoned lock",
-            ))
-        })?;
+        let entries = self
+            .entries
+            .read()
+            .map_err(|_| crate::error::LogError::Io(std::io::Error::other("poisoned lock")))?;
         Ok(entries.len())
     }
 }
