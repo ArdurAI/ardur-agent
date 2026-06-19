@@ -97,6 +97,10 @@ pub fn mint_token(expires_unix: u64, budget_remaining: u64) -> String {
                     "echo".to_string(),
                     "slow".to_string(),
                     "boom".to_string(),
+                    "cap.fs_read".to_string(),
+                    "cap.fs_write".to_string(),
+                    "cap.shell_exec".to_string(),
+                    "cap.network_out".to_string(),
                 ],
             },
         )

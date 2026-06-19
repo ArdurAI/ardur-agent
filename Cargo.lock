@@ -401,6 +401,7 @@ name = "ardur-cli"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "ardur-automation",
  "ardur-cap-token",
  "ardur-cedar-policy",
  "ardur-cost-gate",
@@ -427,6 +428,20 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "ardur-config"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
  "uuid",
 ]
 
@@ -569,6 +584,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ardur-health"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "ardur-hooks-openclaw-compat"
 version = "0.0.1"
 dependencies = [
@@ -612,6 +641,20 @@ dependencies = [
  "ardur-runtime",
  "async-trait",
  "parking_lot",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "ardur-logs"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
@@ -850,6 +893,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "ardur-acp",
+ "ardur-automation",
  "ardur-cap-token",
  "ardur-cedar-policy",
  "ardur-channel-discord",
@@ -857,6 +901,7 @@ dependencies = [
  "ardur-channel-telegram",
  "ardur-cost-gate",
  "ardur-fused-runtime",
+ "ardur-hooks-openclaw-compat",
  "ardur-media-audio",
  "ardur-memory",
  "ardur-memory-qdrant",

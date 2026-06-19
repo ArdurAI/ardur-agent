@@ -42,6 +42,9 @@ ardur-cedar-policy = { workspace = true }
 ardur-memory = { workspace = true }
 # §7.10 session journals — the durable per-session journal stage 10 appends to.
 ardur-session-journals = { workspace = true }
+# ARD-426: automation — the task-flow DAG model + orchestrator trait for
+# `ardur task` commands (task.create / task.list / task.cancel / task.status).
+ardur-automation = { workspace = true }
 # Ed25519 cap-token issuer key custody: load/persist the issuer private key so
 # the session's cap-token root is stable across runs.
 biscuit-auth = { workspace = true }
