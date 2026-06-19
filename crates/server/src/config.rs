@@ -144,6 +144,19 @@ pub struct Config {
 #[error("required environment variable `{0}` is unset or empty")]
 pub struct MissingEnvVar(pub String);
 
+/// A configuration error: either a missing required variable or an invalid
+/// value for one that was present. Returned by [`Config::from_env`].
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {
+    /// A required environment variable was unset or empty.
+    #[error(transparent)]
+    Missing(#[from] MissingEnvVar),
+    /// A present environment variable had a value that could not be parsed
+    /// or was semantically invalid.
+    #[error("invalid value for environment variable `{var}`: {reason}")]
+    Invalid { var: &'static str, reason: String },
+}
+
 impl fmt::Debug for Config {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Config")
@@ -224,7 +237,7 @@ impl Config {
     /// empty (`SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`, `SLACK_APP_ID`,
     /// `ANTHROPIC_API_KEY` when the Anthropic backend is selected, and
     /// `QDRANT_URL` when the Qdrant memory backend is selected).
-    pub fn from_env() -> Result<Self, MissingEnvVar> {
+    pub fn from_env() -> Result<Self, ConfigError> {
         // The Anthropic key gates only the Anthropic backend; under any other
         // selection it is optional (empty when unset).
         let anthropic_selected = matches!(
@@ -242,7 +255,9 @@ impl Config {
         let mcp_enabled = optional("ARDUR_MCP_ENABLED").as_deref() == Some("true");
         let mcp_bearer_tokens = parse_csv(optional("ARDUR_MCP_BEARER_TOKENS").as_deref());
         if mcp_enabled && mcp_bearer_tokens.is_empty() {
-            return Err(MissingEnvVar("ARDUR_MCP_BEARER_TOKENS".to_string()));
+            return Err(ConfigError::Missing(MissingEnvVar(
+                "ARDUR_MCP_BEARER_TOKENS".to_string(),
+            )));
         }
 
         // The memory backend selector. `QDRANT_URL` is required when either
@@ -251,9 +266,17 @@ impl Config {
         // the Anthropic key above. Under the default `in_memory` backend it is
         // optional (and ignored).
         let memory_backend = match optional("ARDUR_MEMORY").as_deref() {
+            None | Some("") => MemoryBackend::InMemory,
             Some("qdrant") => MemoryBackend::Qdrant,
             Some("hybrid") => MemoryBackend::Hybrid,
-            _ => MemoryBackend::InMemory,
+            Some(other) => {
+                return Err(ConfigError::Invalid {
+                    var: "ARDUR_MEMORY",
+                    reason: format!(
+                        "unrecognized value `{other}` (expected: in_memory, qdrant, hybrid)"
+                    ),
+                });
+            }
         };
         let qdrant_url = if matches!(
             memory_backend,
@@ -306,17 +329,29 @@ impl Config {
                 .as_deref()
                 .is_some_and(is_truthy),
             model: optional("ARDUR_MODEL").unwrap_or_else(|| "claude-opus-4-8".to_string()),
-            cost_budget_cents: optional("ARDUR_COST_BUDGET_CENTS")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(10_000),
+            cost_budget_cents: {
+                match optional("ARDUR_COST_BUDGET_CENTS") {
+                    None => 10_000,
+                    Some(raw) => raw.parse::<u64>().map_err(|e| ConfigError::Invalid {
+                        var: "ARDUR_COST_BUDGET_CENTS",
+                        reason: format!("`{raw}` is not a valid u64: {e}"),
+                    })?,
+                }
+            },
             cedar_policy_path: optional("ARDUR_CEDAR_POLICY_PATH").map(PathBuf::from),
             slack_base_url: None,
             channel_matrix,
             channel_discord,
             channel_telegram,
             log_format: match optional("ARDUR_LOG_FORMAT").as_deref() {
+                None | Some("") | Some("text") => LogFormat::Text,
                 Some("json") => LogFormat::Json,
-                _ => LogFormat::Text,
+                Some(other) => {
+                    return Err(ConfigError::Invalid {
+                        var: "ARDUR_LOG_FORMAT",
+                        reason: format!("unrecognized value `{other}` (expected: text, json)"),
+                    });
+                }
             },
             mcp_enabled,
             mcp_bearer_tokens,

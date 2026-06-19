@@ -46,7 +46,28 @@ async fn main() -> anyhow::Result<()> {
 
     let app = build_router(state.shared());
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], cli.port));
+    // Default to localhost for security; only bind to a non-loopback address
+    // when explicitly requested via ARDUR_ADMIN_BIND.
+    let bind_host = std::env::var("ARDUR_ADMIN_BIND").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let addr = match bind_host.parse::<std::net::IpAddr>() {
+        Ok(ip) => SocketAddr::from((ip, cli.port)),
+        Err(_) => {
+            tracing::warn!("Invalid ARDUR_ADMIN_BIND={bind_host}, falling back to 127.0.0.1");
+            SocketAddr::from(([127, 0, 0, 1], cli.port))
+        }
+    };
+
+    // Require auth when binding to non-loopback addresses — prevents accidental
+    // exposure of session/receipt/memory data to the network without credentials.
+    let is_loopback = addr.ip().is_loopback();
+    if !is_loopback && cli.basic_auth.is_none() {
+        anyhow::bail!(
+            "Authentication required for non-loopback bind ({}). \
+             Use --basic-auth or bind to 127.0.0.1.",
+            addr.ip()
+        );
+    }
+
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!(
         %addr,

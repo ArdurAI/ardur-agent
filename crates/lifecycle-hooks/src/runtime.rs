@@ -201,9 +201,8 @@ impl ChatRuntime for HookedRuntime {
             cost: response.cost,
         };
         for err in self.registry.run_post_receipt(&post_ctx).await {
-            // Observational: log and continue. (`tracing` wiring lands with the
-            // observability plumbing; Phase 1 keeps the non-fatal contract.)
-            let _ = err;
+            // Observational: log and continue — non-fatal contract.
+            tracing::warn!(error = %err, "post-receipt hook error (non-fatal)");
         }
 
         // 5. Memory write (after the post-receipt observers have seen the

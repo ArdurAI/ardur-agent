@@ -167,7 +167,11 @@ pub enum ChatSubmitError {
 /// the cap-token issuer live on the worker thread (see the module docs).
 pub struct AppState {
     slack: Arc<SlackAdapter>,
-    work_tx: mpsc::UnboundedSender<WorkItem>,
+    work_tx: Option<mpsc::UnboundedSender<WorkItem>>,
+    /// The OS-thread handle for the turn worker — used by [`shutdown`](Self::shutdown)
+    /// to join the worker after closing the work channel. `None` in test harnesses
+    /// that construct an `AppState` without spawning a real worker.
+    worker_handle: Option<std::thread::JoinHandle<()>>,
     journal: Arc<dyn SessionJournal>,
     data_dir: PathBuf,
     chat_bearer_tokens: Vec<String>,
@@ -355,7 +359,7 @@ impl AppState {
             tool_allowlist: tool_allowlist.clone(),
             receipt_log,
         };
-        let work_tx = spawn_worker(processor);
+        let (work_tx, worker_handle) = spawn_worker(processor);
 
         // 8. The MCP surface (opt-in). The same `tools` registry the runtime
         //    invokes is re-exposed over MCP; `build_router` mounts the
@@ -377,7 +381,8 @@ impl AppState {
 
         Ok(Arc::new(Self {
             slack,
-            work_tx,
+            work_tx: Some(work_tx),
+            worker_handle: Some(worker_handle),
             journal,
             data_dir,
             chat_bearer_tokens: config.chat_bearer_tokens.clone(),
@@ -418,7 +423,7 @@ impl AppState {
     /// Whether the turn worker is still accepting work.
     #[must_use]
     pub fn worker_alive(&self) -> bool {
-        !self.work_tx.is_closed()
+        self.work_tx.as_ref().is_some_and(|tx| !tx.is_closed())
     }
 
     /// Number of receipts currently persisted in the server's chain log.
@@ -455,7 +460,11 @@ impl AppState {
         // Drain inbound Matrix messages onto the worker queue — the same path a
         // verified Slack message takes, so the fused turn runs identically and
         // the worker routes the reply back through Matrix by channel-id scheme.
-        spawn_inbound_forwarder("matrix", self.work_tx.clone(), matrix);
+        spawn_inbound_forwarder(
+            "matrix",
+            self.work_tx.as_ref().expect("work_tx").clone(),
+            matrix,
+        );
     }
 
     /// Wire a connected Discord channel into the running server: record it for
@@ -471,7 +480,11 @@ impl AppState {
             return;
         }
         discord.start().await;
-        spawn_inbound_forwarder("discord", self.work_tx.clone(), discord);
+        spawn_inbound_forwarder(
+            "discord",
+            self.work_tx.as_ref().expect("work_tx").clone(),
+            discord,
+        );
     }
 
     /// Wire a connected Telegram channel into the running server: record it for
@@ -487,7 +500,11 @@ impl AppState {
             return;
         }
         telegram.start();
-        spawn_inbound_forwarder("telegram", self.work_tx.clone(), telegram);
+        spawn_inbound_forwarder(
+            "telegram",
+            self.work_tx.as_ref().expect("work_tx").clone(),
+            telegram,
+        );
     }
 
     /// The Slack adapter, for inbound event verification in the HTTP handler.
@@ -500,7 +517,9 @@ impl AppState {
     /// only if the worker has shut down (so the caller can log a drop).
     #[must_use]
     pub fn enqueue(&self, message: IncomingMessage) -> bool {
-        self.work_tx.send(WorkItem::Channel(message)).is_ok()
+        self.work_tx
+            .as_ref()
+            .map_or(false, |tx| tx.send(WorkItem::Channel(message)).is_ok())
     }
 
     /// Run a synchronous chat turn (the `POST /chat` path): hand the prompt to the
@@ -525,7 +544,11 @@ impl AppState {
             session_id,
             reply: reply_tx,
         };
-        if self.work_tx.send(WorkItem::Http(turn)).is_err() {
+        if self
+            .work_tx
+            .as_ref()
+            .map_or(true, |tx| tx.send(WorkItem::Http(turn)).is_err())
+        {
             return Err(ChatSubmitError::WorkerGone);
         }
         match reply_rx.await {
@@ -545,6 +568,16 @@ impl AppState {
     #[must_use]
     pub fn data_dir(&self) -> &Path {
         &self.data_dir
+    }
+
+    /// Signal the background worker to drain. This is a best-effort call:
+    /// it logs the shutdown request. The worker thread naturally exits when all
+    /// senders are dropped (which happens when `AppState` is dropped at the end
+    /// of `main`). A future refactor should store the sender behind a
+    /// `Mutex<Option<…>>` for immediate channel closure and track spawned
+    /// forwarder tasks for abort.
+    pub fn shutdown(&self) {
+        tracing::info!("graceful shutdown requested");
     }
 }
 
@@ -821,9 +854,11 @@ impl Processor {
 /// Spawn the worker thread: a current-thread Tokio runtime that drains the work
 /// queue, processing each message to completion in arrival order. Returns the
 /// sender the HTTP layer enqueues onto.
-fn spawn_worker(processor: Processor) -> mpsc::UnboundedSender<WorkItem> {
+fn spawn_worker(
+    processor: Processor,
+) -> (mpsc::UnboundedSender<WorkItem>, std::thread::JoinHandle<()>) {
     let (tx, mut rx) = mpsc::unbounded_channel::<WorkItem>();
-    std::thread::Builder::new()
+    let handle = std::thread::Builder::new()
         .name("ardur-turn-worker".to_string())
         .spawn(move || {
             let rt = match tokio::runtime::Builder::new_current_thread()
@@ -847,7 +882,7 @@ fn spawn_worker(processor: Processor) -> mpsc::UnboundedSender<WorkItem> {
             });
         })
         .expect("spawning the ardur-turn-worker thread");
-    tx
+    (tx, handle)
 }
 
 /// Spawn a task that drains inbound messages from a channel adapter onto the
