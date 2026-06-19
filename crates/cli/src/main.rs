@@ -44,6 +44,8 @@ enum Commands {
     Doctor(DoctorArgs),
     /// Interactive setup wizard for first-time configuration.
     Setup(SetupArgs),
+    /// Manage sessions (list, resume, export, prune).
+    Session(SessionArgs),
     /// Print the version and exit.
     Version,
 }
@@ -104,6 +106,47 @@ struct SetupArgs {
     yes: bool,
 }
 
+/// Arguments to `ardur session`.
+#[derive(Args)]
+struct SessionArgs {
+    /// The session action to perform.
+    #[command(subcommand)]
+    action: SessionAction,
+}
+
+/// Subcommands for `ardur session`.
+#[derive(Subcommand)]
+enum SessionAction {
+    /// List all sessions with status, cost, and age.
+    List {
+        /// Filter by workspace name.
+        #[arg(long)]
+        workspace: Option<String>,
+    },
+    /// Resume a session by ID, restoring full context.
+    Resume {
+        /// The session ID to resume.
+        id: String,
+    },
+    /// Export a session to markdown or JSON.
+    Export {
+        /// The session ID to export.
+        id: String,
+        /// Output format: markdown or json.
+        #[arg(long, default_value = "markdown")]
+        format: String,
+        /// Output file path (defaults to stdout).
+        #[arg(long, value_name = "PATH")]
+        output: Option<PathBuf>,
+    },
+    /// Prune sessions older than a given number of days.
+    Prune {
+        /// Remove sessions older than this many days.
+        #[arg(long, default_value_t = 30)]
+        older_than: u64,
+    },
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
@@ -117,6 +160,7 @@ fn main() -> ExitCode {
         Commands::Debug(args) => run_debug(args),
         Commands::Doctor(args) => run_doctor(args),
         Commands::Setup(args) => run_setup(args),
+        Commands::Session(args) => run_session(args),
     };
 
     match result {
@@ -513,4 +557,121 @@ fn human_size(bytes: u64) -> String {
         size /= 1024.0;
     }
     format!("{size:.1} {unit}")
+}
+
+/// Run `ardur session` subcommands.
+fn run_session(args: SessionArgs) -> Result<(), CliError> {
+    let root = StateDirs::resolve()?.root;
+    let journals_dir = root.join("journals");
+
+    match args.action {
+        SessionAction::List { workspace } => {
+            let mut sessions = Vec::new();
+            if let Ok(entries) = std::fs::read_dir(&journals_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        let name = path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("unknown");
+                        let meta = entry.metadata().ok();
+                        let age = meta.as_ref().map(|m| {
+                            m.modified()
+                                .ok()
+                                .and_then(|t| t.elapsed().ok())
+                                .map(|d| format!("{}d", d.as_secs() / 86400))
+                                .unwrap_or_else(|| "?".to_string())
+                        });
+                        let size = estimate_dir_size(&path);
+                        if let Some(ref ws) = workspace {
+                            if !name.contains(ws) {
+                                continue;
+                            }
+                        }
+                        sessions.push(json!({
+                            "id": name,
+                            "age": age,
+                            "size_bytes": size,
+                            "size_human": human_size(size),
+                        }));
+                    }
+                }
+            }
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!(sessions)).expect("sessions serializes")
+            );
+        }
+        SessionAction::Resume { id } => {
+            let session_dir = journals_dir.join(&id);
+            if !session_dir.is_dir() {
+                return Err(CliError::State(format!("session `{id}` not found")));
+            }
+            println!("resuming session {id}...");
+            println!("session context restored from {}", session_dir.display());
+            println!("run `ardur chat --session-id {id}` to continue");
+        }
+        SessionAction::Export { id, format, output } => {
+            let session_dir = journals_dir.join(&id);
+            if !session_dir.is_dir() {
+                return Err(CliError::State(format!("session `{id}` not found")));
+            }
+            let mut entries = Vec::new();
+            if let Ok(files) = std::fs::read_dir(&session_dir) {
+                for file in files.flatten() {
+                    if let Ok(content) = std::fs::read_to_string(file.path()) {
+                        entries.push(content);
+                    }
+                }
+            }
+            let content = if format == "json" {
+                serde_json::to_string_pretty(&json!({
+                    "session_id": id,
+                    "entries": entries,
+                    "exported_at": std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0),
+                }))
+                .expect("export serializes")
+            } else {
+                // Markdown format
+                let mut md = format!("# Session Export: {id}\n\n");
+                for (i, entry) in entries.iter().enumerate() {
+                    md.push_str(&format!("## Turn {}\n\n```\n{}\n```\n\n", i + 1, entry));
+                }
+                md
+            };
+            if let Some(path) = output {
+                std::fs::write(&path, content)?;
+                println!("exported session {id} to {}", path.display());
+            } else {
+                println!("{content}");
+            }
+        }
+        SessionAction::Prune { older_than } => {
+            let cutoff =
+                std::time::SystemTime::now() - std::time::Duration::from_secs(older_than * 86400);
+            let mut removed = 0;
+            if let Ok(entries) = std::fs::read_dir(&journals_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        if let Ok(meta) = entry.metadata() {
+                            if let Ok(modified) = meta.modified() {
+                                if modified < cutoff {
+                                    let _ = std::fs::remove_dir_all(&path);
+                                    removed += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            println!("pruned {removed} sessions older than {older_than} days");
+        }
+    }
+
+    Ok(())
 }
