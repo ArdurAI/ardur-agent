@@ -26,7 +26,7 @@ pub mod openapi;
 mod routes;
 mod state;
 
-pub use config::{Config, LogFormat, MemoryBackend, MissingEnvVar};
+pub use config::{Config, ConfigError, LogFormat, MemoryBackend, MissingEnvVar};
 pub use mcp::{
     assemble_tool_registry, build_mcp_router, connect_remote_tools, example_registry,
     register_skills,

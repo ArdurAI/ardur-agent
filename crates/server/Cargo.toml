@@ -90,6 +90,8 @@ serde_json = { workspace = true }
 reqwest = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
+# Constant-time comparison for bearer-token authentication (timing-attack defence).
+subtle = { workspace = true }
 
 [dev-dependencies]
 # The integration tests drive the router in-process with `oneshot`, mock

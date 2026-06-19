@@ -24,6 +24,7 @@ use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use subtle::ConstantTimeEq;
 
 use ardur_acp::{
     ACP_METHOD_INITIALIZE, ACP_METHOD_SESSION_PROMPT, AcpErrorObject, AcpMessage, AcpRequest,
@@ -480,11 +481,29 @@ fn authorize_bearer(allowed_tokens: &[String], headers: &HeaderMap) -> Result<()
     let Some(token) = presented.strip_prefix("Bearer ") else {
         return Err(());
     };
-    if !allowed_tokens.is_empty() && allowed_tokens.iter().any(|allowed| allowed == token) {
-        Ok(())
-    } else {
-        Err(())
+    // Fail closed when no tokens are configured — every request is denied.
+    if allowed_tokens.is_empty() {
+        return Err(());
     }
+    // Constant-time comparison to prevent timing side-channel attacks that
+    // could leak the correct token byte-by-byte. We compare lengths first
+    // (constant-time via ct_eq on a bool) and then each candidate; the OR-fold
+    // is also constant-time so the number of matching bytes does not leak.
+    let presented_bytes = token.as_bytes();
+    let mut found = subtle::Choice::from(0);
+    for allowed in allowed_tokens {
+        let allowed_bytes = allowed.as_bytes();
+        // Only compare when lengths match; ct_eq panics on mismatched lengths.
+        let len_match =
+            subtle::Choice::from(u8::from(presented_bytes.len() == allowed_bytes.len()));
+        if presented_bytes.len() == allowed_bytes.len() {
+            found |= presented_bytes.ct_eq(allowed_bytes);
+        } else {
+            // Consume the comparison to keep timing uniform regardless.
+            found |= len_match & subtle::Choice::from(0);
+        }
+    }
+    if found.into() { Ok(()) } else { Err(()) }
 }
 
 fn unauthorized() -> Response {

@@ -28,7 +28,7 @@
 //! untrusted. The capability it declares ([`Capability::NetworkOut`]) is what
 //! those layers gate against.
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -81,24 +81,58 @@ fn host_is_localhost(host: &Host<&str>) -> bool {
 /// Whether `ip` is an internal/non-routable address an untrusted fetch must not
 /// be allowed to reach (the SSRF blocklist).
 ///
-/// Covers loopback, RFC 1918 private, link-local, and unspecified IPv4; and
-/// loopback, unspecified, link-local (`fe80::/10`), and unique-local
-/// (`fc00::/7`) IPv6 — mapping IPv4-in-IPv6 down to its v4 form first so an
-/// `::ffff:10.0.0.1` cannot smuggle a private address past the check.
+/// Covers loopback, RFC 1918 private, link-local, unspecified, this-host
+/// (`0.0.0.0/8`), benchmarking (`198.18.0.0/15`), and CGNAT (`100.64.0.0/10`)
+/// IPv4; and loopback, unspecified, link-local (`fe80::/10`), unique-local
+/// (`fc00::/7`), and IPv4-compatible IPv6 (`::a.b.c.d`) — mapping
+/// IPv4-in-IPv6 down to its v4 form first so an `::ffff:10.0.0.1` or
+/// `::10.0.0.1` cannot smuggle a private address past the check.
 fn is_internal_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
-            v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified()
+            let octets = v4.octets();
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                // 0.0.0.0/8 "this host" range — not caught by is_unspecified()
+                // (which only tests for the exact address 0.0.0.0).
+                || octets[0] == 0
+                // 198.18.0.0/15 benchmarking (RFC 2544).
+                || (octets[0] == 198 && (octets[1] & 0xFE) == 18)
+                // 100.64.0.0/10 carrier-grade NAT (RFC 6598).
+                || (octets[0] == 100 && (octets[1] & 0xC0) == 64)
         }
         IpAddr::V6(v6) => {
+            // Normalise IPv4-mapped (::ffff:a.b.c.d) down to its v4 address.
             if let Some(mapped) = v6.to_ipv4_mapped() {
                 return is_internal_ip(IpAddr::V4(mapped));
             }
-            let seg0 = v6.segments()[0];
+            let segs = v6.segments();
+            // Catch the deprecated IPv4-compatible form (::a.b.c.d): the first
+            // 96 bits (6 segments) are zero but segs[5] is 0x0000 (not 0xFFFF).
+            // to_ipv4_mapped only handles ::ffff:0:0/96; this catches ::/96
+            // which to_ipv4_mapped misses.
+            if segs[0] == 0
+                && segs[1] == 0
+                && segs[2] == 0
+                && segs[3] == 0
+                && segs[4] == 0
+                && segs[5] == 0
+            {
+                // segs[6..8] hold the embedded v4 address (or all-zero for ::).
+                let v4 = Ipv4Addr::new(
+                    (segs[6] >> 8) as u8,
+                    (segs[6] & 0xFF) as u8,
+                    (segs[7] >> 8) as u8,
+                    (segs[7] & 0xFF) as u8,
+                );
+                return is_internal_ip(IpAddr::V4(v4));
+            }
             v6.is_loopback()
                 || v6.is_unspecified()
-                || (seg0 & 0xffc0) == 0xfe80 // fe80::/10 link-local
-                || (seg0 & 0xfe00) == 0xfc00 // fc00::/7 unique-local
+                || (segs[0] & 0xffc0) == 0xfe80 // fe80::/10 link-local
+                || (segs[0] & 0xfe00) == 0xfc00 // fc00::/7 unique-local
         }
     }
 }
@@ -423,6 +457,30 @@ impl Tool for HttpFetchTool {
 
             let mut request = client.request(method.clone(), current.clone());
             for (name, value) in &args.headers {
+                // Denylist headers that a prompt-controlled fetch must not set —
+                // prevents credential smuggling, cache poisoning, and request
+                // routing attacks against internal services behind an allowlisted host.
+                let lower = name.to_ascii_lowercase();
+                if matches!(
+                    lower.as_str(),
+                    "authorization"
+                        | "proxy-authorization"
+                        | "cookie"
+                        | "set-cookie"
+                        | "host"
+                        | "forwarded"
+                        | "x-forwarded-for"
+                        | "x-forwarded-host"
+                        | "x-forwarded-proto"
+                        | "x-real-ip"
+                        | "via"
+                        | "connection"
+                        | "transfer-encoding"
+                        | "content-length"
+                        | "upgrade"
+                ) {
+                    continue;
+                }
                 if let Some(v) = value.as_str() {
                     request = request.header(name, v);
                 }

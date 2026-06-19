@@ -23,6 +23,16 @@ pub struct WebhookConfig {
     pub signature_header: String,
     /// Source identifier emitted on the [`WebhookEvent`].
     pub source: String,
+    /// Optional timestamp header name for replay protection (e.g.
+    /// `x-webhook-timestamp`). When set, the handler requires the header on
+    /// every request, verifies the timestamp is within `replay_window_secs`
+    /// of the current time, and includes the timestamp in the HMAC payload
+    /// (signed as `"{timestamp}.{body}"`). When `None`, replay protection is
+    /// disabled — only HMAC over the body is verified.
+    pub timestamp_header: Option<String>,
+    /// Maximum age of a webhook request in seconds (default: 300 = 5 minutes).
+    /// Only enforced when `timestamp_header` is `Some`.
+    pub replay_window_secs: u64,
 }
 
 impl WebhookConfig {
@@ -32,12 +42,28 @@ impl WebhookConfig {
             secret: SecretString::new(secret.into().into()),
             signature_header: "x-webhook-signature".to_string(),
             source: source.into(),
+            timestamp_header: None,
+            replay_window_secs: 300,
         }
     }
 
     /// Set a custom signature header name.
     pub fn with_signature_header(mut self, header: impl Into<String>) -> Self {
         self.signature_header = header.into();
+        self
+    }
+
+    /// Enable replay protection using the given timestamp header name.
+    /// The signature is then computed over `"{timestamp}.{body}"` and the
+    /// timestamp must be within `replay_window_secs` of the current time.
+    pub fn with_replay_protection(mut self, timestamp_header: impl Into<String>) -> Self {
+        self.timestamp_header = Some(timestamp_header.into());
+        self
+    }
+
+    /// Set the replay window in seconds (default: 300).
+    pub fn with_replay_window_secs(mut self, secs: u64) -> Self {
+        self.replay_window_secs = secs;
         self
     }
 }
@@ -74,10 +100,53 @@ pub fn verify_signature(
     }
 }
 
+/// Verify an HMAC-SHA256 signature over `"{timestamp}.{body}"`.
+///
+/// This is the replay-protected variant: the timestamp is part of the signed
+/// payload, so an attacker cannot replay a captured signature with a different
+/// timestamp.
+pub fn verify_signature_with_timestamp(
+    body: &[u8],
+    timestamp: &str,
+    secret: &SecretString,
+    signature_hex: &str,
+) -> Result<(), WebhookError> {
+    let mut mac = HmacSha256::new_from_slice(secret.expose_secret().as_bytes())
+        .map_err(|e| WebhookError::Internal(format!("HMAC init failed: {e}")))?;
+    mac.update(timestamp.as_bytes());
+    mac.update(b".");
+    mac.update(body);
+    let expected =
+        hex::decode(signature_hex).map_err(|_| WebhookError::SignatureVerificationFailed)?;
+    let computed = mac.finalize().into_bytes();
+    if expected.len() != computed.len() {
+        return Err(WebhookError::SignatureVerificationFailed);
+    }
+    if expected.ct_eq(&computed).into() {
+        Ok(())
+    } else {
+        Err(WebhookError::SignatureVerificationFailed)
+    }
+}
+
 /// Generate an HMAC-SHA256 signature for a body (hex-encoded).
 pub fn sign_body(body: &[u8], secret: &SecretString) -> Result<String, WebhookError> {
     let mut mac = HmacSha256::new_from_slice(secret.expose_secret().as_bytes())
         .map_err(|e| WebhookError::Internal(format!("HMAC init failed: {e}")))?;
+    mac.update(body);
+    Ok(hex::encode(mac.finalize().into_bytes()))
+}
+
+/// Generate an HMAC-SHA256 signature for `"{timestamp}.{body}"` (hex-encoded).
+pub fn sign_body_with_timestamp(
+    body: &[u8],
+    timestamp: &str,
+    secret: &SecretString,
+) -> Result<String, WebhookError> {
+    let mut mac = HmacSha256::new_from_slice(secret.expose_secret().as_bytes())
+        .map_err(|e| WebhookError::Internal(format!("HMAC init failed: {e}")))?;
+    mac.update(timestamp.as_bytes());
+    mac.update(b".");
     mac.update(body);
     Ok(hex::encode(mac.finalize().into_bytes()))
 }
@@ -93,9 +162,11 @@ pub struct InboundState {
 /// Axum handler for receiving inbound webhooks.
 ///
 /// 1. Reads the raw body.
-/// 2. Extracts the signature header.
-/// 3. Verifies the HMAC-SHA256 signature.
-/// 4. Parses the body as JSON and emits a [`WebhookEvent`].
+/// 2. Extracts the signature header (and timestamp when replay protection is on).
+/// 3. Verifies the HMAC-SHA256 signature (over `"{timestamp}.{body}"` when
+///    replay protection is configured, over `body` otherwise).
+/// 4. When replay protection is on, rejects timestamps outside the window.
+/// 5. Parses the body as JSON and emits a [`WebhookEvent`].
 pub async fn receive_webhook(
     State(state): State<Arc<InboundState>>,
     headers: HeaderMap,
@@ -106,7 +177,52 @@ pub async fn receive_webhook(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    if let Err(e) = verify_signature(&body, &state.config.secret, signature) {
+    // Replay protection: when a timestamp header is configured, extract and
+    // verify it, and include it in the HMAC payload.
+    if let Some(ts_header) = &state.config.timestamp_header {
+        let timestamp = match headers.get(ts_header).and_then(|v| v.to_str().ok()) {
+            Some(ts) => ts.to_string(),
+            None => {
+                warn!(
+                    "missing timestamp header `{ts_header}` for source={}, rejecting",
+                    state.config.source
+                );
+                return (StatusCode::UNAUTHORIZED, "Missing timestamp").into_response();
+            }
+        };
+
+        // Parse as Unix epoch seconds (decimal string).
+        let ts_secs: i64 = match timestamp.parse() {
+            Ok(v) => v,
+            Err(_) => {
+                warn!(
+                    "unparseable timestamp `{timestamp}` for source={}",
+                    state.config.source
+                );
+                return (StatusCode::BAD_REQUEST, "Invalid timestamp").into_response();
+            }
+        };
+
+        let now_secs = chrono::Utc::now().timestamp();
+        let window = state.config.replay_window_secs as i64;
+        if (now_secs - ts_secs).abs() > window {
+            warn!(
+                "timestamp outside replay window ({}s) for source={}",
+                window, state.config.source
+            );
+            return (StatusCode::UNAUTHORIZED, "Stale request").into_response();
+        }
+
+        if let Err(e) =
+            verify_signature_with_timestamp(&body, &timestamp, &state.config.secret, signature)
+        {
+            warn!(
+                "signature verification failed for source={}: {}",
+                state.config.source, e
+            );
+            return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
+        }
+    } else if let Err(e) = verify_signature(&body, &state.config.secret, signature) {
         warn!(
             "signature verification failed for source={}: {}",
             state.config.source, e

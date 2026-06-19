@@ -72,13 +72,17 @@ impl CronScheduler {
                     job.last_run = Some(now);
                     job.run_count += 1;
 
-                    let _ = registry.update_status(&job.id, JobStatus::Running);
+                    if let Err(e) = registry.update_status(&job.id, JobStatus::Running) {
+                        tracing::warn!(error = %e, job_id = %job.id, "failed to mark job as Running");
+                    }
 
                     info!("running job {}: {}", job.id, job.name);
 
                     // In a real implementation, this would execute the command
                     // For now, mark as completed immediately
-                    let _ = registry.update_status(&job.id, JobStatus::Completed);
+                    if let Err(e) = registry.update_status(&job.id, JobStatus::Completed) {
+                        tracing::warn!(error = %e, job_id = %job.id, "failed to mark job as Completed");
+                    }
                 }
             }
         });

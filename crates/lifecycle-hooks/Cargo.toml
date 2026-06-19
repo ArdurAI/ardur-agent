@@ -32,6 +32,7 @@ ardur-memory = { workspace = true }
 async-trait = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
+tracing = { workspace = true }
 # `RecordingHook` stores callbacks behind a non-poisoning mutex so a panicking
 # hook in one test cannot wedge the shared event log.
 parking_lot = { workspace = true }

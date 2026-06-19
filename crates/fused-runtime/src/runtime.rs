@@ -1235,7 +1235,7 @@ impl FusedRuntime {
                 cost: combined_cost,
             };
             for err in self.registry.run_post_receipt(&post_ctx).await {
-                let _ = err;
+                tracing::warn!(error = %err, "post-receipt hook error (non-fatal)");
             }
 
             // 8. cost-gate finalize: settle this iteration against the combined
@@ -1252,15 +1252,31 @@ impl FusedRuntime {
             }
 
             // 9. memory: record this round as a bi-temporal fact. Non-fatal, but
-            //    still authorized by the same verified cap-token claims and Cedar
-            //    bundle; tokens without `memory.write` simply do not get a memory
-            //    side effect.
+            //    we RE-VERIFY the cap token specifically for `memory.write` to
+            //    prevent attenuation bypass — the turn-level `claims` only proved
+            //    `chat.submit`; a holder who attenuated away `memory.write` must
+            //    not get a memory side-effect.
             if let Some(memory) = &self.memory {
-                let record = turn_record(&claims.subject.0, &response, &receipt, now_ms);
-                let plane = MemoryControlPlane::new(memory.as_ref(), self.policies.clone());
-                if let Err(mem_err) = plane.record(&claims, record) {
-                    self.fire_error(session_id, LifecyclePhase::MemoryWrite, &mem_err)
-                        .await;
+                match self.stage_cap_token_for_tool(
+                    &req,
+                    &provisioning,
+                    now_unix,
+                    ardur_memory::MEMORY_WRITE_CAPABILITY,
+                ) {
+                    Ok(mem_claims) => {
+                        let record =
+                            turn_record(&mem_claims.subject.0, &response, &receipt, now_ms);
+                        let plane = MemoryControlPlane::new(memory.as_ref(), self.policies.clone());
+                        if let Err(mem_err) = plane.record(&mem_claims, record) {
+                            self.fire_error(session_id, LifecyclePhase::MemoryWrite, &mem_err)
+                                .await;
+                        }
+                    }
+                    Err(_) => {
+                        // Token does not grant memory.write (attenuated or never
+                        // issued). Skip the memory side-effect silently — this is
+                        // the intended behaviour for write-less tokens.
+                    }
                 }
             }
 
@@ -1725,7 +1741,7 @@ impl FusedRuntime {
                     cost: combined_cost,
                 };
                 for err in self.registry.run_post_receipt(&post_ctx).await {
-                    let _ = err;
+                    tracing::warn!(error = %err, "post-receipt hook error (non-fatal)");
                 }
 
                 // 8. cost-gate finalize.
@@ -1748,16 +1764,30 @@ impl FusedRuntime {
                     }
                 }
 
-                // 9. memory (only when a backend is configured). The write is
-                // authorized against the verified cap-token claims and Cedar, and
-                // remains non-fatal if the token lacks `memory.write`.
+                // 9. memory (only when a backend is configured). We RE-VERIFY the
+                // cap token specifically for `memory.write` to prevent attenuation
+                // bypass — the turn-level claims only proved `chat.submit`.
+                // The write remains non-fatal; a token that lacks `memory.write`
+                // (attenuated or never issued) silently skips the side-effect.
                 if let Some(memory) = &self.memory {
                     yield FusedEvent::StageStart { stage: StageKind::MemoryRecord };
-                    let record = turn_record(&claims.subject.0, &response, &receipt, now_ms);
-                    let plane = MemoryControlPlane::new(memory.as_ref(), self.policies.clone());
-                    if let Err(mem_err) = plane.record(&claims, record) {
-                        self.fire_error(session_id, LifecyclePhase::MemoryWrite, &mem_err)
-                            .await;
+                    match self.stage_cap_token_for_tool(
+                        &req,
+                        &provisioning,
+                        now_unix,
+                        ardur_memory::MEMORY_WRITE_CAPABILITY,
+                    ) {
+                        Ok(mem_claims) => {
+                            let record = turn_record(&mem_claims.subject.0, &response, &receipt, now_ms);
+                            let plane = MemoryControlPlane::new(memory.as_ref(), self.policies.clone());
+                            if let Err(mem_err) = plane.record(&mem_claims, record) {
+                                self.fire_error(session_id, LifecyclePhase::MemoryWrite, &mem_err)
+                                    .await;
+                            }
+                        }
+                        Err(_) => {
+                            // Token does not grant memory.write — skip silently.
+                        }
                     }
                     yield FusedEvent::StageEnd { stage: StageKind::MemoryRecord, ok: true };
                 }
