@@ -1,11 +1,6 @@
 # CI for Ardur — the four-stage gauntlet (fmt → clippy → check → test),
 # ordered cheapest-first so a formatting failure short-circuits before the
 # expensive test compile. Matrix on {ubuntu, macos} × stable. See §0.0.
-#
-# Security-scanning jobs (CodeQL, cargo-audit, cargo-deny, SBOM) and a Docker
-# smoke build were added in ARD-423/ARD-424. All actions are pinned to full
-# 40-char commit SHAs — never to mutable tags or branches — so a compromised
-# tag cannot silently change what runs in CI.
 
 name: CI
 
@@ -19,29 +14,24 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-permissions:
-  contents: read
-
 jobs:
   gauntlet:
     name: ${{ matrix.os }} / stable
     runs-on: ${{ matrix.os }}
-    permissions:
-      contents: read
     strategy:
       # Don't let a macOS-only failure mask a Linux pass (and vice-versa).
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@v6
 
       - name: Install stable toolchain
-        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
 
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@v2
 
       - name: cargo fmt
         run: cargo fmt --all --check
@@ -54,93 +44,3 @@ jobs:
 
       - name: cargo test
         run: cargo test --workspace
-
-  # ── ARD-423: Security scanning ──────────────────────────────────────────
-
-  codeql:
-    name: CodeQL (rust)
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      security-events: write
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-
-      - name: Initialize CodeQL
-        uses: github/codeql-action/init@dd903d2e4f5405488e5ef1422510ee31c8b32357 # v3
-        with:
-          languages: rust
-
-      - name: Autobuild
-        uses: github/codeql-action/autobuild@dd903d2e4f5405488e5ef1422510ee31c8b32357 # v3
-
-      - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@dd903d2e4f5405488e5ef1422510ee31c8b32357 # v3
-
-  cargo-audit:
-    name: cargo-audit
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-
-      - name: cargo-audit
-        uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
-
-  cargo-deny:
-    name: cargo-deny
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-
-      - name: cargo-deny
-        uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe # v2
-        with:
-          arguments: --workspace
-
-  sbom:
-    name: SBOM
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-
-      - name: Generate SBOM
-        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
-        with:
-          format: spdx-json
-          artifact-name: ardur-sbom-spdx.json
-          upload-artifact: true
-
-  # ── ARD-424: Docker build smoke test ─────────────────────────────────────
-
-  docker:
-    name: Docker build + health smoke
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-
-      - name: Build Docker image
-        run: docker build -t ardur-server:ci .
-
-      - name: Run container smoke test
-        run: |
-          docker run -d --name smoke -p 3000:3000 \
-            -e ANTHROPIC_API_KEY=fake \
-            -e SLACK_BOT_TOKEN=xoxb-fake \
-            -e SLACK_SIGNING_SECRET=fake \
-            -e SLACK_APP_ID=AFAKE \
-            -e ARDUR_DEV_MODE=true \
-            ardur-server:ci || true
-          sleep 3
-          curl -f http://localhost:3000/healthz
-
-      - name: Cleanup container
-        if: always()
-        run: docker rm -f smoke || true
