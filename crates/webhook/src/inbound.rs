@@ -205,7 +205,14 @@ pub async fn receive_webhook(
 
         let now_secs = chrono::Utc::now().timestamp();
         let window = state.config.replay_window_secs as i64;
-        if (now_secs - ts_secs).abs() > window {
+        // Use checked arithmetic to avoid overflow panic on extreme i64 values
+        // (e.g. i64::MIN). If the subtraction overflows, the timestamp is
+        // clearly invalid — reject as stale.
+        let outside_window = now_secs
+            .checked_sub(ts_secs)
+            .map(|diff| diff.abs() > window)
+            .unwrap_or(true);
+        if outside_window {
             warn!(
                 "timestamp outside replay window ({}s) for source={}",
                 window, state.config.source

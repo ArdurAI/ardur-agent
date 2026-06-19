@@ -62,7 +62,7 @@ use ardur_runtime::{
 };
 use ardur_session_journals::{FileSessionJournal, SessionJournal};
 use ardur_slack_adapter::SlackAdapter;
-use ardur_tool_registry::ToolRegistry;
+use ardur_tool_registry::{Capability, ToolRegistry};
 use biscuit_auth::{Algorithm, PrivateKey};
 use secrecy::SecretString;
 use tokio::sync::{mpsc, oneshot};
@@ -582,11 +582,26 @@ impl AppState {
 }
 
 fn tool_allowlist_for_runtime(tools: &ToolRegistry) -> Vec<String> {
-    let mut allowlist = vec![TOOL.to_string()];
+    let mut allowlist = vec![
+        TOOL.to_string(),
+        // Memory capabilities — required so the fused runtime can re-verify
+        // the cap token for memory.write before recording a turn, and so
+        // memory.read/list/show authorizations pass.
+        ardur_memory::MEMORY_READ_CAPABILITY.to_string(),
+        ardur_memory::MEMORY_WRITE_CAPABILITY.to_string(),
+    ];
     for tool in tools.list() {
         let id = tool.id().0;
         if !allowlist.contains(&id) {
             allowlist.push(id);
+        }
+        // Also add each tool's declared capabilities as `cap.*` strings so
+        // ARD-420's `authorize_tool_capabilities` check can pass in production.
+        for cap in tool.required_capabilities() {
+            let label = cap.as_str();
+            if !allowlist.contains(&label) {
+                allowlist.push(label);
+            }
         }
     }
     allowlist
