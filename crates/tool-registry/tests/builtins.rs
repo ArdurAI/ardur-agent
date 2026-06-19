@@ -246,6 +246,7 @@ async fn register_builtins_skips_disabled_tools() {
             shell_allowlist: None,
             file_root: Some(root.path().to_path_buf()),
             http: None,
+            enable_media: false,
         })
         .expect("register file tools");
 
@@ -269,6 +270,7 @@ async fn register_builtins_skips_disabled_tools() {
             shell_allowlist: Some(vec!["echo".to_string()]),
             file_root: None,
             http: None,
+            enable_media: false,
         })
         .expect("register shell only");
     assert!(shell_only.get(&ToolId::new(ShellTool::ID)).is_some());
