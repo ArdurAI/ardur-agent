@@ -21,6 +21,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use serde_json::{Value, json};
+use tower::ServiceExt;
 
 /// POST a JSON body to `/chat` on `router`, returning the status and parsed JSON.
 async fn post_chat(router: Router, body: Value) -> (StatusCode, Value) {
@@ -234,12 +235,27 @@ async fn chat_400_on_empty_message() {
 }
 
 #[tokio::test]
-async fn chat_400_on_stream_true() {
-    // Streaming (SSE) is the P1.5 follow-up; a `stream: true` request is refused
-    // rather than silently answered with a consolidated body.
-    let (status, _json) =
-        post_chat(stub_router(), json!({ "message": "hi", "stream": true })).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
+async fn chat_200_on_stream_true() {
+    // Streaming (SSE) is now supported; a `stream: true` request returns
+    // text/event-stream instead of 400.
+    let router = stub_router();
+    let request = Request::builder()
+        .method("POST")
+        .uri("/chat")
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {}", support::CHAT_TOKEN))
+        .body(Body::from(
+            json!({ "message": "hi", "stream": true }).to_string(),
+        ))
+        .expect("valid request");
+    let response = support::oneshot(router, request).await;
+    let status = response.0;
+    assert_eq!(status, StatusCode::OK);
+    let body = String::from_utf8(response.1.to_vec()).expect("utf8 body");
+    assert!(
+        body.starts_with("data:"),
+        "expected SSE format, got: {body}"
+    );
 }
 
 #[tokio::test]
