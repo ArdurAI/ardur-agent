@@ -354,7 +354,7 @@ fn run_doctor(args: DoctorArgs) -> Result<(), CliError> {
         serde_json::to_string_pretty(&report).expect("doctor report serializes")
     );
     if hard_fail {
-        Err(CliError::State("doctor found critical issues".to_string()))
+        Err(CliError::State("doctor found issues".to_string()))
     } else {
         Ok(())
     }
