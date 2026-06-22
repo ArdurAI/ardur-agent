@@ -62,7 +62,7 @@ use ardur_runtime::{
 };
 use ardur_session_journals::{FileSessionJournal, SessionJournal};
 use ardur_slack_adapter::SlackAdapter;
-use ardur_tool_registry::{Capability, ToolRegistry};
+use ardur_tool_registry::ToolRegistry;
 use biscuit_auth::{Algorithm, PrivateKey};
 use secrecy::SecretString;
 use tokio::sync::{mpsc, oneshot};
@@ -171,6 +171,7 @@ pub struct AppState {
     /// The OS-thread handle for the turn worker — used by [`shutdown`](Self::shutdown)
     /// to join the worker after closing the work channel. `None` in test harnesses
     /// that construct an `AppState` without spawning a real worker.
+    #[allow(dead_code)]
     worker_handle: Option<std::thread::JoinHandle<()>>,
     journal: Arc<dyn SessionJournal>,
     data_dir: PathBuf,
@@ -519,7 +520,7 @@ impl AppState {
     pub fn enqueue(&self, message: IncomingMessage) -> bool {
         self.work_tx
             .as_ref()
-            .map_or(false, |tx| tx.send(WorkItem::Channel(message)).is_ok())
+            .is_some_and(|tx| tx.send(WorkItem::Channel(message)).is_ok())
     }
 
     /// Run a synchronous chat turn (the `POST /chat` path): hand the prompt to the
@@ -547,7 +548,7 @@ impl AppState {
         if self
             .work_tx
             .as_ref()
-            .map_or(true, |tx| tx.send(WorkItem::Http(turn)).is_err())
+            .is_some_and(|tx| tx.send(WorkItem::Http(turn)).is_err())
         {
             return Err(ChatSubmitError::WorkerGone);
         }

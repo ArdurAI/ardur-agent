@@ -154,7 +154,12 @@ pub enum ConfigError {
     /// A present environment variable had a value that could not be parsed
     /// or was semantically invalid.
     #[error("invalid value for environment variable `{var}`: {reason}")]
-    Invalid { var: &'static str, reason: String },
+    Invalid {
+        /// The environment variable name.
+        var: &'static str,
+        /// Why the value is invalid.
+        reason: String,
+    },
 }
 
 impl fmt::Debug for Config {

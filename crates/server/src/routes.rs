@@ -370,7 +370,7 @@ async fn stream_chat(
         Err(ChatSubmitError::Runtime(e)) => (
             StatusCode::BAD_GATEWAY,
             [(header::CONTENT_TYPE, "text/event-stream")],
-            format!("data: {{\"error\":\"{}\"}}\n\n", e.to_string()),
+            format!("data: {{\"error\":\"{}\"}}\n\n", e),
         )
             .into_response(),
         Err(ChatSubmitError::WorkerGone) => (
