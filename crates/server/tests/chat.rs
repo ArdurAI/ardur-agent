@@ -21,7 +21,6 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use serde_json::{Value, json};
-use tower::ServiceExt;
 
 /// POST a JSON body to `/chat` on `router`, returning the status and parsed JSON.
 async fn post_chat(router: Router, body: Value) -> (StatusCode, Value) {
