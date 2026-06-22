@@ -137,7 +137,11 @@ pub fn sign_body(body: &[u8], secret: &SecretString) -> Result<String, WebhookEr
     Ok(hex::encode(mac.finalize().into_bytes()))
 }
 
-/// Generate an HMAC-SHA256 signature for `"{timestamp}.{body}"` (hex-encoded).
+/// Sign a webhook body with a timestamp for HMAC verification.
+///
+/// This function is currently unused but kept for future webhook
+/// inbound verification implementations.
+#[allow(dead_code)]
 pub fn sign_body_with_timestamp(
     body: &[u8],
     timestamp: &str,
