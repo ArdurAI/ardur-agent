@@ -19,8 +19,13 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
+mod local_voice;
 mod whisper;
 
+pub use local_voice::{
+    LocalSpeechToTextProvider, LocalSttConfig, LocalTextToSpeechProvider, LocalTtsConfig,
+    TextToSpeechOutput, TextToSpeechProvider, TextToSpeechRequest, VoiceSpeakTool,
+};
 pub use whisper::{VoiceTranscribeTool, WhisperApiConfig, WhisperApiTranscriptionProvider};
 
 /// Unix timestamp in milliseconds since the epoch.
