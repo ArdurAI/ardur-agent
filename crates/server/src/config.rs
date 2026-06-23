@@ -270,19 +270,7 @@ impl Config {
         // (durable + dense/sparse recall, §7.0c) — the same conditional shape as
         // the Anthropic key above. Under the default `in_memory` backend it is
         // optional (and ignored).
-        let memory_backend = match optional("ARDUR_MEMORY").as_deref() {
-            None | Some("") => MemoryBackend::InMemory,
-            Some("qdrant") => MemoryBackend::Qdrant,
-            Some("hybrid") => MemoryBackend::Hybrid,
-            Some(other) => {
-                return Err(ConfigError::Invalid {
-                    var: "ARDUR_MEMORY",
-                    reason: format!(
-                        "unrecognized value `{other}` (expected: in_memory, qdrant, hybrid)"
-                    ),
-                });
-            }
-        };
+        let memory_backend = parse_memory_backend(optional("ARDUR_MEMORY").as_deref())?;
         let qdrant_url = if matches!(
             memory_backend,
             MemoryBackend::Qdrant | MemoryBackend::Hybrid
@@ -402,6 +390,18 @@ fn parse_remote_servers(value: Option<&str>) -> Vec<(String, String)> {
         .collect()
 }
 
+fn parse_memory_backend(value: Option<&str>) -> Result<MemoryBackend, ConfigError> {
+    match value {
+        None | Some("") | Some("in_memory") => Ok(MemoryBackend::InMemory),
+        Some("qdrant") => Ok(MemoryBackend::Qdrant),
+        Some("hybrid") => Ok(MemoryBackend::Hybrid),
+        Some(other) => Err(ConfigError::Invalid {
+            var: "ARDUR_MEMORY",
+            reason: format!("unrecognized value `{other}` (expected: in_memory, qdrant, hybrid)"),
+        }),
+    }
+}
+
 /// Whether a string is a truthy flag value: `true`/`1`/`yes`/`on`
 /// (case-insensitive). Anything else (including unset) is false.
 fn is_truthy(raw: &str) -> bool {
@@ -422,4 +422,17 @@ fn require(key: &str) -> Result<String, MissingEnvVar> {
 /// Read an optional env var, treating an empty value as unset.
 fn optional(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MemoryBackend, parse_memory_backend};
+
+    #[test]
+    fn parses_explicit_in_memory_literal() {
+        assert_eq!(
+            parse_memory_backend(Some("in_memory")).expect("in_memory parses"),
+            MemoryBackend::InMemory
+        );
+    }
 }
