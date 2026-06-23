@@ -82,10 +82,12 @@ fn host_is_localhost(host: &Host<&str>) -> bool {
 /// be allowed to reach (the SSRF blocklist).
 ///
 /// Covers loopback, RFC 1918 private, link-local, unspecified, this-host
-/// (`0.0.0.0/8`), benchmarking (`198.18.0.0/15`), and CGNAT (`100.64.0.0/10`)
-/// IPv4; and loopback, unspecified, link-local (`fe80::/10`), unique-local
-/// (`fc00::/7`), and IPv4-compatible IPv6 (`::a.b.c.d`) — mapping
-/// IPv4-in-IPv6 down to its v4 form first so an `::ffff:10.0.0.1` or
+/// (`0.0.0.0/8`), CGNAT (`100.64.0.0/10`), protocol-assignment / documentation
+/// / benchmarking ranges, multicast, reserved, and broadcast IPv4; and
+/// loopback, unspecified, link-local (`fe80::/10`), unique-local (`fc00::/7`),
+/// NAT64 (`64:ff9b::/96`), 6to4 (`2002::/16`), and IPv4-compatible IPv6
+/// (`::a.b.c.d`) — mapping IPv4-in-IPv6 down to its v4 form first so an
+/// `::ffff:10.0.0.1`, `64:ff9b::10.0.0.1`, `2002:0a00:0001::`, or
 /// `::10.0.0.1` cannot smuggle a private address past the check.
 fn is_internal_ip(ip: IpAddr) -> bool {
     match ip {
@@ -102,6 +104,17 @@ fn is_internal_ip(ip: IpAddr) -> bool {
                 || (octets[0] == 198 && (octets[1] & 0xFE) == 18)
                 // 100.64.0.0/10 carrier-grade NAT (RFC 6598).
                 || (octets[0] == 100 && (octets[1] & 0xC0) == 64)
+                // 192.0.0.0/24 IETF protocol assignments and 192.0.2.0/24
+                // TEST-NET-1 documentation range.
+                || (octets[0] == 192 && octets[1] == 0 && (octets[2] == 0 || octets[2] == 2))
+                // TEST-NET-2 (RFC 5737).
+                || (octets[0] == 198 && octets[1] == 51 && octets[2] == 100)
+                // TEST-NET-3 (RFC 5737).
+                || (octets[0] == 203 && octets[1] == 0 && octets[2] == 113)
+                || v4.is_multicast()
+                || v4.is_broadcast()
+                // 240.0.0.0/4 reserved for future use.
+                || octets[0] >= 240
         }
         IpAddr::V6(v6) => {
             // Check native IPv6 loopback first — ::1 must be classified as
@@ -116,6 +129,14 @@ fn is_internal_ip(ip: IpAddr) -> bool {
                 return is_internal_ip(IpAddr::V4(mapped));
             }
             let segs = v6.segments();
+            let v4_from_segments = |hi: u16, lo: u16| {
+                Ipv4Addr::new(
+                    (hi >> 8) as u8,
+                    (hi & 0xFF) as u8,
+                    (lo >> 8) as u8,
+                    (lo & 0xFF) as u8,
+                )
+            };
             // Catch the deprecated IPv4-compatible form (::a.b.c.d): the first
             // 96 bits (6 segments) are zero but segs[5] is 0x0000 (not 0xFFFF).
             // to_ipv4_mapped only handles ::ffff:0:0/96; this catches ::/96
@@ -128,12 +149,27 @@ fn is_internal_ip(ip: IpAddr) -> bool {
                 && segs[5] == 0
             {
                 // segs[6..8] hold the embedded v4 address (or all-zero for ::).
-                let v4 = Ipv4Addr::new(
-                    (segs[6] >> 8) as u8,
-                    (segs[6] & 0xFF) as u8,
-                    (segs[7] >> 8) as u8,
-                    (segs[7] & 0xFF) as u8,
-                );
+                let v4 = v4_from_segments(segs[6], segs[7]);
+                return is_internal_ip(IpAddr::V4(v4));
+            }
+            // NAT64 well-known prefix 64:ff9b::/96 embeds an IPv4 address in
+            // the low 32 bits. Recurse through the IPv4 classifier so all
+            // private/reserved ranges remain blocked through the translation.
+            if segs[0] == 0x0064
+                && segs[1] == 0xff9b
+                && segs[2] == 0
+                && segs[3] == 0
+                && segs[4] == 0
+                && segs[5] == 0
+            {
+                let v4 = v4_from_segments(segs[6], segs[7]);
+                return is_internal_ip(IpAddr::V4(v4));
+            }
+            // 6to4 2002::/16 embeds the IPv4 address in bits 16..48 (segments
+            // 1 and 2). If that embedded address is internal, the 6to4 address
+            // is also unsafe for an untrusted fetch.
+            if segs[0] == 0x2002 {
+                let v4 = v4_from_segments(segs[1], segs[2]);
                 return is_internal_ip(IpAddr::V4(v4));
             }
             v6.is_loopback()

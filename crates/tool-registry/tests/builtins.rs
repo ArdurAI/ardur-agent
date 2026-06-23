@@ -97,6 +97,51 @@ async fn shell_allowlist_permits_allowed() {
     assert_eq!(out.content["exit_code"], 0);
 }
 
+#[cfg(not(windows))]
+#[tokio::test]
+async fn shell_destructive_pattern_matrix_is_best_effort() {
+    let root = TempDir::new().expect("tempdir");
+    let tool = ShellTool::without_allowlist();
+
+    let blocked = [
+        (
+            "rm -fr option order",
+            format!("rm -fr {}", root.path().join("missing").display()),
+        ),
+        (
+            "base64 decode piped into shell",
+            "printf ZWNobyBzaG91bGQtbm90LXJ1bgo= | base64 -d | sh".to_string(),
+        ),
+        (
+            "dd with spacing around assignment operators",
+            "dd if = /dev/zero of = /dev/null count=0".to_string(),
+        ),
+    ];
+
+    for (case, command) in blocked {
+        let err = tool
+            .invoke(&ctx(PathBuf::from(".")), json!({ "command": command }))
+            .await
+            .expect_err("destructive command should be denied before execution");
+
+        assert!(
+            matches!(err, ToolError::Denied { .. }),
+            "{case} should match the destructive-pattern denylist, got {err:?}"
+        );
+    }
+
+    // This denylist is intentionally documented as best-effort rather than a
+    // shell parser/sandbox: shell escapes can still hide tokens from the regex
+    // layer. Keep the command harmless (the target path does not exist) while
+    // preserving the bypass shape in the regression matrix.
+    let bypass = format!(r"r\m -fr {}", root.path().join("missing").display());
+    let out = tool
+        .invoke(&ctx(PathBuf::from(".")), json!({ "command": bypass }))
+        .await
+        .expect("documented best-effort bypass reaches the shell");
+    assert_eq!(out.content["exit_code"], 0);
+}
+
 // ── file.read / file.write / file.list ───────────────────────────────────────
 
 #[tokio::test]
