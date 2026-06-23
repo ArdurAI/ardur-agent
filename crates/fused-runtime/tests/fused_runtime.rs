@@ -6,17 +6,23 @@
 mod support;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ardur_fused_runtime::{load_persisted_chain, verify_persisted_chain};
 use ardur_lifecycle_hooks::{
-    HookError, HookEvent, HookId, HookRegistry, LifecycleHook, PostReceiptCtx, RecordingHook,
+    HookError, HookEvent, HookId, HookRegistry, LifecycleHook, LifecyclePhase, PostReceiptCtx,
+    RecordingHook,
 };
 use ardur_memory::{HolderId as MemHolderId, InMemoryMemoryRuntime, MemoryRuntime, UnixTsMillis};
+use ardur_provider_runtime::{
+    CompletionRequest, CompletionResponse, FinishReason, Provider, ProviderError, RateCard, Usage,
+};
 use ardur_receipt::Sha256Digest;
-use ardur_runtime::{CapTokenRef, ChatRuntime, RuntimeError, SessionId};
+use ardur_runtime::{CapTokenRef, ChatRuntime, CostTuple, RuntimeError, SessionId};
 use ardur_session_journals::{FileSessionJournal, JournalEntry, SessionJournal};
 use async_trait::async_trait;
 use parking_lot::Mutex;
+use tokio::sync::Notify;
 
 use support::{
     EchoProvider, HOLDER, NOW_MS, NOW_UNIX, RedactingHook, VetoHook, deny_all_policy, gate_holder,
@@ -49,6 +55,75 @@ impl LifecycleHook for CapturingSignedJwsHook {
 
     fn hook_id(&self) -> HookId {
         HookId::new("capture-signed-jws")
+    }
+}
+
+struct PausingProvider {
+    started: Arc<Notify>,
+    resume: Arc<Notify>,
+    calls: AtomicUsize,
+    rate_card: RateCard,
+}
+
+impl PausingProvider {
+    fn new() -> Self {
+        Self {
+            started: Arc::new(Notify::new()),
+            resume: Arc::new(Notify::new()),
+            calls: AtomicUsize::new(0),
+            rate_card: RateCard::anthropic_2026_q2_v1(),
+        }
+    }
+
+    async fn wait_started(&self) {
+        self.started.notified().await;
+    }
+
+    fn resume(&self) {
+        self.resume.notify_one();
+    }
+
+    fn call_count(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl Provider for PausingProvider {
+    async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.started.notify_one();
+        self.resume.notified().await;
+        let content = req
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == ardur_runtime::Role::User)
+            .map(|m| m.content.clone())
+            .unwrap_or_default();
+        Ok(CompletionResponse {
+            content,
+            finish_reason: FinishReason::Stop,
+            usage: Usage {
+                tokens_in: 1,
+                tokens_out: 1,
+                ..Default::default()
+            },
+            cost: CostTuple::default(),
+            raw_provider_response: None,
+        })
+    }
+
+    fn id(&self) -> ardur_runtime::ProviderId {
+        ardur_runtime::ProviderId("pausing".to_string())
+    }
+
+    fn supports_streaming(&self) -> bool {
+        false
+    }
+
+    fn rate_card(&self) -> &RateCard {
+        &self.rate_card
     }
 }
 
@@ -227,6 +302,77 @@ async fn revoked_token_is_denied_next_turn() {
             .iter()
             .any(|e| matches!(e, HookEvent::OnRevoke { .. })),
         "on_revoke fired for the revoked token"
+    );
+}
+
+/// Stage 9: if a token is revoked after turn admission but before memory.write
+/// re-verification, the turn remains non-fatal but the memory-write denial is
+/// surfaced through `on_error` instead of being silently swallowed.
+#[tokio::test]
+async fn memory_write_revocation_reverification_fires_error_hook() {
+    let provider = Arc::new(PausingProvider::new());
+    let memory = Arc::new(InMemoryMemoryRuntime::new());
+    let recorder = Arc::new(RecordingHook::new("rec"));
+    let mut registry = HookRegistry::new();
+    registry.register(recorder.clone());
+
+    let runtime = Arc::new(
+        runtime_builder(provider.clone())
+            .with_memory(memory.clone())
+            .registry(Arc::new(registry))
+            .build()
+            .expect("runtime builds"),
+    );
+    let token = valid_token();
+    let session_id = SessionId::new();
+
+    let submit_runtime = Arc::clone(&runtime);
+    let submit_token = token.clone();
+    let submit = tokio::spawn(async move {
+        submit_runtime
+            .submit(request_for(
+                "revoke before memory",
+                &submit_token,
+                session_id,
+            ))
+            .await
+    });
+
+    provider.wait_started().await;
+    runtime
+        .revoke_cap_token(
+            session_id,
+            CapTokenRef(token.clone()),
+            "revoked before memory write",
+        )
+        .await
+        .expect("revocation succeeds while the provider call is in flight");
+    provider.resume();
+
+    let outcome = submit
+        .await
+        .expect("submit task joins")
+        .expect("memory-write denial remains non-fatal");
+    assert_eq!(outcome.response.content, "revoke before memory");
+    assert_eq!(provider.call_count(), 1);
+
+    let visible = memory.current_as_of(&MemHolderId(HOLDER.to_string()), UnixTsMillis(NOW_MS + 1));
+    assert!(
+        visible.is_empty(),
+        "revoked memory.write re-verification must not write a memory fact"
+    );
+
+    let events = recorder.events();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            HookEvent::OnError {
+                phase: LifecyclePhase::MemoryWrite,
+                message,
+                ..
+            } if message.contains("cap-token revoked")
+        )),
+        "revoked memory.write re-verification should fire an on_error event; events: {events:?}"
     );
 }
 

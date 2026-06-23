@@ -1257,12 +1257,24 @@ impl FusedRuntime {
             //    `chat.submit`; a holder who attenuated away `memory.write` must
             //    not get a memory side-effect.
             if let Some(memory) = &self.memory {
-                match self.stage_cap_token_for_tool(
-                    &req,
-                    &provisioning,
-                    now_unix,
-                    ardur_memory::MEMORY_WRITE_CAPABILITY,
-                ) {
+                let audience = provisioning
+                    .audience
+                    .clone()
+                    .unwrap_or_else(|| self.audience.clone());
+                let memory_write_claims = CapToken::from_base64(&req.cap_token.0, &self.cap_root)
+                    .and_then(|token| {
+                        self.verifier.verify(
+                            &token,
+                            &self.cap_root,
+                            &RequiredCaveats {
+                                now_unix,
+                                audience,
+                                tool: ardur_memory::MEMORY_WRITE_CAPABILITY.to_string(),
+                                cost: self.cost_units,
+                            },
+                        )
+                    });
+                match memory_write_claims {
                     Ok(mem_claims) => {
                         let record =
                             turn_record(&mem_claims.subject.0, &response, &receipt, now_ms);
@@ -1272,10 +1284,32 @@ impl FusedRuntime {
                                 .await;
                         }
                     }
-                    Err(_) => {
+                    Err(CapTokenError::ToolNotAllowed) => {
                         // Token does not grant memory.write (attenuated or never
                         // issued). Skip the memory side-effect silently — this is
                         // the intended behaviour for write-less tokens.
+                    }
+                    Err(CapTokenError::Expired) => {
+                        let err = RuntimeError::CapTokenExpired;
+                        tracing::warn!(
+                            session_id = ?session_id,
+                            error = %err,
+                            "memory.write cap-token re-verification failed"
+                        );
+                        self.fire_error(session_id, LifecyclePhase::MemoryWrite, &err)
+                            .await;
+                    }
+                    Err(other) => {
+                        let err = RuntimeError::CapDenied {
+                            reason: other.to_string(),
+                        };
+                        tracing::warn!(
+                            session_id = ?session_id,
+                            error = %err,
+                            "memory.write cap-token re-verification failed"
+                        );
+                        self.fire_error(session_id, LifecyclePhase::MemoryWrite, &err)
+                            .await;
                     }
                 }
             }
@@ -1771,12 +1805,24 @@ impl FusedRuntime {
                 // (attenuated or never issued) silently skips the side-effect.
                 if let Some(memory) = &self.memory {
                     yield FusedEvent::StageStart { stage: StageKind::MemoryRecord };
-                    match self.stage_cap_token_for_tool(
-                        &req,
-                        &provisioning,
-                        now_unix,
-                        ardur_memory::MEMORY_WRITE_CAPABILITY,
-                    ) {
+                    let audience = provisioning
+                        .audience
+                        .clone()
+                        .unwrap_or_else(|| self.audience.clone());
+                    let memory_write_claims = CapToken::from_base64(&req.cap_token.0, &self.cap_root)
+                        .and_then(|token| {
+                            self.verifier.verify(
+                                &token,
+                                &self.cap_root,
+                                &RequiredCaveats {
+                                    now_unix,
+                                    audience,
+                                    tool: ardur_memory::MEMORY_WRITE_CAPABILITY.to_string(),
+                                    cost: self.cost_units,
+                                },
+                            )
+                        });
+                    match memory_write_claims {
                         Ok(mem_claims) => {
                             let record = turn_record(&mem_claims.subject.0, &response, &receipt, now_ms);
                             let plane = MemoryControlPlane::new(memory.as_ref(), self.policies.clone());
@@ -1785,8 +1831,30 @@ impl FusedRuntime {
                                     .await;
                             }
                         }
-                        Err(_) => {
+                        Err(CapTokenError::ToolNotAllowed) => {
                             // Token does not grant memory.write — skip silently.
+                        }
+                        Err(CapTokenError::Expired) => {
+                            let err = RuntimeError::CapTokenExpired;
+                            tracing::warn!(
+                                session_id = ?session_id,
+                                error = %err,
+                                "memory.write cap-token re-verification failed"
+                            );
+                            self.fire_error(session_id, LifecyclePhase::MemoryWrite, &err)
+                                .await;
+                        }
+                        Err(other) => {
+                            let err = RuntimeError::CapDenied {
+                                reason: other.to_string(),
+                            };
+                            tracing::warn!(
+                                session_id = ?session_id,
+                                error = %err,
+                                "memory.write cap-token re-verification failed"
+                            );
+                            self.fire_error(session_id, LifecyclePhase::MemoryWrite, &err)
+                                .await;
                         }
                     }
                     yield FusedEvent::StageEnd { stage: StageKind::MemoryRecord, ok: true };
