@@ -15,7 +15,7 @@ pub enum JobStatus {
     Cancelled,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CronExpression {
     pub minute: String,       // 0-59 or *
     pub hour: String,         // 0-23 or *
