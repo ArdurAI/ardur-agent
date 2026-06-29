@@ -37,7 +37,7 @@
 //! the runtime (or an injectable shared budget store).
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ardur_cap_token::{
@@ -167,12 +167,11 @@ pub enum ChatSubmitError {
 /// the cap-token issuer live on the worker thread (see the module docs).
 pub struct AppState {
     slack: Arc<SlackAdapter>,
-    work_tx: Option<mpsc::UnboundedSender<WorkItem>>,
+    work_tx: Arc<Mutex<Option<mpsc::UnboundedSender<WorkItem>>>>,
     /// The OS-thread handle for the turn worker — used by [`shutdown`](Self::shutdown)
     /// to join the worker after closing the work channel. `None` in test harnesses
     /// that construct an `AppState` without spawning a real worker.
-    #[allow(dead_code)]
-    worker_handle: Option<std::thread::JoinHandle<()>>,
+    worker_handle: Mutex<Option<std::thread::JoinHandle<()>>>,
     journal: Arc<dyn SessionJournal>,
     data_dir: PathBuf,
     chat_bearer_tokens: Vec<String>,
@@ -382,8 +381,8 @@ impl AppState {
 
         Ok(Arc::new(Self {
             slack,
-            work_tx: Some(work_tx),
-            worker_handle: Some(worker_handle),
+            work_tx: Arc::new(Mutex::new(Some(work_tx))),
+            worker_handle: Mutex::new(Some(worker_handle)),
             journal,
             data_dir,
             chat_bearer_tokens: config.chat_bearer_tokens.clone(),
@@ -424,7 +423,7 @@ impl AppState {
     /// Whether the turn worker is still accepting work.
     #[must_use]
     pub fn worker_alive(&self) -> bool {
-        self.work_tx.as_ref().is_some_and(|tx| !tx.is_closed())
+        self.work_sender().is_some_and(|tx| !tx.is_closed())
     }
 
     /// Number of receipts currently persisted in the server's chain log.
@@ -461,11 +460,7 @@ impl AppState {
         // Drain inbound Matrix messages onto the worker queue — the same path a
         // verified Slack message takes, so the fused turn runs identically and
         // the worker routes the reply back through Matrix by channel-id scheme.
-        spawn_inbound_forwarder(
-            "matrix",
-            self.work_tx.as_ref().expect("work_tx").clone(),
-            matrix,
-        );
+        spawn_inbound_forwarder("matrix", Arc::clone(&self.work_tx), matrix);
     }
 
     /// Wire a connected Discord channel into the running server: record it for
@@ -481,11 +476,7 @@ impl AppState {
             return;
         }
         discord.start().await;
-        spawn_inbound_forwarder(
-            "discord",
-            self.work_tx.as_ref().expect("work_tx").clone(),
-            discord,
-        );
+        spawn_inbound_forwarder("discord", Arc::clone(&self.work_tx), discord);
     }
 
     /// Wire a connected Telegram channel into the running server: record it for
@@ -501,11 +492,7 @@ impl AppState {
             return;
         }
         telegram.start();
-        spawn_inbound_forwarder(
-            "telegram",
-            self.work_tx.as_ref().expect("work_tx").clone(),
-            telegram,
-        );
+        spawn_inbound_forwarder("telegram", Arc::clone(&self.work_tx), telegram);
     }
 
     /// The Slack adapter, for inbound event verification in the HTTP handler.
@@ -518,8 +505,7 @@ impl AppState {
     /// only if the worker has shut down (so the caller can log a drop).
     #[must_use]
     pub fn enqueue(&self, message: IncomingMessage) -> bool {
-        self.work_tx
-            .as_ref()
+        self.work_sender()
             .is_some_and(|tx| tx.send(WorkItem::Channel(message)).is_ok())
     }
 
@@ -545,11 +531,10 @@ impl AppState {
             session_id,
             reply: reply_tx,
         };
-        if self
-            .work_tx
-            .as_ref()
-            .is_some_and(|tx| tx.send(WorkItem::Http(turn)).is_err())
-        {
+        let Some(work_tx) = self.work_sender() else {
+            return Err(ChatSubmitError::WorkerGone);
+        };
+        if work_tx.send(WorkItem::Http(turn)).is_err() {
             return Err(ChatSubmitError::WorkerGone);
         }
         match reply_rx.await {
@@ -571,14 +556,36 @@ impl AppState {
         &self.data_dir
     }
 
-    /// Signal the background worker to drain. This is a best-effort call:
-    /// it logs the shutdown request. The worker thread naturally exits when all
-    /// senders are dropped (which happens when `AppState` is dropped at the end
-    /// of `main`). A future refactor should store the sender behind a
-    /// `Mutex<Option<…>>` for immediate channel closure and track spawned
-    /// forwarder tasks for abort.
+    /// Signal the background worker to drain, then join its OS thread.
+    ///
+    /// Taking the only long-lived sender closes the queue after any in-flight
+    /// send completes. Forwarder tasks borrow the sender through the same mutex
+    /// instead of holding permanent clones, so the worker can observe closure and
+    /// exit before the process closes the journal.
     pub fn shutdown(&self) {
         tracing::info!("graceful shutdown requested");
+        let sender = self.work_tx.lock().expect("work_tx mutex poisoned").take();
+        drop(sender);
+
+        let worker_handle = self
+            .worker_handle
+            .lock()
+            .expect("worker_handle mutex poisoned")
+            .take();
+        if let Some(handle) = worker_handle {
+            match handle.join() {
+                Ok(()) => tracing::info!("turn worker shut down cleanly"),
+                Err(_panic) => tracing::error!("turn worker panicked during shutdown"),
+            }
+        }
+    }
+
+    fn work_sender(&self) -> Option<mpsc::UnboundedSender<WorkItem>> {
+        self.work_tx
+            .lock()
+            .expect("work_tx mutex poisoned")
+            .as_ref()
+            .cloned()
     }
 }
 
@@ -908,7 +915,7 @@ fn spawn_worker(
 /// in log lines.
 fn spawn_inbound_forwarder<G>(
     label: &'static str,
-    work_tx: mpsc::UnboundedSender<WorkItem>,
+    work_tx: Arc<Mutex<Option<mpsc::UnboundedSender<WorkItem>>>>,
     channel: Arc<G>,
 ) where
     G: MessagingGateway + Send + Sync + 'static,
@@ -917,7 +924,19 @@ fn spawn_inbound_forwarder<G>(
         loop {
             match channel.receive().await {
                 Ok(incoming) => {
-                    if work_tx.send(WorkItem::Channel(incoming)).is_err() {
+                    let Some(tx) = work_tx
+                        .lock()
+                        .expect("work_tx mutex poisoned")
+                        .as_ref()
+                        .cloned()
+                    else {
+                        tracing::info!(
+                            channel = label,
+                            "turn worker is shutting down; stopping forwarder"
+                        );
+                        break;
+                    };
+                    if tx.send(WorkItem::Channel(incoming)).is_err() {
                         tracing::error!(channel = label, "turn worker is gone; stopping forwarder");
                         break;
                     }
@@ -1072,4 +1091,52 @@ fn write_private(path: &Path, contents: &str) -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!("chmod {}: {e}", path.display()))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ardur_session_journals::InMemorySessionJournal;
+
+    #[test]
+    fn shutdown_closes_worker_queue_and_joins_thread() {
+        let (work_tx, mut work_rx) = mpsc::unbounded_channel::<WorkItem>();
+        let (joined_tx, joined_rx) = std::sync::mpsc::channel();
+        let worker_handle = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime builds");
+            runtime.block_on(async move { while work_rx.recv().await.is_some() {} });
+            joined_tx.send(()).expect("joined signal sends");
+        });
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let state = AppState {
+            slack: Arc::new(SlackAdapter::new(
+                SecretString::from("xoxb-test".to_string()),
+                SecretString::from("signing-secret".to_string()),
+                "A123".to_string(),
+            )),
+            work_tx: Arc::new(Mutex::new(Some(work_tx))),
+            worker_handle: Mutex::new(Some(worker_handle)),
+            journal: Arc::new(InMemorySessionJournal::new(SessionId::new())),
+            data_dir: tempdir.path().to_path_buf(),
+            chat_bearer_tokens: Vec::new(),
+            admin_bearer_tokens: Vec::new(),
+            tool_allowlist: Vec::new(),
+            cost_budget_cents: 0,
+            mcp: None,
+            matrix: Arc::new(OnceLock::new()),
+            discord: Arc::new(OnceLock::new()),
+            telegram: Arc::new(OnceLock::new()),
+        };
+
+        assert!(state.worker_alive());
+        state.shutdown();
+        assert!(!state.worker_alive());
+        joined_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("worker thread observed channel close");
+    }
 }
