@@ -20,9 +20,12 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       # Don't let a macOS-only failure mask a Linux pass (and vice-versa).
+      # Pin macOS instead of using `macos-latest`: GitHub began migrating
+      # `macos-latest` from macOS 15 to macOS 26 in June 2026, and the 26 ARM
+      # image currently fails this native Rust link path before tests run.
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-15]
     steps:
       - uses: actions/checkout@v7
 
