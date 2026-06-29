@@ -43,6 +43,8 @@ The same environment variables select the provider, memory backend, channels,
 tools, and skills for both the CLI and the server. The full operator runbook —
 every provider, the Qdrant/hybrid memory backends, the four chat channels, MCP,
 skills, OpenTelemetry, and the HTTP surface — lives in **[RUN.md](RUN.md)**.
+For the current implementation inventory, see
+**[docs/current-status.md](docs/current-status.md)**.
 
 ## Agent Bootstrap
 
@@ -77,11 +79,14 @@ SSE, SSE, NDJSON respectively) through the uniform `Provider::stream` surface.
 
 **Tool execution.** Tools run inside the fused pipeline — cap-token + Cedar
 policy + cost gate + injection-defense scan + signed receipt + journal +
-memory. Built-in tools (`shell.run`, `file.read`, `file.write`, `file.list`,
-`http.fetch`) are each capability-gated: a command allowlist for the shell,
-root-confinement for the filesystem, and SSRF defense for HTTP. External tools
-arrive over MCP via [`rmcp`](https://crates.io/crates/rmcp) (Ardur is both an
-MCP client and an MCP server).
+memory. The hardened built-in tools (`shell.run`, `file.read`, `file.write`,
+`file.list`, `http.fetch`) are implemented and tested with command allowlists,
+root-confinement, and SSRF defense, but default server boot currently registers
+only the safe local tools (`echo`, `health_check`), optional `voice.transcribe`,
+filesystem skills, and remote MCP tools. Default boot wiring for the hardened
+built-ins is tracked by `ARD-457`. External tools arrive over MCP via
+[`rmcp`](https://crates.io/crates/rmcp) (Ardur is both an MCP client and an MCP
+server).
 
 **Memory.** A bi-temporal store (event-time / valid-from-to / invalidation-time)
 backed in-process by default, or durably by Qdrant. A hybrid retriever fuses
@@ -123,16 +128,16 @@ provider's billing; stages 6–10 run after the response and cannot un-happen th
 turn. `FusedRuntime::stream` drives the same ten stages but yields a progressive
 event feed, which is what the CLI consumes for its streaming UX.
 
-Each subsystem is its own workspace crate (37 in all). The design corpus and
+Each subsystem is its own workspace package (47 in all). The design corpus and
 architecture-decision records live under [`docs/`](docs/).
 
 ## Status
 
 Implementation effort wrapping up **June 2026**. The substrate is
-feature-complete and production-shaped, with **600+ workspace tests** green and
-CI passing on every push. It is not yet a turnkey production deployment — see
-RUN.md's *Known gaps* for the open durability tickets (ARD-17, ARD-19) — so run
-it in a private channel before exposing it more widely.
+feature-complete and production-shaped, with CI green on `dev` and the no-key
+baseline passing locally. It is not yet a turnkey production deployment — see
+RUN.md's *Known gaps* and **[docs/current-status.md](docs/current-status.md)** —
+so run it in a private channel before exposing it more widely.
 
 ## Contributing
 
