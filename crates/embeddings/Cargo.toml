@@ -10,7 +10,7 @@ description = "Local text embeddings via fastembed (ONNX) — the dense half of 
 [dependencies]
 # fastembed runs the embedding model locally (ONNX Runtime under the hood) — no
 # network call per embed, only a one-time model download cached on disk.
-fastembed = "4"
+fastembed = "5.17.2"
 # Object-safe async `Embedder` trait (the hybrid retriever awaits dense + sparse
 # halves through one surface).
 async-trait = { workspace = true }

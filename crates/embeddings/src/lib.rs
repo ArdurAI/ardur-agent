@@ -22,6 +22,8 @@
 //! back to the default.
 #![forbid(unsafe_code)]
 
+use std::sync::Mutex;
+
 use async_trait::async_trait;
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 
@@ -120,7 +122,7 @@ pub fn l2_normalize(v: &mut [f32]) {
 
 /// The real embedder: a loaded fastembed model.
 pub struct FastEmbedEmbedder {
-    model: TextEmbedding,
+    model: Mutex<TextEmbedding>,
     choice: ModelChoice,
 }
 
@@ -129,7 +131,10 @@ impl FastEmbedEmbedder {
     pub fn new(choice: ModelChoice) -> Result<Self, EmbedError> {
         let model = TextEmbedding::try_new(InitOptions::new(choice.to_fastembed()))
             .map_err(|e| EmbedError::Init(e.to_string()))?;
-        Ok(Self { model, choice })
+        Ok(Self {
+            model: Mutex::new(model),
+            choice,
+        })
     }
 
     /// Load the model named by `EMBED_MODEL` (or the default).
@@ -148,6 +153,8 @@ impl Embedder for FastEmbedEmbedder {
         // A latency-sensitive caller on a shared async runtime would wrap this in
         // `spawn_blocking` — left out of this foundation crate for simplicity.
         self.model
+            .lock()
+            .map_err(|_| EmbedError::Embed("embedding model mutex poisoned".to_string()))?
             .embed(texts, None)
             .map_err(|e| EmbedError::Embed(e.to_string()))
     }
