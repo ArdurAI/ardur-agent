@@ -31,5 +31,6 @@ uuid = { workspace = true, features = ["v4"] }
 [dev-dependencies]
 # Receipt constants are tested against the current canonical receipt grammar.
 ardur-receipt = { workspace = true }
+tempfile = { workspace = true }
 tokio = { workspace = true }
 wiremock = { workspace = true }

@@ -6,7 +6,7 @@ use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
-use crate::{CronError, CronJob, JobId, JobRegistry, JobStatus, Result};
+use crate::{CronError, JobRegistry, JobStatus, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScheduleMode {
@@ -78,10 +78,15 @@ impl CronScheduler {
 
                     info!("running job {}: {}", job.id, job.name);
 
-                    // In a real implementation, this would execute the command
-                    // For now, mark as completed immediately
-                    if let Err(e) = registry.update_status(&job.id, JobStatus::Completed) {
-                        tracing::warn!(error = %e, job_id = %job.id, "failed to mark job as Completed");
+                    match mode {
+                        ScheduleMode::FireAndForget | ScheduleMode::Sequential => {
+                            // ARD-458 routes production fires through
+                            // ardur-automation; this crate owns due-job
+                            // discovery and lifecycle marking.
+                            if let Err(e) = registry.update_status(&job.id, JobStatus::Completed) {
+                                tracing::warn!(error = %e, job_id = %job.id, "failed to mark job as Completed");
+                            }
+                        }
                     }
                 }
             }
@@ -111,6 +116,7 @@ impl CronScheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::CronJob;
     use crate::job::CronExpression;
 
     #[tokio::test]
@@ -165,7 +171,7 @@ mod tests {
         scheduler.stop().await.unwrap();
 
         let job = reg.get(&id).unwrap();
-        // The scheduler should have attempted to run it
-        assert!(job.run_count >= 0, "job exists after scheduler run");
+        // The scheduler should have attempted to run it and persisted terminal status.
+        assert_eq!(job.status, JobStatus::Completed);
     }
 }

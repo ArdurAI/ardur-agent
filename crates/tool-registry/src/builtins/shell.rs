@@ -40,24 +40,37 @@ use crate::tool::{Tool, ToolContext, ToolId, ToolOutput, ToolSchema};
 /// not supply `timeout_secs`.
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 
-/// Patterns that match known destructive shell commands. These are blocked even
-/// in `Allowlist::Any` mode as a defence-in-depth measure. The list is not
-/// exhaustive — it catches the most common footguns.
+/// Best-effort patterns for known destructive shell commands. These are blocked
+/// even in `Allowlist::Any` mode as a defence-in-depth measure, but they are
+/// deliberately not described as a sandbox: shell syntax is too broad for a
+/// regex denylist to parse completely, and callers still need a narrow
+/// allowlist plus capability/Cedar enforcement for untrusted prompts.
 static DESTRUCTIVE_PATTERNS: once_cell::sync::Lazy<Vec<Regex>> = once_cell::sync::Lazy::new(|| {
     vec![
-        // Recursive force-remove
-        Regex::new(r"(?i)\brm\s+.*-r.*-f\b").expect("valid destructive pattern regex"),
-        Regex::new(r"(?i)\brm\s+.*-rf\b").expect("valid destructive pattern regex"),
-        // Pipe curl/wget into shell
-        Regex::new(r"(?i)\bcurl\s+.*\|\s*(ba)?sh\b").expect("valid destructive pattern regex"),
-        Regex::new(r"(?i)\bwget\s+.*\|\s*(ba)?sh\b").expect("valid destructive pattern regex"),
+        // Recursive force-remove, including `-rf`, `-fr`, `-r -f`, and `-f -r`.
+        Regex::new(r"(?i)\brm\b[^;&|\n]*\s-[[:alpha:]]*r[[:alpha:]]*f[[:alpha:]]*\b")
+            .expect("valid destructive pattern regex"),
+        Regex::new(r"(?i)\brm\b[^;&|\n]*\s-[[:alpha:]]*f[[:alpha:]]*r[[:alpha:]]*\b")
+            .expect("valid destructive pattern regex"),
+        Regex::new(r"(?i)\brm\b[^;&|\n]*\s-[[:alpha:]]*r[[:alpha:]]*\b[^;&|\n]*\s-[[:alpha:]]*f[[:alpha:]]*\b")
+            .expect("valid destructive pattern regex"),
+        Regex::new(r"(?i)\brm\b[^;&|\n]*\s-[[:alpha:]]*f[[:alpha:]]*\b[^;&|\n]*\s-[[:alpha:]]*r[[:alpha:]]*\b")
+            .expect("valid destructive pattern regex"),
+        // Pipe any producer into a shell. This catches both curl/wget pipe-to-sh
+        // and less obvious producers such as `base64 -d | sh`.
+        Regex::new(r"(?i)\|\s*(?:ba)?sh\b").expect("valid destructive pattern regex"),
         // Fork bomb
         Regex::new(r"(?i):\(\)\s*\{\s*:\|:&\s*\};:").expect("valid destructive pattern regex"),
         // Recursive chmod/chown on root
         Regex::new(r"(?i)\bchmod\s+.*-R\s+.*/\b").expect("valid destructive pattern regex"),
         Regex::new(r"(?i)\bchown\s+.*-R\s+.*/\b").expect("valid destructive pattern regex"),
-        // Disk wipe
-        Regex::new(r"(?i)\bdd\s+if=/dev/zero\b").expect("valid destructive pattern regex"),
+        // Disk wipe / filesystem creation. Permit whitespace around `=` because
+        // shell users often add it while experimenting, even though some forms
+        // are not accepted by `dd` itself.
+        Regex::new(r"(?i)\bdd\b[^;&|\n]*\bif\s*=\s*/dev/(?:zero|random|urandom)\b")
+            .expect("valid destructive pattern regex"),
+        Regex::new(r"(?i)\bdd\b[^;&|\n]*\bof\s*=\s*/dev/")
+            .expect("valid destructive pattern regex"),
         Regex::new(r"(?i)\bmkfs\b").expect("valid destructive pattern regex"),
         // Shutdown/reboot
         Regex::new(r"(?i)\b(shutdown|reboot|halt|poweroff)\b")

@@ -23,46 +23,38 @@ impl JobRegistry {
     }
 
     pub fn register(&self, job: CronJob) -> Result<JobId> {
-        let mut jobs = self.jobs.write().map_err(|_| {
-            CronError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "poisoned lock",
-            ))
-        })?;
+        let mut jobs = self
+            .jobs
+            .write()
+            .map_err(|_| CronError::Io(std::io::Error::other("poisoned lock")))?;
         let id = job.id.clone();
         jobs.insert(id.clone(), job);
         Ok(id)
     }
 
     pub fn get(&self, id: &JobId) -> Result<CronJob> {
-        let jobs = self.jobs.read().map_err(|_| {
-            CronError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "poisoned lock",
-            ))
-        })?;
+        let jobs = self
+            .jobs
+            .read()
+            .map_err(|_| CronError::Io(std::io::Error::other("poisoned lock")))?;
         jobs.get(id)
             .cloned()
             .ok_or_else(|| CronError::JobNotFound(id.clone()))
     }
 
     pub fn list(&self) -> Result<Vec<CronJob>> {
-        let jobs = self.jobs.read().map_err(|_| {
-            CronError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "poisoned lock",
-            ))
-        })?;
+        let jobs = self
+            .jobs
+            .read()
+            .map_err(|_| CronError::Io(std::io::Error::other("poisoned lock")))?;
         Ok(jobs.values().cloned().collect())
     }
 
     pub fn update_status(&self, id: &JobId, status: JobStatus) -> Result<()> {
-        let mut jobs = self.jobs.write().map_err(|_| {
-            CronError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "poisoned lock",
-            ))
-        })?;
+        let mut jobs = self
+            .jobs
+            .write()
+            .map_err(|_| CronError::Io(std::io::Error::other("poisoned lock")))?;
         let job = jobs
             .get_mut(id)
             .ok_or_else(|| CronError::JobNotFound(id.clone()))?;
@@ -71,24 +63,20 @@ impl JobRegistry {
     }
 
     pub fn remove(&self, id: &JobId) -> Result<()> {
-        let mut jobs = self.jobs.write().map_err(|_| {
-            CronError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "poisoned lock",
-            ))
-        })?;
+        let mut jobs = self
+            .jobs
+            .write()
+            .map_err(|_| CronError::Io(std::io::Error::other("poisoned lock")))?;
         jobs.remove(id)
             .ok_or_else(|| CronError::JobNotFound(id.clone()))?;
         Ok(())
     }
 
     pub fn due_jobs(&self, now: chrono::DateTime<chrono::Utc>) -> Result<Vec<CronJob>> {
-        let jobs = self.jobs.read().map_err(|_| {
-            CronError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "poisoned lock",
-            ))
-        })?;
+        let jobs = self
+            .jobs
+            .read()
+            .map_err(|_| CronError::Io(std::io::Error::other("poisoned lock")))?;
         Ok(jobs.values().filter(|j| j.is_due(now)).cloned().collect())
     }
 }

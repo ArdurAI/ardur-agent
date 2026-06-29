@@ -1,5 +1,3 @@
-use std::fmt;
-
 #[derive(Debug, thiserror::Error)]
 pub enum StandingGoalError {
     #[error("goal not found: {0}")]

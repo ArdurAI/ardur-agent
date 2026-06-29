@@ -25,10 +25,17 @@
 
 mod error;
 pub mod learning;
+pub mod proactive;
 mod task_record;
 pub mod tasks;
 
 pub use error::TaskFlowError;
+pub use proactive::{
+    AutomationAttenuation, AutomationChannel, AutomationDeliveryEvent, AutomationRuntime,
+    AutomationSchedule, AutomationScheduleId, AutomationScheduleStatus, FileScheduleStore,
+    FireReport, FusedAutomationRuntime, InMemoryScheduleStore, MpscAutomationChannel,
+    ProactiveAutomationError, ProactiveAutomationLoop, ScheduleStore, ScheduledCapToken,
+};
 pub use task_record::{TaskRecord, TaskStatus};
 pub use tasks::flow::{
     BranchOutcome, BranchState, BundleHash, CapTokenJti, CedarDecisionId, CedarExpression,
