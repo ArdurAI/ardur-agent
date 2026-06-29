@@ -1,5 +1,3 @@
-use std::fmt;
-
 #[derive(Debug, thiserror::Error)]
 pub enum CronError {
     #[error("invalid cron expression: {0}")]
