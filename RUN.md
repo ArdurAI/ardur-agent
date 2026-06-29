@@ -7,6 +7,8 @@ the originating Slack channel.
 > **Status: dev fidelity, not production.** Several durability and defence
 > gaps are still open (see [Known gaps](#known-gaps)). Run this in a private
 > Slack channel before exposing it to anyone else.
+> The current implementation inventory lives in
+> [docs/current-status.md](docs/current-status.md).
 
 ## Prerequisites
 
