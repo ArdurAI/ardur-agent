@@ -276,59 +276,37 @@ impl<B: BudgetStore> CostAdmissionGate for InMemoryCostAdmissionGate<B> {
         reservation: Reservation,
         actual: CostTuple,
     ) -> Result<RefundReceipt, AdmissionError> {
-        // ARD-306: Fail-closed on finalization failure.
+        // ARD-448: Finalization is an atomic claim of the reservation.
         //
-        // The finalize must be atomic: if the budget refund fails, the reservation
-        // must NOT be removed from the table (so a retry is possible) and the budget
-        // must NOT be left in a partially-mutated state. The InMemoryBudgetStore
-        // refund is a single write-lock operation that either succeeds or fails
-        // atomically; persistent backends must provide the same guarantee.
-        //
-        // Strategy:
-        // 1. Peek the reservation record (read lock) to check expiry without removing it.
-        // 2. If expired, remove and release the full hold (this is safe because expiry
-        //    is a terminal state — no retry is expected).
-        // 3. If not expired, compute the refund delta, attempt the budget refund,
-        //    and ONLY remove the reservation from the table on success.
-        // 4. If the budget refund fails, the reservation stays in the table so the
-        //    caller can retry finalize; the budget is unchanged (the store refund
-        //    is atomic and either fully applies or fully fails).
-
+        // The previous implementation peeked the reservation under a read lock,
+        // awaited the budget refund, and removed the reservation afterward. Two
+        // concurrent finalize calls could both observe the same active reservation
+        // before either removed it, causing the same refund delta to be credited
+        // twice. Claim by removing under the write lock first; exactly one caller
+        // receives the handle and every later caller sees "no active reservation".
         let now = self.clock.now_ms();
-
-        // Step 1: Check expiry under read lock (peek only).
         let (handle, expired) = {
-            let reservations = self.reservations.read();
+            let mut reservations = self.reservations.write();
             let record = reservations
-                .get(&reservation.reservation_id)
+                .remove(&reservation.reservation_id)
                 .ok_or_else(|| {
                     AdmissionError::Internal(anyhow::anyhow!(
                         "no active reservation for {}",
                         reservation.reservation_id
                     ))
                 })?;
-            (record.handle.clone(), now > record.expires_at)
+            (record.handle, now > record.expires_at)
         };
 
         let reserved = handle.reserved;
 
         if expired {
-            // Expiry is terminal: remove the reservation and release the full hold.
-            // This path is idempotent — a second finalize for an expired reservation
-            // will hit the "no active reservation" error above.
-            {
-                let mut reservations = self.reservations.write();
-                reservations.remove(&reservation.reservation_id);
-            }
             self.budget
                 .refund(handle, CostDelta::full_credit(&reserved))
                 .await
                 .map_err(internal)?;
             return Err(AdmissionError::ReservationExpired);
         }
-
-        // Step 2: Not expired — compute the refund and attempt the atomic budget update.
-        let refunded = CostDelta::between(&reserved, &actual);
 
         // ARD-296: Combine base cost + tool execution cost for post-receipt hooks.
         // The `actual` CostTuple already includes all costs (LLM + tools) if the
@@ -338,29 +316,18 @@ impl<B: BudgetStore> CostAdmissionGate for InMemoryCostAdmissionGate<B> {
         // The refund delta is `reserved - actual_combined`. If the combined cost
         // exceeds the reserved envelope, the delta will be negative (debiting the
         // overage from the holder's budget), which is the correct fail-closed behavior.
-        let refund_result = self.budget.refund(handle, refunded).await;
+        let refunded = CostDelta::between(&reserved, &actual);
+        self.budget
+            .refund(handle, refunded)
+            .await
+            .map_err(internal)?;
 
-        match refund_result {
-            Ok(()) => {
-                // Only remove the reservation on successful budget update.
-                // Drop the write guard before returning (no await while holding it).
-                {
-                    let mut reservations = self.reservations.write();
-                    reservations.remove(&reservation.reservation_id);
-                }
-                Ok(RefundReceipt {
-                    reservation_id: reservation.reservation_id,
-                    actual,
-                    refunded,
-                    finalized_at: self.clock.now_ms(),
-                })
-            }
-            Err(e) => {
-                // ARD-306: Budget refund failed — reservation stays in the table
-                // so the caller can retry. The budget is unchanged (atomic refund).
-                Err(internal(e))
-            }
-        }
+        Ok(RefundReceipt {
+            reservation_id: reservation.reservation_id,
+            actual,
+            refunded,
+            finalized_at: self.clock.now_ms(),
+        })
     }
 }
 
@@ -370,6 +337,9 @@ mod tests {
     use crate::budget::InMemoryBudgetStore;
     use crate::clock::ManualClock;
     use crate::types::{ModelId, Sha256Digest, TokenId};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+    use tokio::sync::Notify;
 
     fn test_gate() -> (
         InMemoryCostAdmissionGate<InMemoryBudgetStore>,
@@ -393,6 +363,59 @@ mod tests {
             provider_id: ProviderId("openrouter".to_string()),
             model_id: ModelId("gpt-4".to_string()),
             request_digest: Sha256Digest::of(b"test"),
+        }
+    }
+
+    struct DelayedRefundBudgetStore {
+        inner: InMemoryBudgetStore,
+        first_refund_started: Arc<Notify>,
+        refund_calls: Arc<AtomicUsize>,
+    }
+
+    impl DelayedRefundBudgetStore {
+        fn new() -> Self {
+            Self {
+                inner: InMemoryBudgetStore::new(),
+                first_refund_started: Arc::new(Notify::new()),
+                refund_calls: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BudgetStore for DelayedRefundBudgetStore {
+        async fn current_balance(&self, holder: &HolderId) -> Result<CostTuple, BudgetError> {
+            self.inner.current_balance(holder).await
+        }
+
+        async fn try_reserve(
+            &self,
+            holder: &HolderId,
+            envelope: &CostEnvelope,
+        ) -> Result<ReservationHandle, BudgetError> {
+            self.inner.try_reserve(holder, envelope).await
+        }
+
+        async fn refund(
+            &self,
+            handle: ReservationHandle,
+            delta: CostDelta,
+        ) -> Result<(), BudgetError> {
+            let previous = self.refund_calls.fetch_add(1, Ordering::SeqCst);
+            if previous == 0 {
+                self.first_refund_started.notify_waiters();
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            self.inner.refund(handle, delta).await
+        }
+
+        async fn provision_merge(
+            &self,
+            holder: &HolderId,
+            add: &CostTuple,
+            cap: Option<&CostTuple>,
+        ) -> Result<CostTuple, BudgetError> {
+            self.inner.provision_merge(holder, add, cap).await
         }
     }
 
@@ -523,6 +546,76 @@ mod tests {
 
         assert_eq!(receipt.actual.cents, 30);
         assert_eq!(receipt.refunded.cents, 20);
+    }
+
+    #[tokio::test]
+    async fn concurrent_double_finalize_credits_refund_once() {
+        let clock = Arc::new(ManualClock::new(0));
+        let budget = DelayedRefundBudgetStore::new();
+        let first_refund_started = budget.first_refund_started.clone();
+        let refund_calls = budget.refund_calls.clone();
+        let gate = Arc::new(InMemoryCostAdmissionGate::with_clock(budget, clock));
+        let holder = HolderId("test".to_string());
+        let token_id = TokenId(Uuid::new_v4());
+        gate.bind_token(token_id, holder.clone());
+        gate.provision_for(
+            &holder,
+            CostTuple {
+                tokens_in: 100,
+                tokens_out: 100,
+                cents: 100,
+                wall_ms: 1000,
+                attention_score: 10,
+            },
+        )
+        .await
+        .unwrap();
+
+        let envelope = CostEnvelope {
+            tokens_in_max: 10,
+            tokens_out_max: 10,
+            cents_max: 50,
+            wall_ms_max: 1000,
+            attention_score_max: 1,
+        };
+        let reservation = gate.admit(req(envelope, token_id)).await.unwrap();
+        let actual = CostTuple {
+            tokens_in: 5,
+            tokens_out: 5,
+            cents: 20,
+            wall_ms: 500,
+            attention_score: 0,
+        };
+
+        let first_refund_observed = first_refund_started.notified();
+        let first_gate = gate.clone();
+        let first_reservation = reservation.clone();
+        let first_finalize =
+            tokio::spawn(async move { first_gate.finalize(first_reservation, actual).await });
+        first_refund_observed.await;
+
+        let second_result = gate.finalize(reservation, actual).await;
+        let first_result = first_finalize.await.unwrap();
+
+        let success_count = [first_result.is_ok(), second_result.is_ok()]
+            .into_iter()
+            .filter(|success| *success)
+            .count();
+        assert_eq!(
+            success_count, 1,
+            "exactly one finalizer should claim the reservation"
+        );
+        assert_eq!(
+            refund_calls.load(Ordering::SeqCst),
+            1,
+            "refund must be called once"
+        );
+
+        let balance_after = gate.budget.current_balance(&holder).await.unwrap();
+        assert_eq!(
+            balance_after.cents, 80,
+            "budget should receive one 30c refund"
+        );
     }
 
     #[tokio::test]
