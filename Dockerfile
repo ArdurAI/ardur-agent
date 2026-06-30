@@ -5,7 +5,7 @@
 # binary, so the runtime image does not need curl/wget/shell packages.
 # ARD-424: Docker build is validated in CI with a /healthz smoke test.
 
-FROM rust:1.85-slim AS builder
+FROM rust:1.96-slim AS builder
 
 # pkg-config + libssl-dev cover openssl-sys transitive dependencies. ca-certificates
 # is needed for crates.io fetches over HTTPS during `cargo build`.
