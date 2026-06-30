@@ -31,6 +31,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use ardur_cost_gate::{CostEnvelope, CostTuple as GateCostTuple};
 use ardur_fused_runtime::{FusedEvent, StageKind, load_persisted_chain, verify_persisted_chain};
 use ardur_injection_defense::{FilterRegistry, PatternBasedFilter};
 use ardur_provider_runtime::{
@@ -46,8 +47,8 @@ use parking_lot::Mutex;
 use serde_json::json;
 
 use support::{
-    AUDIENCE, EchoProvider, TOOL, deny_all_policy, mint_token_as, request_for, runtime_builder,
-    runtime_builder_with_policy, user_request, valid_token,
+    AUDIENCE, EchoProvider, TOOL, deny_all_policy, gate_holder, mint_token_as, request_for,
+    runtime_builder, runtime_builder_with_policy, user_request, valid_token,
 };
 
 // ---- providers -------------------------------------------------------------
@@ -102,6 +103,78 @@ impl Provider for MultiDeltaProvider {
 
     fn id(&self) -> ProviderId {
         ProviderId("multi-delta".to_string())
+    }
+
+    fn supports_streaming(&self) -> bool {
+        true
+    }
+
+    fn rate_card(&self) -> &RateCard {
+        &self.rate_card
+    }
+}
+
+/// An OpenRouter-like streaming provider: the rate card itself is zero, but the
+/// final streamed usage carries the provider-reported exact cost.
+struct ReportedCostStreamProvider {
+    cost_cents: u64,
+    calls: AtomicUsize,
+    rate_card: RateCard,
+}
+
+impl ReportedCostStreamProvider {
+    fn new(cost_cents: u64) -> Self {
+        Self {
+            cost_cents,
+            calls: AtomicUsize::new(0),
+            rate_card: RateCard {
+                version_id: "openrouter-zero-passthrough-test".to_string(),
+                cents_per_1k_input: 0.0,
+                cents_per_1k_output: 0.0,
+                cents_per_request: 0.0,
+            },
+        }
+    }
+
+    fn call_count(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl Provider for ReportedCostStreamProvider {
+    async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let usage = Usage {
+            tokens_in: 11,
+            tokens_out: 4,
+            cost_cents: Some(self.cost_cents),
+        };
+        Ok(CompletionResponse {
+            content: "paid".to_string(),
+            finish_reason: FinishReason::Stop,
+            usage,
+            cost: self.rate_card.price(usage),
+            raw_provider_response: None,
+        })
+    }
+
+    async fn stream(&self, _req: CompletionRequest) -> Result<ProviderStream, ProviderError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let events = vec![
+            StreamEvent::ContentDelta("paid".to_string()),
+            StreamEvent::Usage(Usage {
+                tokens_in: 11,
+                tokens_out: 4,
+                cost_cents: Some(self.cost_cents),
+            }),
+            StreamEvent::Finish(FinishReason::Stop),
+        ];
+        Ok(Box::pin(futures::stream::iter(events.into_iter().map(Ok))))
+    }
+
+    fn id(&self) -> ProviderId {
+        ProviderId("openrouter-reported-cost-test".to_string())
     }
 
     fn supports_streaming(&self) -> bool {
@@ -230,6 +303,13 @@ async fn collect_stream(
     req: ardur_runtime::SubmitRequest,
 ) -> Vec<Result<FusedEvent, RuntimeError>> {
     Box::pin(runtime.stream(req)).collect().await
+}
+
+fn cents_envelope(cents: u32) -> CostEnvelope {
+    CostEnvelope {
+        cents_max: cents,
+        ..Default::default()
+    }
 }
 
 // ---- tests -----------------------------------------------------------------
@@ -409,6 +489,85 @@ async fn fused_stream_mints_receipt_at_end() {
     );
     assert_eq!(receipts[0].0.0, chain[0].body.receipt_id);
     verify_persisted_chain(&chain).expect("the chain verifies");
+}
+
+#[tokio::test]
+async fn fused_stream_receipts_provider_reported_cost_cents() {
+    let provider = Arc::new(ReportedCostStreamProvider::new(7));
+    let receipt_log = tempfile::NamedTempFile::new().expect("receipt log");
+    let runtime = runtime_builder(provider.clone())
+        .projected_envelope(cents_envelope(1))
+        .provision_budget(gate_holder(), GateCostTuple::cents(10))
+        .receipt_log(receipt_log.path())
+        .build()
+        .expect("runtime builds");
+
+    let events = collect_stream(&runtime, user_request("paid stream", &valid_token())).await;
+
+    assert!(matches!(
+        events.last(),
+        Some(Ok(FusedEvent::Finish(FinishReason::Stop)))
+    ));
+    assert_eq!(provider.call_count(), 1);
+    assert!(events.iter().any(|e| matches!(
+        e,
+        Ok(FusedEvent::Usage(Usage {
+            tokens_in: 11,
+            tokens_out: 4,
+            cost_cents: Some(7),
+        }))
+    )));
+
+    let chain = load_persisted_chain(receipt_log.path()).expect("chain loads");
+    assert_eq!(chain.len(), 1);
+    assert_eq!(chain[0].body.cost.cents, 7);
+    assert_eq!(chain[0].body.cost.tokens_in, 11);
+    assert_eq!(chain[0].body.cost.tokens_out, 4);
+    verify_persisted_chain(&chain).expect("the chain verifies");
+
+    let remaining = runtime
+        .remaining_budget(&gate_holder())
+        .await
+        .expect("holder is provisioned");
+    assert_eq!(remaining.cents, 3, "10c funded, 7c actual spend");
+}
+
+#[tokio::test]
+async fn fused_stream_reported_cost_depletes_budget_and_blocks_next_turn() {
+    let provider = Arc::new(ReportedCostStreamProvider::new(5));
+    let runtime = runtime_builder(provider.clone())
+        .projected_envelope(cents_envelope(1))
+        .provision_budget(gate_holder(), GateCostTuple::cents(5))
+        .build()
+        .expect("runtime builds");
+
+    let first = collect_stream(&runtime, user_request("paid stream", &valid_token())).await;
+    assert!(matches!(
+        first.last(),
+        Some(Ok(FusedEvent::Finish(FinishReason::Stop)))
+    ));
+    assert_eq!(provider.call_count(), 1);
+    let after_first = runtime
+        .remaining_budget(&gate_holder())
+        .await
+        .expect("holder is provisioned");
+    assert_eq!(after_first.cents, 0, "5c funded, 5c actual spend");
+
+    let second = collect_stream(&runtime, user_request("second stream", &valid_token())).await;
+    assert!(has_failed_stage(&second, StageKind::CostGateAdmit));
+    assert!(matches!(
+        terminal_error(&second),
+        Some(RuntimeError::CostCeilingExceeded)
+    ));
+    assert!(
+        !has_stage_executed(&second, StageKind::ProviderStream),
+        "exhausted budget must block before provider streaming"
+    );
+    assert_eq!(
+        provider.call_count(),
+        1,
+        "the rejected second turn never reaches the provider"
+    );
 }
 
 #[tokio::test]
