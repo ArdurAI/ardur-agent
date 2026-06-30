@@ -29,3 +29,9 @@ disableKinds = ["taxonomy", "term", "RSS", "sitemap"]
   disableJS = false
   disableCSS = false
   disableHTML = false
+
+[security.node.permissions]
+  allowAddons = ["postcss", "tailwindcss"]
+  allowChildProcess = ["postcss", "tailwindcss"]
+  allowRead = ["."]
+  allowWorker = ["postcss", "tailwindcss"]
