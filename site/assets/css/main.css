@@ -1,6 +1,5 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+@config "./tailwind.config.js";
 
 /* ---------------------------------------------------------------------------
    Self-hosted fonts (woff2 subsets in /fonts). No external font CDN.
@@ -106,7 +105,18 @@
 
 @layer components {
   .container-content {
-    @apply mx-auto w-full max-w-content px-6 md:px-8;
+    margin-left: auto;
+    margin-right: auto;
+    width: 100%;
+    max-width: 72rem;
+    padding-left: 1.5rem;
+    padding-right: 1.5rem;
+  }
+  @media (min-width: 768px) {
+    .container-content {
+      padding-left: 2rem;
+      padding-right: 2rem;
+    }
   }
   .gradient-text {
     background: linear-gradient(
@@ -134,7 +144,29 @@
     transform: translateY(-3px);
   }
   .btn {
-    @apply inline-flex items-center justify-center gap-2 rounded-lg px-5 py-3 text-sm font-semibold transition;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    border-radius: 0.5rem;
+    padding: 0.75rem 1.25rem;
+    font-size: 0.875rem;
+    line-height: 1.25rem;
+    font-weight: 600;
+    transition-duration: 150ms;
+    transition-property:
+      color,
+      background-color,
+      border-color,
+      text-decoration-color,
+      fill,
+      stroke,
+      opacity,
+      box-shadow,
+      transform,
+      filter,
+      backdrop-filter;
+    transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
   }
   .btn-primary {
     background: linear-gradient(
