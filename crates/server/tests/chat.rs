@@ -24,10 +24,22 @@ use serde_json::{Value, json};
 
 /// POST a JSON body to `/chat` on `router`, returning the status and parsed JSON.
 async fn post_chat(router: Router, body: Value) -> (StatusCode, Value) {
-    let request = Request::builder()
+    post_chat_with_auth(router, body, Some(support::CHAT_TOKEN)).await
+}
+
+async fn post_chat_with_auth(
+    router: Router,
+    body: Value,
+    bearer: Option<&str>,
+) -> (StatusCode, Value) {
+    let mut builder = Request::builder()
         .method("POST")
         .uri("/chat")
-        .header("content-type", "application/json")
+        .header("content-type", "application/json");
+    if let Some(token) = bearer {
+        builder = builder.header("authorization", format!("Bearer {token}"));
+    }
+    let request = builder
         .body(Body::from(body.to_string()))
         .expect("request builds");
     let (status, bytes) = support::oneshot(router, request).await;
@@ -95,9 +107,8 @@ impl Provider for ScriptedProvider {
                 usage: Usage {
                     tokens_in: 0,
                     tokens_out: 0,
-                
-            ..Default::default()
-        },
+                    cost_cents: None,
+                },
                 cost: CostTuple::default(),
                 raw_provider_response: None,
             }),
@@ -107,9 +118,8 @@ impl Provider for ScriptedProvider {
                 usage: Usage {
                     tokens_in: cost.tokens_in as u32,
                     tokens_out: cost.tokens_out as u32,
-                
-            ..Default::default()
-        },
+                    cost_cents: None,
+                },
                 cost,
                 raw_provider_response: None,
             }),
@@ -119,9 +129,8 @@ impl Provider for ScriptedProvider {
                 usage: Usage {
                     tokens_in: 0,
                     tokens_out: 0,
-                
-            ..Default::default()
-        },
+                    cost_cents: None,
+                },
                 cost: CostTuple::default(),
                 raw_provider_response: None,
             }),
@@ -144,6 +153,36 @@ impl Provider for ScriptedProvider {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn chat_rejects_missing_bearer_before_body_processing() {
+    let (status, json) =
+        post_chat_with_auth(stub_router(), json!({ "message": "hello" }), None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("bearer")
+    );
+}
+
+#[tokio::test]
+async fn chat_rejects_invalid_bearer() {
+    let (status, json) = post_chat_with_auth(
+        stub_router(),
+        json!({ "message": "hello" }),
+        Some("wrong-token"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("bearer")
+    );
+}
 
 #[tokio::test]
 async fn chat_returns_reply_with_offline_provider() {
@@ -195,12 +234,27 @@ async fn chat_400_on_empty_message() {
 }
 
 #[tokio::test]
-async fn chat_400_on_stream_true() {
-    // Streaming (SSE) is the P1.5 follow-up; a `stream: true` request is refused
-    // rather than silently answered with a consolidated body.
-    let (status, _json) =
-        post_chat(stub_router(), json!({ "message": "hi", "stream": true })).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
+async fn chat_200_on_stream_true() {
+    // Streaming (SSE) is now supported; a `stream: true` request returns
+    // text/event-stream instead of 400.
+    let router = stub_router();
+    let request = Request::builder()
+        .method("POST")
+        .uri("/chat")
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {}", support::CHAT_TOKEN))
+        .body(Body::from(
+            json!({ "message": "hi", "stream": true }).to_string(),
+        ))
+        .expect("valid request");
+    let response = support::oneshot(router, request).await;
+    let status = response.0;
+    assert_eq!(status, StatusCode::OK);
+    let body = String::from_utf8(response.1.to_vec()).expect("utf8 body");
+    assert!(
+        body.starts_with("data:"),
+        "expected SSE format, got: {body}"
+    );
 }
 
 #[tokio::test]

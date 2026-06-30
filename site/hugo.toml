@@ -9,11 +9,12 @@ enableRobotsTXT = true
 disableKinds = ["taxonomy", "term", "RSS", "sitemap"]
 
 [params]
-  description = "Open-source personal AI agent that lives in your terminal, your chat apps, and your voice channels — with cap-token security, receipt-chain transparency, and cost-tuple awareness built into the wire format."
+  description = "Open-source personal AI agent that lives in your terminal and your chat apps — with cap-token security, receipt-chain transparency, and cost-tuple awareness built into the wire format."
   repo = "https://github.com/ArdurAI/ardur-agent"
   discussions = "https://github.com/ArdurAI/ardur-agent/discussions"
   # TODO: replace with the real plan-corpus location once published.
   plans = "https://github.com/ArdurAI/ardur-agent"
+  runbook = "https://github.com/ArdurAI/ardur-agent/blob/main/RUN.md"
   # TODO: replace with a real sponsor link once set up.
   sponsor = "https://github.com/ArdurAI/ardur-agent"
 

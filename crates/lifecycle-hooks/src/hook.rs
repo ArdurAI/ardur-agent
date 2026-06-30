@@ -20,7 +20,7 @@
 //! action before it happens, but the post-action moments are observational.
 
 use ardur_provider_runtime::{CompletionRequest, CompletionResponse};
-use ardur_receipt::ReceiptBody;
+use ardur_receipt::{ReceiptBody, SignedReceipt};
 use ardur_runtime::{CapTokenRef, CostTuple, SessionId};
 use async_trait::async_trait;
 
@@ -69,6 +69,8 @@ impl From<String> for HookId {
 pub enum LifecyclePhase {
     /// Request admission, before the provider call (e.g. a missing cap-token).
     Submit,
+    /// Cost-gate reservation or finalization.
+    CostGate,
     /// The provider completion call itself.
     Provider,
     /// Minting the turn's receipt.
@@ -148,9 +150,13 @@ pub struct PreSubmitCtx<'a> {
 pub struct PostReceiptCtx<'a> {
     /// The session the turn belongs to.
     pub session_id: SessionId,
-    /// The unsigned receipt body minted for the turn. Its `payload_digest`
-    /// covers the *response actually produced* — i.e. the post-redaction text
-    /// when a pre-submit hook rewrote the request.
+    /// The signed receipt envelope minted for the turn. Its compact JWS is the
+    /// canonical byte sequence used for ES256 verification and receipt-chain
+    /// hashing.
+    pub signed_receipt: &'a SignedReceipt,
+    /// The decoded receipt body carried by [`signed_receipt`](Self::signed_receipt).
+    /// Its `payload_digest` covers the *response actually produced* — i.e. the
+    /// post-redaction text when a pre-submit hook rewrote the request.
     pub receipt: &'a ReceiptBody,
     /// The provider's completion response.
     pub response: &'a CompletionResponse,

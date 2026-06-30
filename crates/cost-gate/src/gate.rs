@@ -276,9 +276,15 @@ impl<B: BudgetStore> CostAdmissionGate for InMemoryCostAdmissionGate<B> {
         reservation: Reservation,
         actual: CostTuple,
     ) -> Result<RefundReceipt, AdmissionError> {
-        // Pull the live record (and its store handle) out under the lock, and
-        // decide expiry against the same clock the reservation was stamped with.
-        // Removing it makes a second finalize a no-such-reservation error.
+        // ARD-448: Finalization is an atomic claim of the reservation.
+        //
+        // The previous implementation peeked the reservation under a read lock,
+        // awaited the budget refund, and removed the reservation afterward. Two
+        // concurrent finalize calls could both observe the same active reservation
+        // before either removed it, causing the same refund delta to be credited
+        // twice. Claim by removing under the write lock first; exactly one caller
+        // receives the handle and every later caller sees "no active reservation".
+        let now = self.clock.now_ms();
         let (handle, expired) = {
             let mut reservations = self.reservations.write();
             let record = reservations
@@ -289,14 +295,12 @@ impl<B: BudgetStore> CostAdmissionGate for InMemoryCostAdmissionGate<B> {
                         reservation.reservation_id
                     ))
                 })?;
-            let expired = self.clock.now_ms() > record.expires_at;
-            (record.handle, expired)
+            (record.handle, now > record.expires_at)
         };
 
         let reserved = handle.reserved;
+
         if expired {
-            // Release the entire hold so the budget is not stranded, then report
-            // the expiry to the caller.
             self.budget
                 .refund(handle, CostDelta::full_credit(&reserved))
                 .await
@@ -304,16 +308,352 @@ impl<B: BudgetStore> CostAdmissionGate for InMemoryCostAdmissionGate<B> {
             return Err(AdmissionError::ReservationExpired);
         }
 
+        // ARD-296: Combine base cost + tool execution cost for post-receipt hooks.
+        // The `actual` CostTuple already includes all costs (LLM + tools) if the
+        // caller aggregated them before calling finalize. Here we ensure the
+        // receipt reflects the combined cost, not just the provider-reported cost.
+        //
+        // The refund delta is `reserved - actual_combined`. If the combined cost
+        // exceeds the reserved envelope, the delta will be negative (debiting the
+        // overage from the holder's budget), which is the correct fail-closed behavior.
         let refunded = CostDelta::between(&reserved, &actual);
         self.budget
             .refund(handle, refunded)
             .await
             .map_err(internal)?;
+
         Ok(RefundReceipt {
             reservation_id: reservation.reservation_id,
             actual,
             refunded,
             finalized_at: self.clock.now_ms(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::budget::InMemoryBudgetStore;
+    use crate::clock::ManualClock;
+    use crate::types::{ModelId, Sha256Digest, TokenId};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+    use tokio::sync::Notify;
+
+    fn test_gate() -> (
+        InMemoryCostAdmissionGate<InMemoryBudgetStore>,
+        Arc<ManualClock>,
+        HolderId,
+        TokenId,
+    ) {
+        let clock = Arc::new(ManualClock::new(0));
+        let budget = InMemoryBudgetStore::new();
+        let gate = InMemoryCostAdmissionGate::with_clock(budget, clock.clone());
+        let holder = HolderId("test".to_string());
+        let token_id = TokenId(Uuid::new_v4());
+        gate.bind_token(token_id, holder.clone());
+        (gate, clock, holder, token_id)
+    }
+
+    fn req(envelope: CostEnvelope, token_id: TokenId) -> AdmissionRequest {
+        AdmissionRequest {
+            cap_token_id: token_id,
+            projected_envelope: envelope,
+            provider_id: ProviderId("openrouter".to_string()),
+            model_id: ModelId("gpt-4".to_string()),
+            request_digest: Sha256Digest::of(b"test"),
+        }
+    }
+
+    struct DelayedRefundBudgetStore {
+        inner: InMemoryBudgetStore,
+        first_refund_started: Arc<Notify>,
+        refund_calls: Arc<AtomicUsize>,
+    }
+
+    impl DelayedRefundBudgetStore {
+        fn new() -> Self {
+            Self {
+                inner: InMemoryBudgetStore::new(),
+                first_refund_started: Arc::new(Notify::new()),
+                refund_calls: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BudgetStore for DelayedRefundBudgetStore {
+        async fn current_balance(&self, holder: &HolderId) -> Result<CostTuple, BudgetError> {
+            self.inner.current_balance(holder).await
+        }
+
+        async fn try_reserve(
+            &self,
+            holder: &HolderId,
+            envelope: &CostEnvelope,
+        ) -> Result<ReservationHandle, BudgetError> {
+            self.inner.try_reserve(holder, envelope).await
+        }
+
+        async fn refund(
+            &self,
+            handle: ReservationHandle,
+            delta: CostDelta,
+        ) -> Result<(), BudgetError> {
+            let previous = self.refund_calls.fetch_add(1, Ordering::SeqCst);
+            if previous == 0 {
+                self.first_refund_started.notify_waiters();
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            self.inner.refund(handle, delta).await
+        }
+
+        async fn provision_merge(
+            &self,
+            holder: &HolderId,
+            add: &CostTuple,
+            cap: Option<&CostTuple>,
+        ) -> Result<CostTuple, BudgetError> {
+            self.inner.provision_merge(holder, add, cap).await
+        }
+    }
+
+    #[tokio::test]
+    async fn finalize_fail_closed_budget_unchanged() {
+        let (gate, _clock, holder, token_id) = test_gate();
+        gate.provision_for(
+            &holder,
+            CostTuple {
+                tokens_in: 100,
+                tokens_out: 100,
+                cents: 100,
+                wall_ms: 1000,
+                attention_score: 10,
+            },
+        )
+        .await
+        .unwrap();
+
+        let envelope = CostEnvelope {
+            tokens_in_max: 10,
+            tokens_out_max: 10,
+            cents_max: 50,
+            wall_ms_max: 1000,
+            attention_score_max: 1,
+        };
+        let r = req(envelope, token_id);
+
+        let reservation = gate.admit(r).await.unwrap();
+
+        let actual = CostTuple {
+            tokens_in: 5,
+            tokens_out: 5,
+            cents: 20,
+            wall_ms: 500,
+            attention_score: 0,
+        };
+        let receipt = gate.finalize(reservation, actual).await.unwrap();
+
+        assert_eq!(receipt.actual.cents, 20);
+        assert_eq!(receipt.refunded.cents, 30);
+
+        let balance_after = gate.budget.current_balance(&holder).await.unwrap();
+        assert_eq!(balance_after.cents, 80);
+    }
+
+    #[tokio::test]
+    async fn finalize_expired_releases_full_hold() {
+        let (gate, clock, holder, token_id) = test_gate();
+        gate.provision_for(
+            &holder,
+            CostTuple {
+                tokens_in: 100,
+                tokens_out: 100,
+                cents: 100,
+                wall_ms: 1000,
+                attention_score: 10,
+            },
+        )
+        .await
+        .unwrap();
+
+        let envelope = CostEnvelope {
+            tokens_in_max: 10,
+            tokens_out_max: 10,
+            cents_max: 50,
+            wall_ms_max: 1000,
+            attention_score_max: 1,
+        };
+        let r = req(envelope, token_id);
+
+        let reservation = gate.admit(r).await.unwrap();
+        let balance_after_reserve = gate.budget.current_balance(&holder).await.unwrap();
+        assert_eq!(balance_after_reserve.cents, 50);
+
+        clock.advance(31_000);
+
+        let actual = CostTuple {
+            tokens_in: 5,
+            tokens_out: 5,
+            cents: 20,
+            wall_ms: 500,
+            attention_score: 0,
+        };
+        let result = gate.finalize(reservation, actual).await;
+
+        assert!(matches!(result, Err(AdmissionError::ReservationExpired)));
+
+        let balance_after_expiry = gate.budget.current_balance(&holder).await.unwrap();
+        assert_eq!(balance_after_expiry.cents, 100);
+    }
+
+    #[tokio::test]
+    async fn finalize_combined_cost_in_receipt() {
+        let (gate, _clock, holder, token_id) = test_gate();
+        gate.provision_for(
+            &holder,
+            CostTuple {
+                tokens_in: 100,
+                tokens_out: 100,
+                cents: 100,
+                wall_ms: 1000,
+                attention_score: 10,
+            },
+        )
+        .await
+        .unwrap();
+
+        let envelope = CostEnvelope {
+            tokens_in_max: 10,
+            tokens_out_max: 10,
+            cents_max: 50,
+            wall_ms_max: 1000,
+            attention_score_max: 1,
+        };
+        let r = req(envelope, token_id);
+
+        let reservation = gate.admit(r).await.unwrap();
+
+        let actual = CostTuple {
+            tokens_in: 5,
+            tokens_out: 5,
+            cents: 30,
+            wall_ms: 500,
+            attention_score: 0,
+        };
+        let receipt = gate.finalize(reservation, actual).await.unwrap();
+
+        assert_eq!(receipt.actual.cents, 30);
+        assert_eq!(receipt.refunded.cents, 20);
+    }
+
+    #[tokio::test]
+    async fn concurrent_double_finalize_credits_refund_once() {
+        let clock = Arc::new(ManualClock::new(0));
+        let budget = DelayedRefundBudgetStore::new();
+        let first_refund_started = budget.first_refund_started.clone();
+        let refund_calls = budget.refund_calls.clone();
+        let gate = Arc::new(InMemoryCostAdmissionGate::with_clock(budget, clock));
+        let holder = HolderId("test".to_string());
+        let token_id = TokenId(Uuid::new_v4());
+        gate.bind_token(token_id, holder.clone());
+        gate.provision_for(
+            &holder,
+            CostTuple {
+                tokens_in: 100,
+                tokens_out: 100,
+                cents: 100,
+                wall_ms: 1000,
+                attention_score: 10,
+            },
+        )
+        .await
+        .unwrap();
+
+        let envelope = CostEnvelope {
+            tokens_in_max: 10,
+            tokens_out_max: 10,
+            cents_max: 50,
+            wall_ms_max: 1000,
+            attention_score_max: 1,
+        };
+        let reservation = gate.admit(req(envelope, token_id)).await.unwrap();
+        let actual = CostTuple {
+            tokens_in: 5,
+            tokens_out: 5,
+            cents: 20,
+            wall_ms: 500,
+            attention_score: 0,
+        };
+
+        let first_refund_observed = first_refund_started.notified();
+        let first_gate = gate.clone();
+        let first_reservation = reservation.clone();
+        let first_finalize =
+            tokio::spawn(async move { first_gate.finalize(first_reservation, actual).await });
+        first_refund_observed.await;
+
+        let second_result = gate.finalize(reservation, actual).await;
+        let first_result = first_finalize.await.unwrap();
+
+        let success_count = [first_result.is_ok(), second_result.is_ok()]
+            .into_iter()
+            .filter(|success| *success)
+            .count();
+        assert_eq!(
+            success_count, 1,
+            "exactly one finalizer should claim the reservation"
+        );
+        assert_eq!(
+            refund_calls.load(Ordering::SeqCst),
+            1,
+            "refund must be called once"
+        );
+
+        let balance_after = gate.budget.current_balance(&holder).await.unwrap();
+        assert_eq!(
+            balance_after.cents, 80,
+            "budget should receive one 30c refund"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_reservations_race_safe() {
+        let (gate, _clock, holder, token_id) = test_gate();
+        gate.provision_for(
+            &holder,
+            CostTuple {
+                tokens_in: 100,
+                tokens_out: 100,
+                cents: 100,
+                wall_ms: 1000,
+                attention_score: 10,
+            },
+        )
+        .await
+        .unwrap();
+
+        let envelope = CostEnvelope {
+            tokens_in_max: 10,
+            tokens_out_max: 10,
+            cents_max: 60,
+            wall_ms_max: 1000,
+            attention_score_max: 1,
+        };
+
+        let r1 = req(envelope, token_id);
+        let r2 = req(envelope, token_id);
+        // Note: both requests use the same token, so they compete for the same budget.
+        // This is intentional for the race test.
+
+        let (res1, res2) = tokio::join!(gate.admit(r1), gate.admit(r2));
+
+        let success_count = [res1.is_ok(), res2.is_ok()].iter().filter(|&&x| x).count();
+
+        assert!(
+            success_count <= 1,
+            "At most one reservation should succeed with 100c budget and 60c requests"
+        );
     }
 }

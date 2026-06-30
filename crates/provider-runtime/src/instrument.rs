@@ -16,17 +16,20 @@
 //! each span field of those names onto the corresponding OTel span attribute, so
 //! an OTLP backend (Langfuse / Phoenix / Arize / Jaeger) sees them natively.
 
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
 use ardur_runtime::ProviderId;
 use async_trait::async_trait;
+use futures::Stream;
 use tracing::Instrument;
 
 use crate::error::ProviderError;
 use crate::provider::Provider;
 use crate::rate_card::RateCard;
-use crate::stream::ProviderStream;
-use crate::types::{CompletionRequest, CompletionResponse, FinishReason};
+use crate::stream::{ProviderStream, StreamEvent};
+use crate::types::{CompletionRequest, CompletionResponse, FinishReason, ModelId, Usage};
 
 /// A [`Provider`] decorator that opens a `provider.send` span — carrying the
 /// OpenTelemetry GenAI attributes for the request and (on return) the response
@@ -70,11 +73,12 @@ impl Provider for InstrumentedProvider {
             "gen_ai.response.finish_reasons" = tracing::field::Empty,
             "gen_ai.usage.input_tokens" = tracing::field::Empty,
             "gen_ai.usage.output_tokens" = tracing::field::Empty,
+            "gen_ai.usage.cost_cents" = tracing::field::Empty,
             "error.type" = tracing::field::Empty,
         );
 
         let inner = Arc::clone(&self.inner);
-        let model = req.model.clone();
+        let requested_model = req.model.clone();
         async move {
             let result = inner.complete(req).await;
             let span = tracing::Span::current();
@@ -85,9 +89,9 @@ impl Provider for InstrumentedProvider {
                     // requested model — already on `gen_ai.request.model` — is the
                     // best available value; recording it keeps the response side of
                     // the semconv populated for backends that key on it.
-                    span.record("gen_ai.response.model", model.0);
-                    span.record("gen_ai.usage.input_tokens", resp.usage.tokens_in);
-                    span.record("gen_ai.usage.output_tokens", resp.usage.tokens_out);
+                    let response_model = response_model_attr(resp, &requested_model);
+                    span.record("gen_ai.response.model", response_model.as_str());
+                    record_usage(&span, resp.usage, resp.cost.cents);
                     span.record(
                         "gen_ai.response.finish_reasons",
                         finish_reasons_attr(&resp.finish_reason).as_str(),
@@ -104,10 +108,11 @@ impl Provider for InstrumentedProvider {
         .await
     }
 
-    /// Stream the completion inside the same `provider.send` GenAI span that
-    /// `complete` uses, so the streaming path emits the same OTel attributes
-    /// (§3.1b / ARD-297). The span is opened at handshake time and closed when
-    /// the stream ends; per-chunk enrichment is a Phase-2 follow-up.
+    /// Preserve the backend's real streaming path while keeping the
+    /// `provider.send` span open for the lifetime of the returned stream. The
+    /// wrapper records final usage, cost, finish reason, and mid-stream errors as
+    /// events are polled; entering the span around every poll keeps provider
+    /// internals nested under the GenAI span in tracing/OTel backends.
     async fn stream(&self, req: CompletionRequest) -> Result<ProviderStream, ProviderError> {
         let span = tracing::info_span!(
             "provider.send",
@@ -120,29 +125,30 @@ impl Provider for InstrumentedProvider {
             "gen_ai.response.finish_reasons" = tracing::field::Empty,
             "gen_ai.usage.input_tokens" = tracing::field::Empty,
             "gen_ai.usage.output_tokens" = tracing::field::Empty,
+            "gen_ai.usage.cost_cents" = tracing::field::Empty,
             "error.type" = tracing::field::Empty,
         );
 
         let inner = Arc::clone(&self.inner);
-        let model = req.model.clone();
-        async move {
-            match inner.stream(req).await {
-                Ok(stream) => {
-                    // Record the response model on the span now that the handshake
-                    // succeeded (ARD-298).
-                    tracing::Span::current().record("gen_ai.response.model", model.0);
-                    Ok(stream)
-                }
-                Err(err) => {
-                    let span = tracing::Span::current();
-                    span.record("error.type", error_type(&err));
-                    span.record("gen_ai.response.finish_reasons", "[\"error\"]");
-                    Err(err)
-                }
+        let requested_model = req.model.clone();
+        let rate_card = self.inner.rate_card().clone();
+        let result = async move { inner.stream(req).await }
+            .instrument(span.clone())
+            .await;
+
+        match result {
+            Ok(stream) => {
+                span.record("gen_ai.response.model", requested_model.0.as_str());
+                Ok(Box::pin(InstrumentedProviderStream::new(
+                    stream, rate_card, span,
+                )))
+            }
+            Err(err) => {
+                span.record("error.type", error_type(&err));
+                span.record("gen_ai.response.finish_reasons", "[\"error\"]");
+                Err(err)
             }
         }
-        .instrument(span)
-        .await
     }
 
     fn id(&self) -> ProviderId {
@@ -156,6 +162,87 @@ impl Provider for InstrumentedProvider {
     fn rate_card(&self) -> &RateCard {
         self.inner.rate_card()
     }
+}
+
+/// A stream wrapper that keeps the GenAI `provider.send` span alive until the
+/// caller drains or drops the stream, and enriches it from terminal stream
+/// events. The inner stream is already pinned inside [`ProviderStream`], so the
+/// wrapper itself can be safely moved.
+struct InstrumentedProviderStream {
+    inner: ProviderStream,
+    rate_card: RateCard,
+    span: tracing::Span,
+    saw_error: bool,
+}
+
+impl InstrumentedProviderStream {
+    fn new(inner: ProviderStream, rate_card: RateCard, span: tracing::Span) -> Self {
+        Self {
+            inner,
+            rate_card,
+            span,
+            saw_error: false,
+        }
+    }
+}
+
+impl Unpin for InstrumentedProviderStream {}
+
+impl Stream for InstrumentedProviderStream {
+    type Item = Result<StreamEvent, ProviderError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.as_mut().get_mut();
+        let poll = {
+            let _entered = this.span.enter();
+            this.inner.as_mut().poll_next(cx)
+        };
+
+        if let Poll::Ready(Some(item)) = &poll {
+            match item {
+                Ok(StreamEvent::Usage(usage)) if !this.saw_error => {
+                    let priced = this.rate_card.price(*usage);
+                    record_usage(&this.span, *usage, priced.cents);
+                }
+                Ok(StreamEvent::Finish(reason)) if !this.saw_error => {
+                    this.span.record(
+                        "gen_ai.response.finish_reasons",
+                        finish_reasons_attr(reason).as_str(),
+                    );
+                }
+                Err(err) => {
+                    this.saw_error = true;
+                    this.span.record("error.type", error_type(err));
+                    this.span
+                        .record("gen_ai.response.finish_reasons", "[\"error\"]");
+                }
+                Ok(StreamEvent::ContentDelta(_))
+                | Ok(StreamEvent::ToolCallStart(_))
+                | Ok(StreamEvent::ToolCallDelta { .. })
+                | Ok(StreamEvent::Usage(_))
+                | Ok(StreamEvent::Finish(_)) => {}
+            }
+        }
+
+        poll
+    }
+}
+
+fn record_usage(span: &tracing::Span, usage: Usage, cost_cents: u64) {
+    span.record("gen_ai.usage.input_tokens", usage.tokens_in);
+    span.record("gen_ai.usage.output_tokens", usage.tokens_out);
+    span.record("gen_ai.usage.cost_cents", cost_cents);
+}
+
+fn response_model_attr(resp: &CompletionResponse, requested_model: &ModelId) -> String {
+    resp.raw_provider_response
+        .as_ref()
+        .and_then(|raw| raw.get("model"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .unwrap_or(requested_model.0.as_str())
+        .to_string()
 }
 
 /// Render a [`FinishReason`] as the OTel `gen_ai.response.finish_reasons`
@@ -187,9 +274,10 @@ fn error_type(err: &ProviderError) -> &'static str {
         ProviderError::RateLimited { .. } => "RateLimited",
         ProviderError::InvalidRequest(_) => "InvalidRequest",
         ProviderError::ModelNotAvailable(_) => "ModelNotAvailable",
+        ProviderError::InvalidSelection(_) => "InvalidSelection",
+        ProviderError::UnknownProvider { .. } => "UnknownProvider",
         ProviderError::CostCeilingExceeded => "CostCeilingExceeded",
         ProviderError::Unauthorized => "Unauthorized",
         ProviderError::Upstream(_) => "Upstream",
-        ProviderError::InvalidSelection(_) => "InvalidSelection",
     }
 }

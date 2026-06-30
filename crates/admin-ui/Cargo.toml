@@ -44,6 +44,10 @@ ardur-session-journals = { workspace = true }
 # collection read-only, reusing `ardur-memory-qdrant`'s record type and the
 # `qdrant-client` the durable store already depends on.
 ardur-memory-qdrant = { workspace = true }
+# Trust-center APIs: capability wallet and policy debugger reuse the same cap
+# claims and Cedar evaluator the runtime enforces on turns.
+ardur-cap-token = { workspace = true }
+ardur-cedar-policy = { workspace = true }
 qdrant-client = { workspace = true }
 # Millisecond-epoch → calendar-day conversion for the cost-by-day aggregation.
 chrono = { workspace = true }
@@ -51,6 +55,7 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+subtle = { workspace = true }
 
 [dev-dependencies]
 # In-process router driver for the endpoint tests.
@@ -65,3 +70,5 @@ base64 = { workspace = true }
 # cost/id types it re-exports), so the on-disk bytes the tests write match
 # exactly what ardur-server writes.
 ardur-session-journals = { workspace = true }
+# Trust-center fixtures construct deterministic cap-token ids.
+uuid = { workspace = true }

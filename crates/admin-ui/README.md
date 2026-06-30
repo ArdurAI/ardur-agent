@@ -52,9 +52,9 @@ All endpoints are `GET` — there are no write routes.
 | `GET` | `/` | HTML dashboard (server-rendered, auto-refreshing via HTMX). |
 | `GET` | `/healthz` | `200 ok` readiness check. |
 | `GET` | `/api/sessions` | Session list: id, journal mtime, message/entry counts, last activity, last settled cost. |
-| `GET` | `/api/sessions/:id/journal` | Journal entries for a session. Defaults to the last 100; `?limit=&offset=` paginate. With no `offset`, the page is the tail. |
+| `GET` | `/api/sessions/{id}/journal` | Journal entries for a session. Defaults to the last 100; `?limit=&offset=` paginate. With no `offset`, the page is the tail. |
 | `GET` | `/api/receipts` | The most recent 50 receipts, summarized (cost, provider, tool-call summary). |
-| `GET` | `/api/receipts/:id` | One receipt in full: decoded body + compact JWS. `404` if unknown. |
+| `GET` | `/api/receipts/{id}` | One receipt in full: decoded body + compact JWS. `404` if unknown. |
 | `GET` | `/api/costs` | Aggregate cost: total + today/7d/30d windows, by provider, by day, top-10 sessions. |
 | `GET` | `/api/memory/recent` | Last 20 memory records (when `--qdrant-url` is set; otherwise `{"enabled": false}`). |
 
@@ -78,7 +78,7 @@ available grouping key is the receipt **verb** (`verb.object.state.vN`, e.g.
   reachable from anywhere untrusted.
 - **No secrets exposed.** The dashboard surfaces costs, message counts, tool
   names, and receipt metadata. Journal *message contents* are returned by
-  `/api/sessions/:id/journal`; treat the endpoint accordingly.
+  `/api/sessions/{id}/journal`; treat the endpoint accordingly.
 
 ## Implementation notes
 

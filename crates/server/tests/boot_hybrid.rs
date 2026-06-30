@@ -15,8 +15,10 @@
 mod support;
 
 use ardur_server::MemoryBackend;
+use serial_test::serial;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn boot_with_hybrid() {
     if std::env::var("QDRANT_INTEGRATION_TEST").as_deref() != Ok("1") {
         eprintln!(
@@ -26,17 +28,16 @@ async fn boot_with_hybrid() {
         return;
     }
 
-    // A dedicated collection so boot's idempotent `init()` does not collide with
-    // the durable-Qdrant suites. SAFETY: set once, before boot reads it; this is
-    // an integration-test process, not the `#![forbid(unsafe_code)]` library.
-    unsafe { std::env::set_var("QDRANT_COLLECTION", "ardur_boot_hybrid") };
-
     let qdrant_url =
         std::env::var("QDRANT_URL").unwrap_or_else(|_| "http://localhost:6334".to_string());
     let dir = tempfile::tempdir().expect("tempdir");
     let config = ardur_server::Config {
         memory_backend: MemoryBackend::Hybrid,
         qdrant_url: Some(qdrant_url),
+        // A dedicated collection so boot's idempotent `init()` does not collide
+        // with the durable-Qdrant suites. Set directly on Config rather than by
+        // mutating process-global `QDRANT_COLLECTION`.
+        qdrant_collection: Some("ardur_boot_hybrid".to_string()),
         ..support::test_config(&dir, None)
     };
 

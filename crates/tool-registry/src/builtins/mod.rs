@@ -24,10 +24,12 @@
 
 mod files;
 mod http;
+mod media;
 mod shell;
 
 pub use files::{ListDirTool, ReadFileTool, WriteFileTool};
 pub use http::HttpFetchTool;
+pub use media::{ImageAnalyzeTool, ImageGenerateTool, SttTool, TtsTool, VoiceNoteTool};
 pub use shell::ShellTool;
 
 use std::path::PathBuf;
@@ -58,6 +60,10 @@ pub struct BuiltinOpts {
     /// with `enable` set registers it; `None` (or `enable: false`) installs no
     /// HTTP tool.
     pub http: Option<HttpFetchOpts>,
+    /// Register media tools (STT, TTS, voice note, image generation, image
+    /// analysis). All are stub implementations returning mock data until full
+    /// integrations are wired.
+    pub enable_media: bool,
 }
 
 /// How [`ToolRegistry::register_builtins`] should configure the §6.2
@@ -138,6 +144,14 @@ impl ToolRegistry {
                     .with_redirect_limit(http.redirect_limit);
                 self.register(Box::new(tool))?;
             }
+        }
+
+        if opts.enable_media {
+            self.register(Box::new(SttTool::new()))?;
+            self.register(Box::new(TtsTool::new()))?;
+            self.register(Box::new(VoiceNoteTool::new()))?;
+            self.register(Box::new(ImageGenerateTool::new()))?;
+            self.register(Box::new(ImageAnalyzeTool::new()))?;
         }
 
         Ok(())

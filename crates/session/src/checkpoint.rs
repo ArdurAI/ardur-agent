@@ -75,7 +75,10 @@ impl CheckpointManager {
             .ok_or_else(|| crate::error::SessionError::CheckpointNotFound(id.clone()))
     }
 
-    pub fn list_for_session(&self, session_id: &SessionId) -> crate::error::Result<Vec<Checkpoint>> {
+    pub fn list_for_session(
+        &self,
+        session_id: &SessionId,
+    ) -> crate::error::Result<Vec<Checkpoint>> {
         let checkpoints = self.checkpoints.read().map_err(|_| {
             crate::error::SessionError::Io(std::io::Error::new(
                 std::io::ErrorKind::Other,
@@ -113,9 +116,15 @@ mod tests {
     #[test]
     fn test_manager_list_for_session() {
         let manager = CheckpointManager::new();
-        manager.create(Checkpoint::new("s1".to_string(), "CP1", 5, 50)).unwrap();
-        manager.create(Checkpoint::new("s1".to_string(), "CP2", 10, 100)).unwrap();
-        manager.create(Checkpoint::new("s2".to_string(), "CP3", 3, 30)).unwrap();
+        manager
+            .create(Checkpoint::new("s1".to_string(), "CP1", 5, 50))
+            .unwrap();
+        manager
+            .create(Checkpoint::new("s1".to_string(), "CP2", 10, 100))
+            .unwrap();
+        manager
+            .create(Checkpoint::new("s2".to_string(), "CP3", 3, 30))
+            .unwrap();
 
         let s1_cps = manager.list_for_session(&"s1".to_string()).unwrap();
         assert_eq!(s1_cps.len(), 2);

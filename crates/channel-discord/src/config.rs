@@ -103,7 +103,7 @@ impl DiscordConfig {
         let allowed_channel_ids = parse_allowed_channels(get(ENV_ALLOWED_CHANNELS).as_deref())?;
 
         Ok(Self {
-            bot_token: SecretString::new(bot_token),
+            bot_token: SecretString::from(bot_token),
             application_id,
             intents: DEFAULT_INTENTS,
             allowed_channel_ids,
@@ -155,7 +155,7 @@ impl DiscordConfigBuilder {
             return Err(DiscordError::MissingField("application_id".to_owned()));
         }
         Ok(DiscordConfig {
-            bot_token: SecretString::new(self.bot_token),
+            bot_token: SecretString::from(self.bot_token),
             application_id: self.application_id,
             intents: self.intents,
             allowed_channel_ids: self.allowed_channel_ids,

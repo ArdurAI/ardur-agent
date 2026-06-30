@@ -157,6 +157,96 @@
 }
 
 /* ---------------------------------------------------------------------------
+   Prose for rendered Markdown pages (posts). Tailwind's Preflight strips the
+   default heading/list styling, so restore a minimal, theme-aware set here.
+   --------------------------------------------------------------------------- */
+.doc-prose {
+  color: var(--text-muted);
+  line-height: 1.7;
+}
+.doc-prose > * + * {
+  margin-top: 1.1rem;
+}
+.doc-prose h2 {
+  margin-top: 2.4rem;
+  font-size: 1.5rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+.doc-prose h3 {
+  margin-top: 1.8rem;
+  font-size: 1.15rem;
+  font-weight: 600;
+  color: var(--text);
+}
+.doc-prose a {
+  color: var(--accent-cyan);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.doc-prose a:hover {
+  filter: brightness(1.15);
+}
+.doc-prose strong {
+  color: var(--text);
+  font-weight: 600;
+}
+.doc-prose ul,
+.doc-prose ol {
+  padding-left: 1.4rem;
+}
+.doc-prose ul {
+  list-style: disc;
+}
+.doc-prose ol {
+  list-style: decimal;
+}
+.doc-prose li + li {
+  margin-top: 0.4rem;
+}
+.doc-prose code {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 0.35rem;
+  padding: 0.1rem 0.35rem;
+  font-size: 0.875em;
+  color: var(--accent-cyan);
+}
+.doc-prose pre {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  padding: 1rem 1.1rem;
+  overflow-x: auto;
+}
+.doc-prose pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--text-muted);
+}
+.doc-prose blockquote {
+  border-left: 3px solid var(--accent-violet);
+  padding-left: 1rem;
+  color: var(--text-faint);
+}
+.doc-prose table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+.doc-prose th,
+.doc-prose td {
+  border: 1px solid var(--border);
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+}
+.doc-prose th {
+  color: var(--text);
+}
+
+/* ---------------------------------------------------------------------------
    Aurora hero background — CSS only, slow drift.
    --------------------------------------------------------------------------- */
 .aurora {

@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc, Datelike, Timelike};
+use chrono::{DateTime, Datelike, Timelike, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -15,17 +15,23 @@ pub enum JobStatus {
     Cancelled,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CronExpression {
-    pub minute: String,    // 0-59 or *
-    pub hour: String,       // 0-23 or *
+    pub minute: String,       // 0-59 or *
+    pub hour: String,         // 0-23 or *
     pub day_of_month: String, // 1-31 or *
-    pub month: String,      // 1-12 or *
-    pub day_of_week: String, // 0-7 or *
+    pub month: String,        // 1-12 or *
+    pub day_of_week: String,  // 0-7 or *
 }
 
 impl CronExpression {
-    pub fn new(minute: &str, hour: &str, day_of_month: &str, month: &str, day_of_week: &str) -> Self {
+    pub fn new(
+        minute: &str,
+        hour: &str,
+        day_of_month: &str,
+        month: &str,
+        day_of_week: &str,
+    ) -> Self {
         Self {
             minute: minute.to_string(),
             hour: hour.to_string(),
@@ -72,9 +78,9 @@ impl CronExpression {
             }
         }
         if field.contains(',') {
-            return field.split(',').any(|p| {
-                p.trim().parse::<i32>().map(|v| v == value).unwrap_or(false)
-            });
+            return field
+                .split(',')
+                .any(|p| p.trim().parse::<i32>().map(|v| v == value).unwrap_or(false));
         }
         false
     }

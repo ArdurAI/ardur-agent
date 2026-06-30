@@ -52,6 +52,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+use std::fmt;
 use std::time::Duration;
 
 use ardur_provider_runtime::{
@@ -94,15 +95,23 @@ pub struct OpenRouterConfig {
     request_timeout: Duration,
 }
 
-impl std::fmt::Debug for OpenRouterConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for OpenRouterConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("OpenRouterConfig")
-            .field("api_key", &"***")
+            .field("api_key", &redacted_present(&self.api_key))
             .field("base_url", &self.base_url)
             .field("referer", &self.referer)
             .field("title", &self.title)
             .field("request_timeout", &self.request_timeout)
             .finish()
+    }
+}
+
+fn redacted_present(value: &str) -> &'static str {
+    if value.is_empty() {
+        "<unset>"
+    } else {
+        "<redacted>"
     }
 }
 
@@ -231,6 +240,9 @@ impl OpenRouterProvider {
         if self.config.api_key.is_empty() {
             return error_stream(ProviderError::Unauthorized);
         }
+        if let Err(err) = validate_base_url(&self.config.base_url) {
+            return error_stream(err);
+        }
 
         let body = build_stream_request_body(&req);
         let send = self
@@ -262,6 +274,29 @@ impl OpenRouterProvider {
     }
 }
 
+fn validate_base_url(base_url: &str) -> Result<(), ProviderError> {
+    let parsed = reqwest::Url::parse(base_url).map_err(|e| {
+        ProviderError::InvalidRequest(format!("OpenRouter base URL is not a valid URL: {e}"))
+    })?;
+    match parsed.scheme() {
+        "https" => Ok(()),
+        "http" if is_loopback_host(&parsed) => Ok(()),
+        "http" => Err(ProviderError::InvalidRequest(
+            "OpenRouter base URL must use https unless it points at localhost/loopback".to_string(),
+        )),
+        other => Err(ProviderError::InvalidRequest(format!(
+            "OpenRouter base URL must use https or loopback http, got scheme {other:?}"
+        ))),
+    }
+}
+
+fn is_loopback_host(url: &reqwest::Url) -> bool {
+    matches!(
+        url.host_str(),
+        Some("localhost") | Some("127.0.0.1") | Some("::1") | Some("[::1]")
+    )
+}
+
 /// A terminal one-item stream carrying a connect-time error, boxed so it shares
 /// the concrete return type of [`OpenRouterProvider::stream_chat`]'s success
 /// path.
@@ -277,6 +312,7 @@ impl Provider for OpenRouterProvider {
         if self.config.api_key.is_empty() {
             return Err(ProviderError::Unauthorized);
         }
+        validate_base_url(&self.config.base_url)?;
 
         let body = build_request_body(&req);
 
@@ -329,6 +365,7 @@ impl Provider for OpenRouterProvider {
         if self.config.api_key.is_empty() {
             return Err(ProviderError::Unauthorized);
         }
+        validate_base_url(&self.config.base_url)?;
 
         let body = build_stream_request_body(&req);
         let resp = self
@@ -656,7 +693,7 @@ impl ChatCompletion {
                 let usage = Usage {
                     tokens_in: u.prompt_tokens,
                     tokens_out: u.completion_tokens,
-                    cost_cents: Some(dollars_to_cents(u.cost)),
+                    cost_cents: None,
                 };
                 (usage, dollars_to_cents(u.cost))
             }
@@ -698,6 +735,9 @@ fn map_finish_reason(reason: Option<&str>, tool_calls: Vec<ToolCall>) -> FinishR
 
 /// Convert an optional dollar cost into whole US cents, rounding to the nearest
 /// cent. A missing cost (the field OpenRouter omits on some upstreams) is `0`.
+///
+/// ARD-295: This is the non-streaming path. The streaming path preserves
+/// exact cost via `Usage::cost_cents` in the final usage chunk.
 fn dollars_to_cents(cost: Option<f64>) -> u64 {
     match cost {
         Some(dollars) if dollars.is_finite() && dollars > 0.0 => (dollars * 100.0).round() as u64,
@@ -847,7 +887,7 @@ mod tests {
                 assert_eq!(calls[0].name, "echo");
                 assert_eq!(calls[0].arguments, serde_json::json!({"msg": "hi"}));
             }
-            other => panic!("expected ToolUse, got {other:?}"),
+            other => unreachable!("expected ToolUse, got {other:?}"),
         }
     }
 
@@ -910,6 +950,30 @@ mod tests {
     }
 
     #[test]
+    fn response_parsing_preserves_exact_cost_no_rounding_error() {
+        // ARD-295: Verify exact cost preservation for edge cases.
+        let raw = serde_json::json!({
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "cost": 0.005}
+        });
+        let parsed: ChatCompletion = serde_json::from_value(raw.clone()).unwrap();
+        let resp = parsed.into_completion(raw);
+        assert_eq!(resp.cost.cents, 1); // 0.005 USD → 0.5¢ → rounds to 1¢
+    }
+
+    #[test]
+    fn response_parsing_zero_cost_bills_zero() {
+        // ARD-295: Zero cost should result in zero cents.
+        let raw = serde_json::json!({
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "cost": 0.0}
+        });
+        let parsed: ChatCompletion = serde_json::from_value(raw.clone()).unwrap();
+        let resp = parsed.into_completion(raw);
+        assert_eq!(resp.cost.cents, 0);
+    }
+
+    #[test]
     fn response_without_usage_bills_zero() {
         let raw = serde_json::json!({
             "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]
@@ -945,6 +1009,33 @@ mod tests {
             cfg.completions_url(),
             "http://localhost:1234/api/v1/chat/completions"
         );
+    }
+
+    #[test]
+    fn debug_redacts_api_key() {
+        let cfg = OpenRouterConfig::new("DUMMY_KEY_FOR_TESTING_ONLY");
+        let rendered = format!("{cfg:?}");
+        assert!(
+            !rendered.contains("DUMMY_KEY_FOR_TESTING_ONLY"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("<redacted>"), "{rendered}");
+    }
+
+    #[test]
+    fn base_url_policy_requires_https_or_loopback_http() {
+        assert!(validate_base_url("https://openrouter.ai/api/v1").is_ok());
+        assert!(validate_base_url("http://localhost:8000/api/v1").is_ok());
+        assert!(validate_base_url("http://127.0.0.1:8000/api/v1").is_ok());
+        assert!(validate_base_url("http://[::1]:8000/api/v1").is_ok());
+        assert!(matches!(
+            validate_base_url("http://example.com/api/v1"),
+            Err(ProviderError::InvalidRequest(_))
+        ));
+        assert!(matches!(
+            validate_base_url("ftp://example.com/api/v1"),
+            Err(ProviderError::InvalidRequest(_))
+        ));
     }
 
     #[test]

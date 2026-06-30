@@ -19,12 +19,15 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod auth;
 mod error;
 mod runtime;
 mod types;
 
+pub use auth::{MEMORY_READ_CAPABILITY, MEMORY_WRITE_CAPABILITY, MemoryAction, MemoryControlPlane};
 pub use error::{MemoryError, Result};
 pub use runtime::{InMemoryMemoryRuntime, MemoryRuntime};
 pub use types::{
-    HolderId, InvalidationReason, MemoryRecord, ReceiptId, RecordId, RecordKind, UnixTsMillis,
+    HolderId, InvalidationReason, MemoryCard, MemoryRecord, ReceiptId, RecordId, RecordKind,
+    UnixTsMillis,
 };

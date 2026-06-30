@@ -19,6 +19,9 @@ pub fn phase1_help() -> String {
         "  /theme <name>    switch theme live (dawn · night · terminal)",
         "  /cost            show this session's running cost",
         "  /budget          show the remaining session budget",
+        "  /memory list [--json]  list scoped memory cards",
+        "  /memory show <id>      show memory provenance and payload",
+        "  /memory forget <id>    append a receipt-linked tombstone",
         "  /quit, /exit     leave the chat",
         "Type anything else to send it as a chat message.",
     ]

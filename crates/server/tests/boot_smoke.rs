@@ -4,6 +4,11 @@
 
 mod support;
 
+use std::sync::Arc;
+
+use ardur_provider_runtime::{AnthropicProvider, ModelId, Provider};
+use ardur_server::{AppState, example_registry};
+
 #[tokio::test]
 async fn boots_and_lays_down_the_state_dir() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -45,4 +50,23 @@ async fn second_boot_reuses_persisted_keys() {
     let reread = std::fs::read_to_string(dir.path().join("keys/issuer.key")).expect("read key");
 
     assert_eq!(issuer_key, reread, "the issuer key is stable across boots");
+}
+
+#[tokio::test]
+async fn configured_missing_cedar_policy_fails_boot() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut config = support::test_config(&dir, None);
+    config.cedar_policy_path = Some(dir.path().join("missing-policy.cedar"));
+
+    let provider: Arc<dyn Provider> =
+        Arc::new(AnthropicProvider::stub(ModelId::new(&config.model)));
+    let tools = Arc::new(example_registry("stub", "in-memory"));
+    let err = match AppState::boot(&config, provider, tools) {
+        Ok(_) => panic!("missing policy unexpectedly booted"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string().contains("does not exist"),
+        "error names missing policy path: {err}"
+    );
 }

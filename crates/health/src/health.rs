@@ -62,23 +62,19 @@ impl HealthMonitor {
     }
 
     pub fn record(&self, check: HealthCheck) -> crate::error::Result<()> {
-        let mut checks = self.checks.write().map_err(|_| {
-            crate::error::HealthError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "poisoned lock",
-            ))
-        })?;
+        let mut checks = self
+            .checks
+            .write()
+            .map_err(|_| crate::error::HealthError::Io(std::io::Error::other("poisoned lock")))?;
         checks.insert(check.name.clone(), check);
         Ok(())
     }
 
     pub fn get(&self, name: &str) -> crate::error::Result<HealthCheck> {
-        let checks = self.checks.read().map_err(|_| {
-            crate::error::HealthError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "poisoned lock",
-            ))
-        })?;
+        let checks = self
+            .checks
+            .read()
+            .map_err(|_| crate::error::HealthError::Io(std::io::Error::other("poisoned lock")))?;
         checks
             .get(name)
             .cloned()
@@ -86,12 +82,10 @@ impl HealthMonitor {
     }
 
     pub fn overall(&self) -> crate::error::Result<HealthStatus> {
-        let checks = self.checks.read().map_err(|_| {
-            crate::error::HealthError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "poisoned lock",
-            ))
-        })?;
+        let checks = self
+            .checks
+            .read()
+            .map_err(|_| crate::error::HealthError::Io(std::io::Error::other("poisoned lock")))?;
         if checks.is_empty() {
             return Ok(HealthStatus::Unknown);
         }
@@ -111,12 +105,10 @@ impl HealthMonitor {
     }
 
     pub fn list(&self) -> crate::error::Result<Vec<HealthCheck>> {
-        let checks = self.checks.read().map_err(|_| {
-            crate::error::HealthError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "poisoned lock",
-            ))
-        })?;
+        let checks = self
+            .checks
+            .read()
+            .map_err(|_| crate::error::HealthError::Io(std::io::Error::other("poisoned lock")))?;
         Ok(checks.values().cloned().collect())
     }
 }
@@ -127,8 +119,7 @@ mod tests {
 
     #[test]
     fn test_health_check_creation() {
-        let check = HealthCheck::new("db", HealthStatus::Healthy)
-            .with_message("connected");
+        let check = HealthCheck::new("db", HealthStatus::Healthy).with_message("connected");
         assert_eq!(check.name, "db");
         assert_eq!(check.status, HealthStatus::Healthy);
         assert_eq!(check.message, "connected");
@@ -137,31 +128,45 @@ mod tests {
     #[test]
     fn test_monitor_overall_healthy() {
         let monitor = HealthMonitor::new();
-        monitor.record(HealthCheck::new("a", HealthStatus::Healthy)).unwrap();
-        monitor.record(HealthCheck::new("b", HealthStatus::Healthy)).unwrap();
+        monitor
+            .record(HealthCheck::new("a", HealthStatus::Healthy))
+            .unwrap();
+        monitor
+            .record(HealthCheck::new("b", HealthStatus::Healthy))
+            .unwrap();
         assert_eq!(monitor.overall().unwrap(), HealthStatus::Healthy);
     }
 
     #[test]
     fn test_monitor_overall_degraded() {
         let monitor = HealthMonitor::new();
-        monitor.record(HealthCheck::new("a", HealthStatus::Healthy)).unwrap();
-        monitor.record(HealthCheck::new("b", HealthStatus::Degraded)).unwrap();
+        monitor
+            .record(HealthCheck::new("a", HealthStatus::Healthy))
+            .unwrap();
+        monitor
+            .record(HealthCheck::new("b", HealthStatus::Degraded))
+            .unwrap();
         assert_eq!(monitor.overall().unwrap(), HealthStatus::Degraded);
     }
 
     #[test]
     fn test_monitor_overall_unhealthy() {
         let monitor = HealthMonitor::new();
-        monitor.record(HealthCheck::new("a", HealthStatus::Healthy)).unwrap();
-        monitor.record(HealthCheck::new("b", HealthStatus::Unhealthy)).unwrap();
+        monitor
+            .record(HealthCheck::new("a", HealthStatus::Healthy))
+            .unwrap();
+        monitor
+            .record(HealthCheck::new("b", HealthStatus::Unhealthy))
+            .unwrap();
         assert_eq!(monitor.overall().unwrap(), HealthStatus::Unhealthy);
     }
 
     #[test]
     fn test_monitor_get() {
         let monitor = HealthMonitor::new();
-        monitor.record(HealthCheck::new("db", HealthStatus::Healthy)).unwrap();
+        monitor
+            .record(HealthCheck::new("db", HealthStatus::Healthy))
+            .unwrap();
         let check = monitor.get("db").unwrap();
         assert_eq!(check.name, "db");
     }

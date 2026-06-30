@@ -11,6 +11,7 @@
 //! [`data_dir`]: Config::data_dir
 //! [`slack_base_url`]: Config::slack_base_url
 
+use std::fmt;
 use std::path::PathBuf;
 
 use ardur_provider_selector::{ProviderKind, SELECTOR_ENV};
@@ -41,7 +42,7 @@ pub enum MemoryBackend {
 }
 
 /// The fully-resolved server configuration.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Config {
     /// Anthropic API key (`ANTHROPIC_API_KEY`). Required only when the Anthropic
     /// backend is selected (the `ARDUR_PROVIDER` default); empty otherwise. The
@@ -58,8 +59,20 @@ pub struct Config {
     /// Root of persistent state (`ARDUR_DATA_DIR`, default `./data`): the
     /// `memory/`, `journals/`, `receipts/`, and `keys/` subdirectories.
     pub data_dir: PathBuf,
-    /// Address the HTTP listener binds (`ARDUR_BIND_ADDR`, default `0.0.0.0:3000`).
+    /// Address the HTTP listener binds (`ARDUR_BIND_ADDR`, default `127.0.0.1:3000`).
     pub bind_addr: String,
+    /// Bearer-token allowlist required for `POST /chat`
+    /// (`ARDUR_CHAT_BEARER_TOKENS`, comma-separated). When empty, `/chat`
+    /// denies every request with `401` instead of processing the body.
+    pub chat_bearer_tokens: Vec<String>,
+    /// Bearer-token allowlist required for the runtime-inspection admin API
+    /// (`ARDUR_ADMIN_BEARER_TOKENS`, comma-separated). When empty, admin routes
+    /// deny every request with `401` (fail-closed).
+    pub admin_bearer_tokens: Vec<String>,
+    /// Explicit development escape hatch for the embedded permissive Cedar policy
+    /// (`ARDUR_DEV_PERMISSIVE_POLICY=true`). Production boots without a configured
+    /// policy use a deny-all policy, and a configured-but-missing path is an error.
+    pub dev_permissive_policy: bool,
     /// Default model id (`ARDUR_MODEL`, default `claude-opus-4-8`).
     pub model: String,
     /// The per-process cost budget in cents (`ARDUR_COST_BUDGET_CENTS`, default
@@ -67,8 +80,8 @@ pub struct Config {
     /// per-process rather than per-session under the Phase-2 cost-gate API.
     pub cost_budget_cents: u64,
     /// Optional path to a Cedar policy file (`ARDUR_CEDAR_POLICY_PATH`). When
-    /// unset (or the file is absent) the built-in permissive-but-bounded policy
-    /// is used.
+    /// set, the path must exist and compile. When unset, production uses a
+    /// deny-all policy unless `ARDUR_DEV_PERMISSIVE_POLICY=true` is explicitly set.
     pub cedar_policy_path: Option<PathBuf>,
     /// Override for the Slack Web-API base URL — `None` in production (the
     /// adapter's default), `Some(mock.uri())` in tests.
@@ -98,10 +111,6 @@ pub struct Config {
     /// (`ARDUR_MCP_BEARER_TOKENS`, comma-separated). Required when
     /// [`mcp_enabled`](Self::mcp_enabled) is set; empty otherwise.
     pub mcp_bearer_tokens: Vec<String>,
-    /// The bearer-token allowlist gating the POST /chat endpoint
-    /// (`ARDUR_CHAT_BEARER_TOKENS`, comma-separated). When empty, the endpoint
-    /// is unauthenticated (not recommended for production).
-    pub chat_bearer_tokens: Vec<String>,
     /// URL path prefix the MCP routes mount under (`ARDUR_MCP_PATH_PREFIX`,
     /// default `/mcp`). The per-server endpoint is `<prefix>/{server_name}`.
     pub mcp_path_prefix: String,
@@ -119,18 +128,98 @@ pub struct Config {
     pub memory_backend: MemoryBackend,
     /// The Qdrant endpoint (`QDRANT_URL`) — required only when the Qdrant memory
     /// backend is selected, mirroring how [`anthropic_api_key`] gates the
-    /// Anthropic provider. The full Qdrant config (collection, dim, api key) is
-    /// read by `ardur-memory-qdrant`'s own `from_env`; this field exists so the
-    /// missing-URL failure surfaces at config time rather than at first use.
+    /// Anthropic provider. The rest of the Qdrant config defaults through
+    /// `ardur-memory-qdrant`, but URL is lifted here so a missing required
+    /// endpoint surfaces at config time rather than at first use.
     ///
     /// [`anthropic_api_key`]: Config::anthropic_api_key
     pub qdrant_url: Option<String>,
+    /// Optional Qdrant collection override (`QDRANT_COLLECTION`). Tests can set
+    /// this field directly instead of mutating process-global environment.
+    pub qdrant_collection: Option<String>,
 }
 
 /// A required environment variable was unset or empty.
 #[derive(Debug, thiserror::Error)]
 #[error("required environment variable `{0}` is unset or empty")]
 pub struct MissingEnvVar(pub String);
+
+/// A configuration error: either a missing required variable or an invalid
+/// value for one that was present. Returned by [`Config::from_env`].
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {
+    /// A required environment variable was unset or empty.
+    #[error(transparent)]
+    Missing(#[from] MissingEnvVar),
+    /// A present environment variable had a value that could not be parsed
+    /// or was semantically invalid.
+    #[error("invalid value for environment variable `{var}`: {reason}")]
+    Invalid {
+        /// The environment variable name.
+        var: &'static str,
+        /// Why the value is invalid.
+        reason: String,
+    },
+}
+
+impl fmt::Debug for Config {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Config")
+            .field(
+                "anthropic_api_key",
+                &redacted_present(&self.anthropic_api_key),
+            )
+            .field("slack_bot_token", &redacted_present(&self.slack_bot_token))
+            .field(
+                "slack_signing_secret",
+                &redacted_present(&self.slack_signing_secret),
+            )
+            .field("slack_app_id", &self.slack_app_id)
+            .field("data_dir", &self.data_dir)
+            .field("bind_addr", &self.bind_addr)
+            .field(
+                "chat_bearer_tokens",
+                &redacted_count(self.chat_bearer_tokens.len()),
+            )
+            .field(
+                "admin_bearer_tokens",
+                &redacted_count(self.admin_bearer_tokens.len()),
+            )
+            .field("dev_permissive_policy", &self.dev_permissive_policy)
+            .field("model", &self.model)
+            .field("cost_budget_cents", &self.cost_budget_cents)
+            .field("cedar_policy_path", &self.cedar_policy_path)
+            .field("slack_base_url", &self.slack_base_url)
+            .field("channel_matrix", &self.channel_matrix)
+            .field("channel_discord", &self.channel_discord)
+            .field("channel_telegram", &self.channel_telegram)
+            .field("log_format", &self.log_format)
+            .field("mcp_enabled", &self.mcp_enabled)
+            .field(
+                "mcp_bearer_tokens",
+                &redacted_count(self.mcp_bearer_tokens.len()),
+            )
+            .field("mcp_path_prefix", &self.mcp_path_prefix)
+            .field("mcp_remote_servers", &self.mcp_remote_servers)
+            .field("skills_dirs", &self.skills_dirs)
+            .field("memory_backend", &self.memory_backend)
+            .field("qdrant_url", &self.qdrant_url)
+            .field("qdrant_collection", &self.qdrant_collection)
+            .finish()
+    }
+}
+
+fn redacted_present(value: &str) -> &'static str {
+    if value.is_empty() {
+        "<unset>"
+    } else {
+        "<redacted>"
+    }
+}
+
+fn redacted_count(count: usize) -> String {
+    format!("<redacted:{count}>")
+}
 
 impl Config {
     /// Read the configuration from the process environment.
@@ -153,7 +242,7 @@ impl Config {
     /// empty (`SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`, `SLACK_APP_ID`,
     /// `ANTHROPIC_API_KEY` when the Anthropic backend is selected, and
     /// `QDRANT_URL` when the Qdrant memory backend is selected).
-    pub fn from_env() -> Result<Self, MissingEnvVar> {
+    pub fn from_env() -> Result<Self, ConfigError> {
         // The Anthropic key gates only the Anthropic backend; under any other
         // selection it is optional (empty when unset).
         let anthropic_selected = matches!(
@@ -171,7 +260,9 @@ impl Config {
         let mcp_enabled = optional("ARDUR_MCP_ENABLED").as_deref() == Some("true");
         let mcp_bearer_tokens = parse_csv(optional("ARDUR_MCP_BEARER_TOKENS").as_deref());
         if mcp_enabled && mcp_bearer_tokens.is_empty() {
-            return Err(MissingEnvVar("ARDUR_MCP_BEARER_TOKENS".to_string()));
+            return Err(ConfigError::Missing(MissingEnvVar(
+                "ARDUR_MCP_BEARER_TOKENS".to_string(),
+            )));
         }
 
         // The memory backend selector. `QDRANT_URL` is required when either
@@ -179,11 +270,7 @@ impl Config {
         // (durable + dense/sparse recall, §7.0c) — the same conditional shape as
         // the Anthropic key above. Under the default `in_memory` backend it is
         // optional (and ignored).
-        let memory_backend = match optional("ARDUR_MEMORY").as_deref() {
-            Some("qdrant") => MemoryBackend::Qdrant,
-            Some("hybrid") => MemoryBackend::Hybrid,
-            _ => MemoryBackend::InMemory,
-        };
+        let memory_backend = parse_memory_backend(optional("ARDUR_MEMORY").as_deref())?;
         let qdrant_url = if matches!(
             memory_backend,
             MemoryBackend::Qdrant | MemoryBackend::Hybrid
@@ -229,22 +316,38 @@ impl Config {
             data_dir: optional("ARDUR_DATA_DIR")
                 .map_or_else(|| PathBuf::from("./data"), PathBuf::from),
             bind_addr: optional("ARDUR_BIND_ADDR").unwrap_or_else(|| "127.0.0.1:3000".to_string()),
+            chat_bearer_tokens: parse_csv(optional("ARDUR_CHAT_BEARER_TOKENS").as_deref()),
+            admin_bearer_tokens: parse_csv(optional("ARDUR_ADMIN_BEARER_TOKENS").as_deref()),
+            dev_permissive_policy: optional("ARDUR_DEV_PERMISSIVE_POLICY")
+                .as_deref()
+                .is_some_and(is_truthy),
             model: optional("ARDUR_MODEL").unwrap_or_else(|| "claude-opus-4-8".to_string()),
-            cost_budget_cents: optional("ARDUR_COST_BUDGET_CENTS")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(10_000),
+            cost_budget_cents: {
+                match optional("ARDUR_COST_BUDGET_CENTS") {
+                    None => 10_000,
+                    Some(raw) => raw.parse::<u64>().map_err(|e| ConfigError::Invalid {
+                        var: "ARDUR_COST_BUDGET_CENTS",
+                        reason: format!("`{raw}` is not a valid u64: {e}"),
+                    })?,
+                }
+            },
             cedar_policy_path: optional("ARDUR_CEDAR_POLICY_PATH").map(PathBuf::from),
             slack_base_url: None,
             channel_matrix,
             channel_discord,
             channel_telegram,
             log_format: match optional("ARDUR_LOG_FORMAT").as_deref() {
+                None | Some("") | Some("text") => LogFormat::Text,
                 Some("json") => LogFormat::Json,
-                _ => LogFormat::Text,
+                Some(other) => {
+                    return Err(ConfigError::Invalid {
+                        var: "ARDUR_LOG_FORMAT",
+                        reason: format!("unrecognized value `{other}` (expected: text, json)"),
+                    });
+                }
             },
             mcp_enabled,
             mcp_bearer_tokens,
-            chat_bearer_tokens: parse_csv(optional("ARDUR_CHAT_BEARER_TOKENS").as_deref()),
             mcp_path_prefix: optional("ARDUR_MCP_PATH_PREFIX")
                 .unwrap_or_else(|| "/mcp".to_string()),
             mcp_remote_servers: parse_remote_servers(
@@ -256,6 +359,7 @@ impl Config {
                 .collect(),
             memory_backend,
             qdrant_url,
+            qdrant_collection: optional("QDRANT_COLLECTION"),
         })
     }
 }
@@ -286,6 +390,18 @@ fn parse_remote_servers(value: Option<&str>) -> Vec<(String, String)> {
         .collect()
 }
 
+fn parse_memory_backend(value: Option<&str>) -> Result<MemoryBackend, ConfigError> {
+    match value {
+        None | Some("") | Some("in_memory") => Ok(MemoryBackend::InMemory),
+        Some("qdrant") => Ok(MemoryBackend::Qdrant),
+        Some("hybrid") => Ok(MemoryBackend::Hybrid),
+        Some(other) => Err(ConfigError::Invalid {
+            var: "ARDUR_MEMORY",
+            reason: format!("unrecognized value `{other}` (expected: in_memory, qdrant, hybrid)"),
+        }),
+    }
+}
+
 /// Whether a string is a truthy flag value: `true`/`1`/`yes`/`on`
 /// (case-insensitive). Anything else (including unset) is false.
 fn is_truthy(raw: &str) -> bool {
@@ -306,4 +422,17 @@ fn require(key: &str) -> Result<String, MissingEnvVar> {
 /// Read an optional env var, treating an empty value as unset.
 fn optional(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MemoryBackend, parse_memory_backend};
+
+    #[test]
+    fn parses_explicit_in_memory_literal() {
+        assert_eq!(
+            parse_memory_backend(Some("in_memory")).expect("in_memory parses"),
+            MemoryBackend::InMemory
+        );
+    }
 }

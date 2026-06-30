@@ -51,6 +51,7 @@ ardur-tool-registry = { workspace = true }
 async-trait = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
+tracing = { workspace = true }
 # Non-poisoning interior mutability for the receipt-chain tail.
 parking_lot = { workspace = true }
 serde = { workspace = true }

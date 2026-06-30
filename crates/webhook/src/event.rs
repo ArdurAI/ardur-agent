@@ -19,7 +19,11 @@ pub struct WebhookEvent {
 
 impl WebhookEvent {
     /// Create a new event with the current timestamp and a fresh UUIDv7.
-    pub fn new(event_type: EventType, source: impl Into<String>, payload: serde_json::Value) -> Self {
+    pub fn new(
+        event_type: EventType,
+        source: impl Into<String>,
+        payload: serde_json::Value,
+    ) -> Self {
         Self {
             id: Uuid::now_v7(),
             timestamp: Utc::now(),
@@ -34,11 +38,18 @@ impl WebhookEvent {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum EventType {
+    /// A git push event.
     Push,
+    /// A pull request event.
     PullRequest,
+    /// An issue event.
     Issue,
+    /// A comment event.
     Comment,
+    /// A deployment event.
     Deploy,
+    /// A build/CI event.
     Build,
+    /// A custom event type outside the built-in categories.
     Custom(String),
 }

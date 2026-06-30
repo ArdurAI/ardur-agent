@@ -92,7 +92,9 @@ mod tests {
     #[test]
     fn test_registry_register_and_get() {
         let registry = HookRegistry::new();
-        registry.register(OpenClawHook::new("h1", "action1")).unwrap();
+        registry
+            .register(OpenClawHook::new("h1", "action1"))
+            .unwrap();
         let hook = registry.get("h1").unwrap();
         assert_eq!(hook.action, "action1");
     }

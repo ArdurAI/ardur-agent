@@ -15,14 +15,18 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+/// Error types for webhook operations.
 pub mod error;
+/// Normalized webhook event types and variants.
 pub mod event;
 mod inbound;
+/// Outbound webhook delivery client and configuration.
 pub mod outbound;
+/// Webhook signature computation and verification.
 pub mod signature;
 
-pub use error::{WebhookError, Result};
-pub use event::{WebhookEvent, EventType};
-pub use inbound::{receive_webhook, WebhookConfig, InboundWebhookHandler, InboundState};
+pub use error::{Result, WebhookError};
+pub use event::{EventType, WebhookEvent};
+pub use inbound::{InboundState, InboundWebhookHandler, WebhookConfig, receive_webhook};
 pub use outbound::{OutboundWebhookClient, OutboundWebhookConfig};
-pub use signature::{verify_signature, sign_body};
+pub use signature::{sign_body, verify_signature};

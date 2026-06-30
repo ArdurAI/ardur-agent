@@ -131,7 +131,10 @@ impl Gateway {
         Ok(channels.values().cloned().collect())
     }
 
-    pub fn list_channels_by_status(&self, status: ChannelStatus) -> crate::error::Result<Vec<Channel>> {
+    pub fn list_channels_by_status(
+        &self,
+        status: ChannelStatus,
+    ) -> crate::error::Result<Vec<Channel>> {
         let channels = self.channels.read().map_err(|_| {
             crate::error::GatewayError::Io(std::io::Error::new(
                 std::io::ErrorKind::Other,
@@ -221,7 +224,9 @@ mod tests {
         gateway.add_channel(ch1).unwrap();
         gateway.add_channel(ch2).unwrap();
 
-        let connected = gateway.list_channels_by_status(ChannelStatus::Connected).unwrap();
+        let connected = gateway
+            .list_channels_by_status(ChannelStatus::Connected)
+            .unwrap();
         assert_eq!(connected.len(), 1);
         assert_eq!(connected[0].name, "ch1");
     }
@@ -239,7 +244,14 @@ mod tests {
     fn test_gateway_message_count() {
         let gateway = Gateway::new(GatewayConfig::default());
         assert_eq!(gateway.message_count().unwrap(), 0);
-        gateway.send_message(Message::new("ch-1", "user1", "Hello", crate::message::MessageType::Text)).unwrap();
+        gateway
+            .send_message(Message::new(
+                "ch-1",
+                "user1",
+                "Hello",
+                crate::message::MessageType::Text,
+            ))
+            .unwrap();
         assert_eq!(gateway.message_count().unwrap(), 1);
     }
 }

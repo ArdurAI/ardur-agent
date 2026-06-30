@@ -29,7 +29,7 @@ use ardur_lifecycle_hooks::{
     ErrorCtx, HookError, HookRegistry, LifecyclePhase, PostReceiptCtx, PreSubmitCtx,
     PreSubmitOutcome, RevokeCtx,
 };
-use ardur_memory::MemoryRuntime;
+use ardur_memory::{HolderId as MemoryHolderId, MemoryCard, MemoryControlPlane, MemoryRuntime};
 use ardur_provider_runtime::{
     CompletionRequest, CompletionResponse, FinishReason, ModelId, Provider, ProviderError,
     StreamEvent, ToolDef, Usage,
@@ -42,7 +42,7 @@ use ardur_runtime::{
     RuntimeError, SessionId, SubmitRequest, SubmitResult, ToolCall,
 };
 use ardur_session_journals::{JournalEntry, SessionJournal};
-use ardur_tool_registry::{InvocationId, ToolContext, ToolError, ToolId, ToolRegistry};
+use ardur_tool_registry::{Capability, InvocationId, ToolContext, ToolError, ToolId, ToolRegistry};
 use parking_lot::Mutex;
 
 use crate::receipts::{PersistedReceipt, load_persisted_chain};
@@ -149,6 +149,33 @@ impl FusedRuntime {
         ardur_cost_gate::BudgetStore::current_balance(&self.budget, holder)
             .await
             .ok()
+    }
+
+    /// Verify `cap_token` for an operator/control-plane capability under this
+    /// runtime's issuer root, audience, deny-list, clock, and cost units.
+    ///
+    /// This lets surfaces such as the CLI memory explorer reuse the exact
+    /// cap-token verification substrate instead of manufacturing claims locally.
+    ///
+    /// # Errors
+    /// Returns [`RuntimeError`] when the token is missing, expired, revoked,
+    /// malformed, or does not grant `tool`.
+    pub fn verify_cap_token_for_tool(
+        &self,
+        cap_token: &CapTokenRef,
+        tool: &str,
+    ) -> Result<VerifiedClaims, RuntimeError> {
+        self.stage_cap_token_for_tool(
+            &SubmitRequest {
+                messages: Vec::new(),
+                cap_token: cap_token.clone(),
+                session_id: SessionId::new(),
+                requested_provider: None,
+            },
+            &PerRequestProvisioning::default(),
+            self.clock.now_ms() / 1000,
+            tool,
+        )
     }
 
     /// Revoke a capability token mid-session: add its revocation ids to the
@@ -342,6 +369,16 @@ impl FusedRuntime {
         provisioning: &PerRequestProvisioning,
         now_unix: u64,
     ) -> Result<VerifiedClaims, RuntimeError> {
+        self.stage_cap_token_for_tool(req, provisioning, now_unix, &self.tool)
+    }
+
+    fn stage_cap_token_for_tool(
+        &self,
+        req: &SubmitRequest,
+        provisioning: &PerRequestProvisioning,
+        now_unix: u64,
+        tool: &str,
+    ) -> Result<VerifiedClaims, RuntimeError> {
         if req.cap_token.0.is_empty() {
             return Err(RuntimeError::CapTokenMissing);
         }
@@ -361,7 +398,7 @@ impl FusedRuntime {
                 &RequiredCaveats {
                     now_unix,
                     audience,
-                    tool: self.tool.clone(),
+                    tool: tool.to_string(),
                     cost: self.cost_units,
                 },
             )
@@ -382,12 +419,21 @@ impl FusedRuntime {
         session_id: SessionId,
         claims: &VerifiedClaims,
     ) -> Result<(), RuntimeError> {
+        self.stage_cedar_with_action(session_id, claims, self.action.clone())
+    }
+
+    fn stage_cedar_with_action(
+        &self,
+        session_id: SessionId,
+        claims: &VerifiedClaims,
+        action: ActionRef,
+    ) -> Result<(), RuntimeError> {
         let principal = derive_principal(&self.principal_entity_type, claims);
         let resource = derive_resource(session_id);
         let attributes = cedar_attributes_from_claims(&self.cedar_attributes, claims);
         match self.policies.evaluate(&EvaluationContext {
             principal,
-            action: self.action.clone(),
+            action,
             resource,
             attributes,
         }) {
@@ -397,6 +443,52 @@ impl FusedRuntime {
                 reason: format!("indeterminate: {reason}"),
             }),
         }
+    }
+
+    fn authorize_tool_invocation(
+        &self,
+        req: &SubmitRequest,
+        provisioning: &PerRequestProvisioning,
+        session_id: SessionId,
+        now_unix: u64,
+        tool_name: &str,
+    ) -> Result<(), RuntimeError> {
+        let claims = self.stage_cap_token_for_tool(req, provisioning, now_unix, tool_name)?;
+        self.stage_cedar_with_action(
+            session_id,
+            &claims,
+            ActionRef("Action::ToolInvoke".to_string()),
+        )
+    }
+
+    /// **ARD-420.** Check the tool's declared [`Capability`]s against the
+    /// verified cap-token claims before `invoke` runs. Each required capability
+    /// (as a `cap.*` string via [`Capability::as_str`]) must appear in the
+    /// cap-token's `tool_allowlist`; otherwise the call is denied with
+    /// [`RuntimeError::CapDenied`] before the tool body executes.
+    fn authorize_tool_capabilities(
+        &self,
+        req: &SubmitRequest,
+        provisioning: &PerRequestProvisioning,
+        now_unix: u64,
+        tool_name: &str,
+        required: &[Capability],
+    ) -> Result<(), RuntimeError> {
+        if required.is_empty() {
+            return Ok(());
+        }
+        let claims = self.stage_cap_token_for_tool(req, provisioning, now_unix, tool_name)?;
+        for cap in required {
+            let label = cap.as_str();
+            if !claims.tool_allowlist.iter().any(|t| t == &label) {
+                return Err(RuntimeError::CapDenied {
+                    reason: format!(
+                        "tool `{tool_name}` requires capability `{label}` which is not granted by the cap-token"
+                    ),
+                });
+            }
+        }
+        Ok(())
     }
 
     /// **Stage 3 (setup).** Resolve the budget holder (the verified subject
@@ -454,6 +546,141 @@ impl FusedRuntime {
                 reason,
             }),
         }
+    }
+
+    /// Recall memories for the verified cap-token subject and inject them as a
+    /// system context block before provider dispatch.
+    ///
+    /// This runs only after cap-token verification and Cedar authorization have
+    /// succeeded, so memory reads inherit the same security gate as the turn. The
+    /// search itself is subject-scoped; a backend bug that returns another
+    /// workspace's record is filtered by the memory runtime before this formatter
+    /// can see it.
+    fn inject_recalled_memories(
+        &self,
+        mut request: CompletionRequest,
+        claims: &VerifiedClaims,
+    ) -> Result<CompletionRequest, RuntimeError> {
+        let Some(memory) = &self.memory else {
+            return Ok(request);
+        };
+        let Some(query) = request
+            .messages
+            .iter()
+            .rev()
+            .find(|m| matches!(m.role, Role::User))
+            .map(|m| m.content.as_str())
+        else {
+            return Ok(request);
+        };
+        if query.trim().is_empty() {
+            return Ok(request);
+        }
+        let subject = MemoryHolderId(claims.subject.0.clone());
+        let hits = memory
+            .search_scoped(&subject, query, 5)
+            .map_err(|e| RuntimeError::Internal(anyhow::anyhow!("memory recall failed: {e}")))?;
+        if hits.is_empty() {
+            return Ok(request);
+        }
+
+        let mut block = format!(
+            "Relevant memories (scoped to verified subject {}):\n",
+            claims.subject.0
+        );
+        for rec in hits {
+            let card = MemoryCard::from_record(&rec);
+            let receipt = card
+                .receipt_id
+                .map(|r| r.0.to_string())
+                .unwrap_or_else(|| "unreceipted".to_string());
+            let source = card.source.unwrap_or_else(|| "unknown".to_string());
+            let scope = card.scope.unwrap_or_else(|| card.subject.0.clone());
+            let confidence = card
+                .confidence
+                .map(|c| format!("{c:.2}"))
+                .unwrap_or_else(|| "unknown".to_string());
+            block.push_str(&format!(
+                "- id={} source={} scope={} confidence={} receipt={} valid_from={}: {}\n",
+                card.record_id,
+                source,
+                scope,
+                confidence,
+                receipt,
+                card.valid_from.0,
+                memory_payload_text(&card.payload)
+            ));
+        }
+        request.messages.insert(0, ChatMessage::system(block));
+        Ok(request)
+    }
+
+    async fn commit_receipt_and_journal(
+        &self,
+        _session_id: SessionId,
+        iteration: u32,
+        req: &SubmitRequest,
+        response: &CompletionResponse,
+        signed: &ardur_receipt::SignedReceipt,
+        now_ms: u64,
+    ) -> Result<ReceiptBody, RuntimeError> {
+        let receipt = signed.body().clone();
+        let journal_start_len = match &self.journal {
+            Some(journal) => Some(journal.len().await.map_err(|e| {
+                RuntimeError::Internal(anyhow::anyhow!(
+                    "journal length read failed before receipt commit: {e}"
+                ))
+            })?),
+            None => None,
+        };
+
+        if let Some(journal) = &self.journal {
+            if iteration == 1 {
+                if let Some(prompt) = last_user_message(&req.messages) {
+                    if let Err(e) = journal
+                        .append(JournalEntry::UserMessage {
+                            content: prompt.to_string(),
+                            at: now_ms,
+                        })
+                        .await
+                    {
+                        return Err(RuntimeError::Internal(anyhow::anyhow!(
+                            "journal user append failed before receipt commit: {e}"
+                        )));
+                    }
+                }
+            }
+            if let Err(e) = journal
+                .append(JournalEntry::AssistantMessage {
+                    content: response.content.clone(),
+                    at: now_ms,
+                    receipt_id: ReceiptId(receipt.receipt_id),
+                })
+                .await
+            {
+                if let Some(start_len) = journal_start_len {
+                    let _ = journal.truncate(start_len).await;
+                }
+                return Err(RuntimeError::Internal(anyhow::anyhow!(
+                    "journal assistant append failed before receipt commit: {e}"
+                )));
+            }
+        }
+
+        if let Err(e) = self.persist_receipt(signed.jws_compact()) {
+            if let (Some(journal), Some(start_len)) = (&self.journal, journal_start_len) {
+                if let Err(rollback_err) = journal.truncate(start_len).await {
+                    return Err(RuntimeError::Internal(anyhow::anyhow!(
+                        "receipt persist failed after journal append: {e}; journal rollback failed: {rollback_err}"
+                    )));
+                }
+            }
+            return Err(RuntimeError::Internal(anyhow::anyhow!(
+                "receipt persist failed after journal append: {e}"
+            )));
+        }
+        *self.chain_tail.lock() = Some(Sha256Digest::of(signed.jws_compact().as_bytes()));
+        Ok(receipt)
     }
 
     /// Append a signed receipt's compact JWS to the durable receipt log
@@ -752,6 +979,14 @@ impl FusedRuntime {
             Ok(request) => request,
             Err(err) => return Err(err),
         };
+        let initial = match self.inject_recalled_memories(initial, &claims) {
+            Ok(request) => request,
+            Err(err) => {
+                self.fire_error(session_id, LifecyclePhase::MemoryWrite, &err)
+                    .await;
+                return Err(err);
+            }
+        };
 
         // The working transcript the loop grows with each tool round trip, plus
         // the request knobs (a hook may have rewritten temperature / stops) that
@@ -856,26 +1091,33 @@ impl FusedRuntime {
                             .await;
                         return Err(err);
                     };
-                    let ctx = self.tool_context(&req.cap_token, session_id);
-
-                    // Check tool capabilities before invoking (ARD-290 fix)
-                    let tool_caps = tool.required_capabilities();
-                    if !tool_caps.is_empty() {
-                        // The tool requires specific capabilities - verify the cap-token grants them
-                        // For now, we check against the claims' tool_allowlist as a proxy
-                        // A proper fix would add capability grants to the cap-token
-                        let tool_name = call.name.clone();
-                        if !claims.tool_allowlist.is_empty() && !claims.tool_allowlist.contains(&tool_name) {
-                            self.release(reservation).await;
-                            let err = RuntimeError::PolicyDenied {
-                                reason: format!("tool `{tool_name}` not in cap-token allowlist"),
-                            };
-                            self.fire_error(session_id, LifecyclePhase::Provider, &err)
-                                .await;
-                            return Err(err);
-                        }
+                    if let Err(err) = self.authorize_tool_invocation(
+                        &req,
+                        &provisioning,
+                        session_id,
+                        now_unix,
+                        &call.name,
+                    ) {
+                        self.release(reservation).await;
+                        self.fire_error(session_id, LifecyclePhase::Submit, &err)
+                            .await;
+                        return Err(err);
                     }
-
+                    // ARD-420: enforce required_capabilities() against the
+                    // cap-token's tool allowlist before the tool body runs.
+                    if let Err(err) = self.authorize_tool_capabilities(
+                        &req,
+                        &provisioning,
+                        now_unix,
+                        &call.name,
+                        tool.required_capabilities(),
+                    ) {
+                        self.release(reservation).await;
+                        self.fire_error(session_id, LifecyclePhase::Submit, &err)
+                            .await;
+                        return Err(err);
+                    }
+                    let ctx = self.tool_context(&req.cap_token, session_id);
                     let output = match tokio::time::timeout(
                         self.tool_timeout,
                         tool.invoke(&ctx, call.arguments.clone()),
@@ -971,27 +1213,29 @@ impl FusedRuntime {
                     )));
                 }
             };
-            let receipt = signed.body().clone();
-
-            // 6. persist the receipt before advancing chain tail.
-            if let Err(e) = self.persist_receipt(signed.jws_compact()) {
-                self.fire_error(session_id, LifecyclePhase::Receipt, &e)
-                    .await;
-                return Err(RuntimeError::Internal(anyhow::anyhow!(
-                    "receipt persistence failed: {e}"
-                )));
-            }
-            *self.chain_tail.lock() = Some(Sha256Digest::of(signed.jws_compact().as_bytes()));
+            let receipt = match self
+                .commit_receipt_and_journal(session_id, iteration, &req, &response, &signed, now_ms)
+                .await
+            {
+                Ok(receipt) => receipt,
+                Err(err) => {
+                    self.release(reservation).await;
+                    self.fire_error(session_id, LifecyclePhase::Receipt, &err)
+                        .await;
+                    return Err(err);
+                }
+            };
 
             // 7. post-receipt hooks (observational; the call already happened).
             let post_ctx = PostReceiptCtx {
                 session_id,
+                signed_receipt: &signed,
                 receipt: &receipt,
                 response: &response,
                 cost: combined_cost,
             };
             for err in self.registry.run_post_receipt(&post_ctx).await {
-                let _ = err;
+                tracing::warn!(error = %err, "post-receipt hook error (non-fatal)");
             }
 
             // 8. cost-gate finalize: settle this iteration against the combined
@@ -1000,52 +1244,79 @@ impl FusedRuntime {
             match self.gate.finalize(reservation, actual).await {
                 Ok(_) => {}
                 Err(e) => {
-                    self.fire_error(session_id, LifecyclePhase::Receipt, &e)
+                    let err = map_admission_error(e);
+                    self.fire_error(session_id, LifecyclePhase::CostGate, &err)
                         .await;
-                    return Err(RuntimeError::Internal(anyhow::anyhow!(
-                        "cost-gate finalization failed: {e}"
-                    )));
+                    return Err(err);
                 }
             }
 
-            // 9. memory: record this round as a bi-temporal fact. Non-fatal.
+            // 9. memory: record this round as a bi-temporal fact. Non-fatal, but
+            //    we RE-VERIFY the cap token specifically for `memory.write` to
+            //    prevent attenuation bypass — the turn-level `claims` only proved
+            //    `chat.submit`; a holder who attenuated away `memory.write` must
+            //    not get a memory side-effect.
             if let Some(memory) = &self.memory {
-                let record = turn_record(&claims.subject.0, &response, &receipt, now_ms);
-                if let Err(mem_err) = memory.record(record) {
-                    self.fire_error(session_id, LifecyclePhase::MemoryWrite, &mem_err)
-                        .await;
-                }
-            }
-
-            // 10. session-journal: append the original user prompt once (on the
-            //     first iteration) and this round's assistant message. Non-fatal.
-            if let Some(journal) = &self.journal {
-                if iteration == 1 {
-                    if let Some(prompt) = last_user_message(&req.messages) {
-                        if let Err(e) = journal
-                            .append(JournalEntry::UserMessage {
-                                content: prompt.to_string(),
-                                at: now_ms,
-                            })
-                            .await
-                        {
-                            self.fire_error(session_id, LifecyclePhase::JournalAppend, &e)
+                let audience = provisioning
+                    .audience
+                    .clone()
+                    .unwrap_or_else(|| self.audience.clone());
+                let memory_write_claims = CapToken::from_base64(&req.cap_token.0, &self.cap_root)
+                    .and_then(|token| {
+                        self.verifier.verify(
+                            &token,
+                            &self.cap_root,
+                            &RequiredCaveats {
+                                now_unix,
+                                audience,
+                                tool: ardur_memory::MEMORY_WRITE_CAPABILITY.to_string(),
+                                cost: self.cost_units,
+                            },
+                        )
+                    });
+                match memory_write_claims {
+                    Ok(mem_claims) => {
+                        let record =
+                            turn_record(&mem_claims.subject.0, &response, &receipt, now_ms);
+                        let plane = MemoryControlPlane::new(memory.as_ref(), self.policies.clone());
+                        if let Err(mem_err) = plane.record(&mem_claims, record) {
+                            self.fire_error(session_id, LifecyclePhase::MemoryWrite, &mem_err)
                                 .await;
                         }
                     }
-                }
-                if let Err(e) = journal
-                    .append(JournalEntry::AssistantMessage {
-                        content: response.content.clone(),
-                        at: now_ms,
-                        receipt_id: ReceiptId(receipt.receipt_id),
-                    })
-                    .await
-                {
-                    self.fire_error(session_id, LifecyclePhase::JournalAppend, &e)
-                        .await;
+                    Err(CapTokenError::ToolNotAllowed) => {
+                        // Token does not grant memory.write (attenuated or never
+                        // issued). Skip the memory side-effect silently — this is
+                        // the intended behaviour for write-less tokens.
+                    }
+                    Err(CapTokenError::Expired) => {
+                        let err = RuntimeError::CapTokenExpired;
+                        tracing::warn!(
+                            session_id = ?session_id,
+                            error = %err,
+                            "memory.write cap-token re-verification failed"
+                        );
+                        self.fire_error(session_id, LifecyclePhase::MemoryWrite, &err)
+                            .await;
+                    }
+                    Err(other) => {
+                        let err = RuntimeError::CapDenied {
+                            reason: other.to_string(),
+                        };
+                        tracing::warn!(
+                            session_id = ?session_id,
+                            error = %err,
+                            "memory.write cap-token re-verification failed"
+                        );
+                        self.fire_error(session_id, LifecyclePhase::MemoryWrite, &err)
+                            .await;
+                    }
                 }
             }
+
+            // 10. session-journal + receipt were committed atomically before
+            //     post-receipt hooks/finalize/memory, so no separate journal append
+            //     runs here.
 
             total_cost = add_cost(total_cost, &combined_cost);
 
@@ -1180,6 +1451,14 @@ impl FusedRuntime {
             let initial = match self.stage_pre_submit(&req, tool_defs.clone()).await {
                 Ok(request) => request,
                 Err(err) => {
+                    Err(err)?;
+                    unreachable!()
+                }
+            };
+            let initial = match self.inject_recalled_memories(initial, &claims) {
+                Ok(request) => request,
+                Err(err) => {
+                    self.fire_error(session_id, LifecyclePhase::MemoryWrite, &err).await;
                     Err(err)?;
                     unreachable!()
                 }
@@ -1336,24 +1615,35 @@ impl FusedRuntime {
                             Err(err)?;
                             unreachable!()
                         };
-                        let ctx = self.tool_context(&req.cap_token, session_id);
-
-                        // Check tool capabilities before invoking (ARD-290 fix)
-                        let tool_caps = tool.required_capabilities();
-                        if !tool_caps.is_empty() {
-                            let tool_name = call.name.clone();
-                            if !claims.tool_allowlist.is_empty() && !claims.tool_allowlist.contains(&tool_name) {
-                                self.release(reservation.take().expect("reservation held")).await;
-                                let err = RuntimeError::PolicyDenied {
-                                    reason: format!("tool `{tool_name}` not in cap-token allowlist"),
-                                };
-                                yield FusedEvent::StageEnd { stage: StageKind::ToolExec, ok: false };
-                                self.fire_error(session_id, LifecyclePhase::Provider, &err).await;
-                                Err(err)?;
-                                unreachable!()
-                            }
+                        if let Err(err) = self.authorize_tool_invocation(
+                            &req,
+                            &provisioning,
+                            session_id,
+                            now_unix,
+                            &call.name,
+                        ) {
+                            self.release(reservation.take().expect("reservation held")).await;
+                            yield FusedEvent::StageEnd { stage: StageKind::ToolExec, ok: false };
+                            self.fire_error(session_id, LifecyclePhase::Submit, &err).await;
+                            Err(err)?;
+                            unreachable!()
                         }
-
+                        // ARD-420: enforce required_capabilities() against the
+                        // cap-token's tool allowlist before the tool body runs.
+                        if let Err(err) = self.authorize_tool_capabilities(
+                            &req,
+                            &provisioning,
+                            now_unix,
+                            &call.name,
+                            tool.required_capabilities(),
+                        ) {
+                            self.release(reservation.take().expect("reservation held")).await;
+                            yield FusedEvent::StageEnd { stage: StageKind::ToolExec, ok: false };
+                            self.fire_error(session_id, LifecyclePhase::Submit, &err).await;
+                            Err(err)?;
+                            unreachable!()
+                        }
+                        let ctx = self.tool_context(&req.cap_token, session_id);
                         let output = match tokio::time::timeout(
                             self.tool_timeout,
                             tool.invoke(&ctx, call.arguments.clone()),
@@ -1456,16 +1746,20 @@ impl FusedRuntime {
                         unreachable!()
                     }
                 };
+                let receipt = match self
+                    .commit_receipt_and_journal(session_id, iteration, &req, &response, &signed, now_ms)
+                    .await
+                {
+                    Ok(receipt) => receipt,
+                    Err(err) => {
+                        self.release(reservation.take().expect("reservation held")).await;
+                        self.fire_error(session_id, LifecyclePhase::Receipt, &err).await;
+                        yield FusedEvent::StageEnd { stage: StageKind::ReceiptMint, ok: false };
+                        Err(err)?;
+                        unreachable!()
+                    }
+                };
                 let chain_hash = Sha256Digest::of(signed.jws_compact().as_bytes());
-                let receipt = signed.body().clone();
-                if let Err(e) = self.persist_receipt(signed.jws_compact()) {
-                    yield FusedEvent::StageEnd { stage: StageKind::ReceiptMint, ok: false };
-                    self.fire_error(session_id, LifecyclePhase::Receipt, &e).await;
-                    Err(RuntimeError::Internal(anyhow::anyhow!(
-                        "receipt persistence failed: {e}"
-                    )))?;
-                }
-                *self.chain_tail.lock() = Some(chain_hash);
                 yield FusedEvent::Receipt {
                     receipt_id: ReceiptId(receipt.receipt_id),
                     chain_hash: format!("{chain_hash}"),
@@ -1475,12 +1769,13 @@ impl FusedRuntime {
                 // 7'. post-receipt hooks (observational).
                 let post_ctx = PostReceiptCtx {
                     session_id,
+                    signed_receipt: &signed,
                     receipt: &receipt,
                     response: &response,
                     cost: combined_cost,
                 };
                 for err in self.registry.run_post_receipt(&post_ctx).await {
-                    let _ = err;
+                    tracing::warn!(error = %err, "post-receipt hook error (non-fatal)");
                 }
 
                 // 8. cost-gate finalize.
@@ -1495,56 +1790,79 @@ impl FusedRuntime {
                         yield FusedEvent::StageEnd { stage: StageKind::CostGateFinalize, ok: true };
                     }
                     Err(e) => {
+                        let err = map_admission_error(e);
+                        self.fire_error(session_id, LifecyclePhase::CostGate, &err).await;
                         yield FusedEvent::StageEnd { stage: StageKind::CostGateFinalize, ok: false };
-                        self.fire_error(session_id, LifecyclePhase::Receipt, &e)
-                            .await;
-                        Err(RuntimeError::Internal(anyhow::anyhow!(
-                            "cost-gate finalization failed: {e}"
-                        )))?;
+                        Err(err)?;
+                        unreachable!()
                     }
                 }
 
-                // 9. memory (only when a backend is configured).
+                // 9. memory (only when a backend is configured). We RE-VERIFY the
+                // cap token specifically for `memory.write` to prevent attenuation
+                // bypass — the turn-level claims only proved `chat.submit`.
+                // The write remains non-fatal; a token that lacks `memory.write`
+                // (attenuated or never issued) silently skips the side-effect.
                 if let Some(memory) = &self.memory {
                     yield FusedEvent::StageStart { stage: StageKind::MemoryRecord };
-                    let record = turn_record(&claims.subject.0, &response, &receipt, now_ms);
-                    if let Err(mem_err) = memory.record(record) {
-                        self.fire_error(session_id, LifecyclePhase::MemoryWrite, &mem_err)
-                            .await;
+                    let audience = provisioning
+                        .audience
+                        .clone()
+                        .unwrap_or_else(|| self.audience.clone());
+                    let memory_write_claims = CapToken::from_base64(&req.cap_token.0, &self.cap_root)
+                        .and_then(|token| {
+                            self.verifier.verify(
+                                &token,
+                                &self.cap_root,
+                                &RequiredCaveats {
+                                    now_unix,
+                                    audience,
+                                    tool: ardur_memory::MEMORY_WRITE_CAPABILITY.to_string(),
+                                    cost: self.cost_units,
+                                },
+                            )
+                        });
+                    match memory_write_claims {
+                        Ok(mem_claims) => {
+                            let record = turn_record(&mem_claims.subject.0, &response, &receipt, now_ms);
+                            let plane = MemoryControlPlane::new(memory.as_ref(), self.policies.clone());
+                            if let Err(mem_err) = plane.record(&mem_claims, record) {
+                                self.fire_error(session_id, LifecyclePhase::MemoryWrite, &mem_err)
+                                    .await;
+                            }
+                        }
+                        Err(CapTokenError::ToolNotAllowed) => {
+                            // Token does not grant memory.write — skip silently.
+                        }
+                        Err(CapTokenError::Expired) => {
+                            let err = RuntimeError::CapTokenExpired;
+                            tracing::warn!(
+                                session_id = ?session_id,
+                                error = %err,
+                                "memory.write cap-token re-verification failed"
+                            );
+                            self.fire_error(session_id, LifecyclePhase::MemoryWrite, &err)
+                                .await;
+                        }
+                        Err(other) => {
+                            let err = RuntimeError::CapDenied {
+                                reason: other.to_string(),
+                            };
+                            tracing::warn!(
+                                session_id = ?session_id,
+                                error = %err,
+                                "memory.write cap-token re-verification failed"
+                            );
+                            self.fire_error(session_id, LifecyclePhase::MemoryWrite, &err)
+                                .await;
+                        }
                     }
                     yield FusedEvent::StageEnd { stage: StageKind::MemoryRecord, ok: true };
                 }
 
-                // 10. session-journal (only when a journal is configured).
-                if let Some(journal) = &self.journal {
-                    yield FusedEvent::StageStart { stage: StageKind::JournalAppend };
-                    if iteration == 1 {
-                        if let Some(prompt) = last_user_message(&req.messages) {
-                            if let Err(e) = journal
-                                .append(JournalEntry::UserMessage {
-                                    content: prompt.to_string(),
-                                    at: now_ms,
-                                })
-                                .await
-                            {
-                                self.fire_error(session_id, LifecyclePhase::JournalAppend, &e)
-                                    .await;
-                            }
-                        }
-                    }
-                    if let Err(e) = journal
-                        .append(JournalEntry::AssistantMessage {
-                            content: response.content.clone(),
-                            at: now_ms,
-                            receipt_id: ReceiptId(receipt.receipt_id),
-                        })
-                        .await
-                    {
-                        self.fire_error(session_id, LifecyclePhase::JournalAppend, &e)
-                            .await;
-                    }
-                    yield FusedEvent::StageEnd { stage: StageKind::JournalAppend, ok: true };
-                }
+                // 10. session-journal + receipt were committed atomically before
+                //     post-receipt hooks/finalize/memory, so no separate journal
+                //     append runs here.
 
                 // Termination: a response with no tool calls settles the turn; a
                 // tool-wanting response at the ceiling aborts; otherwise fold the
@@ -1727,6 +2045,9 @@ fn turn_record(
         serde_json::json!({
             "response": response.content,
             "receipt_id": receipt.receipt_id,
+            "source": "turn",
+            "workspace_id": subject,
+            "confidence": 1.0,
         }),
         now,
         now,
@@ -1735,6 +2056,20 @@ fn turn_record(
     );
     record.source_receipt_id = Some(ardur_memory::ReceiptId(receipt.receipt_id));
     record
+}
+
+/// Render a memory payload into a compact context string.
+fn memory_payload_text(payload: &serde_json::Value) -> String {
+    if let Some(object) = payload.get("object") {
+        return match object {
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+    }
+    match payload {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
 }
 
 /// The most recent user message in a transcript — the prompt journaled for the

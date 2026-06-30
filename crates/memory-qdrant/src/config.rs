@@ -60,18 +60,32 @@ impl QdrantMemoryConfig {
     /// `QDRANT_VECTOR_DIM` is ignored (the default dim is kept).
     #[must_use]
     pub fn from_env() -> Self {
+        Self::from_source(|key| std::env::var(key).ok())
+    }
+
+    /// Resolve the config from an injected environment-variable source.
+    ///
+    /// This is the pure core of [`from_env`](Self::from_env): callers provide a
+    /// getter that returns `Some(value)` for set variables. Empty strings are
+    /// treated as unset, and a malformed `QDRANT_VECTOR_DIM` is ignored. Tests use
+    /// this path so they do not mutate the process-global environment.
+    #[must_use]
+    pub fn from_source<F>(mut get: F) -> Self
+    where
+        F: FnMut(&str) -> Option<String>,
+    {
         let mut cfg = Self::default();
-        if let Some(url) = non_empty("QDRANT_URL") {
+        if let Some(url) = non_empty(get("QDRANT_URL")) {
             cfg.url = url;
         }
-        cfg.api_key = non_empty("QDRANT_API_KEY");
-        if let Some(collection) = non_empty("QDRANT_COLLECTION") {
+        cfg.api_key = non_empty(get("QDRANT_API_KEY"));
+        if let Some(collection) = non_empty(get("QDRANT_COLLECTION")) {
             cfg.collection_name = collection;
         }
-        if let Some(dim) = non_empty("QDRANT_VECTOR_DIM").and_then(|v| v.parse().ok()) {
+        if let Some(dim) = non_empty(get("QDRANT_VECTOR_DIM")).and_then(|v| v.parse().ok()) {
             cfg.vector_dim = dim;
         }
-        cfg.default_embed_model = non_empty("EMBED_MODEL");
+        cfg.default_embed_model = non_empty(get("EMBED_MODEL"));
         cfg
     }
 
@@ -111,9 +125,9 @@ impl QdrantMemoryConfig {
     }
 }
 
-/// Read an environment variable, treating an unset *or* empty value as absent.
-fn non_empty(key: &str) -> Option<String> {
-    std::env::var(key).ok().filter(|v| !v.is_empty())
+/// Treat an unset *or* empty environment value as absent.
+fn non_empty(value: Option<String>) -> Option<String> {
+    value.filter(|v| !v.is_empty())
 }
 
 #[cfg(test)]
@@ -147,8 +161,7 @@ mod tests {
         assert_eq!(cfg.default_embed_model.as_deref(), Some("gte-base-en-v1.5"));
     }
 
-    // `from_env`'s defaults-then-overrides behaviour is exercised in
-    // `tests/config_env.rs`: setting env vars is `unsafe` under edition 2024,
-    // which this crate's `#![forbid(unsafe_code)]` rejects inside the library, so
-    // the env-mutating test lives in a separate integration-test crate.
+    // `from_env`'s defaults-then-overrides behaviour is exercised via the pure
+    // `from_source` core in `tests/config_env.rs`, keeping tests hermetic without
+    // mutating process-global environment variables.
 }

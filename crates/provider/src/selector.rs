@@ -37,52 +37,77 @@ impl ProviderSelector {
         self
     }
 
-    pub fn select(&self, providers: &[crate::provider::Provider]) -> crate::error::Result<crate::provider::Provider> {
+    pub fn select(
+        &self,
+        providers: &[crate::provider::Provider],
+    ) -> crate::error::Result<crate::provider::Provider> {
         match self.strategy {
             SelectionStrategy::Fixed => {
                 if providers.is_empty() {
-                    return Err(crate::error::ProviderError::NotAvailable("No providers available".to_string()));
+                    return Err(crate::error::ProviderError::NotAvailable(
+                        "No providers available".to_string(),
+                    ));
                 }
                 Ok(providers[0].clone())
             }
             SelectionStrategy::RoundRobin => {
                 if providers.is_empty() {
-                    return Err(crate::error::ProviderError::NotAvailable("No providers available".to_string()));
+                    return Err(crate::error::ProviderError::NotAvailable(
+                        "No providers available".to_string(),
+                    ));
                 }
-                let idx = self.current_index.fetch_add(1, std::sync::atomic::Ordering::SeqCst) % providers.len();
+                let idx = self
+                    .current_index
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                    % providers.len();
                 Ok(providers[idx].clone())
             }
-            SelectionStrategy::LowestCost => {
-                providers.iter()
-                    .min_by(|a, b| {
-                        let a_cost = a.models.iter().map(|m| m.cost_per_1k_input).fold(f64::INFINITY, f64::min);
-                        let b_cost = b.models.iter().map(|m| m.cost_per_1k_input).fold(f64::INFINITY, f64::min);
-                        a_cost.partial_cmp(&b_cost).unwrap()
-                    })
-                    .cloned()
-                    .ok_or_else(|| crate::error::ProviderError::NotAvailable("No providers available".to_string()))
-            }
-            SelectionStrategy::HighestAvailability => {
-                providers.iter()
-                    .filter(|p| p.status == crate::provider::ProviderStatus::Available)
-                    .next()
-                    .cloned()
-                    .ok_or_else(|| crate::error::ProviderError::NotAvailable("No available providers".to_string()))
-            }
+            SelectionStrategy::LowestCost => providers
+                .iter()
+                .min_by(|a, b| {
+                    let a_cost = a
+                        .models
+                        .iter()
+                        .map(|m| m.cost_per_1k_input)
+                        .fold(f64::INFINITY, f64::min);
+                    let b_cost = b
+                        .models
+                        .iter()
+                        .map(|m| m.cost_per_1k_input)
+                        .fold(f64::INFINITY, f64::min);
+                    a_cost.partial_cmp(&b_cost).unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .cloned()
+                .ok_or_else(|| {
+                    crate::error::ProviderError::NotAvailable("No providers available".to_string())
+                }),
+            SelectionStrategy::HighestAvailability => providers
+                .iter()
+                .filter(|p| p.status == crate::provider::ProviderStatus::Available)
+                .next()
+                .cloned()
+                .ok_or_else(|| {
+                    crate::error::ProviderError::NotAvailable("No available providers".to_string())
+                }),
             SelectionStrategy::Fallback => {
                 for name in &self.fallback_chain {
-                    if let Some(provider) = providers.iter().find(|p| &p.name == name && p.status == crate::provider::ProviderStatus::Available) {
+                    if let Some(provider) = providers.iter().find(|p| {
+                        &p.name == name && p.status == crate::provider::ProviderStatus::Available
+                    }) {
                         return Ok(provider.clone());
                     }
                 }
-                Err(crate::error::ProviderError::NotAvailable("All providers in fallback chain unavailable".to_string()))
+                Err(crate::error::ProviderError::NotAvailable(
+                    "All providers in fallback chain unavailable".to_string(),
+                ))
             }
-            SelectionStrategy::Fastest => {
-                providers.iter()
-                    .min_by(|a, b| a.usage_count.cmp(&b.usage_count))
-                    .cloned()
-                    .ok_or_else(|| crate::error::ProviderError::NotAvailable("No providers available".to_string()))
-            }
+            SelectionStrategy::Fastest => providers
+                .iter()
+                .min_by(|a, b| a.usage_count.cmp(&b.usage_count))
+                .cloned()
+                .ok_or_else(|| {
+                    crate::error::ProviderError::NotAvailable("No providers available".to_string())
+                }),
         }
     }
 }

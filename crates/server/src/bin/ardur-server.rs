@@ -130,7 +130,9 @@ async fn main() -> anyhow::Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("server error: {e}"))?;
 
-    // Graceful shutdown: fsync + close the durable journal before exit.
+    // Graceful shutdown: signal the worker, then fsync + close the durable
+    // journal before exit.
+    state.shutdown();
     if let Err(e) = state.journal().close().await {
         tracing::warn!(error = %e, "journal close failed during shutdown");
     }
@@ -159,17 +161,21 @@ fn init_tracing() {
 /// can finish in-flight requests and exit cleanly.
 async fn shutdown_signal() {
     let ctrl_c = async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl-C handler");
+        if let Err(e) = tokio::signal::ctrl_c().await {
+            tracing::warn!(error = %e, "failed to install Ctrl-C handler");
+        }
     };
 
     #[cfg(unix)]
     let terminate = async {
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("failed to install SIGTERM handler")
-            .recv()
-            .await;
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut sig) => {
+                sig.recv().await;
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to install SIGTERM handler");
+            }
+        }
     };
     #[cfg(not(unix))]
     let terminate = std::future::pending::<()>();

@@ -23,4 +23,5 @@ pub enum WebhookError {
     Internal(String),
 }
 
+/// Convenience type alias for webhook operations.
 pub type Result<T> = std::result::Result<T, WebhookError>;

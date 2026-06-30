@@ -504,7 +504,7 @@ impl MessagesResponse {
         let usage = Usage {
             tokens_in: self.usage.input_tokens,
             tokens_out: self.usage.output_tokens,
-        
+
             ..Default::default()
         };
 

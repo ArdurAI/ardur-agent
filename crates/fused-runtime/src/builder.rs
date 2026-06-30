@@ -34,7 +34,7 @@ use ardur_session_journals::SessionJournal;
 use ardur_tool_registry::ToolRegistry;
 use parking_lot::Mutex;
 
-use crate::receipts::{ReceiptChainError, load_persisted_chain};
+use crate::receipts::{ReceiptChainError, load_persisted_chain, verify_persisted_chain};
 use crate::reconcile::{ReconciliationError, ReconciliationReport, ReconciliationStrategy};
 use crate::runtime::{COMPLETION_VERB, FusedRuntime};
 use crate::shared::{SharedBudget, SharedDenyList};
@@ -373,9 +373,13 @@ impl FusedRuntimeBuilder {
         // Seed the chain tail from the persisted log, if any, so a restart
         // continues the chain rather than starting a fresh genesis.
         let chain_tail = match &self.receipt_log {
-            Some(path) => load_persisted_chain(path)?
-                .last()
-                .map(|r| ardur_receipt::Sha256Digest::of(r.jws_compact.as_bytes())),
+            Some(path) => {
+                let chain = load_persisted_chain(path)?;
+                verify_persisted_chain(&chain)?;
+                chain
+                    .last()
+                    .map(|r| ardur_receipt::Sha256Digest::of(r.jws_compact.as_bytes()))
+            }
             None => None,
         };
 

@@ -25,6 +25,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use regex::Regex;
 use serde::Deserialize;
 use serde_json::json;
 use tokio::process::Command;
@@ -38,6 +39,44 @@ use crate::tool::{Tool, ToolContext, ToolId, ToolOutput, ToolSchema};
 /// Default wall-clock ceiling for a command, in seconds, when the caller does
 /// not supply `timeout_secs`.
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
+
+/// Best-effort patterns for known destructive shell commands. These are blocked
+/// even in `Allowlist::Any` mode as a defence-in-depth measure, but they are
+/// deliberately not described as a sandbox: shell syntax is too broad for a
+/// regex denylist to parse completely, and callers still need a narrow
+/// allowlist plus capability/Cedar enforcement for untrusted prompts.
+static DESTRUCTIVE_PATTERNS: once_cell::sync::Lazy<Vec<Regex>> = once_cell::sync::Lazy::new(|| {
+    vec![
+        // Recursive force-remove, including `-rf`, `-fr`, `-r -f`, and `-f -r`.
+        Regex::new(r"(?i)\brm\b[^;&|\n]*\s-[[:alpha:]]*r[[:alpha:]]*f[[:alpha:]]*\b")
+            .expect("valid destructive pattern regex"),
+        Regex::new(r"(?i)\brm\b[^;&|\n]*\s-[[:alpha:]]*f[[:alpha:]]*r[[:alpha:]]*\b")
+            .expect("valid destructive pattern regex"),
+        Regex::new(r"(?i)\brm\b[^;&|\n]*\s-[[:alpha:]]*r[[:alpha:]]*\b[^;&|\n]*\s-[[:alpha:]]*f[[:alpha:]]*\b")
+            .expect("valid destructive pattern regex"),
+        Regex::new(r"(?i)\brm\b[^;&|\n]*\s-[[:alpha:]]*f[[:alpha:]]*\b[^;&|\n]*\s-[[:alpha:]]*r[[:alpha:]]*\b")
+            .expect("valid destructive pattern regex"),
+        // Pipe any producer into a shell. This catches both curl/wget pipe-to-sh
+        // and less obvious producers such as `base64 -d | sh`.
+        Regex::new(r"(?i)\|\s*(?:ba)?sh\b").expect("valid destructive pattern regex"),
+        // Fork bomb
+        Regex::new(r"(?i):\(\)\s*\{\s*:\|:&\s*\};:").expect("valid destructive pattern regex"),
+        // Recursive chmod/chown on root
+        Regex::new(r"(?i)\bchmod\s+.*-R\s+.*/\b").expect("valid destructive pattern regex"),
+        Regex::new(r"(?i)\bchown\s+.*-R\s+.*/\b").expect("valid destructive pattern regex"),
+        // Disk wipe / filesystem creation. Permit whitespace around `=` because
+        // shell users often add it while experimenting, even though some forms
+        // are not accepted by `dd` itself.
+        Regex::new(r"(?i)\bdd\b[^;&|\n]*\bif\s*=\s*/dev/(?:zero|random|urandom)\b")
+            .expect("valid destructive pattern regex"),
+        Regex::new(r"(?i)\bdd\b[^;&|\n]*\bof\s*=\s*/dev/")
+            .expect("valid destructive pattern regex"),
+        Regex::new(r"(?i)\bmkfs\b").expect("valid destructive pattern regex"),
+        // Shutdown/reboot
+        Regex::new(r"(?i)\b(shutdown|reboot|halt|poweroff)\b")
+            .expect("valid destructive pattern regex"),
+    ]
+});
 
 /// The policy [`ShellTool`] gates each command against.
 enum Allowlist {
@@ -200,6 +239,22 @@ impl Tool for ShellTool {
         if !self.allowlist.permits(&args.command) {
             return Err(ToolError::Denied {
                 reason: format!("command is not on the shell allowlist: `{}`", args.command),
+            });
+        }
+
+        // Defence-in-depth: block known destructive patterns even when the
+        // allowlist would otherwise permit the command. This catches footguns
+        // like `rm -rf /` and `curl | sh` that an allowlist prefix alone
+        // cannot prevent.
+        if DESTRUCTIVE_PATTERNS
+            .iter()
+            .any(|re| re.is_match(&args.command))
+        {
+            return Err(ToolError::Denied {
+                reason: format!(
+                    "command matches a destructive pattern and is blocked: `{}`",
+                    args.command
+                ),
             });
         }
 

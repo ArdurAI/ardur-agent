@@ -7,6 +7,8 @@ the originating Slack channel.
 > **Status: dev fidelity, not production.** Several durability and defence
 > gaps are still open (see [Known gaps](#known-gaps)). Run this in a private
 > Slack channel before exposing it to anyone else.
+> The current implementation inventory lives in
+> [docs/current-status.md](docs/current-status.md).
 
 ## Prerequisites
 
@@ -31,6 +33,7 @@ startup (`using provider provider=<id>`).
 |---|---|---|
 | `anthropic` (default) | Anthropic Messages API | `ANTHROPIC_API_KEY` |
 | `openrouter` | OpenRouter HTTP gateway | `OPENROUTER_API_KEY` |
+| `openai-compat` (alias `openai`) | Generic OpenAI-compatible Chat Completions endpoint | `OPENAI_COMPAT_API_KEY` preferred; `OPENAI_API_KEY` fallback for OpenAI proper; `OPENAI_COMPAT_BASE_URL` default `https://api.openai.com/v1`; `OPENAI_COMPAT_TIMEOUT_SECS` |
 | `ollama` | Ollama local daemon **or** hosted cloud | `OLLAMA_BASE_URL` (default `http://localhost:11434`); `OLLAMA_API_KEY` (cloud only — its presence auto-defaults the base URL to `https://ollama.com`) |
 | `codex` | OpenAI Codex CLI (ChatGPT subscription) | `CODEX_BINARY` (default: `codex` on `PATH`), `CODEX_DEFAULT_MODEL`, `CODEX_SANDBOX_MODE` (`read-only` \| `workspace-write` \| `danger-full-access`), `CODEX_WORKING_DIR` |
 | `claude-cli` (alias `claude-subscription`) | Claude Code CLI (Anthropic subscription) | `CLAUDE_CLI_BINARY` (default: `claude` on `PATH`), `CLAUDE_CLI_DEFAULT_MODEL`, `CLAUDE_CLI_PERMISSION_MODE` (`default` \| `acceptEdits` \| `auto` \| `bypassPermissions` \| `dontAsk` \| `plan`), `CLAUDE_CLI_WORKING_DIR`, `CLAUDE_CLI_ALLOWED_TOOLS`. Run `claude login` once; spends the **Agent SDK Credit pool** ($20–$200/mo, plan-dependent), not unbounded |
@@ -44,6 +47,11 @@ ARDUR_PROVIDER=anthropic ANTHROPIC_API_KEY=sk-ant-... ardur chat
 # OpenRouter
 ARDUR_PROVIDER=openrouter OPENROUTER_API_KEY=sk-or-... ardur chat
 
+# OpenAI-compatible endpoint — defaults to https://api.openai.com/v1
+ARDUR_PROVIDER=openai-compat OPENAI_COMPAT_API_KEY=sk-... ardur chat
+# OpenAI proper can use the standard OpenAI key name as a fallback
+ARDUR_PROVIDER=openai OPENAI_API_KEY=sk-... ardur chat
+
 # Ollama — local daemon (no key)
 ARDUR_PROVIDER=ollama ardur chat
 # Ollama — hosted cloud (a key auto-targets https://ollama.com)
@@ -56,11 +64,72 @@ ARDUR_PROVIDER=codex ardur chat
 ARDUR_PROVIDER=claude-cli ardur chat
 ```
 
-The Anthropic and OpenRouter backends fail at boot if their API key is missing
-(the CLI then falls back to a network-free stub and prints an offline notice;
-the server aborts). The Ollama, Codex, and Claude-CLI backends need no
-credentials to wire — they fail later, per-turn, if the daemon/binary is
-unreachable or the CLI is not logged in.
+The Anthropic, OpenRouter, and OpenAI-compatible backends fail at boot if their
+API key is missing (the CLI then falls back to a network-free stub and prints an
+offline notice; the server aborts). `OPENAI_COMPAT_BASE_URL` must use HTTPS
+unless it targets loopback HTTP for local tests. The Ollama, Codex, and
+Claude-CLI backends need no credentials to wire — they fail later, per-turn, if
+the daemon/binary is unreachable or the CLI is not logged in.
+
+## Observability, health, metrics, and diagnostics
+
+Provider calls are wrapped once at the provider-runtime boundary with
+OpenTelemetry GenAI semantic-convention spans named `provider.send`. Both
+`complete()` and streaming `stream()` calls record:
+
+- `gen_ai.system` (provider id) and `gen_ai.operation.name=chat`
+- `gen_ai.request.model`, `gen_ai.request.temperature`, and
+  `gen_ai.request.max_tokens`
+- `gen_ai.response.model` (actual response model from the provider raw response
+  when present; otherwise the requested model)
+- `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, and the custom
+  `gen_ai.usage.cost_cents`
+- `gen_ai.response.finish_reasons` and `error.type` on failure paths
+
+Enable OTLP export from the CLI or server with:
+
+```sh
+ARDUR_OTEL_ENABLED=true \
+ARDUR_OTEL_ENDPOINT=http://localhost:4317 \
+ARDUR_OTEL_SERVICE_NAME=ardur-dev \
+ardur chat
+```
+
+The server also exposes operational HTTP endpoints:
+
+```sh
+# Readiness with dependency checks (data dir, journal dir, worker)
+curl http://127.0.0.1:3000/health
+
+# Prometheus text exposition. Counts only; token/key values are never emitted.
+curl http://127.0.0.1:3000/metrics
+
+# Redacted runtime inspection. Fails closed when no admin tokens are configured.
+export ARDUR_ADMIN_BEARER_TOKENS='dev-admin-token'
+curl -H 'Authorization: Bearer dev-admin-token' \
+  http://127.0.0.1:3000/admin/runtime
+```
+
+`/admin/runtime` reports cap-token posture (audience, gateway subject, TTL,
+tool-allowlist count), receipt count, cost-gate budget, and enabled surfaces.
+It never returns bearer tokens, Slack/Discord/Telegram credentials, API keys, or
+raw key material. `/metrics` similarly reports only counters/gauges and redacted
+counts such as `ardur_server_admin_bearer_tokens_configured`.
+
+The CLI has matching local diagnostics:
+
+```sh
+ardur config                         # redacted config summary
+ardur config set model claude-opus-4-8
+ardur logs --lines 50                # tails ~/.ardur/logs/ardur.log with secret fields redacted
+ardur debug                          # redacted state-dir snapshot (keys present, receipt count)
+ardur doctor                         # local checks; warns if no key but offline stub is usable
+ardur doctor --require-api-key        # fail if ANTHROPIC_API_KEY is missing
+```
+
+Sensitive keys (`api_key`, `token`, `secret`, `authorization`) are redacted when
+logs are tailed. Debug output reports only presence/counts and never file
+contents.
 
 ## Selecting a memory backend
 
@@ -115,11 +184,58 @@ is meaningless).
 
 `HybridMemoryRetriever` (in `ardur-memory-qdrant`) layers **dense** vector search
 and **sparse** BM25 lexical search over the same store and fuses them with
-reciprocal-rank fusion — see that crate's `README.md`. As of §7.0c the server's
-`ARDUR_MEMORY` seam selects it directly (`ARDUR_MEMORY=hybrid`): it implements the
-same `MemoryRuntime`, additionally overriding `MemoryRuntime::search` with the
-fused recall (the in-process and bare-durable backends return nothing from
-`search`).
+reciprocal-rank fusion — see that crate's `README.md`. As of EPIC-TRUST the
+turn path calls `MemoryRuntime::search_scoped` after cap-token verification and
+Cedar authorization, then injects matching memory cards into the provider
+request. The hybrid backend implements that seam with dense+sparse recall and a
+subject/workspace filter; the in-process backend provides a deterministic
+lexical fallback for local/offline runs.
+
+### CLI memory explorer
+
+Interactive `ardur chat` sessions expose a scoped memory explorer. The commands
+operate only on the verified session holder's memory view and show provenance,
+confidence, validity, TTL, and receipt ids when present:
+
+```text
+/memory list          # list current memory cards for this holder
+/memory list --json   # export cards as JSON
+/memory show <id>     # show one card with full payload/provenance
+/memory forget <id>   # append a receipt-linked tombstone for the card
+```
+
+Writes made by the fused turn path are authorized through `MemoryControlPlane`,
+so the verified cap-token must include `memory.write` before the turn can create
+memory side effects. Successful writes are receipt-chained (`source_receipt_id`
+is set to the turn receipt). `forget` is append-only: the original card remains
+in history, and a tombstone/invalidation row carries the receipt linkage forward.
+Direct `/memory show <id>` only returns live cards; after a successful forget,
+show returns not-found rather than disclosing the historical payload.
+
+Programmatic/operator memory mutations should use `ardur_memory::MemoryControlPlane`
+rather than calling a backend directly. The control plane enforces cap-token
+claims (`memory.read` for list/show, `memory.write` for record/forget), evaluates
+Cedar (`Action::"MemoryList"`, `Action::"MemoryShow"`, `Action::"MemoryRecord"`,
+`Action::"MemoryForget"`), rejects cross-workspace subjects, and rejects memory
+writes that are not linked to a receipt.
+
+Useful memory verification commands:
+
+```sh
+cargo test -p ardur-memory --test authorized_operations
+cargo test -p ardur-cli --test memory_commands
+cargo test -p ardur-fused-runtime --test memory_recall
+cargo test -p ardur-fused-runtime --test receipt_atomic_commit
+
+# Full hybrid retriever tests with real Qdrant and deterministic mock embeddings.
+docker run -p 6333:6333 -p 6334:6334 qdrant/qdrant
+QDRANT_INTEGRATION_TEST=1 QDRANT_URL=http://localhost:6334 \
+  cargo test -p ardur-memory-qdrant --test hybrid_integration
+
+# Full chat → hybrid memory store → Qdrant/BM25 recall → memory display pipeline.
+QDRANT_INTEGRATION_TEST=1 QDRANT_URL=http://localhost:6334 \
+  cargo test -p ardur-e2e-tests --test scenario_hybrid_memory_full_pipeline
+```
 
 ## Slack app setup
 
@@ -160,15 +276,16 @@ enable it with `ARDUR_CHANNEL_MATRIX=true`.
    MATRIX_ACCESS_TOKEN=syt_…
    MATRIX_DEVICE_ID=ARDUR_BOT            # use the device_id from step 2 for E2EE
    MATRIX_STATE_DIR=/var/lib/ardur/matrix-state
-   MATRIX_AUTO_JOIN_INVITES=true
-   MATRIX_ALLOWED_ROOMS=                 # optional: restrict to specific room ids
+   MATRIX_AUTO_JOIN_INVITES=false
+   MATRIX_ALLOWED_ROOMS=!abc:your.hs     # required: comma-separated room allowlist
    ```
    When `ARDUR_CHANNEL_MATRIX=true`, the three `MATRIX_*` credentials are
    required at startup (the boot fails fast if any is missing).
-4. **Opt into rooms.** With `MATRIX_AUTO_JOIN_INVITES=true`, invite the bot to a
-   room and it joins automatically. To restrict it, set `MATRIX_ALLOWED_ROOMS`
-   to a comma-separated list of room ids (`!abc:your.hs,!def:your.hs`); messages
-   from rooms outside the list are dropped. An empty value means all rooms.
+4. **Opt into rooms.** Set `MATRIX_ALLOWED_ROOMS` to a comma-separated list of
+   room ids (`!abc:your.hs,!def:your.hs`) before enabling the channel. The bot
+   ignores all messages outside that allowlist. `MATRIX_AUTO_JOIN_INVITES=false`
+   is the safe default; if you temporarily set it to `true`, auto-join still only
+   joins rooms already present in `MATRIX_ALLOWED_ROOMS`.
 5. **End-to-end encryption.** The adapter is built with E2EE on. For encrypted
    rooms, give the bot a **stable `MATRIX_DEVICE_ID`** and a durable
    `MATRIX_STATE_DIR` (it holds the sqlite crypto store — treat it as a secret),
@@ -259,6 +376,7 @@ docker run -d \
     --restart=unless-stopped \
     -p 3000:3000 \
     -v ardur-data:/var/lib/ardur \
+    -e ARDUR_BIND_ADDR=0.0.0.0:3000 \
     --env-file .env \
     ardur-server:latest
 ```
@@ -267,7 +385,9 @@ docker run -d \
 behind a TLS-terminating proxy — nginx, Caddy, Traefik, or a Cloudflare
 Tunnel — so Slack's signed requests arrive over HTTPS and the signature
 verification basestring includes a real `Host`. The container itself
-listens on plain HTTP at `$ARDUR_BIND_ADDR` (default `0.0.0.0:3000`).
+listens on plain HTTP at `$ARDUR_BIND_ADDR` (default `127.0.0.1:3000`; set
+`ARDUR_BIND_ADDR=0.0.0.0:3000` inside containers behind a private Docker network
+or reverse proxy).
 
 ## Persistent state
 
@@ -302,24 +422,31 @@ ARDUR_MCP_PATH_PREFIX=/mcp                     # default
 
 **Server.** When enabled, the Streamable-HTTP transport mounts at
 `<prefix>/{server_name}` (e.g. `POST /mcp/ardur`), handling the MCP
-`GET`/`POST`/`DELETE` methods. The example deployment exposes two tools:
+`GET`/`POST`/`DELETE` methods. Direct MCP currently exposes only
+capability-free tools because the direct MCP path has bearer auth but does not yet
+derive a fused-runtime cap-token/Cedar context:
 
 | Tool | Purpose |
 |---|---|
 | `echo` | returns its input arguments unchanged (round-trip check) |
 | `health_check` | reports uptime, selected provider, and memory backend |
 
-**Auth.** Every MCP request must carry `Authorization: Bearer <token>` matching
-`ARDUR_MCP_BEARER_TOKENS` (constant-time compare); anything else is `401`. The
-bearer allowlist is the security boundary — the transport's default loopback-only
-DNS-rebinding guard is lifted so remote clients can connect, so **front the
-endpoint with your own TLS/ingress.**
+Capability-bearing tools such as `voice.transcribe` remain available to fused
+runtime turns, where `ToolInvoke` cap-token/Cedar checks and signed tool receipts
+are enforced, but they are filtered out of direct MCP `tools/list` and rejected
+from direct MCP `tools/call` until MCP gets the same scoped invocation context.
+
+**Auth.** Every MCP request must carry `Authorization: Bearer $ARDUR_MCP_TOKEN`
+where the token matches one entry in `ARDUR_MCP_BEARER_TOKENS` (constant-time
+compare); anything else is `401`. The bearer allowlist is the security boundary —
+the transport's default loopback-only DNS-rebinding guard is lifted so remote
+clients can connect, so **front the endpoint with your own TLS/ingress.**
 
 Quick check against a running server:
 
 ```bash
 curl -sS http://localhost:3000/mcp/ardur \
-  -H 'Authorization: Bearer token-one' \
+  -H "Authorization: Bearer ${ARDUR_MCP_TOKEN}" \
   -H 'Content-Type: application/json' \
   -H 'Accept: application/json, text/event-stream' \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"curl","version":"1"}}}'
@@ -340,9 +467,10 @@ final answer (§6.0). Each round runs the full pipeline — cost-gate admission,
 injection-defense scanning of the tool output, and a signed receipt that records
 the calls — so tool use is governed and audited like the rest of a turn.
 
-The tools available in a turn are the local ones (`echo`, `health_check`), any
-filesystem **skills** (see **Skills** below), plus any from
-`ARDUR_MCP_REMOTE_SERVERS`. Two safeguards bound the loop:
+The tools available in a turn are the local ones (`echo`, `health_check`),
+optional `voice.transcribe` (see **Voice transcription** below), any filesystem
+**skills** (see **Skills** below), plus any from `ARDUR_MCP_REMOTE_SERVERS`. Two
+safeguards bound the loop:
 
 ```bash
 ARDUR_TOOL_MAX_ITERATIONS=5    # provider rounds that may request tools (default 5)
@@ -355,10 +483,175 @@ A turn that keeps requesting tools past the iteration ceiling aborts with a
 tool name, or a tool output that trips the injection filter, likewise aborts the
 turn before it can affect the conversation.
 
-Provider support (Phase 1): **anthropic** (Messages API `tool_use`) and
-**openrouter** (OpenAI-compatible `tools`/`tool_calls`). The `codex` and
+Provider support (Phase 1): **anthropic** (Messages API `tool_use`),
+**openrouter** (OpenAI-compatible `tools`/`tool_calls`), and
+**openai-compat** (OpenAI-compatible `tools`/`tool_calls`). The `codex` and
 `claude` CLI providers orchestrate their own tools internally, so the runtime
 loop does not drive tools through them.
+
+## Platform integrations
+
+EPIC-PLATFORM adds dedicated platform crates for browser, terminal, and web
+operations. They are designed to be registered as tools through the same runtime
+path described above, so a model-requested call is admitted only after cap-token
+verification, Cedar `Action::ToolInvoke`, cost-gate admission, injection-defense
+output scanning, and signed runtime receipt creation. The tool implementations
+also carry local fail-closed checks for direct use in tests and offline harnesses:
+an empty cap-token is denied, and a direct `ToolContext` with
+`ARDUR_CEDAR_DECISION=deny` is refused.
+
+### Browser automation (`ardur-browser`)
+
+Tools: `browser.navigate`, `browser.click`, `browser.type`,
+`browser.screenshot`, and `browser.extract`.
+
+- Configure a `BrowserPolicy` with `SiteAction::new("example.com", "click")`
+  style site/action allowlist entries. Empty allowlists deny external sites.
+- `ConfirmationLevel::ExternalConsequences` requires a `confirmed: true`
+  argument for sensitive write actions such as clicking, typing, form-fill, form
+  submit, and downloads. `ConfirmationLevel::EveryAction` requires confirmation
+  for read-only actions too.
+- Every browser action appends a browser-action receipt with `{id, parent_id,
+  action, target, timestamp_ms}` and includes it in `ToolOutput.receipt_data`, so
+  browser actions can be chained into the signed runtime receipt.
+
+### Terminal backends (`ardur-terminal`)
+
+Backends: local shell, Docker exec, SSH remote, and Modal/cloud sandbox.
+
+- `TerminalPolicy::allow_commands(["printf", "python"])` allowlists commands by
+  first shell token; the default policy is deny-all. Each backend checks policy
+  before execution.
+- Local execution runs `/bin/sh -c <command>` with timeout and bounded stdout /
+  stderr capture.
+- Docker execution uses the [`bollard`](https://crates.io/crates/bollard) Docker
+  daemon API (`create_exec` + `start_exec`) against an existing container. For
+  live tests or operations, start Docker Desktop / the Docker daemon first and
+  pass a running container id/name.
+- SSH execution requires a configured host-key fingerprint and uses strict host
+  key checking for live command execution. The backend carries a `russh` client
+  config so the implementation can move fully native without changing callers.
+- Modal/cloud execution posts `{ "command": ... }` to a configured HTTPS sandbox
+  endpoint and requires `MODAL_TOKEN_ID` for live use. Offline tests use mock
+  backends when cloud credentials are absent.
+- `terminal.exec` receipts include backend name, action, command digest, and
+  timestamp; runtime receipts still sign the enclosing tool-call digest.
+
+### Web capabilities (`ardur-web`)
+
+Tools: `web.fetch`, `web.parse`, `web.screenshot`, and `web.form_fill`.
+
+- `web.fetch` enforces HTTPS for external URLs. HTTP is allowed only for loopback
+  development URLs when `WebPolicy::dev_loopback()` is used.
+- `WebPolicy::with_allowlist(["example.com"])` narrows eligible hosts; each
+  fetch/screenshot/form-fill validates the URL before network or browser work.
+- `web.parse` extracts titles, selector text, links, and form metadata from HTML
+  without network access.
+- `web.form_fill` denies `submit: true` unless the caller supplies
+  `confirmed: true`; field-fill previews without submit remain allowed under the
+  URL policy.
+- Each web operation returns receipt metadata under `ToolOutput.receipt_data`.
+
+## Voice transcription (Whisper)
+
+EPIC-TOOLS adds a concrete `TranscriptionProvider`: `WhisperApiTranscriptionProvider`
+in `ardur-media-audio`. When the server assembles its tool registry it attempts
+to register `voice.transcribe`; missing Whisper credentials are a graceful
+degradation (the server still boots, logs that the tool is disabled, and the
+tool is simply absent from the registry).
+
+Environment:
+
+```bash
+OPENAI_WHISPER_API_KEY=sk-...        # preferred for Whisper only
+# or OPENAI_API_KEY=sk-...           # fallback
+OPENAI_WHISPER_BASE_URL=https://api.openai.com/v1   # optional; loopback HTTP allowed for tests
+OPENAI_WHISPER_MODEL=whisper-1       # optional default
+```
+
+`voice.transcribe` takes base64 audio bytes and a declared format (`mp3`, `wav`,
+`ogg`/`opus`, `flac`, `m4a`, or `webm`) and returns transcript text, language,
+provider/model ids, and the provider-level receipt hash. The runtime still gates
+the tool call before invocation with the normal cap-token allowlist and Cedar
+`Action::"ToolInvoke"` check, then records the invocation in the signed turn
+receipt. The provider itself also validates the audio request, refuses empty or
+oversized inline audio before any network call, enforces the declared duration
+ceiling, validates the Whisper base URL (HTTPS except loopback HTTP for tests),
+and hash-chains provider operation receipts.
+
+Example tool arguments (when a model asks to call it through the fused runtime):
+
+```json
+{
+  "audio_base64": "UklGRiQAAABXQVZF...",
+  "format": "wav",
+  "duration_seconds_upper_bound": 30,
+  "language_hint": "en",
+  "mission_id": "mission.voice-note"
+}
+```
+
+## ACP (Agent Communication Protocol)
+
+EPIC-TOOLS wires ACP two ways:
+
+- `ardur-acp::StdioAcpTransport` carries newline-delimited JSON-RPC 2.0 ACP
+  frames over any stdio-like async reader/writer (child-process stdin/stdout,
+  or `tokio::io::duplex` in tests).
+- `POST /acp` accepts one ACP JSON-RPC request over HTTP. It uses the same bearer
+  gate as `/chat`, then dispatches only explicitly supported methods. Currently
+  `initialize` and `session/prompt` are accepted; unsupported methods return a
+  JSON-RPC `-32601` error before provider work, journaling, or receipt writes.
+  Accepted requests are submitted through the fused runtime so the request is
+  cap-token verified, Cedar-authorized, cost-gated, journaled, and
+  receipt-chained before the JSON-RPC response is returned.
+
+Quick HTTP check against a running server:
+
+```bash
+curl -sS http://localhost:3000/acp \
+  -H "Authorization: Bearer $ARDUR_CHAT_TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}'
+```
+
+Successful responses are ACP JSON-RPC responses whose `result` includes
+`accepted: true`, the method, the fused-runtime reply, and the signed
+`receipt_id`. Missing/invalid bearer tokens return `401`; malformed ACP messages
+return `400`; unsupported ACP methods return JSON-RPC `-32601`; runtime failures
+are returned as JSON-RPC errors with `502`.
+
+## Automation task-flow DAGs
+
+`ardur-automation::DefaultTaskFlowOrchestrator` is now an in-memory production
+default rather than a `NotImplemented` placeholder. It validates non-empty
+descriptions, cap-token allowlists for every declared dispatch, DAG
+version/depth/fanout, and fail-closed control-flow constraints. Empty sequence or
+parallel controls, invalid `AnyN`, Cedar invariants, and conditional branches are
+rejected until a real Cedar predicate evaluator is wired. It records a
+`TaskRuntimeState`, deterministically traverses supported sequence/parallel/retry
+nodes, and records both success and timeout failure paths. Operator verification
+overrides require a `task.override` allowlist entry and an existing
+verification-failed step. It still does not dispatch external
+tools/providers/webhooks; it provides the real DAG execution/state seam that
+runtime workers can depend on while effectful dispatch is added in later phases.
+
+## OpenClaw hook compatibility
+
+`ardur-hooks-openclaw-compat` now exposes `OpenClawHookRegistryExt` for
+registering OpenClaw-format hook configs directly into
+`ardur_lifecycle_hooks::HookRegistry`. The compatibility layer translates
+OpenClaw/codex events into Ardur canonical hook events, preserves source order as
+hook priority, and adapts runner results into lifecycle decisions:
+
+- `pre_tool_use` / permission-style events run as pre-submit hooks and can veto
+  with a human-readable reason.
+- post/finalize-style events run as post-receipt observational hooks.
+- the default runner is safe no-op; tests and embeddings can inject explicit
+  runners (for example a recording runner, or a future subprocess runner).
+
+This keeps OpenClaw config parsing and ordering compatible without silently
+executing shell commands just because a compatibility config exists.
 
 ## Streaming
 
@@ -370,7 +663,8 @@ advertises whether it implements it via `supports_streaming()`:
 |---|---|---|
 | `anthropic` | yes | SSE (§3.1b) |
 | `ollama` | yes | NDJSON (§3.4b) |
-| `openrouter` | no | planned |
+| `openrouter` | yes | SSE (§3.2b) |
+| `openai-compat` | yes | SSE |
 | `codex` | no | CLI orchestrates its own output |
 | `claude-cli` | no | planned |
 
@@ -412,19 +706,23 @@ argument, e.g. `{"expand": ["conventions.md"]}`.
 **Validation.** `name` and `description` are required — a `SKILL.md` missing
 either is skipped with a warning. Unknown frontmatter fields are ignored, so a
 newer skill schema still loads. A skill whose `name` collides with an
-already-registered tool is skipped (first registration wins). Two example skills
-ship under `examples/skills/`.
+already-registered tool is skipped (first registration wins). Nine example
+skills ship under `examples/skills/`.
 
 ## HTTP endpoints
 
 `ardur-server` exposes a small HTTP surface over the fused runtime:
 
-| Method & path        | Purpose                                                        |
-| -------------------- | ------------------------------------------------------------- |
-| `POST /slack/events` | Slack Events-API webhook (HMAC-verified; replies to channel). |
-| `POST /chat`         | Generic synchronous chat — run one turn, get the reply back.  |
-| `GET  /healthz`      | Liveness probe with build metadata.                           |
-| `…/mcp` (optional)   | Bearer-gated MCP surface (see [MCP](#mcp-model-context-protocol)). |
+| Method & path                   | Purpose                                                        |
+| ------------------------------- | -------------------------------------------------------------- |
+| `POST /slack/events`            | Slack Events-API webhook (HMAC-verified; replies to channel).  |
+| `POST /chat`                    | Generic synchronous chat — run one turn, get the reply back.   |
+| `POST /acp`                     | ACP JSON-RPC ingress; bearer-gated and receipt-chained through the fused runtime. |
+| `GET  /healthz`                 | Liveness probe with build metadata.                            |
+| `GET  /openapi.json`            | OpenAPI 3.0 document for the mounted HTTP surface.              |
+| `GET  /openapi/clients/rust`    | Generated Rust client source.                                  |
+| `GET  /openapi/clients/python`  | Generated Python client source.                                |
+| `…/mcp` (optional)              | Bearer-gated MCP surface (see [MCP](#mcp-model-context-protocol)). |
 
 ### `POST /chat`
 
@@ -471,6 +769,7 @@ Example:
 
 ```sh
 curl -sS http://localhost:3000/chat \
+  -H "Authorization: Bearer ${ARDUR_CHAT_TOKEN}" \
   -H 'content-type: application/json' \
   -d '{"message":"hello ardur"}'
 ```
@@ -487,6 +786,20 @@ Status codes:
 rejected with `400` rather than silently answered with a consolidated body. It
 is a planned P1.5 follow-up.
 
+### OpenAPI and generated clients
+
+Fetch the OpenAPI spec and generated client sources from a running server:
+
+```sh
+curl -sS http://localhost:3000/openapi.json | python3 -m json.tool
+curl -sS http://localhost:3000/openapi/clients/rust -o ardur_client.rs
+curl -sS http://localhost:3000/openapi/clients/python -o ardur_client.py
+```
+
+The Rust and Python client templates include `healthz()` and `chat(message)`
+helpers. `chat` attaches `Authorization: Bearer <token>` when a token is
+configured; `/healthz` is unauthenticated.
+
 ## Monitoring
 
 - `GET /healthz` — returns `200 OK` once the runtime is initialized.
@@ -502,7 +815,7 @@ attributes — `gen_ai.system`, `gen_ai.request.model`,
 `error.type`, and friends. Export them to any OTLP-native backend (Langfuse,
 Arize Phoenix, Arize, Jaeger, Grafana Tempo, …) for token-usage dashboards,
 latency tracing, and per-call drill-down — for free, across **every** provider
-(anthropic / openrouter / ollama / codex / claude-cli).
+(anthropic / openrouter / openai-compat / ollama / codex / claude-cli).
 
 Disabled by default. To enable, set:
 
@@ -553,6 +866,28 @@ process.
   treat its port like the data directory and keep it on a trusted/private
   network behind your own auth.
 
+  Trust Center APIs are exposed under `/api/trust/*` on the same read-only
+  server:
+
+  ```sh
+  # Capability Wallet: active verified grants, tool allowlists, expiry, budget,
+  # and a read-only revoke-button affordance for operators.
+  curl -sS http://localhost:8090/api/trust/wallet
+
+  # Receipt Explorer: verify the on-disk parent-hash chain.
+  curl -sS http://localhost:8090/api/trust/receipts/verify
+
+  # Policy Debugger: explain Cedar allow/deny/indeterminate with matched policy ids.
+  curl -sG http://localhost:8090/api/trust/policy/debug \
+    --data-urlencode 'principal=User::"alice"' \
+    --data-urlencode 'action=Action::"Submit"' \
+    --data-urlencode 'resource=Session::"s1"'
+  ```
+
+  `ardur-admin` remains read-only: wallet revocation is shown as an operator
+  affordance, while actual cap-token revocation still flows through the runtime
+  deny-list API.
+
 - **`ardur-eval`** (`crates/eval-harness`) — a CLI that POSTs scenario files
   to a server chat endpoint and grades the results, emitting `json`, `junit`,
   or `markdown`:
@@ -566,6 +901,28 @@ process.
   It targets the `POST <server-url>/chat` JSON contract that `ardur-server`
   now exposes (see [HTTP endpoints](#http-endpoints)). The path is overridable
   with `--chat-path` if you front the server with a different route.
+
+## Closed learning loop
+
+`ardur-automation::learning` implements the closed self-improvement loop. A
+scheduled job supplies already-verified cap-token claims and a Cedar policy
+bundle, reads the past N sessions for one workspace, normalizes/merges duplicate
+patterns, and writes structured playbook proposals. The job requires:
+
+- cap-token tool grant `learning.dream`;
+- Cedar allow for action `Action::"LearningDream"` on the workspace resource;
+- human approval before any proposal can transition from
+  `PendingHumanApproval` to `Approved`.
+
+The generated proposals are receipt-style hash chained (`parent_hash` points to
+`SHA256(previous proposal)`), so a later approval/audit can prove ordering.
+Useful checks while developing the loop:
+
+```sh
+cargo test -p ardur-automation learning
+cargo test -p ardur-fused-runtime --test receipt_atomic_commit
+cargo test -p ardur-fused-runtime --test memory_recall
+```
 
 ## Cost ceilings
 
@@ -596,17 +953,11 @@ error to the channel before the next provider call when the ceiling is hit.
 Open tickets that an operator should know about before depending on this
 deployment for anything sensitive:
 
-- **ARD-17** — Orphan-receipt durability: the two-phase commit between
-  journal append and receipt sign is still single-phase. A crash in the
-  window can leave an orphan receipt.
-- **ARD-19** — Runtime ↔ memory wiring is still partial; some recall paths
-  bypass the bi-temporal store. The durable Qdrant memory backend
-  (`ARDUR_MEMORY=qdrant`) persists writes across restarts and now embeds records
-  with a real local model (`EMBED_MODEL`), and `HybridMemoryRetriever` adds fused
-  dense + sparse recall — but the runtime's recall side does not yet call the
-  hybrid surface, so semantic recall is not wired into the turn path.
 - **ARD-21** — Dependabot triage queue is unmanaged; pin reviews land
   ad-hoc.
 
-Until ARD-17 and ARD-19 land, this is **dev fidelity**, not **production**.
-Use it in a private Slack channel first.
+EPIC-TRUST closes the ARD-17/ARD-19 trust-substrate gaps: receipt and journal
+commit are atomic from the runtime's perspective, boot verifies persisted chain
+integrity, orphan reconciliation remains available, and scoped hybrid memory
+recall is wired into the turn path after cap-token and Cedar enforcement. This
+is still **dev fidelity**, not **production**; use it in a private channel first.

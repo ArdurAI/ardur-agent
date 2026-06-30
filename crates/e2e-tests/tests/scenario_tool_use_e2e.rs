@@ -138,7 +138,7 @@ async fn tool_use_full_turn_audits_and_accumulates_cost() {
 
     let request = SubmitRequest {
         messages: vec![ChatMessage::user("please use the echo tool")],
-        cap_token: CapTokenRef(fixtures::dev_valid_cap_token()),
+        cap_token: CapTokenRef(fixtures::dev_valid_cap_token_with_echo()),
         session_id: SessionId::new(),
         requested_provider: None,
     };

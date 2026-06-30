@@ -35,6 +35,9 @@ async fn spawn_server(bearer: &str) -> String {
         slack_app_id: "A0E2EMCP".to_string(),
         data_dir: data_dir.path().to_path_buf(),
         bind_addr: "127.0.0.1:0".to_string(),
+        chat_bearer_tokens: vec!["e2e-chat-token".to_string()],
+        admin_bearer_tokens: Vec::new(),
+        dev_permissive_policy: true,
         model: "claude-opus-4-8".to_string(),
         cost_budget_cents: 10_000,
         cedar_policy_path: None,
@@ -45,12 +48,12 @@ async fn spawn_server(bearer: &str) -> String {
         log_format: LogFormat::Text,
         mcp_enabled: true,
         mcp_bearer_tokens: vec![bearer.to_string()],
-        chat_bearer_tokens: Vec::new(),
         mcp_path_prefix: "/mcp".to_string(),
         mcp_remote_servers: Vec::new(),
         skills_dirs: Vec::new(),
         memory_backend: ardur_server::MemoryBackend::InMemory,
         qdrant_url: None,
+        qdrant_collection: None,
     };
     let provider: Arc<dyn Provider> =
         Arc::new(AnthropicProvider::stub(ModelId::new(&config.model)));

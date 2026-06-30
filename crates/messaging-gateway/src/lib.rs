@@ -45,6 +45,7 @@ mod error;
 mod gateway;
 mod registry;
 mod types;
+mod verb;
 
 pub use error::{GatewayError, RegistryError};
 pub use gateway::{InProcessGateway, MessagingGateway};
@@ -52,6 +53,11 @@ pub use registry::GatewayRegistry;
 pub use types::{
     ChannelId, ChannelRef, IncomingMessage, MessageBody, MessageReceipt, MessageTarget,
     OutgoingMessage, SenderRef, ThreadId, ThreadRef, UnixTsMillis, UserRef,
+};
+pub use verb::{
+    MESSAGE_DELETED_EVENT, MESSAGE_EDITED_EVENT, MESSAGE_FORWARDED_EVENT, MESSAGE_OP_REFUSED_EVENT,
+    MESSAGE_PINNED_EVENT, MESSAGE_QUOTED_EVENT, MESSAGE_REACTED_EVENT, MESSAGE_SENT_EVENT,
+    MESSAGE_UNPINNED_EVENT, MessageVerb, MessageVerbRequest,
 };
 
 // The capability handle an outgoing message is authorized by is owned by §1.0;

@@ -82,7 +82,9 @@ impl Commitment {
     pub fn check_due_status(&mut self) {
         if let Some(due) = self.due_at {
             let now = Utc::now();
-            if self.status == CommitmentStatus::Declared || self.status == CommitmentStatus::InProgress {
+            if self.status == CommitmentStatus::Declared
+                || self.status == CommitmentStatus::InProgress
+            {
                 if now > due {
                     self.status = CommitmentStatus::Overdue;
                 } else if (due - now).num_hours() < 24 {

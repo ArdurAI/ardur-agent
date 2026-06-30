@@ -91,8 +91,7 @@ mod tests {
 
     #[test]
     fn test_message_with_recipient() {
-        let msg = Message::new("ch-1", "user1", "Hello", MessageType::Text)
-            .with_recipient("user2");
+        let msg = Message::new("ch-1", "user1", "Hello", MessageType::Text).with_recipient("user2");
         assert_eq!(msg.recipient, Some("user2".to_string()));
     }
 

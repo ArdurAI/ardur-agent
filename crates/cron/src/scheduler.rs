@@ -6,7 +6,7 @@ use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
-use crate::{CronError, CronJob, JobId, JobRegistry, JobStatus, Result};
+use crate::{CronError, JobRegistry, JobStatus, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScheduleMode {
@@ -54,7 +54,7 @@ impl CronScheduler {
             loop {
                 ticker.tick().await;
                 let now = Utc::now();
-                
+
                 let due_jobs = match registry.due_jobs(now) {
                     Ok(jobs) => jobs,
                     Err(e) => {
@@ -71,14 +71,23 @@ impl CronScheduler {
                     job.status = JobStatus::Running;
                     job.last_run = Some(now);
                     job.run_count += 1;
-                    
-                    let _ = registry.update_status(&job.id, JobStatus::Running);
+
+                    if let Err(e) = registry.update_status(&job.id, JobStatus::Running) {
+                        tracing::warn!(error = %e, job_id = %job.id, "failed to mark job as Running");
+                    }
 
                     info!("running job {}: {}", job.id, job.name);
 
-                    // In a real implementation, this would execute the command
-                    // For now, mark as completed immediately
-                    let _ = registry.update_status(&job.id, JobStatus::Completed);
+                    match mode {
+                        ScheduleMode::FireAndForget | ScheduleMode::Sequential => {
+                            // ARD-458 routes production fires through
+                            // ardur-automation; this crate owns due-job
+                            // discovery and lifecycle marking.
+                            if let Err(e) = registry.update_status(&job.id, JobStatus::Completed) {
+                                tracing::warn!(error = %e, job_id = %job.id, "failed to mark job as Completed");
+                            }
+                        }
+                    }
                 }
             }
         });
@@ -107,12 +116,14 @@ impl CronScheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::CronJob;
     use crate::job::CronExpression;
 
     #[tokio::test]
     async fn test_scheduler_start_stop() {
         let reg = JobRegistry::new();
-        let scheduler = CronScheduler::new(reg, Duration::from_millis(100), ScheduleMode::FireAndForget);
+        let scheduler =
+            CronScheduler::new(reg, Duration::from_millis(100), ScheduleMode::FireAndForget);
 
         assert!(!scheduler.is_running().await);
         scheduler.start().await.unwrap();
@@ -124,7 +135,8 @@ mod tests {
     #[tokio::test]
     async fn test_scheduler_double_start() {
         let reg = JobRegistry::new();
-        let scheduler = CronScheduler::new(reg, Duration::from_millis(100), ScheduleMode::FireAndForget);
+        let scheduler =
+            CronScheduler::new(reg, Duration::from_millis(100), ScheduleMode::FireAndForget);
         scheduler.start().await.unwrap();
         let err = scheduler.start().await.unwrap_err();
         assert!(matches!(err, CronError::AlreadyRunning));
@@ -134,7 +146,8 @@ mod tests {
     #[tokio::test]
     async fn test_scheduler_stop_when_not_running() {
         let reg = JobRegistry::new();
-        let scheduler = CronScheduler::new(reg, Duration::from_millis(100), ScheduleMode::FireAndForget);
+        let scheduler =
+            CronScheduler::new(reg, Duration::from_millis(100), ScheduleMode::FireAndForget);
         let err = scheduler.stop().await.unwrap_err();
         assert!(matches!(err, CronError::NotRunning));
     }
@@ -142,7 +155,11 @@ mod tests {
     #[tokio::test]
     async fn test_scheduler_runs_due_jobs() {
         let reg = JobRegistry::new();
-        let scheduler = CronScheduler::new(reg.clone(), Duration::from_millis(50), ScheduleMode::FireAndForget);
+        let scheduler = CronScheduler::new(
+            reg.clone(),
+            Duration::from_millis(50),
+            ScheduleMode::FireAndForget,
+        );
 
         // Create a job that's always due (every minute, but we'll check immediately)
         let mut job = CronJob::new("tick", CronExpression::every_minute(), "echo test");
@@ -154,7 +171,7 @@ mod tests {
         scheduler.stop().await.unwrap();
 
         let job = reg.get(&id).unwrap();
-        // The scheduler should have attempted to run it
-        assert!(job.run_count >= 0, "job exists after scheduler run");
+        // The scheduler should have attempted to run it and persisted terminal status.
+        assert_eq!(job.status, JobStatus::Completed);
     }
 }

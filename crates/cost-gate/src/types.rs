@@ -181,6 +181,17 @@ impl CostTuple {
         })
     }
 
+    /// Per-dimension addition, or `None` if any dimension would overflow.
+    pub fn checked_add(&self, rhs: &CostTuple) -> Option<CostTuple> {
+        Some(CostTuple {
+            tokens_in: self.tokens_in.checked_add(rhs.tokens_in)?,
+            tokens_out: self.tokens_out.checked_add(rhs.tokens_out)?,
+            cents: self.cents.checked_add(rhs.cents)?,
+            wall_ms: self.wall_ms.checked_add(rhs.wall_ms)?,
+            attention_score: self.attention_score.checked_add(rhs.attention_score)?,
+        })
+    }
+
     /// Apply a signed [`CostDelta`], clamping each dimension to the
     /// `0..=u64::MAX` range (a refund credits, an overrun debits).
     pub fn apply_delta(&self, delta: &CostDelta) -> CostTuple {
@@ -316,4 +327,93 @@ pub struct ReservationHandle {
     pub reserved: CostTuple,
     /// The store version produced by the committing decrement.
     pub committed_version: u64,
+}
+
+#[cfg(test)]
+mod prop_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    prop_compose! {
+        fn arb_cost_tuple()(tokens_in in 0..u64::MAX/2, tokens_out in 0..u64::MAX/2, cents in 0..u64::MAX/2, wall_ms in 0..u64::MAX/2, attention_score in 0..u64::MAX/2) -> CostTuple {
+            CostTuple { tokens_in, tokens_out, cents, wall_ms, attention_score }
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn cost_checked_add_no_overflow(a in arb_cost_tuple(), b in arb_cost_tuple()) {
+            // ARD-322: Property-based test for cost arithmetic.
+            let result = a.checked_add(&b);
+            if let Some(sum) = result {
+                assert_eq!(sum.tokens_in, a.tokens_in + b.tokens_in);
+                assert_eq!(sum.tokens_out, a.tokens_out + b.tokens_out);
+                assert_eq!(sum.cents, a.cents + b.cents);
+                assert_eq!(sum.wall_ms, a.wall_ms + b.wall_ms);
+                assert_eq!(sum.attention_score, a.attention_score + b.attention_score);
+            }
+        }
+
+        #[test]
+        fn cost_checked_sub_no_underflow(a in arb_cost_tuple(), b in arb_cost_tuple()) {
+            // ARD-322: Property-based test for cost subtraction.
+            let result = a.checked_sub(&b);
+            if let Some(diff) = result {
+                assert_eq!(diff.tokens_in, a.tokens_in - b.tokens_in);
+                assert_eq!(diff.tokens_out, a.tokens_out - b.tokens_out);
+                assert_eq!(diff.cents, a.cents - b.cents);
+                assert_eq!(diff.wall_ms, a.wall_ms - b.wall_ms);
+                assert_eq!(diff.attention_score, a.attention_score - b.attention_score);
+            }
+        }
+
+        #[test]
+        fn cost_delta_between_is_correct(reserved in arb_cost_tuple(), actual in arb_cost_tuple()) {
+            // ARD-322: Property-based test for CostDelta::between.
+            let delta = CostDelta::between(&reserved, &actual);
+
+            // Verify that applying the negative delta to actual gives back reserved.
+            // This only works when the values are small enough to avoid clamping.
+            let reconstructed = actual.apply_delta(&CostDelta {
+                tokens_in: -delta.tokens_in,
+                tokens_out: -delta.tokens_out,
+                cents: -delta.cents,
+                wall_ms: -delta.wall_ms,
+                attention_score: -delta.attention_score,
+            });
+
+            // For small values (where no clamping occurs), reconstruction should be exact.
+            // The i128 arithmetic in apply_delta clamps at 0 and u64::MAX.
+            // Only check when both values are small enough to avoid overflow/underflow
+            // AND reserved >= actual (so delta is non-negative and no clamping at 0).
+            // Use a much smaller bound to ensure no overflow in the i128 arithmetic.
+            if reserved.tokens_in <= 1_000_000_000u64 && actual.tokens_in <= 1_000_000_000u64 &&
+               reserved.tokens_in >= actual.tokens_in &&
+               reserved.tokens_out >= actual.tokens_out &&
+               reserved.cents >= actual.cents &&
+               reserved.wall_ms >= actual.wall_ms &&
+               reserved.attention_score >= actual.attention_score {
+                assert_eq!(reconstructed.tokens_in, reserved.tokens_in, "tokens_in mismatch: reserved={:?}, actual={:?}, delta={:?}, reconstructed={:?}", reserved, actual, delta, reconstructed);
+            }
+        }
+
+        #[test]
+        fn covers_is_transitive(a in arb_cost_tuple(), b in arb_cost_tuple(), c in arb_cost_tuple()) {
+            // ARD-322: If a covers b and b covers c, then a covers c.
+            if a.covers(&b) && b.covers(&c) {
+                assert!(a.covers(&c), "covers should be transitive");
+            }
+        }
+
+        #[test]
+        fn saturating_add_never_overflows(a in arb_cost_tuple(), b in arb_cost_tuple()) {
+            // ARD-322: saturating_add should never panic or overflow.
+            let result = a.saturating_add(&b);
+            assert!(result.tokens_in >= a.tokens_in);
+            assert!(result.tokens_out >= a.tokens_out);
+            assert!(result.cents >= a.cents);
+            assert!(result.wall_ms >= a.wall_ms);
+            assert!(result.attention_score >= a.attention_score);
+        }
+    }
 }

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use crate::error::{WikiError, Result};
+use crate::error::{Result, WikiError};
 use crate::page::{PageId, PageStatus, WikiPage};
 
 #[derive(Debug, Clone)]
@@ -25,13 +25,23 @@ impl WikiRegistry {
     }
 
     pub fn create(&self, page: WikiPage) -> Result<PageId> {
-        let mut pages = self.pages.write().map_err(|_| WikiError::Io(std::io::Error::new(std::io::ErrorKind::Other, "poisoned lock")))?;
-        let mut path_index = self.path_index.write().map_err(|_| WikiError::Io(std::io::Error::new(std::io::ErrorKind::Other, "poisoned lock")))?;
-        
+        let mut pages = self.pages.write().map_err(|_| {
+            WikiError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "poisoned lock",
+            ))
+        })?;
+        let mut path_index = self.path_index.write().map_err(|_| {
+            WikiError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "poisoned lock",
+            ))
+        })?;
+
         if path_index.contains_key(&page.path) {
             return Err(WikiError::PageAlreadyExists(page.path.clone()));
         }
-        
+
         let id = page.id.clone();
         path_index.insert(page.path.clone(), id.clone());
         pages.insert(id.clone(), page);
@@ -39,28 +49,62 @@ impl WikiRegistry {
     }
 
     pub fn get(&self, id: &PageId) -> Result<WikiPage> {
-        let pages = self.pages.read().map_err(|_| WikiError::Io(std::io::Error::new(std::io::ErrorKind::Other, "poisoned lock")))?;
-        pages.get(id).cloned().ok_or_else(|| WikiError::PageNotFound(id.clone()))
+        let pages = self.pages.read().map_err(|_| {
+            WikiError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "poisoned lock",
+            ))
+        })?;
+        pages
+            .get(id)
+            .cloned()
+            .ok_or_else(|| WikiError::PageNotFound(id.clone()))
     }
 
     pub fn get_by_path(&self, path: &str) -> Result<WikiPage> {
-        let path_index = self.path_index.read().map_err(|_| WikiError::Io(std::io::Error::new(std::io::ErrorKind::Other, "poisoned lock")))?;
-        let id = path_index.get(path).ok_or_else(|| WikiError::PageNotFound(path.to_string()))?;
+        let path_index = self.path_index.read().map_err(|_| {
+            WikiError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "poisoned lock",
+            ))
+        })?;
+        let id = path_index
+            .get(path)
+            .ok_or_else(|| WikiError::PageNotFound(path.to_string()))?;
         self.get(id)
     }
 
     pub fn list(&self) -> Result<Vec<WikiPage>> {
-        let pages = self.pages.read().map_err(|_| WikiError::Io(std::io::Error::new(std::io::ErrorKind::Other, "poisoned lock")))?;
+        let pages = self.pages.read().map_err(|_| {
+            WikiError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "poisoned lock",
+            ))
+        })?;
         Ok(pages.values().cloned().collect())
     }
 
     pub fn list_by_status(&self, status: PageStatus) -> Result<Vec<WikiPage>> {
-        let pages = self.pages.read().map_err(|_| WikiError::Io(std::io::Error::new(std::io::ErrorKind::Other, "poisoned lock")))?;
-        Ok(pages.values().filter(|p| p.status == status).cloned().collect())
+        let pages = self.pages.read().map_err(|_| {
+            WikiError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "poisoned lock",
+            ))
+        })?;
+        Ok(pages
+            .values()
+            .filter(|p| p.status == status)
+            .cloned()
+            .collect())
     }
 
     pub fn update(&self, page: WikiPage) -> Result<()> {
-        let mut pages = self.pages.write().map_err(|_| WikiError::Io(std::io::Error::new(std::io::ErrorKind::Other, "poisoned lock")))?;
+        let mut pages = self.pages.write().map_err(|_| {
+            WikiError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "poisoned lock",
+            ))
+        })?;
         if !pages.contains_key(&page.id) {
             return Err(WikiError::PageNotFound(page.id.clone()));
         }
@@ -69,10 +113,22 @@ impl WikiRegistry {
     }
 
     pub fn delete(&self, id: &PageId) -> Result<()> {
-        let mut pages = self.pages.write().map_err(|_| WikiError::Io(std::io::Error::new(std::io::ErrorKind::Other, "poisoned lock")))?;
-        let mut path_index = self.path_index.write().map_err(|_| WikiError::Io(std::io::Error::new(std::io::ErrorKind::Other, "poisoned lock")))?;
-        
-        let page = pages.remove(id).ok_or_else(|| WikiError::PageNotFound(id.clone()))?;
+        let mut pages = self.pages.write().map_err(|_| {
+            WikiError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "poisoned lock",
+            ))
+        })?;
+        let mut path_index = self.path_index.write().map_err(|_| {
+            WikiError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "poisoned lock",
+            ))
+        })?;
+
+        let page = pages
+            .remove(id)
+            .ok_or_else(|| WikiError::PageNotFound(id.clone()))?;
         path_index.remove(&page.path);
         Ok(())
     }
@@ -117,7 +173,7 @@ mod tests {
         page2.publish();
         registry.create(page1).unwrap();
         registry.create(page2).unwrap();
-        
+
         let published = registry.list_by_status(PageStatus::Published).unwrap();
         assert_eq!(published.len(), 1);
         assert_eq!(published[0].title, "Published");

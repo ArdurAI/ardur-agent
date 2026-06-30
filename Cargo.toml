@@ -8,19 +8,27 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/acp",
     "crates/cap-token",
     "crates/embeddings",
     "crates/bm25-index",
     "crates/fusion",
     "crates/receipt",
     "crates/lifecycle-hooks",
+    "crates/hooks-openclaw-compat",
     "crates/cedar-policy",
     "crates/memory",
     "crates/memory-qdrant",
     "crates/runtime",
+    "crates/automation",
+    "crates/cron",
+    "crates/standing-goals",
     "crates/cost-gate",
     "crates/provider-runtime",
+    "crates/media-decode",
+    "crates/media-audio",
     "crates/provider-openrouter",
+    "crates/provider-openai-compat",
     "crates/provider-ollama",
     "crates/provider-codex",
     "crates/provider-claude-cli",
@@ -40,25 +48,13 @@ members = [
     "crates/admin-ui",
     "crates/e2e-tests",
     "crates/eval-harness",
-    "crates/cron",
+    "crates/browser",
+    "crates/terminal",
+    "crates/web",
     "crates/webhook",
-    "crates/task-flow",
-    "crates/wiki",
-    "crates/curator",
-    "crates/mcp-server",
-    "crates/commitments",
-    "crates/standing-goals",
-    "crates/session",
-    "crates/provider",
-    "crates/gateway",
     "crates/config",
     "crates/health",
     "crates/logs",
-    "crates/acp",
-    "crates/automation",
-    "crates/media-audio",
-    "crates/provider-openai-compat",
-    "crates/hooks-openclaw-compat",
 ]
 
 [workspace.package]
@@ -96,14 +92,14 @@ subtle = "2"
 hex = "0.4"
 # Secret custody for the Slack bot token + signing secret (crates/slack-adapter,
 # §4.1) — keeps them out of Debug/log output behind `SecretString`.
-secrecy = "0.8"
+secrecy = "0.10"
 base64 = "0.22"
 regex = "1"
 once_cell = "1"
 # HTTP client for the live provider backends (crates/provider-runtime, §3.1).
 # `rustls-tls` keeps the TLS stack pure-Rust — no OpenSSL/native-tls system
 # dependency; `json` pulls the serde request/response helpers.
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
 # URL parsing + host classification for the §6.2 built-in `http.fetch` tool
 # (crates/tool-registry): rejects relative/non-http(s) URLs and exposes the
 # host as a typed `Host` (domain vs IP literal) for the SSRF allowlist + IP
@@ -122,7 +118,7 @@ tokio = { version = "1", features = ["full"] }
 # Slack Events-API webhook listener + `/healthz`. `tower` supplies the
 # `ServiceExt::oneshot` the router is driven through in-process by the server's
 # integration tests (no real listener needed).
-axum = "0.7"
+axum = "0.8"
 tower = { version = "0.5", features = ["util"] }
 # Compile-time HTML templating for the `ardur-admin` observability dashboard
 # (crates/admin-ui, §13.X). maud renders HTML from a Rust macro — no template
@@ -131,25 +127,24 @@ tower = { version = "0.5", features = ["util"] }
 # (needs a templates dir + build step) and tera (a runtime engine, explicitly
 # excluded) because it is the lightest server-rendering option for a read-only
 # dashboard.
-maud = { version = "0.26", features = ["axum"] }
+maud = { version = "0.27", features = ["axum"] }
 # In-process axum test harness — `axum-test::TestServer` drives the admin-ui
 # router without binding a port, backing the endpoint integration tests
 # (crates/admin-ui dev-dependency, §13.X).
-axum-test = "16"
+axum-test = "20"
 # Tracing & observability.
 tracing = "0.1"
 # OpenTelemetry GenAI semantic-convention emission (crates/provider-runtime
 # `telemetry`). The provider-dispatch span carries `gen_ai.*` attributes; an
 # OTLP exporter ships them to any OTLP-native backend — Langfuse / Phoenix /
-# Arize / Jaeger — "for free". Pinned at 0.30 across the three opentelemetry
-# crates + tracing-opentelemetry 0.31: that is the verified-compatible pairing
-# for tracing 0.1.x (tracing-opentelemetry 0.31 requires opentelemetry ^0.30 and
-# tracing ^0.1.35). default-features are stripped so we pull only the trace
-# signal — no metrics/logs pipelines we don't emit.
-opentelemetry = { version = "0.30", default-features = false, features = ["trace"] }
-opentelemetry_sdk = { version = "0.30", default-features = false, features = ["rt-tokio", "trace"] }
-opentelemetry-otlp = { version = "0.30", default-features = false, features = ["grpc-tonic", "trace"] }
-tracing-opentelemetry = "0.31"
+# Arize / Jaeger — "for free". Keep the OTel crates and tracing bridge on a
+# verified-compatible set so trait types do not split across crate versions.
+# default-features are stripped so we pull only the trace signal — no
+# metrics/logs pipelines we don't emit.
+opentelemetry = { version = "0.32", default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "0.32.1", default-features = false, features = ["rt-tokio", "trace"] }
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["grpc-tonic", "trace"] }
+tracing-opentelemetry = "0.33"
 # Error handling.
 anyhow = "1"
 thiserror = "2"
@@ -164,7 +159,7 @@ qdrant-client = "1.18"
 # §3.0) and the cost-admission gate + budget store (crates/cost-gate, §11.14).
 async-trait = "0.1"
 # CLI argument parsing — the `ardur` binary's subcommands (crates/cli, §2.1).
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 # Tracing subscriber — the CLI installs the process-wide log formatter (§2.1).
 tracing-subscriber = "0.3"
 # Interactive line editor backing the chat REPL (crates/cli, §2.1).
@@ -192,6 +187,10 @@ crossterm = { version = "0.29", default-features = false }
 # Black-box CLI assertions — drives the built `ardur` binary in integration
 # tests (crates/cli dev-dependency, §2.1).
 assert_cmd = "2"
+# Serial test execution for env-mutating integration tests — prevents races
+# on process-global environment variables (crates/server, crates/provider-selector
+# dev-dependency).
+serial_test = "3"
 # Throwaway directories for the file-backed session-journal tests
 # (crates/session-journals dev-dependency, §7.10).
 tempfile = "3"
@@ -210,6 +209,12 @@ futures = "0.3"
 # `transport-streamable-http-server` for the axum-mounted Streamable-HTTP
 # service in `crates/server`. Pinned here so both crates share one version.
 rmcp = { version = "1", default-features = false, features = ["server", "client", "transport-streamable-http-server", "transport-streamable-http-client-reqwest"] }
+# Docker daemon API for terminal Docker exec backend (ARD-315/ARD-324).
+bollard = "0.21"
+# SSH client library for terminal SSH remote backend (ARD-315/ARD-324). Disable
+# russh's default `rsa` feature because upstream rsa has an unfixed Marvin timing
+# side-channel advisory (RUSTSEC-2023-0071); keep compression and aws-lc crypto.
+russh = { version = "0.61", default-features = false, features = ["flate2", "aws-lc-rs"] }
 
 # --- Internal crate path-deps (one per Phase-0 crate). Declared here so
 #     cross-crate wiring in Phase 1 references `{ workspace = true }`. ---
@@ -219,17 +224,24 @@ ardur-bm25-index = { path = "crates/bm25-index" }
 ardur-fusion = { path = "crates/fusion" }
 ardur-receipt = { path = "crates/receipt" }
 ardur-lifecycle-hooks = { path = "crates/lifecycle-hooks" }
+ardur-hooks-openclaw-compat = { path = "crates/hooks-openclaw-compat" }
 ardur-cedar-policy = { path = "crates/cedar-policy" }
 ardur-memory = { path = "crates/memory" }
 ardur-memory-qdrant = { path = "crates/memory-qdrant" }
 ardur-runtime = { path = "crates/runtime" }
+ardur-acp = { path = "crates/acp" }
+ardur-automation = { path = "crates/automation" }
+ardur-cron = { path = "crates/cron" }
+ardur-standing-goals = { path = "crates/standing-goals" }
 ardur-cost-gate = { path = "crates/cost-gate" }
 ardur-provider-runtime = { path = "crates/provider-runtime" }
+ardur-media-decode = { path = "crates/media-decode" }
+ardur-media-audio = { path = "crates/media-audio" }
 ardur-provider-openrouter = { path = "crates/provider-openrouter" }
+ardur-provider-openai-compat = { path = "crates/provider-openai-compat" }
 ardur-provider-ollama = { path = "crates/provider-ollama" }
 ardur-provider-codex = { path = "crates/provider-codex" }
 ardur-provider-claude-cli = { path = "crates/provider-claude-cli" }
-ardur-provider-openai-compat = { path = "crates/provider-openai-compat" }
 ardur-provider-selector = { path = "crates/provider-selector" }
 ardur-messaging-gateway = { path = "crates/messaging-gateway" }
 ardur-tool-registry = { path = "crates/tool-registry" }
@@ -242,6 +254,9 @@ ardur-channel-matrix = { path = "crates/channel-matrix" }
 ardur-channel-discord = { path = "crates/channel-discord" }
 ardur-channel-telegram = { path = "crates/channel-telegram" }
 ardur-server = { path = "crates/server" }
-ardur-webhook = { path = "crates/webhook" }
-ardur-task-flow = { path = "crates/task-flow" }
-ardur-cron = { path = "crates/cron" }
+ardur-browser = { path = "crates/browser" }
+ardur-terminal = { path = "crates/terminal" }
+ardur-web = { path = "crates/web" }
+ardur-config = { path = "crates/config" }
+ardur-health = { path = "crates/health" }
+ardur-logs = { path = "crates/logs" }

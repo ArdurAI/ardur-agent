@@ -92,7 +92,12 @@ mod tests {
 
     #[test]
     fn test_goal_creation() {
-        let g = StandingGoal::new("Daily Backup", "Backup data daily", Frequency::Daily, "gnani");
+        let g = StandingGoal::new(
+            "Daily Backup",
+            "Backup data daily",
+            Frequency::Daily,
+            "gnani",
+        );
         assert_eq!(g.title, "Daily Backup");
         assert_eq!(g.status, GoalStatus::Active);
         assert_eq!(g.run_count, 0);

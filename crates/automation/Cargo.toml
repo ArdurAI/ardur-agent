@@ -7,14 +7,30 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+# §9.9 task-flow creation is authorized by an already-verified cap-token. Phase 1
+# stores only the verified claims handle and defers attenuation/re-verification to
+# the §11.14 gate stack.
+ardur-cap-token = { workspace = true }
+# §11.0 policy decisions are referenced by id in conditional receipts; actual
+# Cedar evaluation lands in a later phase.
+ardur-cedar-policy = { workspace = true }
+ardur-cost-gate = { workspace = true }
+ardur-cron = { workspace = true }
+ardur-fused-runtime = { workspace = true }
+# §11.14 receipt vocabulary supplies digests and cost accounting types for task
+# and per-step receipt bodies.
+ardur-receipt = { workspace = true }
+# §1.0 runtime owns provider/tool/session placeholder ids reused by task steps.
+ardur-runtime = { workspace = true }
+ardur-standing-goals = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-anyhow = { workspace = true }
 tokio = { workspace = true }
-tracing = { workspace = true }
 uuid = { workspace = true }
-chrono = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
+tempfile = { workspace = true }

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use crate::error::{StandingGoalError, Result};
+use crate::error::{Result, StandingGoalError};
 use crate::goal::{GoalId, GoalStatus, StandingGoal};
 
 #[derive(Debug, Clone)]
@@ -23,24 +23,20 @@ impl GoalRegistry {
     }
 
     pub fn create(&self, goal: StandingGoal) -> Result<GoalId> {
-        let mut goals = self.goals.write().map_err(|_| {
-            StandingGoalError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "poisoned lock",
-            ))
-        })?;
+        let mut goals = self
+            .goals
+            .write()
+            .map_err(|_| StandingGoalError::Io(std::io::Error::other("poisoned lock")))?;
         let id = goal.id.clone();
         goals.insert(id.clone(), goal);
         Ok(id)
     }
 
     pub fn get(&self, id: &GoalId) -> Result<StandingGoal> {
-        let goals = self.goals.read().map_err(|_| {
-            StandingGoalError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "poisoned lock",
-            ))
-        })?;
+        let goals = self
+            .goals
+            .read()
+            .map_err(|_| StandingGoalError::Io(std::io::Error::other("poisoned lock")))?;
         goals
             .get(id)
             .cloned()
@@ -48,22 +44,18 @@ impl GoalRegistry {
     }
 
     pub fn list(&self) -> Result<Vec<StandingGoal>> {
-        let goals = self.goals.read().map_err(|_| {
-            StandingGoalError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "poisoned lock",
-            ))
-        })?;
+        let goals = self
+            .goals
+            .read()
+            .map_err(|_| StandingGoalError::Io(std::io::Error::other("poisoned lock")))?;
         Ok(goals.values().cloned().collect())
     }
 
     pub fn list_by_status(&self, status: GoalStatus) -> Result<Vec<StandingGoal>> {
-        let goals = self.goals.read().map_err(|_| {
-            StandingGoalError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "poisoned lock",
-            ))
-        })?;
+        let goals = self
+            .goals
+            .read()
+            .map_err(|_| StandingGoalError::Io(std::io::Error::other("poisoned lock")))?;
         Ok(goals
             .values()
             .filter(|g| g.status == status)
@@ -72,12 +64,10 @@ impl GoalRegistry {
     }
 
     pub fn update(&self, goal: StandingGoal) -> Result<()> {
-        let mut goals = self.goals.write().map_err(|_| {
-            StandingGoalError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "poisoned lock",
-            ))
-        })?;
+        let mut goals = self
+            .goals
+            .write()
+            .map_err(|_| StandingGoalError::Io(std::io::Error::other("poisoned lock")))?;
         if !goals.contains_key(&goal.id) {
             return Err(StandingGoalError::NotFound(goal.id.clone()));
         }
@@ -86,12 +76,10 @@ impl GoalRegistry {
     }
 
     pub fn remove(&self, id: &GoalId) -> Result<()> {
-        let mut goals = self.goals.write().map_err(|_| {
-            StandingGoalError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "poisoned lock",
-            ))
-        })?;
+        let mut goals = self
+            .goals
+            .write()
+            .map_err(|_| StandingGoalError::Io(std::io::Error::other("poisoned lock")))?;
         goals
             .remove(id)
             .ok_or_else(|| StandingGoalError::NotFound(id.clone()))?;
@@ -116,7 +104,7 @@ mod tests {
     #[test]
     fn test_registry_list_by_status() {
         let registry = GoalRegistry::new();
-        let mut g1 = StandingGoal::new("Active", "Desc", Frequency::Daily, "gnani");
+        let g1 = StandingGoal::new("Active", "Desc", Frequency::Daily, "gnani");
         let mut g2 = StandingGoal::new("Paused", "Desc", Frequency::Hourly, "gnani");
         g2.pause();
         registry.create(g1).unwrap();

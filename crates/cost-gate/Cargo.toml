@@ -28,3 +28,5 @@ sha2 = { workspace = true }
 # The trait surface is async; tests drive it on a Tokio runtime (multi-thread
 # for the concurrent-reserve race test).
 tokio = { workspace = true }
+# Property-based testing for cost arithmetic (ARD-322).
+proptest = "1"

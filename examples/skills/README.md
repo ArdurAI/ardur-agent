@@ -20,6 +20,7 @@ actually works, and drop it into your skills directory.
 |-------|------|---------------|
 | [git-commit-message](git-commit-message/SKILL.md) | git | Draft a Conventional-Commits message for a staged diff. |
 | [code-review](code-review/SKILL.md) | review | Review a diff for correctness, security, and clarity issues. |
+| [cite-or-refuse](cite-or-refuse/SKILL.md) | grounding | Ground answers in retrieved user-corpus spans, cite every claim, and refuse empty retrieval. |
 | [debug-test-failure](debug-test-failure/SKILL.md) | engineering | Systematically diagnose a failing test instead of guessing at fixes. |
 | [refactor-without-breaking](refactor-without-breaking/SKILL.md) | engineering | Restructure code without changing behavior, one verifiable step at a time. |
 | [investigate-performance-regression](investigate-performance-regression/SKILL.md) | engineering | Narrow down what made something slower using measurement, not intuition. |

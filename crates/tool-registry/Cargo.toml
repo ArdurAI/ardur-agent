@@ -46,6 +46,9 @@ reqwest = { workspace = true }
 # §6.2 — typed URL parsing + host classification (domain vs IPv4/IPv6 literal)
 # backing the `http.fetch` allowlist and SSRF checks.
 url = { workspace = true }
+# §6.0 — destructive-command detection for the shell tool's defence-in-depth.
+regex = { workspace = true }
+once_cell = { workspace = true }
 
 [dev-dependencies]
 # Integration tests are a separate crate; the async `invoke` calls need a

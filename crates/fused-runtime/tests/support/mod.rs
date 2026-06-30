@@ -91,7 +91,17 @@ pub fn mint_token(expires_unix: u64, budget_remaining: u64) -> String {
                 audience: AUDIENCE.to_string(),
                 expires_unix,
                 budget_remaining,
-                tool_allowlist: vec![TOOL.to_string()],
+                tool_allowlist: vec![
+                    TOOL.to_string(),
+                    "memory.write".to_string(),
+                    "echo".to_string(),
+                    "slow".to_string(),
+                    "boom".to_string(),
+                    "cap.fs_read".to_string(),
+                    "cap.fs_write".to_string(),
+                    "cap.shell_exec".to_string(),
+                    "cap.network_out".to_string(),
+                ],
             },
         )
         .expect("the cap-token issues")
@@ -238,9 +248,9 @@ impl Provider for EchoProvider {
             usage: Usage {
                 tokens_in: 1,
                 tokens_out: 1,
-            
-            ..Default::default()
-        },
+
+                ..Default::default()
+            },
             cost: CostTuple::default(),
             raw_provider_response: None,
         })
@@ -298,9 +308,9 @@ impl Provider for BillingProvider {
             usage: Usage {
                 tokens_in: 0,
                 tokens_out: 0,
-            
-            ..Default::default()
-        },
+
+                ..Default::default()
+            },
             cost: CostTuple {
                 tokens_in: 0,
                 tokens_out: 0,

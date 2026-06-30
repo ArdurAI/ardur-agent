@@ -115,6 +115,82 @@ pub struct MemoryRecord {
     pub correction_chain_root: Uuid,
 }
 
+/// Operator-facing projection of a [`MemoryRecord`].
+///
+/// A memory card is the shape shown by explorers, exported by CLI/API surfaces,
+/// and injected into model context. It keeps the underlying record intact while
+/// lifting the trust/provenance fields an operator needs to audit a recall hit:
+/// source, workspace/scope, confidence, validity interval, TTL, and the receipt
+/// that chained the write.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MemoryCard {
+    /// The underlying record id.
+    pub record_id: Uuid,
+    /// The holder/workspace this memory belongs to.
+    pub subject: HolderId,
+    /// The record category.
+    pub kind: RecordKind,
+    /// Human-readable source/provenance label, when supplied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// Workspace/channel/session scope, when supplied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    /// Confidence score in `0.0..=1.0`, when supplied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f64>,
+    /// Start of the held-valid interval.
+    pub valid_from: UnixTsMillis,
+    /// End of the held-valid interval, if bounded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub valid_to: Option<UnixTsMillis>,
+    /// TTL expiry, if this card should age out independently of `valid_to`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttl_expires_at: Option<UnixTsMillis>,
+    /// Receipt that authorized/chained the write.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub receipt_id: Option<ReceiptId>,
+    /// The raw payload for exact audit/export.
+    pub payload: serde_json::Value,
+}
+
+impl MemoryCard {
+    /// Project a stored record into an operator-facing memory card.
+    #[must_use]
+    pub fn from_record(rec: &MemoryRecord) -> Self {
+        Self {
+            record_id: rec.record_id,
+            subject: rec.subject.clone(),
+            kind: rec.kind,
+            source: string_payload_field(rec, "source"),
+            scope: string_payload_field(rec, "workspace_id")
+                .or_else(|| string_payload_field(rec, "scope"))
+                .or_else(|| string_payload_field(rec, "session_id"))
+                .or_else(|| string_payload_field(rec, "channel_id")),
+            confidence: rec
+                .payload
+                .get("confidence")
+                .and_then(serde_json::Value::as_f64),
+            valid_from: rec.valid_from,
+            valid_to: rec.valid_to,
+            ttl_expires_at: rec
+                .payload
+                .get("ttl_expires_at")
+                .and_then(serde_json::Value::as_u64)
+                .map(UnixTsMillis),
+            receipt_id: rec.source_receipt_id,
+            payload: rec.payload.clone(),
+        }
+    }
+}
+
+fn string_payload_field(rec: &MemoryRecord, field: &str) -> Option<String> {
+    rec.payload
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+}
+
 impl MemoryRecord {
     /// Build a fresh, live data record.
     ///

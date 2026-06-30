@@ -135,7 +135,9 @@ mod tests {
         registry.create(c1).unwrap();
         registry.create(c2).unwrap();
 
-        let in_progress = registry.list_by_status(CommitmentStatus::InProgress).unwrap();
+        let in_progress = registry
+            .list_by_status(CommitmentStatus::InProgress)
+            .unwrap();
         assert_eq!(in_progress.len(), 1);
         assert_eq!(in_progress[0].title, "Active");
     }

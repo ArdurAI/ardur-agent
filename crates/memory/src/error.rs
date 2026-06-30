@@ -30,6 +30,44 @@ pub enum MemoryError {
     #[error("malformed memory record: {0}")]
     Malformed(String),
 
+    /// The verified cap-token claims did not carry the required memory
+    /// capability for this high-level operation.
+    #[error("memory capability denied for {action:?}: requires {required}")]
+    CapabilityDenied {
+        /// Operation being attempted.
+        action: crate::MemoryAction,
+        /// Capability string that was required.
+        required: String,
+    },
+
+    /// Cedar denied or could not safely decide a memory operation.
+    #[error("memory policy denied for {action:?}: {reason}")]
+    PolicyDenied {
+        /// Operation being attempted.
+        action: crate::MemoryAction,
+        /// Cedar denial or indeterminate reason.
+        reason: String,
+    },
+
+    /// The cap-token subject did not match the memory subject/scope.
+    #[error(
+        "memory subject mismatch: cap-token subject `{claim_subject}` cannot access `{memory_subject}`"
+    )]
+    SubjectMismatch {
+        /// Subject from the verified cap-token claims.
+        claim_subject: String,
+        /// Subject on the requested memory operation.
+        memory_subject: String,
+    },
+
+    /// A memory write was attempted without a receipt id to chain it to the
+    /// audit log.
+    #[error("memory operation {action:?} requires a receipt id")]
+    ReceiptRequired {
+        /// Operation being attempted.
+        action: crate::MemoryAction,
+    },
+
     /// A persistence backend (the §7.0 Phase 2 durable stores — e.g. the
     /// Qdrant-backed `ardur-memory-qdrant`) failed to complete an operation:
     /// a transport error, a collection that could not be created, or a payload
