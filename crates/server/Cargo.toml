@@ -31,6 +31,7 @@ path = "src/bin/ardur-server.rs"
 [dependencies]
 # The boot sequence wires every Phase-1/2 substrate crate behind the fused
 # runtime, then fronts it with the Slack adapter.
+ardur-acp = { workspace = true }
 ardur-fused-runtime = { workspace = true }
 ardur-slack-adapter = { workspace = true }
 # The §4.X Matrix channel adapter — a second `MessagingGateway` backend the boot
@@ -55,11 +56,20 @@ ardur-session-journals = { workspace = true }
 ardur-receipt = { workspace = true }
 ardur-runtime = { workspace = true }
 ardur-messaging-gateway = { workspace = true }
+# Optional Whisper-backed voice.transcribe tool registration; missing API keys
+# degrade gracefully at boot.
+ardur-media-audio = { workspace = true }
 # §6.0 Phase 2 — the tool registry + its MCP bridge. The server exposes ardur's
 # tools over MCP (`ArdurMcpServer` mounted on the Streamable-HTTP transport) and
 # gates the surface with the registry's bearer-token allowlist helpers.
 ardur-tool-registry = { workspace = true }
 rmcp = { workspace = true }
+# ARD-426: OpenClaw hook compatibility — register_openclaw_hooks at boot when
+# ARDUR_HOOKS_DIRS contains an OpenClaw-format hook directory.
+ardur-hooks-openclaw-compat = { workspace = true }
+# ARD-426: automation — the task-flow orchestrator trait for `ardur task`
+# commands surfaced through the server's API.
+ardur-automation = { workspace = true }
 
 # `ardur-cap-token` re-exports `KeyPair`/`PublicKey` but not `PrivateKey`, and
 # loading the persisted issuer key needs `PrivateKey::from_bytes_hex`. Pulled
@@ -77,8 +87,11 @@ tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
 
 serde = { workspace = true }
 serde_json = { workspace = true }
+reqwest = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
+# Constant-time comparison for bearer-token authentication (timing-attack defence).
+subtle = { workspace = true }
 
 [dev-dependencies]
 # The integration tests drive the router in-process with `oneshot`, mock
@@ -99,3 +112,6 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
+# Serial test execution for env-mutating integration tests (config_from_env,
+# boot_hybrid) — prevents races on process-global environment variables.
+serial_test = { workspace = true }

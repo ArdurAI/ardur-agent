@@ -15,6 +15,7 @@
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use ardur_server::{Config, MemoryBackend};
+use serial_test::serial;
 
 fn env_lock() -> MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -33,6 +34,8 @@ const TOUCHED: &[&str] = &[
     "SLACK_APP_ID",
     "ARDUR_DATA_DIR",
     "ARDUR_BIND_ADDR",
+    "ARDUR_CHAT_BEARER_TOKENS",
+    "ARDUR_DEV_PERMISSIVE_POLICY",
     "ARDUR_MODEL",
     "ARDUR_COST_BUDGET_CENTS",
     "ARDUR_CEDAR_POLICY_PATH",
@@ -43,6 +46,7 @@ const TOUCHED: &[&str] = &[
     "ARDUR_MCP_REMOTE_SERVERS",
     "ARDUR_MEMORY",
     "QDRANT_URL",
+    "QDRANT_COLLECTION",
     "ARDUR_CHANNEL_MATRIX",
     "ARDUR_CHANNEL_DISCORD",
     "DISCORD_BOT_TOKEN",
@@ -100,6 +104,7 @@ impl Drop for CleanEnv {
 }
 
 #[test]
+#[serial]
 fn from_env_requires_anthropic_key_when_default() {
     let _guard = env_lock();
     let _env = CleanEnv::new().with_slack(); // ARDUR_PROVIDER + ANTHROPIC_API_KEY unset
@@ -112,6 +117,7 @@ fn from_env_requires_anthropic_key_when_default() {
 }
 
 #[test]
+#[serial]
 fn from_env_requires_anthropic_key_when_explicit() {
     let _guard = env_lock();
     let _env = CleanEnv::new().with_slack();
@@ -125,6 +131,7 @@ fn from_env_requires_anthropic_key_when_explicit() {
 }
 
 #[test]
+#[serial]
 fn from_env_ollama_does_not_require_anthropic_key() {
     let _guard = env_lock();
     let _env = CleanEnv::new().with_slack();
@@ -137,10 +144,14 @@ fn from_env_ollama_does_not_require_anthropic_key() {
     );
     // Sanity: the rest still resolved to their defaults.
     assert_eq!(config.model, "claude-opus-4-8");
+    assert_eq!(config.bind_addr, "127.0.0.1:3000");
+    assert!(config.chat_bearer_tokens.is_empty());
+    assert!(!config.dev_permissive_policy);
     assert_eq!(config.slack_app_id, "A0TEST");
 }
 
 #[test]
+#[serial]
 fn from_env_codex_does_not_require_anthropic_key() {
     let _guard = env_lock();
     let _env = CleanEnv::new().with_slack();
@@ -151,6 +162,7 @@ fn from_env_codex_does_not_require_anthropic_key() {
 }
 
 #[test]
+#[serial]
 fn from_env_unknown_provider_does_not_require_anthropic_key() {
     let _guard = env_lock();
     let _env = CleanEnv::new().with_slack();
@@ -164,6 +176,24 @@ fn from_env_unknown_provider_does_not_require_anthropic_key() {
 }
 
 #[test]
+#[serial]
+fn from_env_parses_chat_auth_tokens_and_dev_policy_flag() {
+    let _guard = env_lock();
+    let _env = CleanEnv::new().with_slack();
+    set("ARDUR_PROVIDER", "ollama");
+    set("ARDUR_CHAT_BEARER_TOKENS", "chat-a, chat-b ,chat-c");
+    set("ARDUR_DEV_PERMISSIVE_POLICY", "true");
+
+    let config = Config::from_env().expect("chat auth config parses");
+    assert_eq!(
+        config.chat_bearer_tokens,
+        vec!["chat-a", "chat-b", "chat-c"]
+    );
+    assert!(config.dev_permissive_policy);
+}
+
+#[test]
+#[serial]
 fn from_env_mcp_disabled_by_default() {
     let _guard = env_lock();
     let _env = CleanEnv::new().with_slack();
@@ -180,6 +210,7 @@ fn from_env_mcp_disabled_by_default() {
 }
 
 #[test]
+#[serial]
 fn from_env_mcp_enabled_requires_bearer_tokens() {
     let _guard = env_lock();
     let _env = CleanEnv::new().with_slack();
@@ -194,6 +225,7 @@ fn from_env_mcp_enabled_requires_bearer_tokens() {
 }
 
 #[test]
+#[serial]
 fn from_env_mcp_parses_tokens_prefix_and_remotes() {
     let _guard = env_lock();
     let _env = CleanEnv::new().with_slack();
@@ -220,6 +252,7 @@ fn from_env_mcp_parses_tokens_prefix_and_remotes() {
 }
 
 #[test]
+#[serial]
 fn from_env_defaults_to_in_memory_without_qdrant_url() {
     let _guard = env_lock();
     let _env = CleanEnv::new().with_slack();
@@ -230,9 +263,11 @@ fn from_env_defaults_to_in_memory_without_qdrant_url() {
     let config = Config::from_env().expect("the default in-memory backend needs no QDRANT_URL");
     assert_eq!(config.memory_backend, MemoryBackend::InMemory);
     assert_eq!(config.qdrant_url, None);
+    assert_eq!(config.qdrant_collection, None);
 }
 
 #[test]
+#[serial]
 fn from_env_requires_qdrant_url_when_qdrant_selected() {
     let _guard = env_lock();
     let _env = CleanEnv::new().with_slack();
@@ -249,19 +284,26 @@ fn from_env_requires_qdrant_url_when_qdrant_selected() {
 }
 
 #[test]
+#[serial]
 fn from_env_qdrant_selected_with_url_loads() {
     let _guard = env_lock();
     let _env = CleanEnv::new().with_slack();
     set("ARDUR_PROVIDER", "ollama");
     set("ARDUR_MEMORY", "qdrant");
     set("QDRANT_URL", "http://localhost:6334");
+    set("QDRANT_COLLECTION", "ardur_test_collection");
 
     let config = Config::from_env().expect("qdrant + a URL loads");
     assert_eq!(config.memory_backend, MemoryBackend::Qdrant);
     assert_eq!(config.qdrant_url.as_deref(), Some("http://localhost:6334"));
+    assert_eq!(
+        config.qdrant_collection.as_deref(),
+        Some("ardur_test_collection")
+    );
 }
 
 #[test]
+#[serial]
 fn parses_hybrid_from_env() {
     let _guard = env_lock();
     let _env = CleanEnv::new().with_slack();
@@ -277,6 +319,7 @@ fn parses_hybrid_from_env() {
 }
 
 #[test]
+#[serial]
 fn from_env_requires_qdrant_url_when_hybrid_selected() {
     let _guard = env_lock();
     let _env = CleanEnv::new().with_slack();
@@ -291,6 +334,7 @@ fn from_env_requires_qdrant_url_when_hybrid_selected() {
 }
 
 #[test]
+#[serial]
 fn from_env_discord_disabled_by_default() {
     let _guard = env_lock();
     let _env = CleanEnv::new().with_slack();
@@ -304,6 +348,7 @@ fn from_env_discord_disabled_by_default() {
 }
 
 #[test]
+#[serial]
 fn from_env_discord_enabled_requires_credentials() {
     let _guard = env_lock();
     let _env = CleanEnv::new().with_slack();
@@ -318,6 +363,7 @@ fn from_env_discord_enabled_requires_credentials() {
 }
 
 #[test]
+#[serial]
 fn from_env_discord_enabled_with_credentials_loads() {
     let _guard = env_lock();
     let _env = CleanEnv::new().with_slack();
@@ -331,6 +377,7 @@ fn from_env_discord_enabled_with_credentials_loads() {
 }
 
 #[test]
+#[serial]
 fn from_env_telegram_enabled_requires_token() {
     let _guard = env_lock();
     let _env = CleanEnv::new().with_slack();
@@ -345,6 +392,7 @@ fn from_env_telegram_enabled_requires_token() {
 }
 
 #[test]
+#[serial]
 fn from_env_telegram_enabled_with_token_loads() {
     let _guard = env_lock();
     let _env = CleanEnv::new().with_slack();
@@ -357,6 +405,7 @@ fn from_env_telegram_enabled_with_token_loads() {
 }
 
 #[test]
+#[serial]
 fn from_env_still_requires_slack_credentials() {
     let _guard = env_lock();
     let _env = CleanEnv::new(); // no slack creds, ollama selected

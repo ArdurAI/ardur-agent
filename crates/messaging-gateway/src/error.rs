@@ -28,6 +28,12 @@ pub enum GatewayError {
     /// [`supports_threading`]: crate::MessagingGateway::supports_threading
     #[error("unsupported feature: {0}")]
     UnsupportedFeature(String),
+    /// The gateway does not support the requested per-message verb yet.
+    #[error("message verb unsupported: {verb}")]
+    MessageVerbUnsupported {
+        /// Stable verb id, e.g. `edit` or `react`.
+        verb: String,
+    },
     /// An unexpected internal error.
     #[error("internal gateway error: {0}")]
     Internal(#[from] anyhow::Error),

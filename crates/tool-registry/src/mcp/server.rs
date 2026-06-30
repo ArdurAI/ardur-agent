@@ -56,9 +56,11 @@ impl ArdurMcpServer {
     /// The ambient context an MCP-driven invocation runs against.
     ///
     /// MCP-exposed tools are capability-free (echo, health-check), so the
-    /// context carries no real cap-token and a wide budget. `// TODO §6.0
-    /// Phase 3:` derive the context from the request's verified bearer identity
-    /// once MCP calls are gated by the cap-token + Cedar layers.
+    /// context carries no real cap-token and a wide budget. Tools with
+    /// non-empty `required_capabilities()` are denied in `call_tool` below —
+    /// the empty cap-token cannot grant any capability. `// TODO §6.0 Phase 3:`
+    /// derive the context from the request's verified bearer identity once MCP
+    /// calls are gated by the cap-token + Cedar layers.
     fn invocation_context() -> ToolContext {
         ToolContext {
             cap_token: CapTokenRef(String::new()),
@@ -87,6 +89,7 @@ impl ServerHandler for ArdurMcpServer {
             .registry
             .list()
             .into_iter()
+            .filter(|tool| tool.required_capabilities().is_empty())
             .map(Self::to_mcp_tool)
             .collect();
         Ok(ListToolsResult::with_all_items(tools))
@@ -104,6 +107,15 @@ impl ServerHandler for ArdurMcpServer {
                 None,
             ));
         };
+        if !tool.required_capabilities().is_empty() {
+            return Err(McpError::invalid_params(
+                format!(
+                    "tool {} requires fused-runtime cap-token/Cedar context and is not callable over direct MCP",
+                    request.name
+                ),
+                None,
+            ));
+        }
 
         // MCP arguments are an object (or absent); pass them through as the
         // tool's JSON `args`, defaulting an omitted object to `{}`.

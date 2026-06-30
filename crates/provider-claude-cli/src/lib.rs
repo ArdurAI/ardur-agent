@@ -925,7 +925,7 @@ mod tests {
         let err = parse_claude_output("[{\"type\":\"system\"}]").unwrap_err();
         match err {
             ProviderError::Upstream(m) => assert!(m.contains("no `result`"), "got: {m}"),
-            other => panic!("expected Upstream, got {other:?}"),
+            other => unreachable!("expected Upstream, got {other:?}"),
         }
     }
 
@@ -960,7 +960,7 @@ mod tests {
                 assert!(m.contains("boom: internal error"), "got: {m}");
                 assert!(m.contains("status 2"), "got: {m}");
             }
-            other => panic!("expected Upstream, got {other:?}"),
+            other => unreachable!("expected Upstream, got {other:?}"),
         }
     }
 

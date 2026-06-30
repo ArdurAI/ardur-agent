@@ -25,14 +25,51 @@ pub trait SessionJournal: Send + Sync {
     /// Append `entry` to the end of the log, durably, and return the
     /// [`EntryId`] it landed at.
     ///
-    /// A file-backed journal does a write-then-fsync so a returned id always
-    /// names a durably persisted entry.
+    /// A file-backed journal does a write-then-fsync so a returned EntryId names
+    /// a durably persisted entry.
     ///
     /// # Errors
     ///
     /// Returns [`JournalError::Io`]/[`JournalError::Serde`] if the entry could
     /// not be persisted.
     async fn append(&self, entry: JournalEntry) -> Result<EntryId, JournalError>;
+
+    /// Return the number of entries currently in this journal.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`replay`](Self::replay) for backends that
+    /// compute length by reading the durable log.
+    async fn len(&self) -> Result<u64, JournalError> {
+        Ok(self.replay(*self.session_id()).await?.len() as u64)
+    }
+
+    /// Whether the journal currently has no entries.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`len`](Self::len).
+    async fn is_empty(&self) -> Result<bool, JournalError> {
+        Ok(self.len().await? == 0)
+    }
+
+    /// Truncate the journal to the first `len` entries, durably.
+    ///
+    /// This is used only by the two-phase receipt+journal commit path to roll
+    /// back entries appended in a failed transaction before success is returned.
+    /// Implementations must reject `len` values beyond the current tail.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JournalError::EntryNotFound`] if `len` is beyond the current
+    /// tail, or backend-specific I/O errors if the truncation cannot be made
+    /// durable.
+    async fn truncate(&self, len: u64) -> Result<(), JournalError> {
+        let _ = len;
+        Err(JournalError::Malformed(
+            "journal backend does not support transactional truncate".to_string(),
+        ))
+    }
 
     /// Replay the session's full log, in append order.
     ///

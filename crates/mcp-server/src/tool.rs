@@ -34,7 +34,13 @@ impl McpTool {
         }
     }
 
-    pub fn with_parameter(mut self, name: &str, param_type: &str, required: bool, description: &str) -> Self {
+    pub fn with_parameter(
+        mut self,
+        name: &str,
+        param_type: &str,
+        required: bool,
+        description: &str,
+    ) -> Self {
         self.parameters.push(ToolParameter {
             name: name.to_string(),
             param_type: param_type.to_string(),
@@ -62,7 +68,7 @@ mod tests {
         let tool = McpTool::new("search", "Search tool")
             .with_parameter("query", "string", true, "Search query")
             .with_parameter("limit", "integer", false, "Result limit");
-        
+
         assert_eq!(tool.parameters.len(), 2);
         assert_eq!(tool.parameters[0].name, "query");
         assert!(tool.parameters[0].required);

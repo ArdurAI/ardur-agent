@@ -141,6 +141,6 @@ pub trait Tool: Send + Sync {
     ) -> Result<ToolOutput, ToolError>;
 
     /// The capabilities the authorization layer must grant before this tool may
-    /// run. Declarative: the registry does not enforce them in Phase 1.
+    /// run. These are enforced by the fused runtime before every invocation.
     fn required_capabilities(&self) -> &[Capability];
 }

@@ -61,15 +61,13 @@ impl ConfigSchema {
         self
     }
 
-    pub fn validate(
-        &self,
-        config: &crate::config::Config,
-    ) -> crate::error::Result<()> {
+    pub fn validate(&self, config: &crate::config::Config) -> crate::error::Result<()> {
         for field in &self.fields {
             if field.required && !config.values.contains_key(&field.name) {
-                return Err(crate::error::ConfigError::SchemaValidationFailed(
-                    format!("required field '{}' is missing", field.name),
-                ));
+                return Err(crate::error::ConfigError::SchemaValidationFailed(format!(
+                    "required field '{}' is missing",
+                    field.name
+                )));
             }
         }
         Ok(())
@@ -116,9 +114,8 @@ mod tests {
 
     #[test]
     fn test_schema_validation_optional() {
-        let schema = ConfigSchema::new().add_field(
-            SchemaField::new("key", FieldType::String).optional(),
-        );
+        let schema =
+            ConfigSchema::new().add_field(SchemaField::new("key", FieldType::String).optional());
         let config = crate::config::Config::new();
         assert!(schema.validate(&config).is_ok());
     }

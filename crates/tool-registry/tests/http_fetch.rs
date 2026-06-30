@@ -201,6 +201,54 @@ async fn fetch_permits_private_ip_when_allowed() {
     );
 }
 
+#[tokio::test]
+async fn fetch_rejects_reserved_ipv4_ranges_by_default() {
+    let tool = HttpFetchTool::new().with_allowlist(vec!["*".to_string()]);
+
+    for url in [
+        "http://0.1.2.3/",         // 0.0.0.0/8 this-host range
+        "http://100.64.0.1/",      // RFC 6598 carrier-grade NAT
+        "http://192.0.2.1/",       // RFC 5737 TEST-NET-1
+        "http://198.18.0.1/",      // RFC 2544 benchmarking
+        "http://198.51.100.1/",    // RFC 5737 TEST-NET-2
+        "http://203.0.113.1/",     // RFC 5737 TEST-NET-3
+        "http://224.0.0.1/",       // multicast
+        "http://240.0.0.1/",       // reserved for future use
+        "http://255.255.255.255/", // limited broadcast
+    ] {
+        let err = tool
+            .invoke(&ctx(), json!({ "url": url, "timeout_secs": 1 }))
+            .await
+            .expect_err("reserved address must be denied before network I/O");
+
+        assert!(
+            matches!(err, ToolError::Denied { .. }),
+            "{url} must be blocked by SSRF defence, got {err:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn fetch_rejects_ipv6_prefixes_that_embed_internal_ipv4() {
+    let tool = HttpFetchTool::new().with_allowlist(vec!["*".to_string()]);
+
+    for url in [
+        "http://[64:ff9b::7f00:1]/", // NAT64 well-known prefix embedding 127.0.0.1
+        "http://[64:ff9b::0a00:1]/", // NAT64 well-known prefix embedding 10.0.0.1
+        "http://[2002:0a00:0001::1]/", // 6to4 prefix embedding 10.0.0.1
+    ] {
+        let err = tool
+            .invoke(&ctx(), json!({ "url": url, "timeout_secs": 1 }))
+            .await
+            .expect_err("reserved address must be denied before network I/O");
+
+        assert!(
+            matches!(err, ToolError::Denied { .. }),
+            "{url} must be blocked by SSRF defence, got {err:?}"
+        );
+    }
+}
+
 // ── scheme / method / relative URL ───────────────────────────────────────────
 
 #[tokio::test]

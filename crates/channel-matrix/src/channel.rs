@@ -68,9 +68,10 @@ struct Forwarder {
 }
 
 impl Forwarder {
-    /// Whether `room_id` is permitted (empty allowlist = all rooms).
+    /// Whether `room_id` is permitted. An empty allowlist denies all rooms
+    /// (deny-by-default); otherwise the id must be in the set.
     fn room_allowed(&self, room_id: &str) -> bool {
-        self.allowed_rooms.is_empty() || self.allowed_rooms.contains(room_id)
+        self.allowed_rooms.contains(room_id)
     }
 }
 
@@ -285,7 +286,8 @@ async fn on_room_message(ev: OriginalSyncRoomMessageEvent, room: Room, ctx: Ctx<
 }
 
 /// Stripped room-member handler: auto-join an invite addressed to the bot when
-/// [`MatrixConfig::auto_join_invites`] is set and the room clears the allowlist.
+/// [`MatrixConfig::auto_join_invites`] is `true` and the room clears the
+/// allowlist. An empty allowlist denies all rooms (deny-by-default).
 async fn on_stripped_member(
     ev: StrippedRoomMemberEvent,
     room: Room,

@@ -183,18 +183,13 @@ fn welcome_splash_shows_once_then_persists_state() {
 #[test]
 fn slash_help_lists_phase1_commands() {
     let help = phase1_help();
-    for cmd in ["/help", "/clear", "/theme", "/cost", "/quit", "/exit"] {
+    for cmd in [
+        "/help", "/clear", "/theme", "/cost", "/memory", "/quit", "/exit",
+    ] {
         assert!(help.contains(cmd), "help should list {cmd}, got: {help}");
     }
-    // Phase-2/3 commands are deferred — they must NOT appear yet.
-    for deferred in [
-        "/sessions",
-        "/receipts",
-        "/memory",
-        "/skill",
-        "/copy",
-        "/save",
-    ] {
+    // Phase-2/3 commands still deferred — memory explorer graduated in EPIC-TRUST.
+    for deferred in ["/sessions", "/receipts", "/skill", "/copy", "/save"] {
         assert!(
             !help.contains(deferred),
             "{deferred} is deferred past Phase 1"

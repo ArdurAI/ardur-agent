@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use crate::error::{SessionError, Result};
+use crate::error::{Result, SessionError};
 use crate::session::{Session, SessionId, SessionStatus};
 
 #[derive(Debug, Clone)]
@@ -163,7 +163,9 @@ mod tests {
         old_session.last_active = chrono::Utc::now() - chrono::Duration::days(30);
         let id = registry.create(old_session).unwrap();
 
-        let pruned = registry.prune_inactive(chrono::Utc::now() - chrono::Duration::days(7)).unwrap();
+        let pruned = registry
+            .prune_inactive(chrono::Utc::now() - chrono::Duration::days(7))
+            .unwrap();
         assert_eq!(pruned.len(), 1);
         assert_eq!(pruned[0], id);
         assert!(registry.get(&id).is_err());

@@ -1,9 +1,9 @@
-pub mod error;
-pub mod session;
-pub mod registry;
 pub mod checkpoint;
+pub mod error;
+pub mod registry;
+pub mod session;
 
-pub use error::{SessionError, Result};
-pub use session::{Session, SessionId, SessionStatus, SessionConfig};
-pub use registry::SessionRegistry;
 pub use checkpoint::{Checkpoint, CheckpointManager};
+pub use error::{Result, SessionError};
+pub use registry::SessionRegistry;
+pub use session::{Session, SessionConfig, SessionId, SessionStatus};

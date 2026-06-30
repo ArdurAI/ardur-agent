@@ -82,7 +82,11 @@ impl LogFilter {
     }
 
     pub fn apply(&self, entries: &[crate::log::LogEntry]) -> Vec<crate::log::LogEntry> {
-        entries.iter().filter(|e| self.criteria.matches(e)).cloned().collect()
+        entries
+            .iter()
+            .filter(|e| self.criteria.matches(e))
+            .cloned()
+            .collect()
     }
 }
 
@@ -111,7 +115,8 @@ mod tests {
     #[test]
     fn test_filter_criteria_message() {
         let criteria = FilterCriteria::new().with_message_contains("error");
-        let entry = crate::log::LogEntry::new(crate::log::LogLevel::Info, "test", "an error occurred");
+        let entry =
+            crate::log::LogEntry::new(crate::log::LogLevel::Info, "test", "an error occurred");
         assert!(criteria.matches(&entry));
         let entry2 = crate::log::LogEntry::new(crate::log::LogLevel::Info, "test", "success");
         assert!(!criteria.matches(&entry2));

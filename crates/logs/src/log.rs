@@ -61,12 +61,10 @@ impl LogStream {
     }
 
     pub fn append(&self, entry: LogEntry) -> crate::error::Result<()> {
-        let mut entries = self.entries.write().map_err(|_| {
-            crate::error::LogError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "poisoned lock",
-            ))
-        })?;
+        let mut entries = self
+            .entries
+            .write()
+            .map_err(|_| crate::error::LogError::Io(std::io::Error::other("poisoned lock")))?;
         if entries.len() >= self.max_size {
             entries.remove(0);
         }
@@ -75,23 +73,22 @@ impl LogStream {
     }
 
     pub fn tail(&self, n: usize) -> crate::error::Result<Vec<LogEntry>> {
-        let entries = self.entries.read().map_err(|_| {
-            crate::error::LogError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "poisoned lock",
-            ))
-        })?;
+        let entries = self
+            .entries
+            .read()
+            .map_err(|_| crate::error::LogError::Io(std::io::Error::other("poisoned lock")))?;
         let start = entries.len().saturating_sub(n);
         Ok(entries[start..].to_vec())
     }
 
-    pub fn filter(&self, criteria: &crate::filter::FilterCriteria) -> crate::error::Result<Vec<LogEntry>> {
-        let entries = self.entries.read().map_err(|_| {
-            crate::error::LogError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "poisoned lock",
-            ))
-        })?;
+    pub fn filter(
+        &self,
+        criteria: &crate::filter::FilterCriteria,
+    ) -> crate::error::Result<Vec<LogEntry>> {
+        let entries = self
+            .entries
+            .read()
+            .map_err(|_| crate::error::LogError::Io(std::io::Error::other("poisoned lock")))?;
         Ok(entries
             .iter()
             .filter(|e| criteria.matches(e))
@@ -100,12 +97,10 @@ impl LogStream {
     }
 
     pub fn count(&self) -> crate::error::Result<usize> {
-        let entries = self.entries.read().map_err(|_| {
-            crate::error::LogError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "poisoned lock",
-            ))
-        })?;
+        let entries = self
+            .entries
+            .read()
+            .map_err(|_| crate::error::LogError::Io(std::io::Error::other("poisoned lock")))?;
         Ok(entries.len())
     }
 }
@@ -125,8 +120,12 @@ mod tests {
     #[test]
     fn test_log_stream_append() {
         let stream = LogStream::new(100);
-        stream.append(LogEntry::new(LogLevel::Info, "a", "msg1")).unwrap();
-        stream.append(LogEntry::new(LogLevel::Info, "a", "msg2")).unwrap();
+        stream
+            .append(LogEntry::new(LogLevel::Info, "a", "msg1"))
+            .unwrap();
+        stream
+            .append(LogEntry::new(LogLevel::Info, "a", "msg2"))
+            .unwrap();
         assert_eq!(stream.count().unwrap(), 2);
     }
 
@@ -134,7 +133,9 @@ mod tests {
     fn test_log_stream_tail() {
         let stream = LogStream::new(100);
         for i in 0..10 {
-            stream.append(LogEntry::new(LogLevel::Info, "a", &format!("msg{}", i))).unwrap();
+            stream
+                .append(LogEntry::new(LogLevel::Info, "a", &format!("msg{}", i)))
+                .unwrap();
         }
         let tail = stream.tail(3).unwrap();
         assert_eq!(tail.len(), 3);
@@ -145,7 +146,9 @@ mod tests {
     fn test_log_stream_max_size() {
         let stream = LogStream::new(5);
         for i in 0..10 {
-            stream.append(LogEntry::new(LogLevel::Info, "a", &format!("msg{}", i))).unwrap();
+            stream
+                .append(LogEntry::new(LogLevel::Info, "a", &format!("msg{}", i)))
+                .unwrap();
         }
         assert_eq!(stream.count().unwrap(), 5);
     }

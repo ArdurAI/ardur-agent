@@ -142,6 +142,14 @@ impl ActiveEngine {
             ActiveEngine::Echo(e) => e.run_turn(messages).await,
         }
     }
+
+    /// Run a `/memory` explorer command when the active substrate has memory.
+    fn memory_command(&self, args: &str) -> String {
+        match self {
+            ActiveEngine::Fused(e) => e.memory_command(args),
+            ActiveEngine::Echo(_) => "memory explorer is unavailable in --echo mode".to_string(),
+        }
+    }
 }
 
 /// The mutable per-session presentation state the REPL threads through every
@@ -359,7 +367,7 @@ async fn handle_line(
     stream_enabled: bool,
 ) -> bool {
     if let Some(rest) = line.strip_prefix('/') {
-        dispatch_slash(bus, state, rest)
+        dispatch_slash(engine, bus, state, rest)
     } else {
         run_chat_message(engine, state, history, line, stream_enabled).await;
         false
@@ -370,7 +378,12 @@ async fn handle_line(
 /// `/cost`, `/clear`) are handled here against the [`ReplState`]; everything else
 /// (`/help`, `/budget`, `/quit`, `/exit`, unknown) routes through the bus.
 /// Returns `true` if the command was `/quit` or `/exit`.
-fn dispatch_slash(bus: &InMemoryCommandBus, state: &mut ReplState, rest: &str) -> bool {
+fn dispatch_slash(
+    engine: &ActiveEngine,
+    bus: &InMemoryCommandBus,
+    state: &mut ReplState,
+    rest: &str,
+) -> bool {
     let (command, args) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
     let args = args.trim();
     match command {
@@ -383,6 +396,10 @@ fn dispatch_slash(bus: &InMemoryCommandBus, state: &mut ReplState, rest: &str) -
         }
         "cost" => {
             println!("{}", state.cost.render(&state.theme));
+            false
+        }
+        "memory" => {
+            println!("{}", engine.memory_command(args));
             false
         }
         "clear" => {

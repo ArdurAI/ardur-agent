@@ -7,12 +7,14 @@ updates:
     target-branch: "dev"
     labels:
       - "dependencies"
+      - "ci"
     groups:
       gha-minor-patch:
         applies-to: version-updates
         update-types:
           - "minor"
           - "patch"
+
   - package-ecosystem: "cargo"
     directory: "/"
     schedule:
@@ -20,9 +22,46 @@ updates:
     target-branch: "dev"
     labels:
       - "dependencies"
+      - "rust"
     groups:
+      # Keep the OpenTelemetry stack in one PR. `provider-runtime` wires
+      # `opentelemetry`, `opentelemetry_sdk`, `opentelemetry-otlp`, and
+      # `tracing-opentelemetry` through one API surface; a single-crate bump left
+      # `dev` red when the SDK advanced without matching API/exporter crates.
+      otel-stack:
+        applies-to: version-updates
+        patterns:
+          - "opentelemetry*"
+          - "tracing-opentelemetry"
+        update-types:
+          - "minor"
+          - "patch"
       cargo-minor-patch:
         applies-to: version-updates
         update-types:
           - "minor"
           - "patch"
+
+  - package-ecosystem: "npm"
+    directory: "/site"
+    schedule:
+      interval: "weekly"
+    target-branch: "dev"
+    labels:
+      - "dependencies"
+      - "site"
+    groups:
+      site-minor-patch:
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    target-branch: "dev"
+    labels:
+      - "dependencies"
+      - "docker"

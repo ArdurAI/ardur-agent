@@ -39,10 +39,15 @@ pub struct MatrixConfig {
     /// Directory backing the sqlite state + crypto store. Defaults to
     /// `~/.ardur/matrix-state` (see [`default_state_dir`]).
     pub state_dir: PathBuf,
-    /// Whether the bot accepts room invites automatically (default `true`).
+    /// Whether the bot accepts room invites automatically (default `false`).
+    /// When `false`, invites are never auto-joined regardless of the allowlist.
+    /// When `true`, the bot joins invited rooms that clear the allowlist — but
+    /// an empty allowlist means *no* rooms are joined (deny-by-default).
     pub auto_join_invites: bool,
-    /// Room-id allowlist. Empty means "all rooms"; otherwise inbound messages
-    /// from rooms not in this list are dropped.
+    /// Room-id allowlist. Empty means "all rooms denied" (deny-by-default); a
+    /// message from a room not in this list is dropped before the runtime sees
+    /// it. When `auto_join_invites` is `true` *and* the allowlist is empty, a
+    /// startup warning is emitted.
     pub allowed_rooms: Vec<String>,
 }
 
@@ -90,7 +95,8 @@ impl MatrixConfig {
     /// Required: `MATRIX_HOMESERVER_URL`, `MATRIX_USER_ID`,
     /// `MATRIX_ACCESS_TOKEN`. Optional: `MATRIX_DEVICE_ID`, `MATRIX_STATE_DIR`
     /// (default `~/.ardur/matrix-state`), `MATRIX_AUTO_JOIN_INVITES`
-    /// (default `false`), `MATRIX_ALLOWED_ROOMS` (comma-separated; empty = all).
+    /// (default `false`), `MATRIX_ALLOWED_ROOMS` (comma-separated; empty = all
+    /// denied).
     ///
     /// # Errors
     /// [`MatrixError::MissingEnvVar`] naming the first required variable that is
@@ -122,13 +128,13 @@ impl MatrixConfig {
 
         let device_id = get(ENV_DEVICE_ID);
         let state_dir = get(ENV_STATE_DIR).map_or_else(default_state_dir, PathBuf::from);
-        let auto_join_invites = get(ENV_AUTO_JOIN).is_none_or(|v| parse_bool(&v));
+        let auto_join_invites = get(ENV_AUTO_JOIN).map(|v| parse_bool(&v)).unwrap_or(false);
         let allowed_rooms = parse_allowed_rooms(get(ENV_ALLOWED_ROOMS).as_deref());
 
         Ok(Self {
             homeserver_url,
             user_id,
-            access_token: SecretString::new(access_token),
+            access_token: SecretString::from(access_token),
             device_id,
             state_dir,
             auto_join_invites,
@@ -143,11 +149,11 @@ impl MatrixConfig {
         self.device_id.as_deref().unwrap_or(DEFAULT_DEVICE_ID)
     }
 
-    /// Whether `room_id` is permitted: true when the allowlist is empty
-    /// (all rooms) or contains the id.
+    /// Whether `room_id` is permitted: true only when the allowlist contains
+    /// it. An empty allowlist denies **all** rooms (deny-by-default).
     #[must_use]
     pub fn room_allowed(&self, room_id: &str) -> bool {
-        self.allowed_rooms.is_empty() || self.allowed_rooms.iter().any(|r| r == room_id)
+        self.allowed_rooms.iter().any(|r| r == room_id)
     }
 }
 
@@ -178,14 +184,14 @@ impl MatrixConfigBuilder {
         self
     }
 
-    /// Set whether the bot auto-joins room invites (default `true`).
+    /// Set whether the bot auto-joins room invites (default `false`).
     #[must_use]
     pub fn auto_join_invites(mut self, auto_join: bool) -> Self {
         self.auto_join_invites = auto_join;
         self
     }
 
-    /// Set the room-id allowlist (empty = all rooms).
+    /// Set the room-id allowlist (empty = all denied).
     #[must_use]
     pub fn allowed_rooms(mut self, rooms: Vec<String>) -> Self {
         self.allowed_rooms = rooms;
@@ -207,10 +213,20 @@ impl MatrixConfigBuilder {
         if self.access_token.is_empty() {
             return Err(MatrixError::MissingField("access_token".to_owned()));
         }
+        // ARD-422: warn when auto-join is enabled with an empty allowlist —
+        // deny-by-default means no room would clear the gate anyway, but this
+        // is almost certainly a misconfiguration the operator should know about.
+        if self.auto_join_invites && self.allowed_rooms.is_empty() {
+            tracing::warn!(
+                "Matrix auto_join_invites is true but allowed_rooms is empty — \
+                 deny-by-default means no room will be joined or processed. \
+                 Set MATRIX_ALLOWED_ROOMS to the rooms the bot should operate in."
+            );
+        }
         Ok(MatrixConfig {
             homeserver_url: self.homeserver_url,
             user_id: self.user_id,
-            access_token: SecretString::new(self.access_token),
+            access_token: SecretString::from(self.access_token),
             device_id: self.device_id,
             state_dir: self.state_dir.unwrap_or_else(default_state_dir),
             auto_join_invites: self.auto_join_invites,
@@ -230,7 +246,8 @@ pub fn default_state_dir() -> PathBuf {
 }
 
 /// Parse the `MATRIX_ALLOWED_ROOMS` value: comma-separated, each entry trimmed,
-/// blanks dropped. `None` (or all-blank) yields an empty list = "all rooms".
+/// blanks dropped. `None` (or all-blank) yields an empty list = "all rooms
+/// denied" (deny-by-default).
 #[must_use]
 pub fn parse_allowed_rooms(raw: Option<&str>) -> Vec<String> {
     raw.map(|s| {

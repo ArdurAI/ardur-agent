@@ -19,7 +19,7 @@ use crate::journal::{self, JournalPage, SessionSummary};
 use crate::memory::{self, MemoryRecent};
 use crate::receipts::{self, ReceiptSummary};
 use crate::state::SharedState;
-use crate::{auth, html};
+use crate::{auth, html, trust};
 
 /// An error from a handler — rendered as a `500` with the message. Reads that
 /// simply find nothing (missing session, unknown receipt) return `404` instead,
@@ -79,7 +79,7 @@ struct JournalQuery {
     offset: Option<usize>,
 }
 
-/// `GET /api/sessions/:id/journal?limit=&offset=`
+/// `GET /api/sessions/{id}/journal?limit=&offset=`
 async fn session_journal(
     State(state): State<SharedState>,
     Path(id): Path<String>,
@@ -111,7 +111,7 @@ struct FullReceipt {
     jws_compact: String,
 }
 
-/// `GET /api/receipts/:id`
+/// `GET /api/receipts/{id}`
 async fn receipt_by_id(
     State(state): State<SharedState>,
     Path(id): Path<String>,
@@ -143,6 +143,36 @@ async fn memory_recent(State(state): State<SharedState>) -> Result<Json<MemoryRe
     }
 }
 
+/// `GET /api/trust/wallet` — active verified capability grants.
+async fn trust_wallet(State(state): State<SharedState>) -> Json<trust::WalletResponse> {
+    Json(trust::wallet(
+        &state.capabilities,
+        chrono::Utc::now().timestamp().max(0) as u64,
+    ))
+}
+
+/// `GET /api/trust/receipts/verify` — verify hash-chain linkage.
+async fn trust_receipts_verify(
+    State(state): State<SharedState>,
+) -> Result<Json<trust::ReceiptVerification>, ApiError> {
+    Ok(Json(trust::verify_receipts(&state.receipt_store)?))
+}
+
+/// `GET /api/trust/policy/debug?principal=&action=&resource=&attributes=`.
+async fn trust_policy_debug(
+    State(state): State<SharedState>,
+    Query(query): Query<trust::PolicyDebugQuery>,
+) -> Result<Response, ApiError> {
+    match &state.policies {
+        Some(policies) => Ok(Json(trust::debug_policy(policies, query)?).into_response()),
+        None => Ok((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "policy debugger not configured",
+        )
+            .into_response()),
+    }
+}
+
 /// Assemble the read-only router, layering the Basic-auth gate (a no-op unless
 /// `AppState::basic_auth` is set).
 pub fn build_router(state: SharedState) -> Router {
@@ -150,11 +180,14 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/", get(dashboard))
         .route("/healthz", get(healthz))
         .route("/api/sessions", get(list_sessions))
-        .route("/api/sessions/:id/journal", get(session_journal))
+        .route("/api/sessions/{id}/journal", get(session_journal))
         .route("/api/receipts", get(list_receipts))
-        .route("/api/receipts/:id", get(receipt_by_id))
+        .route("/api/receipts/{id}", get(receipt_by_id))
         .route("/api/costs", get(costs_report))
         .route("/api/memory/recent", get(memory_recent))
+        .route("/api/trust/wallet", get(trust_wallet))
+        .route("/api/trust/receipts/verify", get(trust_receipts_verify))
+        .route("/api/trust/policy/debug", get(trust_policy_debug))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth::require_auth,

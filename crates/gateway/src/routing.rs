@@ -84,14 +84,17 @@ impl Router {
         Ok(())
     }
 
-    pub fn route(&self, message: &crate::message::Message) -> crate::error::Result<Vec<RouteTarget>> {
+    pub fn route(
+        &self,
+        message: &crate::message::Message,
+    ) -> crate::error::Result<Vec<RouteTarget>> {
         let rules = self.rules.read().map_err(|_| {
             crate::error::GatewayError::Io(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 "poisoned lock",
             ))
         })?;
-        
+
         for rule in rules.iter() {
             if !rule.enabled {
                 continue;
@@ -101,10 +104,11 @@ impl Router {
                 return Ok(rule.targets.clone());
             }
         }
-        
-        Err(crate::error::GatewayError::RoutingFailed(
-            format!("No matching route for message: {}", message.id)
-        ))
+
+        Err(crate::error::GatewayError::RoutingFailed(format!(
+            "No matching route for message: {}",
+            message.id
+        )))
     }
 
     pub fn list_rules(&self) -> crate::error::Result<Vec<RoutingRule>> {
@@ -156,8 +160,8 @@ mod tests {
     #[test]
     fn test_router_no_match() {
         let router = Router::new();
-        let rule = RoutingRule::new("specific", "xyz")
-            .add_target(RouteTarget::new("ch-1", "handler"));
+        let rule =
+            RoutingRule::new("specific", "xyz").add_target(RouteTarget::new("ch-1", "handler"));
         router.add_rule(rule).unwrap();
 
         let msg = Message::new("ch-2", "user1", "hello", MessageType::Text);

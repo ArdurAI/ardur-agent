@@ -39,7 +39,9 @@ impl SkillRegistry {
         })?;
 
         if name_index.contains_key(&skill.manifest.name) {
-            return Err(CuratorError::SkillAlreadyExists(skill.manifest.name.clone()));
+            return Err(CuratorError::SkillAlreadyExists(
+                skill.manifest.name.clone(),
+            ));
         }
 
         let id = skill.id.clone();
@@ -55,7 +57,10 @@ impl SkillRegistry {
                 "poisoned lock",
             ))
         })?;
-        skills.get(id).cloned().ok_or_else(|| CuratorError::SkillNotFound(id.clone()))
+        skills
+            .get(id)
+            .cloned()
+            .ok_or_else(|| CuratorError::SkillNotFound(id.clone()))
     }
 
     pub fn get_by_name(&self, name: &str) -> Result<Skill> {
@@ -65,7 +70,9 @@ impl SkillRegistry {
                 "poisoned lock",
             ))
         })?;
-        let id = name_index.get(name).ok_or_else(|| CuratorError::SkillNotFound(name.to_string()))?;
+        let id = name_index
+            .get(name)
+            .ok_or_else(|| CuratorError::SkillNotFound(name.to_string()))?;
         self.get(id)
     }
 
@@ -86,7 +93,11 @@ impl SkillRegistry {
                 "poisoned lock",
             ))
         })?;
-        Ok(skills.values().filter(|s| s.status == status).cloned().collect())
+        Ok(skills
+            .values()
+            .filter(|s| s.status == status)
+            .cloned()
+            .collect())
     }
 
     pub fn update(&self, skill: Skill) -> Result<()> {
@@ -117,7 +128,9 @@ impl SkillRegistry {
             ))
         })?;
 
-        let skill = skills.remove(id).ok_or_else(|| CuratorError::SkillNotFound(id.clone()))?;
+        let skill = skills
+            .remove(id)
+            .ok_or_else(|| CuratorError::SkillNotFound(id.clone()))?;
         name_index.remove(&skill.manifest.name);
         Ok(())
     }

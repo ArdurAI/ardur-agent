@@ -66,10 +66,9 @@ impl AudioProvider {
                 "poisoned lock",
             ))
         })?;
-        clips
-            .get(id)
-            .cloned()
-            .ok_or_else(|| crate::error::MediaError::ProcessingFailed(format!("clip not found: {id}")))
+        clips.get(id).cloned().ok_or_else(|| {
+            crate::error::MediaError::ProcessingFailed(format!("clip not found: {id}"))
+        })
     }
 
     pub fn list_clips(&self) -> crate::error::Result<Vec<AudioClip>> {
@@ -107,8 +106,12 @@ mod tests {
     #[test]
     fn test_provider_list() {
         let provider = AudioProvider::new();
-        provider.add_clip(AudioClip::new(AudioFormat::Mp3, 1000)).unwrap();
-        provider.add_clip(AudioClip::new(AudioFormat::Wav, 2000)).unwrap();
+        provider
+            .add_clip(AudioClip::new(AudioFormat::Mp3, 1000))
+            .unwrap();
+        provider
+            .add_clip(AudioClip::new(AudioFormat::Wav, 2000))
+            .unwrap();
         let list = provider.list_clips().unwrap();
         assert_eq!(list.len(), 2);
     }

@@ -4,7 +4,7 @@
 
 mod common;
 
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use common::{spawn_mcp_server, test_context};
 
@@ -103,4 +103,30 @@ async fn registers_via_mcp() {
         out.content,
         json!("Summarize the staged diff. @./format.md")
     );
+}
+
+#[tokio::test]
+async fn repository_examples_include_cite_or_refuse_policy() {
+    let examples_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/skills");
+    let skills =
+        SkillLoader::load_directory(&examples_dir).expect("load repository example skills");
+    let skill = skills
+        .into_iter()
+        .find(|skill| skill.frontmatter.name == "cite-or-refuse")
+        .expect("cite-or-refuse example skill is loadable");
+
+    assert!(skill.frontmatter.description.contains("user-corpus spans"));
+    assert!(skill.body.contains("refused_empty_retrieval"));
+    assert!(skill.body.contains("cited_spans"));
+    assert!(skill.body.contains("@./receipt-schema.md"));
+
+    let tool = SkillTool::new(skill);
+    let out = tool
+        .invoke(&test_context(), json!({ "expand": ["receipt-schema.md"] }))
+        .await
+        .expect("invoke cite-or-refuse skill with receipt schema");
+    let body = out.content.as_str().expect("skill output is a string");
+    assert!(body.contains("Grounding receipt requirements"));
+    assert!(body.contains("\"mode\": \"cite_or_refuse\""));
+    assert!(body.contains("refused_empty_retrieval"));
 }

@@ -54,7 +54,8 @@ impl ExecutionEngine {
                 .copied()
                 .filter(|id| {
                     let deps = graph.dependencies(*id);
-                    deps.iter().all(|d| completed.contains_key(d) || failed.contains(d))
+                    deps.iter()
+                        .all(|d| completed.contains_key(d) || failed.contains(d))
                         && deps.iter().all(|d| !failed.contains(d))
                 })
                 .collect();
@@ -323,7 +324,11 @@ mod tests {
 
         assert_eq!(results.len(), 3);
         // B and C should run in parallel, so total time should be ~200ms, not ~300ms
-        assert!(elapsed.as_millis() < 250, "parallel execution took too long: {:?}", elapsed);
+        assert!(
+            elapsed.as_millis() < 250,
+            "parallel execution took too long: {:?}",
+            elapsed
+        );
     }
 
     #[tokio::test]

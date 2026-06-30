@@ -158,9 +158,8 @@ async fn streaming_shows_usage_at_end() {
     provider.usage = Some(Usage {
         tokens_in: 1000,
         tokens_out: 1000,
-    
-            ..Default::default()
-        });
+        cost_cents: None,
+    });
 
     let (output, outcome) = run(&provider, true).await;
 
@@ -175,7 +174,7 @@ async fn streaming_shows_usage_at_end() {
         Some(Usage {
             tokens_in: 1000,
             tokens_out: 1000,
-            ..Default::default()
+            cost_cents: None,
         })
     );
 }
@@ -251,9 +250,8 @@ fn cost_tuple_round_trips() {
     let cost = card.price(Usage {
         tokens_in: 1000,
         tokens_out: 1000,
-    
-            ..Default::default()
-        });
+        cost_cents: None,
+    });
     let json = serde_json::to_string(&cost).expect("serialize CostTuple");
     let back: CostTuple = serde_json::from_str(&json).expect("deserialize CostTuple");
     assert_eq!(cost, back);

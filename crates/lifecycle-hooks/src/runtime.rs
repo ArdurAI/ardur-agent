@@ -24,7 +24,7 @@ use ardur_memory::MemoryRuntime;
 use ardur_provider_runtime::{
     CompletionRequest, CompletionResponse, ModelId, Provider, ProviderError,
 };
-use ardur_receipt::{ReceiptBody, Sha256Digest, VerbObject};
+use ardur_receipt::{Es256SigningKey, ReceiptBody, ReceiptSigner, Sha256Digest, VerbObject};
 use ardur_runtime::{
     CapTokenRef, ChatMessage, ChatRuntime, ReceiptId, RuntimeError, SessionId, SubmitRequest,
     SubmitResult,
@@ -49,6 +49,7 @@ pub struct HookedRuntime {
     provider: Arc<dyn Provider>,
     model: ModelId,
     max_tokens: u32,
+    receipt_key: Es256SigningKey,
     memory: Option<Arc<dyn MemoryRuntime + Send + Sync>>,
 }
 
@@ -62,6 +63,7 @@ impl HookedRuntime {
             provider,
             model,
             max_tokens: DEFAULT_MAX_TOKENS,
+            receipt_key: Es256SigningKey::generate(),
             memory: None,
         }
     }
@@ -79,6 +81,14 @@ impl HookedRuntime {
     #[must_use]
     pub fn with_max_tokens(mut self, max_tokens: u32) -> Self {
         self.max_tokens = max_tokens;
+        self
+    }
+
+    /// Use explicit ES256 key material for receipts minted by this runtime.
+    /// Without this, the runtime generates an ephemeral key when it is built.
+    #[must_use]
+    pub fn with_receipt_key(mut self, receipt_key: Es256SigningKey) -> Self {
+        self.receipt_key = receipt_key;
         self
     }
 
@@ -169,25 +179,37 @@ impl ChatRuntime for HookedRuntime {
             }
         };
 
-        // 4. Mint the receipt, then run post-receipt hooks (observational).
-        let receipt = mint_receipt(&req, &response);
+        // 4. Mint + sign the receipt, then run post-receipt hooks
+        //    (observational).
+        let body = mint_receipt(&req, &response);
+        let signed_receipt = match ReceiptSigner::sign(body, &self.receipt_key) {
+            Ok(signed) => signed,
+            Err(receipt_err) => {
+                self.fire_error(session_id, LifecyclePhase::Receipt, &receipt_err)
+                    .await;
+                return Err(RuntimeError::Internal(anyhow::anyhow!(
+                    "receipt mint failed: {receipt_err}"
+                )));
+            }
+        };
+        let receipt = signed_receipt.body();
         let post_ctx = PostReceiptCtx {
             session_id,
-            receipt: &receipt,
+            signed_receipt: &signed_receipt,
+            receipt,
             response: &response,
             cost: response.cost,
         };
         for err in self.registry.run_post_receipt(&post_ctx).await {
-            // Observational: log and continue. (`tracing` wiring lands with the
-            // observability plumbing; Phase 1 keeps the non-fatal contract.)
-            let _ = err;
+            // Observational: log and continue — non-fatal contract.
+            tracing::warn!(error = %err, "post-receipt hook error (non-fatal)");
         }
 
         // 5. Memory write (after the post-receipt observers have seen the
         //    receipt). A write failure is reported via `on_error` but does not
         //    fail the turn — the turn already happened and is receipted.
         if let Some(memory) = &self.memory {
-            let record = turn_record(&req, &response, &receipt);
+            let record = turn_record(&req, &response, receipt);
             if let Err(mem_err) = memory.record(record) {
                 self.fire_error(session_id, LifecyclePhase::MemoryWrite, &mem_err)
                     .await;
@@ -210,9 +232,9 @@ fn map_provider_error(err: &ProviderError) -> RuntimeError {
     }
 }
 
-/// Mint the unsigned receipt body for a completed turn. The `payload_digest`
-/// covers the *response actually produced*, so a turn whose request was
-/// redacted by a pre-submit hook is receipted against the redacted text.
+/// Mint the receipt body for a completed turn. The `payload_digest` covers the
+/// *response actually produced*, so a turn whose request was redacted by a
+/// pre-submit hook is receipted against the redacted text.
 fn mint_receipt(req: &SubmitRequest, response: &CompletionResponse) -> ReceiptBody {
     ReceiptBody {
         receipt_id: uuid::Uuid::new_v4(),

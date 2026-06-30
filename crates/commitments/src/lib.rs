@@ -1,7 +1,7 @@
-pub mod error;
 pub mod commitment;
+pub mod error;
 pub mod registry;
 
-pub use error::{CommitmentError, Result};
 pub use commitment::{Commitment, CommitmentId, CommitmentStatus, Priority};
+pub use error::{CommitmentError, Result};
 pub use registry::CommitmentRegistry;

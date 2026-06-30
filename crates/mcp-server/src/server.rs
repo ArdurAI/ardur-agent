@@ -57,7 +57,10 @@ impl McpServer {
                 "poisoned lock",
             ))
         })?;
-        tools.get(name).cloned().ok_or_else(|| McpError::ToolNotFound(name.to_string()))
+        tools
+            .get(name)
+            .cloned()
+            .ok_or_else(|| McpError::ToolNotFound(name.to_string()))
     }
 
     pub fn list_tools(&self) -> Result<Vec<McpTool>> {
@@ -77,7 +80,9 @@ impl McpServer {
                 "poisoned lock",
             ))
         })?;
-        tools.remove(name).ok_or_else(|| McpError::ToolNotFound(name.to_string()))?;
+        tools
+            .remove(name)
+            .ok_or_else(|| McpError::ToolNotFound(name.to_string()))?;
         Ok(())
     }
 
@@ -112,8 +117,12 @@ mod tests {
     #[test]
     fn test_list_tools() {
         let server = McpServer::default();
-        server.register_tool(McpTool::new("tool1", "First")).unwrap();
-        server.register_tool(McpTool::new("tool2", "Second")).unwrap();
+        server
+            .register_tool(McpTool::new("tool1", "First"))
+            .unwrap();
+        server
+            .register_tool(McpTool::new("tool2", "Second"))
+            .unwrap();
         let tools = server.list_tools().unwrap();
         assert_eq!(tools.len(), 2);
     }
@@ -121,7 +130,9 @@ mod tests {
     #[test]
     fn test_remove_tool() {
         let server = McpServer::default();
-        server.register_tool(McpTool::new("remove_me", "To be removed")).unwrap();
+        server
+            .register_tool(McpTool::new("remove_me", "To be removed"))
+            .unwrap();
         server.remove_tool("remove_me").unwrap();
         assert!(server.get_tool("remove_me").is_err());
     }
@@ -129,7 +140,9 @@ mod tests {
     #[test]
     fn test_execute_tool() {
         let server = McpServer::default();
-        server.register_tool(McpTool::new("echo", "Echo tool")).unwrap();
+        server
+            .register_tool(McpTool::new("echo", "Echo tool"))
+            .unwrap();
         let input = serde_json::json!({"message": "hello"});
         let output = server.execute_tool("echo", input.clone()).unwrap();
         assert_eq!(output, input);

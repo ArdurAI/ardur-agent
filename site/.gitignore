@@ -6,5 +6,9 @@ public/
 resources/
 .hugo_build.lock
 
-# Generated Tailwind build-stats file
+# Generated Tailwind build-stats files
 assets/jsconfig.json
+hugo_stats.json
+
+# Lockfile is not committed: the deploy uses `npm install` with caret ranges.
+package-lock.json

@@ -59,7 +59,10 @@ impl DiagnosticReport {
     }
 
     pub fn by_level(&self, level: DiagnosticLevel) -> Vec<&Diagnostic> {
-        self.diagnostics.iter().filter(|d| d.level == level).collect()
+        self.diagnostics
+            .iter()
+            .filter(|d| d.level == level)
+            .collect()
     }
 }
 
@@ -90,8 +93,18 @@ mod tests {
     #[test]
     fn test_diagnostic_report() {
         let mut report = DiagnosticReport::new();
-        report.add(Diagnostic::new("d1", DiagnosticLevel::Info, "Info msg", "test"));
-        report.add(Diagnostic::new("d2", DiagnosticLevel::Error, "Error msg", "test"));
+        report.add(Diagnostic::new(
+            "d1",
+            DiagnosticLevel::Info,
+            "Info msg",
+            "test",
+        ));
+        report.add(Diagnostic::new(
+            "d2",
+            DiagnosticLevel::Error,
+            "Error msg",
+            "test",
+        ));
         assert_eq!(report.diagnostics.len(), 2);
         assert_eq!(report.unresolved().len(), 2);
         assert_eq!(report.by_level(DiagnosticLevel::Error).len(), 1);

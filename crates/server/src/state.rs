@@ -37,7 +37,7 @@
 //! the runtime (or an injectable shared budget store).
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ardur_cap_token::{
@@ -92,10 +92,17 @@ pub const CAP_TTL_SECS: u64 = 5 * 60;
 /// down to the configured budget so a tiny budget still admits its first turn.
 const PER_TURN_CENTS_CAP: u64 = 1_000;
 
-/// The built-in permissive-but-bounded Cedar policy: permit the one action the
-/// server performs (`Action::Submit`) and nothing else. Used when
-/// `ARDUR_CEDAR_POLICY_PATH` is unset or its file is absent.
-const DEFAULT_POLICY: &str = "permit(principal, action == Action::\"Submit\", resource);";
+/// The built-in development Cedar policy: permit chat submission plus the
+/// tool-invocation action that is still constrained by cap-token tool caveats.
+/// It is available only when `ARDUR_DEV_PERMISSIVE_POLICY=true` is explicitly set.
+const DEFAULT_POLICY: &str = r#"
+permit(principal, action == Action::"Submit", resource);
+permit(principal, action == Action::"ToolInvoke", resource);
+"#;
+
+/// Production fallback when no explicit Cedar policy is configured: deny every
+/// action. This keeps missing policy configuration fail-closed.
+const DENY_ALL_POLICY: &str = "forbid(principal, action, resource);";
 
 /// A unit of work handed to the turn worker. Both variants run the identical
 /// fused-runtime pipeline; they differ only in where the reply goes — a
@@ -160,9 +167,17 @@ pub enum ChatSubmitError {
 /// the cap-token issuer live on the worker thread (see the module docs).
 pub struct AppState {
     slack: Arc<SlackAdapter>,
-    work_tx: mpsc::UnboundedSender<WorkItem>,
+    work_tx: Arc<Mutex<Option<mpsc::UnboundedSender<WorkItem>>>>,
+    /// The OS-thread handle for the turn worker — used by [`shutdown`](Self::shutdown)
+    /// to join the worker after closing the work channel. `None` in test harnesses
+    /// that construct an `AppState` without spawning a real worker.
+    worker_handle: Mutex<Option<std::thread::JoinHandle<()>>>,
     journal: Arc<dyn SessionJournal>,
     data_dir: PathBuf,
+    chat_bearer_tokens: Vec<String>,
+    admin_bearer_tokens: Vec<String>,
+    tool_allowlist: Vec<String>,
+    cost_budget_cents: u64,
     mcp: Option<McpSurface>,
     /// The Matrix channel, once [`attach_matrix`](AppState::attach_matrix) wires
     /// it (only when `ARDUR_CHANNEL_MATRIX=true`). Shared with the worker's
@@ -177,9 +192,6 @@ pub struct AppState {
     /// wires it (only when `ARDUR_CHANNEL_TELEGRAM=true`). Same `OnceLock`-shared
     /// reply path as Matrix.
     telegram: Arc<OnceLock<Arc<TelegramChannel>>>,
-    /// The bearer tokens admitted to the POST /chat endpoint.
-    /// When empty, the endpoint is unauthenticated (not recommended for production).
-    pub chat_bearer_tokens: Vec<String>,
 }
 
 /// The data [`build_router`](crate::build_router) needs to mount the §6.0 MCP
@@ -233,7 +245,10 @@ impl AppState {
         let receipt_key = load_or_generate_receipt_key(&keys_dir)?;
 
         // 3. Policy: the operator's file if configured + present, else built-in.
-        let policy = load_policy(config.cedar_policy_path.as_deref())?;
+        let policy = load_policy(
+            config.cedar_policy_path.as_deref(),
+            config.dev_permissive_policy,
+        )?;
 
         // 4. Substrate sinks. Memory is selected by `ARDUR_MEMORY`: the
         //    in-process §7.0 Phase 1 store (default — fast, lost on restart), the
@@ -316,8 +331,8 @@ impl AppState {
 
         // 6. The Slack adapter (base URL overridable so tests point at a mock).
         let mut slack = SlackAdapter::new(
-            SecretString::new(config.slack_bot_token.clone()),
-            SecretString::new(config.slack_signing_secret.clone()),
+            SecretString::from(config.slack_bot_token.clone()),
+            SecretString::from(config.slack_signing_secret.clone()),
             config.slack_app_id.clone(),
         );
         if let Some(base) = &config.slack_base_url {
@@ -332,6 +347,7 @@ impl AppState {
         let matrix: Arc<OnceLock<Arc<MatrixChannel>>> = Arc::new(OnceLock::new());
         let discord: Arc<OnceLock<Arc<DiscordChannel>>> = Arc::new(OnceLock::new());
         let telegram: Arc<OnceLock<Arc<TelegramChannel>>> = Arc::new(OnceLock::new());
+        let tool_allowlist = tool_allowlist_for_runtime(&tools);
         let processor = Processor {
             runtime,
             slack: slack.clone(),
@@ -340,9 +356,10 @@ impl AppState {
             telegram: telegram.clone(),
             issuer,
             cap_budget_remaining: config.cost_budget_cents,
+            tool_allowlist: tool_allowlist.clone(),
             receipt_log,
         };
-        let work_tx = spawn_worker(processor);
+        let (work_tx, worker_handle) = spawn_worker(processor);
 
         // 8. The MCP surface (opt-in). The same `tools` registry the runtime
         //    invokes is re-exposed over MCP; `build_router` mounts the
@@ -364,15 +381,57 @@ impl AppState {
 
         Ok(Arc::new(Self {
             slack,
-            work_tx,
+            work_tx: Arc::new(Mutex::new(Some(work_tx))),
+            worker_handle: Mutex::new(Some(worker_handle)),
             journal,
             data_dir,
+            chat_bearer_tokens: config.chat_bearer_tokens.clone(),
+            admin_bearer_tokens: config.admin_bearer_tokens.clone(),
+            tool_allowlist,
+            cost_budget_cents: config.cost_budget_cents,
             mcp,
             matrix,
             discord,
             telegram,
-            chat_bearer_tokens: config.chat_bearer_tokens.clone(),
         }))
+    }
+
+    /// The bearer tokens admitted to `POST /chat`.
+    #[must_use]
+    pub fn chat_bearer_tokens(&self) -> &[String] {
+        &self.chat_bearer_tokens
+    }
+
+    /// The bearer tokens admitted to the admin runtime-inspection API.
+    #[must_use]
+    pub fn admin_bearer_tokens(&self) -> &[String] {
+        &self.admin_bearer_tokens
+    }
+
+    /// The configured per-process cost-gate budget, in cents.
+    #[must_use]
+    pub fn cost_budget_cents(&self) -> u64 {
+        self.cost_budget_cents
+    }
+
+    /// The tool ids minted into session cap-tokens for runtime turns.
+    #[must_use]
+    pub fn tool_allowlist(&self) -> &[String] {
+        &self.tool_allowlist
+    }
+
+    /// Whether the turn worker is still accepting work.
+    #[must_use]
+    pub fn worker_alive(&self) -> bool {
+        self.work_sender().is_some_and(|tx| !tx.is_closed())
+    }
+
+    /// Number of receipts currently persisted in the server's chain log.
+    #[must_use]
+    pub fn receipt_count(&self) -> usize {
+        load_persisted_chain(self.data_dir.join("receipts").join("chain.jsonl"))
+            .map(|chain| chain.len())
+            .unwrap_or(0)
     }
 
     /// The MCP surface to mount, if `ARDUR_MCP_ENABLED` was set at boot.
@@ -401,7 +460,7 @@ impl AppState {
         // Drain inbound Matrix messages onto the worker queue — the same path a
         // verified Slack message takes, so the fused turn runs identically and
         // the worker routes the reply back through Matrix by channel-id scheme.
-        spawn_inbound_forwarder("matrix", self.work_tx.clone(), matrix);
+        spawn_inbound_forwarder("matrix", Arc::clone(&self.work_tx), matrix);
     }
 
     /// Wire a connected Discord channel into the running server: record it for
@@ -417,7 +476,7 @@ impl AppState {
             return;
         }
         discord.start().await;
-        spawn_inbound_forwarder("discord", self.work_tx.clone(), discord);
+        spawn_inbound_forwarder("discord", Arc::clone(&self.work_tx), discord);
     }
 
     /// Wire a connected Telegram channel into the running server: record it for
@@ -433,7 +492,7 @@ impl AppState {
             return;
         }
         telegram.start();
-        spawn_inbound_forwarder("telegram", self.work_tx.clone(), telegram);
+        spawn_inbound_forwarder("telegram", Arc::clone(&self.work_tx), telegram);
     }
 
     /// The Slack adapter, for inbound event verification in the HTTP handler.
@@ -446,7 +505,8 @@ impl AppState {
     /// only if the worker has shut down (so the caller can log a drop).
     #[must_use]
     pub fn enqueue(&self, message: IncomingMessage) -> bool {
-        self.work_tx.send(WorkItem::Channel(message)).is_ok()
+        self.work_sender()
+            .is_some_and(|tx| tx.send(WorkItem::Channel(message)).is_ok())
     }
 
     /// Run a synchronous chat turn (the `POST /chat` path): hand the prompt to the
@@ -471,7 +531,10 @@ impl AppState {
             session_id,
             reply: reply_tx,
         };
-        if self.work_tx.send(WorkItem::Http(turn)).is_err() {
+        let Some(work_tx) = self.work_sender() else {
+            return Err(ChatSubmitError::WorkerGone);
+        };
+        if work_tx.send(WorkItem::Http(turn)).is_err() {
             return Err(ChatSubmitError::WorkerGone);
         }
         match reply_rx.await {
@@ -492,6 +555,64 @@ impl AppState {
     pub fn data_dir(&self) -> &Path {
         &self.data_dir
     }
+
+    /// Signal the background worker to drain, then join its OS thread.
+    ///
+    /// Taking the only long-lived sender closes the queue after any in-flight
+    /// send completes. Forwarder tasks borrow the sender through the same mutex
+    /// instead of holding permanent clones, so the worker can observe closure and
+    /// exit before the process closes the journal.
+    pub fn shutdown(&self) {
+        tracing::info!("graceful shutdown requested");
+        let sender = self.work_tx.lock().expect("work_tx mutex poisoned").take();
+        drop(sender);
+
+        let worker_handle = self
+            .worker_handle
+            .lock()
+            .expect("worker_handle mutex poisoned")
+            .take();
+        if let Some(handle) = worker_handle {
+            match handle.join() {
+                Ok(()) => tracing::info!("turn worker shut down cleanly"),
+                Err(_panic) => tracing::error!("turn worker panicked during shutdown"),
+            }
+        }
+    }
+
+    fn work_sender(&self) -> Option<mpsc::UnboundedSender<WorkItem>> {
+        self.work_tx
+            .lock()
+            .expect("work_tx mutex poisoned")
+            .as_ref()
+            .cloned()
+    }
+}
+
+fn tool_allowlist_for_runtime(tools: &ToolRegistry) -> Vec<String> {
+    let mut allowlist = vec![
+        TOOL.to_string(),
+        // Memory capabilities — required so the fused runtime can re-verify
+        // the cap token for memory.write before recording a turn, and so
+        // memory.read/list/show authorizations pass.
+        ardur_memory::MEMORY_READ_CAPABILITY.to_string(),
+        ardur_memory::MEMORY_WRITE_CAPABILITY.to_string(),
+    ];
+    for tool in tools.list() {
+        let id = tool.id().0;
+        if !allowlist.contains(&id) {
+            allowlist.push(id);
+        }
+        // Also add each tool's declared capabilities as `cap.*` strings so
+        // ARD-420's `authorize_tool_capabilities` check can pass in production.
+        for cap in tool.required_capabilities() {
+            let label = cap.as_str();
+            if !allowlist.contains(&label) {
+                allowlist.push(label);
+            }
+        }
+    }
+    allowlist
 }
 
 /// The turn-processing core, owned by the worker thread. Drives the `!Send`
@@ -510,6 +631,7 @@ struct Processor {
     telegram: Arc<OnceLock<Arc<TelegramChannel>>>,
     issuer: BiscuitCapTokenIssuer,
     cap_budget_remaining: u64,
+    tool_allowlist: Vec<String>,
     /// The append-only receipt-chain log the fused runtime writes to. Read
     /// before/after an HTTP turn to recover the tools it called (the worker is
     /// single-threaded, so the receipts appended across one `submit` belong to
@@ -745,7 +867,7 @@ impl Processor {
                 audience: AUDIENCE.to_string(),
                 expires_unix: now_unix.saturating_add(CAP_TTL_SECS),
                 budget_remaining: self.cap_budget_remaining,
-                tool_allowlist: vec![TOOL.to_string()],
+                tool_allowlist: self.tool_allowlist.clone(),
             },
         )?;
         Ok(token.to_base64()?)
@@ -755,9 +877,11 @@ impl Processor {
 /// Spawn the worker thread: a current-thread Tokio runtime that drains the work
 /// queue, processing each message to completion in arrival order. Returns the
 /// sender the HTTP layer enqueues onto.
-fn spawn_worker(processor: Processor) -> mpsc::UnboundedSender<WorkItem> {
+fn spawn_worker(
+    processor: Processor,
+) -> (mpsc::UnboundedSender<WorkItem>, std::thread::JoinHandle<()>) {
     let (tx, mut rx) = mpsc::unbounded_channel::<WorkItem>();
-    std::thread::Builder::new()
+    let handle = std::thread::Builder::new()
         .name("ardur-turn-worker".to_string())
         .spawn(move || {
             let rt = match tokio::runtime::Builder::new_current_thread()
@@ -781,7 +905,7 @@ fn spawn_worker(processor: Processor) -> mpsc::UnboundedSender<WorkItem> {
             });
         })
         .expect("spawning the ardur-turn-worker thread");
-    tx
+    (tx, handle)
 }
 
 /// Spawn a task that drains inbound messages from a channel adapter onto the
@@ -791,7 +915,7 @@ fn spawn_worker(processor: Processor) -> mpsc::UnboundedSender<WorkItem> {
 /// in log lines.
 fn spawn_inbound_forwarder<G>(
     label: &'static str,
-    work_tx: mpsc::UnboundedSender<WorkItem>,
+    work_tx: Arc<Mutex<Option<mpsc::UnboundedSender<WorkItem>>>>,
     channel: Arc<G>,
 ) where
     G: MessagingGateway + Send + Sync + 'static,
@@ -800,7 +924,19 @@ fn spawn_inbound_forwarder<G>(
         loop {
             match channel.receive().await {
                 Ok(incoming) => {
-                    if work_tx.send(WorkItem::Channel(incoming)).is_err() {
+                    let Some(tx) = work_tx
+                        .lock()
+                        .expect("work_tx mutex poisoned")
+                        .as_ref()
+                        .cloned()
+                    else {
+                        tracing::info!(
+                            channel = label,
+                            "turn worker is shutting down; stopping forwarder"
+                        );
+                        break;
+                    };
+                    if tx.send(WorkItem::Channel(incoming)).is_err() {
                         tracing::error!(channel = label, "turn worker is gone; stopping forwarder");
                         break;
                     }
@@ -877,12 +1013,15 @@ fn now_unix() -> u64 {
 /// The key is stored as the Biscuit private key's canonical hex (not PKCS#8 PEM
 /// — `biscuit-auth` exposes no PEM writer for Ed25519), one line.
 /// The Qdrant connection config shared by the `qdrant` and `hybrid` backends:
-/// the collection/dim/api-key knobs come from `QDRANT_*`, with the URL
-/// overridden from the validated [`Config::qdrant_url`] when set.
+/// collection/dim/api-key defaults come from `ardur-memory-qdrant`, with URL and
+/// collection overridden from the validated [`Config`] when set.
 fn qdrant_config(config: &Config) -> QdrantMemoryConfig {
     let mut qcfg = QdrantMemoryConfig::from_env();
     if let Some(url) = &config.qdrant_url {
         qcfg = qcfg.with_url(url.clone());
+    }
+    if let Some(collection) = &config.qdrant_collection {
+        qcfg = qcfg.with_collection_name(collection.clone());
     }
     qcfg
 }
@@ -922,20 +1061,20 @@ fn load_or_generate_receipt_key(keys_dir: &Path) -> anyhow::Result<Es256SigningK
     }
 }
 
-/// Compile the Cedar policy: the operator's file when configured and present.
-/// Fails closed (errors) when a policy path is configured but missing.
-/// Only falls back to the built-in [`DEFAULT_POLICY`] when no path is configured.
-fn load_policy(path: Option<&Path>) -> anyhow::Result<CedarPolicyBundle> {
+/// Compile the Cedar policy: a configured operator file must exist and compile.
+/// Without a configured path, production uses deny-all; tests/lab boots may opt
+/// into the embedded permissive policy with an explicit dev flag.
+fn load_policy(path: Option<&Path>, dev_permissive: bool) -> anyhow::Result<CedarPolicyBundle> {
     let source = match path {
         Some(p) if p.exists() => PolicySource::File(p.to_path_buf()),
         Some(p) => {
             return Err(anyhow::anyhow!(
-                "Cedar policy path configured but file not found: {}. \
-                 To use the built-in permissive policy, unset ARDUR_CEDAR_POLICY_PATH.",
+                "configured Cedar policy path does not exist: {}",
                 p.display()
             ));
         }
-        None => PolicySource::Embedded(DEFAULT_POLICY.to_string()),
+        None if dev_permissive => PolicySource::Embedded(DEFAULT_POLICY.to_string()),
+        None => PolicySource::Embedded(DENY_ALL_POLICY.to_string()),
     };
     CedarPolicyBundle::load(source).map_err(|e| anyhow::anyhow!("compiling cedar policy: {e}"))
 }
@@ -952,4 +1091,52 @@ fn write_private(path: &Path, contents: &str) -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!("chmod {}: {e}", path.display()))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ardur_session_journals::InMemorySessionJournal;
+
+    #[test]
+    fn shutdown_closes_worker_queue_and_joins_thread() {
+        let (work_tx, mut work_rx) = mpsc::unbounded_channel::<WorkItem>();
+        let (joined_tx, joined_rx) = std::sync::mpsc::channel();
+        let worker_handle = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime builds");
+            runtime.block_on(async move { while work_rx.recv().await.is_some() {} });
+            joined_tx.send(()).expect("joined signal sends");
+        });
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let state = AppState {
+            slack: Arc::new(SlackAdapter::new(
+                SecretString::from("xoxb-test".to_string()),
+                SecretString::from("signing-secret".to_string()),
+                "A123".to_string(),
+            )),
+            work_tx: Arc::new(Mutex::new(Some(work_tx))),
+            worker_handle: Mutex::new(Some(worker_handle)),
+            journal: Arc::new(InMemorySessionJournal::new(SessionId::new())),
+            data_dir: tempdir.path().to_path_buf(),
+            chat_bearer_tokens: Vec::new(),
+            admin_bearer_tokens: Vec::new(),
+            tool_allowlist: Vec::new(),
+            cost_budget_cents: 0,
+            mcp: None,
+            matrix: Arc::new(OnceLock::new()),
+            discord: Arc::new(OnceLock::new()),
+            telegram: Arc::new(OnceLock::new()),
+        };
+
+        assert!(state.worker_alive());
+        state.shutdown();
+        assert!(!state.worker_alive());
+        joined_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("worker thread observed channel close");
+    }
 }

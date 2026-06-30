@@ -34,10 +34,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use ardur_cap_token::{CapScope, CapTokenIssuer, HolderId as CapHolderId};
+use ardur_cap_token::{CapScope, CapTokenIssuer, HolderId as CapHolderId, VerifiedClaims};
+use ardur_cedar_policy::CedarPolicyBundle;
 use ardur_cost_gate::{CostEnvelope, CostTuple as GateCostTuple, HolderId as GateHolderId};
 use ardur_fused_runtime::FusedRuntimeBuilder;
-use ardur_memory::InMemoryMemoryRuntime;
+use ardur_memory::{
+    HolderId as MemoryHolderId, InMemoryMemoryRuntime, MemoryCard, MemoryControlPlane, ReceiptId,
+    RecordId, UnixTsMillis,
+};
 use ardur_provider_runtime::{
     AnthropicProvider, CompletionRequest, InstrumentedProvider, ModelId, Provider,
 };
@@ -80,6 +84,8 @@ pub struct FusedEngine {
     model: ModelId,
     cap_token: CapTokenRef,
     holder: GateHolderId,
+    policies: CedarPolicyBundle,
+    memory: Arc<InMemoryMemoryRuntime>,
     session_id: SessionId,
     remaining: Arc<AtomicU64>,
     offline: bool,
@@ -147,7 +153,11 @@ impl FusedEngine {
                     // The verifier checks the per-turn cost (1 unit) against this
                     // ceiling, so it must be at least 1.
                     budget_remaining: budget_cents.max(1),
-                    tool_allowlist: vec![TOOL.to_string()],
+                    tool_allowlist: vec![
+                        TOOL.to_string(),
+                        ardur_memory::MEMORY_READ_CAPABILITY.to_string(),
+                        ardur_memory::MEMORY_WRITE_CAPABILITY.to_string(),
+                    ],
                 },
             )
             .map_err(|e| CliError::State(format!("minting the session cap-token: {e}")))?;
@@ -173,28 +183,33 @@ impl FusedEngine {
         // TODO §7.0: no file-backed `MemoryRuntime` exists yet, so the bi-temporal
         // memory sink is in-process for now (the `~/.ardur/memory/` dir is created
         // for the persistent store that replaces this).
-        let memory = InMemoryMemoryRuntime::new();
+        let memory = Arc::new(InMemoryMemoryRuntime::new());
 
-        let runtime =
-            FusedRuntimeBuilder::new(cap_root, policies, provider, receipt_key, model.clone())
-                .audience(AUDIENCE)
-                .tool(TOOL)
-                .provision_budget(
-                    holder.clone(),
-                    GateCostTuple {
-                        tokens_in: 1_000_000_000,
-                        tokens_out: 1_000_000_000,
-                        cents: budget_cents,
-                        wall_ms: 1_000_000_000,
-                        attention_score: 1_000_000_000,
-                    },
-                )
-                .projected_envelope(envelope)
-                .with_memory(Arc::new(memory))
-                .with_journal(Arc::new(journal))
-                .receipt_log(dirs.receipt_log())
-                .build()
-                .map_err(|e| CliError::State(format!("building the fused runtime: {e}")))?;
+        let runtime = FusedRuntimeBuilder::new(
+            cap_root,
+            policies.clone(),
+            provider,
+            receipt_key,
+            model.clone(),
+        )
+        .audience(AUDIENCE)
+        .tool(TOOL)
+        .provision_budget(
+            holder.clone(),
+            GateCostTuple {
+                tokens_in: 1_000_000_000,
+                tokens_out: 1_000_000_000,
+                cents: budget_cents,
+                wall_ms: 1_000_000_000,
+                attention_score: 1_000_000_000,
+            },
+        )
+        .projected_envelope(envelope)
+        .with_memory(memory.clone())
+        .with_journal(Arc::new(journal))
+        .receipt_log(dirs.receipt_log())
+        .build()
+        .map_err(|e| CliError::State(format!("building the fused runtime: {e}")))?;
 
         Ok(Self {
             runtime,
@@ -202,6 +217,8 @@ impl FusedEngine {
             model,
             cap_token,
             holder,
+            policies,
+            memory,
             session_id,
             remaining: Arc::new(AtomicU64::new(budget_cents)),
             offline,
@@ -246,6 +263,103 @@ impl FusedEngine {
     #[must_use]
     pub fn should_stream(&self) -> bool {
         !self.offline && self.provider.supports_streaming()
+    }
+
+    /// Run a `/memory ...` explorer command against this session's scoped memory.
+    #[must_use]
+    pub fn memory_command(&self, args: &str) -> String {
+        let Some(capability) = memory_command_capability(args) else {
+            return "usage: /memory list [--json] | /memory show <id> | /memory forget <id>"
+                .to_string();
+        };
+        let claims = match self
+            .runtime
+            .verify_cap_token_for_tool(&self.cap_token, capability)
+        {
+            Ok(claims) => claims,
+            Err(e) => return format!("memory authorization denied: {e}"),
+        };
+        Self::memory_command_on(
+            &self.memory,
+            &self.policies,
+            &claims,
+            &self.holder.0,
+            args,
+            now_ms(),
+        )
+    }
+
+    /// Pure helper for the CLI memory explorer. Kept public so integration tests
+    /// can exercise CRUD, workspace isolation, export formatting, and denial
+    /// paths without booting providers or touching `~/.ardur`.
+    #[must_use]
+    pub fn memory_command_on(
+        memory: &Arc<InMemoryMemoryRuntime>,
+        policies: &CedarPolicyBundle,
+        claims: &VerifiedClaims,
+        subject: &str,
+        args: &str,
+        now_ms: u64,
+    ) -> String {
+        let mut parts = args.split_whitespace();
+        let command = parts.next().unwrap_or("list");
+        let rest: Vec<&str> = parts.collect();
+        let holder = MemoryHolderId(subject.to_string());
+        let plane = MemoryControlPlane::new(memory.as_ref(), policies.clone());
+        match command {
+            "" | "list" => {
+                let cards = match plane.list(claims, &holder, UnixTsMillis(now_ms)) {
+                    Ok(cards) => cards,
+                    Err(e) => return format!("memory list denied: {e}"),
+                };
+                if rest
+                    .iter()
+                    .any(|arg| matches!(*arg, "--json" | "--export=json"))
+                {
+                    return serde_json::to_string_pretty(&cards)
+                        .unwrap_or_else(|e| format!("memory export error: {e}"));
+                }
+                if cards.is_empty() {
+                    return "memory: no current cards".to_string();
+                }
+                cards
+                    .iter()
+                    .map(memory_card_line)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+            "show" => {
+                let Some(id) = rest.first().and_then(|raw| uuid::Uuid::parse_str(raw).ok()) else {
+                    return "usage: /memory show <id>".to_string();
+                };
+                let rec =
+                    match plane.show_as_of(claims, &holder, RecordId(id), UnixTsMillis(now_ms)) {
+                        Ok(Some(rec)) => rec,
+                        Ok(None) => return format!("memory {id} not found"),
+                        Err(e) => return format!("memory show denied: {e}"),
+                    };
+                serde_json::to_string_pretty(&rec)
+                    .unwrap_or_else(|e| format!("memory show error: {e}"))
+            }
+            "forget" => {
+                let Some(id) = rest.first().and_then(|raw| uuid::Uuid::parse_str(raw).ok()) else {
+                    return "usage: /memory forget <id>".to_string();
+                };
+                match plane.forget(
+                    claims,
+                    &holder,
+                    RecordId(id),
+                    UnixTsMillis(now_ms),
+                    ReceiptId(uuid::Uuid::new_v4()),
+                ) {
+                    Ok(()) => format!("forgot memory {id}"),
+                    Err(e) => format!("memory forget denied: {e}"),
+                }
+            }
+            _ => {
+                "usage: /memory list [--json] | /memory show <id> | /memory forget <id>".to_string()
+            }
+        }
     }
 
     /// Run one chat turn by streaming the provider **directly**, rendering tokens
@@ -316,6 +430,57 @@ impl FusedEngine {
             remaining_cents,
         })
     }
+}
+
+fn memory_command_capability(args: &str) -> Option<&'static str> {
+    match args.split_whitespace().next().unwrap_or("list") {
+        "" | "list" | "show" => Some(ardur_memory::MEMORY_READ_CAPABILITY),
+        "forget" => Some(ardur_memory::MEMORY_WRITE_CAPABILITY),
+        _ => None,
+    }
+}
+
+fn memory_card_line(card: &MemoryCard) -> String {
+    let receipt = card
+        .receipt_id
+        .map(|r| r.0.to_string())
+        .unwrap_or_else(|| "unreceipted".to_string());
+    let source = card.source.as_deref().unwrap_or("unknown");
+    let scope = card.scope.as_deref().unwrap_or(card.subject.0.as_str());
+    let confidence = card
+        .confidence
+        .map(|c| format!("{c:.2}"))
+        .unwrap_or_else(|| "unknown".to_string());
+    format!(
+        "{} source={} scope={} confidence={} receipt={} valid_from={} {}",
+        card.record_id,
+        source,
+        scope,
+        confidence,
+        receipt,
+        card.valid_from.0,
+        memory_payload_text(&card.payload)
+    )
+}
+
+fn memory_payload_text(payload: &serde_json::Value) -> String {
+    if let Some(object) = payload.get("object") {
+        return match object {
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+    }
+    match payload {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis().try_into().unwrap_or(u64::MAX))
+        .unwrap_or(0)
 }
 
 /// The per-turn cents ceiling: `ARDUR_CLI_PER_TURN_CENTS` if set and parseable,

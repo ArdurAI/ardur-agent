@@ -19,9 +19,8 @@ pub fn next_execution(expr: &CronExpr, from: DateTime<Utc>) -> Result<DateTime<U
     let mut candidate = from + Duration::minutes(1);
     candidate = candidate
         .with_second(0)
-        .unwrap()
-        .with_nanosecond(0)
-        .unwrap();
+        .and_then(|t| t.with_nanosecond(0))
+        .ok_or(CronError::NoNextExecution)?;
 
     for _ in 0..(366 * 24 * 60 + 10) {
         // ~1 year of minutes

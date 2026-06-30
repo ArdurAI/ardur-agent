@@ -10,36 +10,36 @@
 
     <div class="reveal mt-14 grid gap-px overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--border)] sm:grid-cols-2 lg:grid-cols-4">
       <div class="bg-[var(--bg-card)] p-6">
-        <h3 class="font-semibold">Multi-provider</h3>
-        <p class="mt-2 text-sm text-ink-muted">Claude, OpenAI, Mistral, Llama via Ollama, OpenRouter — bring whatever you pay for. Cost-aware routing picks well.</p>
+        <h3 class="font-semibold">Five providers</h3>
+        <p class="mt-2 text-sm text-ink-muted">Anthropic (Claude), OpenRouter, Ollama (local or cloud), Codex, and Claude&#8209;CLI — bring an API key or a ChatGPT/Anthropic subscription. Chosen at boot.</p>
       </div>
       <div class="bg-[var(--bg-card)] p-6">
-        <h3 class="font-semibold">Multi-channel</h3>
-        <p class="mt-2 text-sm text-ink-muted">Terminal, chat apps, and voice. The same agent, memory, and skills wherever you reach it.</p>
+        <h3 class="font-semibold">Four channels</h3>
+        <p class="mt-2 text-sm text-ink-muted">Slack, Matrix, Discord, Telegram — plus the terminal. The same agent, memory, and skills, each with token auth and an allowlist.</p>
       </div>
       <div class="bg-[var(--bg-card)] p-6">
         <h3 class="font-semibold">Bi-temporal memory</h3>
-        <p class="mt-2 text-sm text-ink-muted">A record of what was true and when you knew it. Authority and evidence kept separate; forget-and-prove-it on demand.</p>
+        <p class="mt-2 text-sm text-ink-muted">A record of what was true and when you knew it. Event-time and valid-time kept separate; in-process by default, durable on Qdrant.</p>
+      </div>
+      <div class="bg-[var(--bg-card)] p-6">
+        <h3 class="font-semibold">Hybrid retrieval</h3>
+        <p class="mt-2 text-sm text-ink-muted">Dense recall (fastembed BGE&#8209;small) and sparse recall (Tantivy BM25) fused with reciprocal-rank fusion — meaning <em>and</em> exact terms.</p>
+      </div>
+      <div class="bg-[var(--bg-card)] p-6">
+        <h3 class="font-semibold">Capability-gated tools</h3>
+        <p class="mt-2 text-sm text-ink-muted">Built-in <code class="text-accent-cyan">shell.run</code>, <code class="text-accent-cyan">file.*</code>, and <code class="text-accent-cyan">http.fetch</code> — each behind a command allowlist, root-confinement, or SSRF defense.</p>
+      </div>
+      <div class="bg-[var(--bg-card)] p-6">
+        <h3 class="font-semibold">MCP, both ways</h3>
+        <p class="mt-2 text-sm text-ink-muted">Speaks the Model Context Protocol as both client and server, built on <code class="text-accent-cyan">rmcp</code>. Plug into the wider tool ecosystem.</p>
       </div>
       <div class="bg-[var(--bg-card)] p-6">
         <h3 class="font-semibold">Skills</h3>
-        <p class="mt-2 text-sm text-ink-muted">Extend the agent with packaged capabilities. Simple <code class="text-accent-cyan">SKILL.md</code> format, versioned and shareable.</p>
+        <p class="mt-2 text-sm text-ink-muted">Extend the agent with packaged capabilities. Simple <code class="text-accent-cyan">SKILL.md</code> format with progressive disclosure; nine examples ship.</p>
       </div>
       <div class="bg-[var(--bg-card)] p-6">
-        <h3 class="font-semibold">MCP &amp; ACP</h3>
-        <p class="mt-2 text-sm text-ink-muted">Speaks the open agent protocols, as both a client and a server. Plug into the wider tool ecosystem.</p>
-      </div>
-      <div class="bg-[var(--bg-card)] p-6">
-        <h3 class="font-semibold">Live model handoff</h3>
-        <p class="mt-2 text-sm text-ink-muted">Switch providers mid-session without losing context. Start on one model, finish on another.</p>
-      </div>
-      <div class="bg-[var(--bg-card)] p-6">
-        <h3 class="font-semibold">Agent fleet</h3>
-        <p class="mt-2 text-sm text-ink-muted">Run several agents in parallel under one roof, each with its own caps, budget, and receipt chain.</p>
-      </div>
-      <div class="bg-[var(--bg-card)] p-6">
-        <h3 class="font-semibold">OS-isolated tools</h3>
-        <p class="mt-2 text-sm text-ink-muted">Tool execution is sandboxed at the operating-system level, so a task stays inside the boundary you set for it.</p>
+        <h3 class="font-semibold">Token streaming</h3>
+        <p class="mt-2 text-sm text-ink-muted">Anthropic, OpenRouter, and Ollama stream token-by-token (SSE / NDJSON) through the full pipeline — no security or audit bypass.</p>
       </div>
     </div>
   </div>

@@ -20,19 +20,10 @@ pub enum ConfigSource {
     Default,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
     pub values: HashMap<String, ConfigValue>,
     pub sources: HashMap<String, ConfigSource>,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            values: HashMap::new(),
-            sources: HashMap::new(),
-        }
-    }
 }
 
 impl Config {
@@ -46,7 +37,9 @@ impl Config {
     }
 
     pub fn get(&self, key: &str) -> crate::error::Result<&ConfigValue> {
-        self.values.get(key).ok_or_else(|| crate::error::ConfigError::KeyNotFound(key.to_string()))
+        self.values
+            .get(key)
+            .ok_or_else(|| crate::error::ConfigError::KeyNotFound(key.to_string()))
     }
 
     pub fn get_string(&self, key: &str) -> crate::error::Result<String> {
@@ -76,7 +69,11 @@ mod tests {
     #[test]
     fn test_config_set_and_get() {
         let mut config = Config::new();
-        config.set("key1", ConfigValue::String("value1".to_string()), ConfigSource::Env);
+        config.set(
+            "key1",
+            ConfigValue::String("value1".to_string()),
+            ConfigSource::Env,
+        );
         assert_eq!(config.get_string("key1").unwrap(), "value1");
     }
 
@@ -91,7 +88,11 @@ mod tests {
         let mut config1 = Config::new();
         config1.set("a", ConfigValue::String("1".to_string()), ConfigSource::Env);
         let mut config2 = Config::new();
-        config2.set("b", ConfigValue::String("2".to_string()), ConfigSource::File);
+        config2.set(
+            "b",
+            ConfigValue::String("2".to_string()),
+            ConfigSource::File,
+        );
         config1.merge(config2);
         assert!(config1.get("a").is_ok());
         assert!(config1.get("b").is_ok());
@@ -102,7 +103,11 @@ mod tests {
         let mut config1 = Config::new();
         config1.set("a", ConfigValue::String("1".to_string()), ConfigSource::Env);
         let mut config2 = Config::new();
-        config2.set("a", ConfigValue::String("2".to_string()), ConfigSource::File);
+        config2.set(
+            "a",
+            ConfigValue::String("2".to_string()),
+            ConfigSource::File,
+        );
         config1.merge(config2);
         assert_eq!(config1.get_string("a").unwrap(), "1");
     }

@@ -53,6 +53,25 @@ impl SessionJournal for InMemorySessionJournal {
         Ok(id)
     }
 
+    async fn len(&self) -> Result<u64, JournalError> {
+        Ok(self.entries.read().len() as u64)
+    }
+
+    async fn is_empty(&self) -> Result<bool, JournalError> {
+        Ok(self.entries.read().is_empty())
+    }
+
+    async fn truncate(&self, len: u64) -> Result<(), JournalError> {
+        let mut entries = self.entries.write();
+        let len_usize = usize::try_from(len)
+            .map_err(|_| JournalError::Malformed("truncate length overflows usize".to_string()))?;
+        if len_usize > entries.len() {
+            return Err(JournalError::EntryNotFound(EntryId(len)));
+        }
+        entries.truncate(len_usize);
+        Ok(())
+    }
+
     async fn replay(&self, session_id: SessionId) -> Result<Vec<JournalEntry>, JournalError> {
         if session_id != self.session_id {
             return Err(JournalError::SessionNotFound(session_id));

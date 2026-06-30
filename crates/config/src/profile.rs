@@ -58,24 +58,20 @@ impl ProfileManager {
     }
 
     pub fn create(&self, profile: Profile) -> crate::error::Result<ProfileId> {
-        let mut profiles = self.profiles.write().map_err(|_| {
-            crate::error::ConfigError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "poisoned lock",
-            ))
-        })?;
+        let mut profiles = self
+            .profiles
+            .write()
+            .map_err(|_| crate::error::ConfigError::Io(std::io::Error::other("poisoned lock")))?;
         let id = profile.id.clone();
         profiles.insert(id.clone(), profile);
         Ok(id)
     }
 
     pub fn get(&self, id: &ProfileId) -> crate::error::Result<Profile> {
-        let profiles = self.profiles.read().map_err(|_| {
-            crate::error::ConfigError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "poisoned lock",
-            ))
-        })?;
+        let profiles = self
+            .profiles
+            .read()
+            .map_err(|_| crate::error::ConfigError::Io(std::io::Error::other("poisoned lock")))?;
         profiles
             .get(id)
             .cloned()
@@ -83,42 +79,34 @@ impl ProfileManager {
     }
 
     pub fn list(&self) -> crate::error::Result<Vec<Profile>> {
-        let profiles = self.profiles.read().map_err(|_| {
-            crate::error::ConfigError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "poisoned lock",
-            ))
-        })?;
+        let profiles = self
+            .profiles
+            .read()
+            .map_err(|_| crate::error::ConfigError::Io(std::io::Error::other("poisoned lock")))?;
         Ok(profiles.values().cloned().collect())
     }
 
     pub fn set_active(&self, id: &ProfileId) -> crate::error::Result<()> {
-        let profiles = self.profiles.read().map_err(|_| {
-            crate::error::ConfigError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "poisoned lock",
-            ))
-        })?;
+        let profiles = self
+            .profiles
+            .read()
+            .map_err(|_| crate::error::ConfigError::Io(std::io::Error::other("poisoned lock")))?;
         if !profiles.contains_key(id) {
             return Err(crate::error::ConfigError::ProfileNotFound(id.clone()));
         }
-        let mut active = self.active.write().map_err(|_| {
-            crate::error::ConfigError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "poisoned lock",
-            ))
-        })?;
+        let mut active = self
+            .active
+            .write()
+            .map_err(|_| crate::error::ConfigError::Io(std::io::Error::other("poisoned lock")))?;
         *active = Some(id.clone());
         Ok(())
     }
 
     pub fn active(&self) -> crate::error::Result<Option<ProfileId>> {
-        let active = self.active.read().map_err(|_| {
-            crate::error::ConfigError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "poisoned lock",
-            ))
-        })?;
+        let active = self
+            .active
+            .read()
+            .map_err(|_| crate::error::ConfigError::Io(std::io::Error::other("poisoned lock")))?;
         Ok(active.clone())
     }
 }

@@ -74,8 +74,8 @@ impl SlackAdapter {
         let signing_secret = read_env("SLACK_SIGNING_SECRET")?;
         let app_id = read_env("SLACK_APP_ID")?;
         Ok(Self::new(
-            SecretString::new(bot_token),
-            SecretString::new(signing_secret),
+            SecretString::from(bot_token),
+            SecretString::from(signing_secret),
             app_id,
         ))
     }

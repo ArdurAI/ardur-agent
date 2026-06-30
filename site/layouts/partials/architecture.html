@@ -12,17 +12,17 @@
     <div class="reveal card mx-auto mt-12 max-w-4xl p-6 md:p-8">
       <pre class="mermaid">
 flowchart TD
-  U["You<br/>terminal · chat · voice"] --> G["Gateway<br/>channels · auth"]
-  G --> R["Runtime<br/>orchestration loop"]
-  R --> P["Providers<br/>Claude · OpenAI · Mistral · Ollama"]
-  R --> M["Memory<br/>bi-temporal store"]
-  R --> T["Tools<br/>OS-isolated execution"]
-  R --> S["Skills &amp; Plugins<br/>MCP · ACP"]
-  R --> H["Hooks<br/>policy checks"]
+  U["You<br/>terminal · Slack · Matrix · Discord · Telegram"] --> G["Gateway<br/>channels · auth · allowlists"]
+  G --> R["FusedRuntime<br/>10-stage turn pipeline"]
+  R --> P["Providers<br/>Anthropic · OpenRouter · Ollama · Codex · Claude-CLI"]
+  R --> M["Memory<br/>bi-temporal · hybrid recall"]
+  R --> T["Tools<br/>shell · file · http · MCP"]
+  R --> S["Skills<br/>SKILL.md"]
+  R --> H["Hooks<br/>policy · injection defense"]
 
   R -.emits.-> CT["Cap-tokens<br/>scoped · revocable"]
   R -.emits.-> RC["Receipt-chain<br/>signed · replayable"]
-  R -.emits.-> CO["Cost-tuples<br/>tokens · $ · time · attention"]
+  R -.emits.-> CO["Cost-tuples<br/>tokens · $ · time · risk"]
 
   CT -.guards.-> T
   CO -.bounds.-> P
@@ -30,8 +30,11 @@ flowchart TD
     </div>
 
     <p class="reveal mx-auto mt-6 max-w-2xl text-center text-sm text-ink-faint">
-      Cap-tokens guard what tools can run. Cost-tuples bound what providers can spend.
-      Receipts record all of it.
+      A turn runs ten stages in order — cap-token, Cedar policy, cost-gate,
+      hooks, injection scan, provider, receipt, hooks, cost finalize, memory,
+      journal — short-circuiting on the first failure. Cap-tokens guard what
+      tools can run; cost-tuples bound what providers can spend; receipts record
+      all of it.
     </p>
   </div>
 </section>

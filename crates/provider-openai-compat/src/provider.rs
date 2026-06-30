@@ -1,7 +1,10 @@
-use serde::{Deserialize, Serialize};
+use ardur_provider_runtime::{
+    CompletionRequest, CompletionResponse, ModelId, Provider, ProviderError, ProviderStream,
+    RateCard,
+};
 use ardur_runtime::ProviderId;
-use ardur_provider_runtime::{CompletionRequest, CompletionResponse, Provider, ProviderError, ProviderStream, RateCard, ModelId};
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderCapabilities {
@@ -45,16 +48,14 @@ impl OpenAiCompatProvider {
     pub fn from_env() -> crate::error::Result<Self> {
         let base_url = std::env::var("OPENAI_COMPAT_URL")
             .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
-        let api_key = std::env::var("OPENAI_COMPAT_KEY")
-            .unwrap_or_default();
-        let model = std::env::var("OPENAI_COMPAT_MODEL")
-            .unwrap_or_else(|_| "gpt-4".to_string());
-        
+        let api_key = std::env::var("OPENAI_COMPAT_KEY").unwrap_or_default();
+        let model = std::env::var("OPENAI_COMPAT_MODEL").unwrap_or_else(|_| "gpt-4".to_string());
+
         let config = crate::config::ConfigBuilder::new(&base_url)
             .with_api_key(&api_key)
             .with_model(&model)
             .build()?;
-        
+
         Ok(Self::new(config))
     }
 
@@ -83,7 +84,9 @@ impl OpenAiCompatProvider {
 impl Provider for OpenAiCompatProvider {
     async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
         // Placeholder implementation - real implementation would call the OpenAI-compatible API
-        Err(ProviderError::Upstream("OpenAI-compatible provider not yet fully implemented".to_string()))
+        Err(ProviderError::Upstream(
+            "OpenAI-compatible provider not yet fully implemented".to_string(),
+        ))
     }
 
     fn id(&self) -> ProviderId {
@@ -98,13 +101,11 @@ impl Provider for OpenAiCompatProvider {
         // Return a static rate card - in production this would be configurable
         use std::sync::OnceLock;
         static RATE_CARD: OnceLock<RateCard> = OnceLock::new();
-        RATE_CARD.get_or_init(|| {
-            RateCard {
-                version_id: "openai-compat-default".to_string(),
-                cents_per_1k_input: 0.5,
-                cents_per_1k_output: 1.5,
-                cents_per_request: 0.0,
-            }
+        RATE_CARD.get_or_init(|| RateCard {
+            version_id: "openai-compat-default".to_string(),
+            cents_per_1k_input: 0.5,
+            cents_per_1k_output: 1.5,
+            cents_per_request: 0.0,
         })
     }
 }

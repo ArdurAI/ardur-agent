@@ -11,16 +11,15 @@ pub struct OpenAiCompatConfig {
 
 impl OpenAiCompatConfig {
     pub fn validate_url(&self) -> crate::error::Result<()> {
-        let url = Url::parse(&self.base_url).map_err(|e| {
-            crate::error::OpenAiCompatError::InvalidUrl(format!("{e}"))
-        })?;
+        let url = Url::parse(&self.base_url)
+            .map_err(|e| crate::error::OpenAiCompatError::InvalidUrl(format!("{e}")))?;
 
         // Require HTTPS for production URLs
         if url.scheme() != "https" {
             // Allow http only for localhost/loopback in development
             let host = url.host_str().unwrap_or("");
-            let is_loopback = host == "localhost" 
-                || host == "127.0.0.1" 
+            let is_loopback = host == "localhost"
+                || host == "127.0.0.1"
                 || host.starts_with("[::1]")
                 || host.starts_with("10.")
                 || host.starts_with("192.168.")

@@ -20,9 +20,9 @@ ardur-runtime = { workspace = true }
 # `CompletionRequest`/`CompletionResponse` envelopes the pre-submit / post-
 # receipt contexts give hooks an (immutable, or replaceable) view of.
 ardur-provider-runtime = { workspace = true }
-# §11.14 — the unsigned `ReceiptBody` minted per turn that `on_post_receipt`
-# observes (and that records the *post-redaction* payload digest, not the
-# original). Phase 1 carries the body; JWS signing is wired in a later phase.
+# §11.14 — the signed receipt minted per turn that `on_post_receipt`
+# observes. The carried body records the *post-redaction* payload digest, not
+# the original prompt.
 ardur-receipt = { workspace = true }
 # §7.0 — the bi-temporal memory the turn record is written to *after*
 # `on_post_receipt` runs, so an observer sees the receipt before the write.
@@ -32,6 +32,7 @@ ardur-memory = { workspace = true }
 async-trait = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
+tracing = { workspace = true }
 # `RecordingHook` stores callbacks behind a non-poisoning mutex so a panicking
 # hook in one test cannot wedge the shared event log.
 parking_lot = { workspace = true }
