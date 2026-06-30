@@ -208,7 +208,7 @@ futures = "0.3"
 # for the `RemoteMcpToolset` that consumes remote ones, and
 # `transport-streamable-http-server` for the axum-mounted Streamable-HTTP
 # service in `crates/server`. Pinned here so both crates share one version.
-rmcp = { version = "1", default-features = false, features = ["server", "client", "transport-streamable-http-server", "transport-streamable-http-client-reqwest"] }
+rmcp = { version = "2", default-features = false, features = ["server", "client", "transport-streamable-http-server", "transport-streamable-http-client-reqwest"] }
 # Docker daemon API for terminal Docker exec backend (ARD-315/ARD-324).
 bollard = "0.21"
 # SSH client library for terminal SSH remote backend (ARD-315/ARD-324). Disable
