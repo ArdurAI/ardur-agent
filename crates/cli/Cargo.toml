@@ -29,7 +29,7 @@ ardur-receipt = { workspace = true }
 # engine wires when the selected backend is unavailable.
 ardur-provider-runtime = { workspace = true }
 # §3.0 provider selection — reads ARDUR_PROVIDER and boxes the chosen backend
-# (anthropic | openrouter | ollama | codex) at boot.
+# (anthropic | openrouter | openai-compat | ollama | codex | claude-cli) at boot.
 ardur-provider-selector = { workspace = true }
 # §11.14 cost gate — the budget store + admission gate every turn routes through.
 ardur-cost-gate = { workspace = true }
