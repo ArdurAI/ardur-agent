@@ -857,10 +857,13 @@ process.
   ardur-admin \
     --journal-dir /var/lib/ardur/journals \
     --receipt-store /var/lib/ardur/receipts \
-    --qdrant-url http://localhost:6334 \   # optional; enables the memory view
-    --port 8090 \                          # default 8090
-    --basic-auth user:pass                 # optional light gate
+    --qdrant-url http://localhost:6334 \
+    --port 8090 \
+    --basic-auth user:pass
   ```
+
+  `--qdrant-url` is optional and enables the memory view, `--port` defaults to
+  `8090`, and `--basic-auth` is an optional light gate.
 
   It is strictly read-only, but it surfaces receipt and journal contents —
   treat its port like the data directory and keep it on a trusted/private

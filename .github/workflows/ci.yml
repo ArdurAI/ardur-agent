@@ -29,6 +29,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: docs and process unittests
+        run: python3 -m unittest discover -s tests
+
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
