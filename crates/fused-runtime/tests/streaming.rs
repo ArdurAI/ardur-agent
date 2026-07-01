@@ -34,6 +34,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use ardur_cost_gate::{CostEnvelope, CostTuple as GateCostTuple};
 use ardur_fused_runtime::{FusedEvent, StageKind, load_persisted_chain, verify_persisted_chain};
 use ardur_injection_defense::{FilterRegistry, PatternBasedFilter};
+use ardur_lifecycle_hooks::HookRegistry;
 use ardur_provider_runtime::{
     CompletionRequest, CompletionResponse, FinishReason, Provider, ProviderError, ProviderStream,
     RateCard, StreamEvent, Usage,
@@ -47,8 +48,10 @@ use parking_lot::Mutex;
 use serde_json::json;
 
 use support::{
-    AUDIENCE, EchoProvider, TOOL, deny_all_policy, gate_holder, mint_token_as, request_for,
-    runtime_builder, runtime_builder_with_policy, user_request, valid_token,
+    AUDIENCE, CapturingPostReceiptCostHook, EchoProvider, HOLDER, TOOL,
+    assert_runtime_cost_matches_receipt, deny_all_policy, gate_holder, mint_token_as,
+    paid_registry, request_for, runtime_builder, runtime_builder_with_policy, user_request,
+    valid_token,
 };
 
 // ---- providers -------------------------------------------------------------
@@ -235,6 +238,15 @@ impl Provider for ScriptedProvider {
 
 /// A `ToolUse` response asking for `name` with `args`.
 fn tool_call(id: &str, name: &str, args: serde_json::Value) -> CompletionResponse {
+    tool_call_with_usage(id, name, args, Usage::default())
+}
+
+fn tool_call_with_usage(
+    id: &str,
+    name: &str,
+    args: serde_json::Value,
+    usage: Usage,
+) -> CompletionResponse {
     CompletionResponse {
         content: String::new(),
         finish_reason: FinishReason::ToolUse(vec![ToolCall {
@@ -242,8 +254,14 @@ fn tool_call(id: &str, name: &str, args: serde_json::Value) -> CompletionRespons
             name: name.to_string(),
             arguments: args,
         }]),
-        usage: Usage::default(),
-        cost: CostTuple::default(),
+        usage,
+        cost: CostTuple {
+            tokens_in: u64::from(usage.tokens_in),
+            tokens_out: u64::from(usage.tokens_out),
+            cents: usage.cost_cents.unwrap_or_default(),
+            wall_ms: 0,
+            attention_score: 0.0,
+        },
         raw_provider_response: None,
     }
 }
@@ -309,6 +327,16 @@ fn cents_envelope(cents: u32) -> CostEnvelope {
     CostEnvelope {
         cents_max: cents,
         ..Default::default()
+    }
+}
+
+fn envelope_for(cost: CostTuple) -> CostEnvelope {
+    CostEnvelope {
+        tokens_in_max: cost.tokens_in as u32,
+        tokens_out_max: cost.tokens_out as u32,
+        cents_max: cost.cents as u32,
+        wall_ms_max: cost.wall_ms as u32,
+        attention_score_max: cost.attention_score.ceil() as u32,
     }
 }
 
@@ -442,6 +470,97 @@ async fn fused_stream_executes_tools_mid_stream() {
     assert_eq!(receipt_events, 2);
     let chain = load_persisted_chain(receipt_log.path()).expect("chain loads");
     assert_eq!(chain.len(), 2);
+    verify_persisted_chain(&chain).expect("the two-receipt chain verifies");
+}
+
+#[tokio::test]
+async fn fused_stream_post_receipt_hook_cost_matches_combined_receipt_cost_for_tool_turn() {
+    let provider_usage = Usage {
+        tokens_in: 2,
+        tokens_out: 3,
+        cost_cents: Some(5),
+    };
+    let provider_cost = CostTuple {
+        tokens_in: 2,
+        tokens_out: 3,
+        cents: 5,
+        wall_ms: 0,
+        attention_score: 0.0,
+    };
+    let tool_cost = CostTuple {
+        tokens_in: 11,
+        tokens_out: 13,
+        cents: 17,
+        wall_ms: 19,
+        attention_score: 0.5,
+    };
+    let expected = CostTuple {
+        tokens_in: 13,
+        tokens_out: 16,
+        cents: 22,
+        wall_ms: 19,
+        attention_score: 0.5,
+    };
+    let tool_name = "priced.tool";
+    let provider = Arc::new(ScriptedProvider::new(
+        vec![
+            tool_call_with_usage(
+                "call-1",
+                tool_name,
+                json!({ "payload": "bill me" }),
+                provider_usage,
+            ),
+            stop("done"),
+        ],
+        stop("default"),
+    ));
+    let capture = Arc::new(CapturingPostReceiptCostHook::new(
+        "capture-stream-post-receipt-cost",
+    ));
+    let mut hooks = HookRegistry::new();
+    hooks.register(capture.clone());
+    let receipt_log = tempfile::NamedTempFile::new().expect("receipt log");
+    let runtime = runtime_builder(provider.clone())
+        .with_tools(paid_registry(tool_name, tool_cost))
+        .registry(Arc::new(hooks))
+        .projected_envelope(envelope_for(expected))
+        .receipt_log(receipt_log.path())
+        .build()
+        .expect("runtime builds");
+    let token = mint_token_as(HOLDER, AUDIENCE, &[TOOL, tool_name]);
+
+    let events = collect_stream(&runtime, user_request("use paid tool", &token)).await;
+
+    assert!(matches!(
+        events.last(),
+        Some(Ok(FusedEvent::Finish(FinishReason::Stop)))
+    ));
+    assert_eq!(provider.call_count(), 2);
+    let observed = capture.observed();
+    assert_eq!(
+        observed.len(),
+        2,
+        "one post-receipt hook runs per streamed provider round"
+    );
+    let tool_round = &observed[0];
+    assert_eq!(
+        tool_round.response_cost, provider_cost,
+        "the streaming regression needs non-zero provider-only cost"
+    );
+    assert_runtime_cost_matches_receipt(tool_round.ctx_cost, &tool_round.receipt_cost);
+    assert_eq!(
+        tool_round.ctx_cost, expected,
+        "post-receipt hooks must see provider + tool cost"
+    );
+    assert!(
+        tool_round.ctx_cost.cents > tool_round.response_cost.cents,
+        "the hook cost includes the paid tool, not just the provider response"
+    );
+
+    let chain = load_persisted_chain(receipt_log.path()).expect("chain loads");
+    assert_eq!(chain.len(), 2);
+    assert_runtime_cost_matches_receipt(expected, &chain[0].body.cost);
+    assert_eq!(chain[0].body.tool_calls[0].cost.cents, tool_cost.cents);
     verify_persisted_chain(&chain).expect("the two-receipt chain verifies");
 }
 

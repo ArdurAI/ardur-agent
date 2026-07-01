@@ -29,8 +29,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use ardur_cedar_policy::{CedarPolicyBundle, PolicyBundle, PolicySource};
+use ardur_cost_gate::CostEnvelope;
 use ardur_fused_runtime::{load_persisted_chain, verify_persisted_chain};
 use ardur_injection_defense::{FilterRegistry, PatternBasedFilter};
+use ardur_lifecycle_hooks::HookRegistry;
 use ardur_provider_runtime::{
     CompletionRequest, CompletionResponse, FinishReason, Provider, ProviderError, RateCard, Usage,
 };
@@ -44,8 +46,9 @@ use parking_lot::Mutex;
 use serde_json::json;
 
 use support::{
-    AUDIENCE, HOLDER, TOOL, mint_token_as, runtime_builder, runtime_builder_with_policy,
-    user_request, valid_token,
+    AUDIENCE, CapturingPostReceiptCostHook, HOLDER, TOOL, assert_runtime_cost_matches_receipt,
+    mint_token_as, paid_registry, runtime_builder, runtime_builder_with_policy, user_request,
+    valid_token,
 };
 
 // ---- scripted provider -----------------------------------------------------
@@ -98,6 +101,15 @@ impl Provider for ScriptedProvider {
 
 /// A `ToolUse` response asking for `name` with `args`.
 fn tool_call(id: &str, name: &str, args: serde_json::Value) -> CompletionResponse {
+    tool_call_with_cost(id, name, args, CostTuple::default())
+}
+
+fn tool_call_with_cost(
+    id: &str,
+    name: &str,
+    args: serde_json::Value,
+    cost: CostTuple,
+) -> CompletionResponse {
     CompletionResponse {
         content: String::new(),
         finish_reason: FinishReason::ToolUse(vec![ToolCall {
@@ -106,7 +118,7 @@ fn tool_call(id: &str, name: &str, args: serde_json::Value) -> CompletionRespons
             arguments: args,
         }]),
         usage: Usage::default(),
-        cost: CostTuple::default(),
+        cost,
         raw_provider_response: None,
     }
 }
@@ -119,6 +131,16 @@ fn stop(text: &str) -> CompletionResponse {
         usage: Usage::default(),
         cost: CostTuple::default(),
         raw_provider_response: None,
+    }
+}
+
+fn envelope_for(cost: CostTuple) -> CostEnvelope {
+    CostEnvelope {
+        tokens_in_max: cost.tokens_in as u32,
+        tokens_out_max: cost.tokens_out as u32,
+        cents_max: cost.cents as u32,
+        wall_ms_max: cost.wall_ms as u32,
+        attention_score_max: cost.attention_score.ceil() as u32,
     }
 }
 
@@ -629,6 +651,84 @@ async fn receipt_audit() {
     assert!(
         chain[1].body.tool_calls.is_empty(),
         "the final answer round records no tool calls"
+    );
+}
+
+#[tokio::test]
+async fn post_receipt_hook_cost_matches_combined_receipt_cost_for_tool_turn() {
+    let provider_cost = CostTuple {
+        tokens_in: 2,
+        tokens_out: 3,
+        cents: 5,
+        wall_ms: 7,
+        attention_score: 0.25,
+    };
+    let tool_cost = CostTuple {
+        tokens_in: 11,
+        tokens_out: 13,
+        cents: 17,
+        wall_ms: 19,
+        attention_score: 0.5,
+    };
+    let expected = CostTuple {
+        tokens_in: 13,
+        tokens_out: 16,
+        cents: 22,
+        wall_ms: 26,
+        attention_score: 0.75,
+    };
+    let tool_name = "priced.tool";
+    let provider = Arc::new(ScriptedProvider::new(
+        vec![
+            tool_call_with_cost(
+                "call_1",
+                tool_name,
+                json!({ "payload": "bill me" }),
+                provider_cost,
+            ),
+            stop("final"),
+        ],
+        stop("default"),
+    ));
+    let capture = Arc::new(CapturingPostReceiptCostHook::new(
+        "capture-post-receipt-cost",
+    ));
+    let mut hooks = HookRegistry::new();
+    hooks.register(capture.clone());
+    let runtime = runtime_builder(provider.clone())
+        .with_tools(paid_registry(tool_name, tool_cost))
+        .registry(Arc::new(hooks))
+        .projected_envelope(envelope_for(expected))
+        .build()
+        .expect("runtime builds");
+    let token = mint_token_as(HOLDER, AUDIENCE, &[TOOL, tool_name]);
+
+    let result = runtime
+        .submit(user_request("use paid tool", &token))
+        .await
+        .expect("the paid tool round trip completes");
+
+    assert_eq!(result.response.content, "final");
+    assert_eq!(provider.call_count(), 2);
+    let observed = capture.observed();
+    assert_eq!(
+        observed.len(),
+        2,
+        "one post-receipt hook runs per receipted provider round"
+    );
+    let tool_round = &observed[0];
+    assert_eq!(
+        tool_round.response_cost, provider_cost,
+        "the regression needs non-zero provider-only cost"
+    );
+    assert_runtime_cost_matches_receipt(tool_round.ctx_cost, &tool_round.receipt_cost);
+    assert_eq!(
+        tool_round.ctx_cost, expected,
+        "post-receipt hooks must see provider + tool cost"
+    );
+    assert!(
+        tool_round.ctx_cost.cents > tool_round.response_cost.cents,
+        "the hook cost includes the paid tool, not just the provider response"
     );
 }
 
