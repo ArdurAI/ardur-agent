@@ -16,11 +16,12 @@
 //!
 //! - **Provider** — selected by `ARDUR_PROVIDER` (default `anthropic`) via
 //!   [`ardur_provider_selector::from_env`]: `anthropic` | `openrouter` |
-//!   `ollama` | `codex`. When the selected backend cannot be built from the
-//!   environment (a credentialed backend with no key), the engine falls back to
-//!   [`AnthropicProvider::stub`] and reports [`offline`](FusedEngine::offline)
-//!   so the REPL can print an offline notice. An unknown `ARDUR_PROVIDER` value
-//!   panics at boot.
+//!   `openai-compat` | `ollama` | `codex` | `claude-cli`. When the selected
+//!   backend cannot be built from the environment (a credentialed backend with
+//!   no key), the engine falls back to [`AnthropicProvider::stub`] and reports
+//!   [`offline`](FusedEngine::offline) so the REPL can print an offline notice.
+//!   An unknown `ARDUR_PROVIDER` value returns a typed provider-selection error
+//!   so operators get a clean typo message instead of a silent fallback.
 //! - **Budget** — the session holder is provisioned with `budget_cents` on the
 //!   cents axis (and generously on the token/wall/attention axes), and each turn
 //!   reserves a per-turn ceiling (`ARDUR_CLI_PER_TURN_CENTS`, default
@@ -43,7 +44,7 @@ use ardur_memory::{
     RecordId, UnixTsMillis,
 };
 use ardur_provider_runtime::{
-    AnthropicProvider, CompletionRequest, InstrumentedProvider, ModelId, Provider,
+    AnthropicProvider, CompletionRequest, InstrumentedProvider, ModelId, Provider, ProviderError,
 };
 use ardur_provider_selector as provider_selector;
 use ardur_runtime::{CapTokenRef, ChatMessage, ChatRuntime, SessionId, SubmitRequest};
@@ -98,19 +99,19 @@ impl FusedEngine {
     pub fn new(config: &Config, dirs: &StateDirs, budget_cents: u64) -> Result<Self, CliError> {
         let model = ModelId::new(&config.model);
 
-        // Select the live backend via `ARDUR_PROVIDER` (default `anthropic`). An
-        // unknown selector panics at boot inside the selector — a typo aborts
-        // loudly rather than silently downgrading. A *valid* selection whose
-        // credentials are missing (e.g. no `ANTHROPIC_API_KEY` /
+        // Select the live backend via `ARDUR_PROVIDER` (default `anthropic`).
+        // Invalid selectors are operator typos and must abort cleanly. A *valid*
+        // selection whose credentials are missing (e.g. no `ANTHROPIC_API_KEY` /
         // `OPENROUTER_API_KEY`) falls back to the network-free Anthropic stub and
-        // flags the session offline; the credential-free backends (ollama, codex)
-        // never take this branch.
+        // flags the session offline; credential-free backends do not take this
+        // branch.
         let (provider, offline): (Arc<dyn Provider>, bool) =
             match provider_selector::from_env(model.clone()) {
                 Ok(live) => {
                     tracing::info!(provider = %live.id().0, "using provider");
                     (live, false)
                 }
+                Err(e @ ProviderError::InvalidSelection(_)) => return Err(CliError::Provider(e)),
                 Err(_) => {
                     let stub: Arc<dyn Provider> = Arc::new(AnthropicProvider::stub(model.clone()));
                     tracing::info!(

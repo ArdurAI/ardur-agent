@@ -108,6 +108,7 @@ secrecy = { workspace = true }
 # (`ardur-runtime` / `ardur-provider-runtime` are already normal dependencies and
 # so are reachable from the integration tests.)
 async-trait = { workspace = true }
+assert_cmd = { workspace = true }
 hmac = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }

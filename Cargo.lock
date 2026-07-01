@@ -935,6 +935,7 @@ dependencies = [
  "ardur-session-journals",
  "ardur-slack-adapter",
  "ardur-tool-registry",
+ "assert_cmd",
  "async-trait",
  "axum 0.8.9",
  "biscuit-auth",

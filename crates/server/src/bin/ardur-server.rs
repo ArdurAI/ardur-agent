@@ -41,8 +41,8 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // The live backend, selected by `ARDUR_PROVIDER` (default `anthropic`). An
-    // unknown selector panics here at boot; a valid selection with a missing key
-    // surfaces as an error and aborts startup (tests inject a stub instead).
+    // unknown selector returns a clean error; a valid selection with a missing
+    // key surfaces as an error and aborts startup (tests inject a stub instead).
     // Wrap it in `InstrumentedProvider` so every dispatch emits a `provider.send`
     // span with the GenAI semconv attributes — for free, regardless of backend.
     let provider = provider_selector::from_env(ModelId::new(&config.model))
