@@ -1,0 +1,82 @@
+# Validates the production Docker image path documented in RUN.md.
+#
+# Keep this as a separate Ubuntu-only workflow: the release Docker build is
+# materially more expensive than the Rust fmt/clippy/check/test gauntlet and
+# Docker is not available on the macOS runner in the same way.
+
+name: docker
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-healthcheck-scan:
+    name: build-healthcheck-scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build production image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          pull: true
+          tags: ardur-agent:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Inspect image contract
+        run: |
+          set -euo pipefail
+          docker image inspect ardur-agent:ci \
+            --format 'id={{.Id}} user={{.Config.User}} entrypoint={{json .Config.Entrypoint}} healthcheck={{json .Config.Healthcheck.Test}}'
+
+      - name: Smoke /healthz through container healthcheck
+        run: |
+          set -euo pipefail
+
+          trap 'docker logs --tail 80 ardur-ci-smoke || true; docker rm -f ardur-ci-smoke >/dev/null 2>&1 || true' EXIT
+
+          docker run -d --name ardur-ci-smoke \
+            --health-interval=2s \
+            --health-timeout=2s \
+            --health-start-period=2s \
+            --health-retries=5 \
+            -e SLACK_BOT_TOKEN=dummy \
+            -e SLACK_SIGNING_SECRET=dummy \
+            -e SLACK_APP_ID=dummy \
+            -e ARDUR_PROVIDER=ollama \
+            -e ARDUR_DATA_DIR=/tmp/ardur-data \
+            ardur-agent:ci
+
+          for _ in $(seq 1 15); do
+            state="$(docker inspect ardur-ci-smoke --format '{{.State.Status}} {{.State.Health.Status}}')"
+            echo "${state}"
+            case "${state}" in
+              "running healthy")
+                exit 0
+                ;;
+              exited*|dead*)
+                exit 1
+                ;;
+            esac
+            sleep 2
+          done
+
+          docker inspect ardur-ci-smoke --format '{{json .State.Health}}'
+          exit 1
