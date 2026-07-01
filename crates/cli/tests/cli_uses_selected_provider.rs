@@ -4,23 +4,36 @@
 //!
 //! These drive the real `ardur` binary with a child-process environment (the
 //! established pattern — no in-process env mutation). They quit immediately
-//! after boot, so no turn runs and the credential-free backends (`ollama`,
-//! `codex`) are never actually contacted over the network.
+//! after boot, so no turn runs and the selected backend is never contacted over
+//! the network.
 
 use assert_cmd::Command;
 
 /// Boot `ardur chat` with `ARDUR_PROVIDER=<selector>` and no Anthropic key,
 /// quit, and return `(stdout, stderr)`.
 fn boot_with_selector(selector: &str) -> (String, String) {
+    boot_with_selector_env(selector, [])
+}
+
+fn boot_with_selector_env<const N: usize>(
+    selector: &str,
+    extra_env: [(&str, &str); N],
+) -> (String, String) {
     let home = tempfile::tempdir().expect("temp HOME");
-    let output = Command::cargo_bin("ardur")
-        .expect("the `ardur` binary builds")
+    let mut command = Command::cargo_bin("ardur").expect("the `ardur` binary builds");
+    command
         .arg("chat")
         .env("HOME", home.path())
         .env("ARDUR_PROVIDER", selector)
         // Strip the ambient key so the *only* reason a real backend is wired is
         // the selector — never a fallback to the offline Anthropic stub.
-        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("ANTHROPIC_API_KEY");
+
+    for (key, value) in extra_env {
+        command.env(key, value);
+    }
+
+    let output = command
         .write_stdin("/quit\n")
         .output()
         .expect("the chat process runs");
@@ -60,6 +73,21 @@ fn cli_uses_selected_codex_provider() {
     assert!(
         !stdout.contains("offline mode"),
         "codex is not the offline stub, yet an offline notice appeared: {stdout}"
+    );
+}
+
+#[test]
+fn cli_uses_selected_openai_compat_provider() {
+    let (stdout, stderr) =
+        boot_with_selector_env("openai-compat", [("OPENAI_COMPAT_API_KEY", "sk-test")]);
+
+    assert!(
+        stderr.contains("using provider") && stderr.contains("openai-compat"),
+        "startup log should report the openai-compat selection, got stderr: {stderr}"
+    );
+    assert!(
+        !stdout.contains("offline mode"),
+        "openai-compat is not the offline stub when a key is present, yet an offline notice appeared: {stdout}"
     );
 }
 

@@ -163,6 +163,17 @@ fn from_env_codex_does_not_require_anthropic_key() {
 
 #[test]
 #[serial]
+fn from_env_openai_compat_does_not_require_anthropic_key() {
+    let _guard = env_lock();
+    let _env = CleanEnv::new().with_slack();
+    set("ARDUR_PROVIDER", "openai-compat"); // OPENAI key is validated by provider construction.
+
+    let config = Config::from_env().expect("openai-compat boot must not require an anthropic key");
+    assert_eq!(config.anthropic_api_key, "");
+}
+
+#[test]
+#[serial]
 fn from_env_unknown_provider_does_not_require_anthropic_key() {
     let _guard = env_lock();
     let _env = CleanEnv::new().with_slack();
