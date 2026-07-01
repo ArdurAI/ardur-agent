@@ -226,11 +226,11 @@ impl Config {
     ///
     /// `ANTHROPIC_API_KEY` is required only when the selected `ARDUR_PROVIDER`
     /// backend is `anthropic` (the default when unset). For `openrouter`,
-    /// `ollama`, and `codex` it is optional, so a real boot under those backends
-    /// does not demand an Anthropic key. An unrecognized `ARDUR_PROVIDER` is
-    /// treated as non-Anthropic here (the key is not required); the selector
-    /// itself rejects the bad value — with a message listing the supported ones —
-    /// when the binary builds the provider.
+    /// `openai-compat`, `ollama`, `codex`, and `claude-cli` it is optional, so a
+    /// real boot under those backends does not demand an Anthropic key. An
+    /// unrecognized `ARDUR_PROVIDER` is treated as non-Anthropic here (the key
+    /// is not required); the selector itself rejects the bad value — with a
+    /// message listing the supported ones — when the binary builds the provider.
     ///
     /// `QDRANT_URL` follows the same conditional shape: it is required when
     /// `ARDUR_MEMORY=qdrant` selects the durable Qdrant memory backend, or

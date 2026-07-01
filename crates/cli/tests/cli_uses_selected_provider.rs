@@ -45,6 +45,25 @@ fn boot_with_selector_env<const N: usize>(
     )
 }
 
+fn boot_with_invalid_selector(selector: &str) -> (String, String, std::process::ExitStatus) {
+    let home = tempfile::tempdir().expect("temp HOME");
+    let output = Command::cargo_bin("ardur")
+        .expect("the `ardur` binary builds")
+        .arg("chat")
+        .env("HOME", home.path())
+        .env("ARDUR_PROVIDER", selector)
+        .env_remove("ANTHROPIC_API_KEY")
+        .write_stdin("/quit\n")
+        .output()
+        .expect("the chat process runs");
+
+    (
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+        output.status,
+    )
+}
+
 #[test]
 fn cli_uses_selected_ollama_provider() {
     let (stdout, stderr) = boot_with_selector("ollama");
@@ -98,5 +117,27 @@ fn cli_case_insensitive_selector() {
     assert!(
         stderr.contains("using provider") && stderr.contains("ollama"),
         "an upper-case selector should still wire ollama, got stderr: {stderr}"
+    );
+}
+
+#[test]
+fn cli_invalid_provider_exits_with_clean_error() {
+    let (stdout, stderr, status) = boot_with_invalid_selector("mistral");
+
+    assert!(
+        !status.success(),
+        "invalid selector must fail, got {status:?}"
+    );
+    assert!(
+        stderr.contains("error: provider error: invalid provider selection"),
+        "stderr should contain a clean provider-selection error, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("supported values are") && stderr.contains("openai-compat"),
+        "stderr should list supported provider values, got: {stderr}"
+    );
+    assert!(
+        !stdout.contains("offline mode"),
+        "invalid selector should not fall back to the offline stub, got stdout: {stdout}"
     );
 }
