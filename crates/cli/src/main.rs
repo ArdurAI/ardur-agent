@@ -46,6 +46,14 @@ enum Commands {
     Setup(SetupArgs),
     /// Manage sessions (list, resume, export, prune).
     Session(SessionArgs),
+    /// Inspect and verify the receipt chain.
+    Receipts(ReceiptsArgs),
+    /// Browse capability tokens and grants.
+    Caps(CapsArgs),
+    /// Dry-run and inspect Cedar policy decisions.
+    Policy(PolicyArgs),
+    /// Manage pending approval requests.
+    Approvals(ApprovalsArgs),
     /// Print the version and exit.
     Version,
 }
@@ -147,6 +155,118 @@ enum SessionAction {
     },
 }
 
+// ---------------------------------------------------------------------------
+// ARD-142: Receipt Explorer / Capability Wallet / Policy Debugger
+// ---------------------------------------------------------------------------
+
+/// Arguments to `ardur receipts`.
+#[derive(Args)]
+struct ReceiptsArgs {
+    #[command(subcommand)]
+    action: ReceiptsAction,
+}
+
+/// Subcommands for `ardur receipts`.
+#[derive(Subcommand)]
+enum ReceiptsAction {
+    /// List receipts from the chain (most recent first).
+    List {
+        /// Maximum number of receipts to show.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        /// Filter by session ID prefix.
+        #[arg(long)]
+        session: Option<String>,
+    },
+    /// Show a single receipt by ID with full detail.
+    Show {
+        /// The receipt ID (UUID).
+        id: String,
+    },
+    /// Verify the integrity of the receipt chain.
+    Verify {
+        /// Maximum number of receipts to verify (0 = all).
+        #[arg(long, default_value_t = 0)]
+        limit: usize,
+    },
+}
+
+/// Arguments to `ardur caps`.
+#[derive(Args)]
+struct CapsArgs {
+    #[command(subcommand)]
+    action: CapsAction,
+}
+
+/// Subcommands for `ardur caps`.
+#[derive(Subcommand)]
+enum CapsAction {
+    /// List all known capability variants.
+    List,
+    /// Show capabilities granted in the last session's cap-token.
+    Grants {
+        /// Session ID to inspect (defaults to most recent).
+        #[arg(long)]
+        session: Option<String>,
+    },
+}
+
+/// Arguments to `ardur policy`.
+#[derive(Args)]
+struct PolicyArgs {
+    #[command(subcommand)]
+    action: PolicyAction,
+}
+
+/// Subcommands for `ardur policy`.
+#[derive(Subcommand)]
+enum PolicyAction {
+    /// Dry-run a Cedar policy check for a given tool and capability set.
+    Check {
+        /// Tool name to check (e.g. "shell.run").
+        #[arg(long)]
+        tool: String,
+        /// Comma-separated capability list (e.g. "cap.shell_exec,cap.fs_read").
+        #[arg(long)]
+        caps: String,
+    },
+    /// Lint the Cedar policy file for syntax issues.
+    Lint,
+    /// Show recent policy decisions from the receipt chain.
+    Explain {
+        /// Maximum number of decisions to show.
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+    },
+}
+
+/// Arguments to `ardur approvals`.
+#[derive(Args)]
+struct ApprovalsArgs {
+    #[command(subcommand)]
+    action: ApprovalsAction,
+}
+
+/// Subcommands for `ardur approvals`.
+#[derive(Subcommand)]
+enum ApprovalsAction {
+    /// List pending approval requests.
+    List,
+    /// Approve a pending request.
+    Approve {
+        /// The approval request ID.
+        id: String,
+    },
+    /// Deny a pending request with an optional reason.
+    Deny {
+        /// The approval request ID.
+        id: String,
+        /// Reason for denial.
+        #[arg(long)]
+        reason: Option<String>,
+    },
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
@@ -161,6 +281,10 @@ fn main() -> ExitCode {
         Commands::Doctor(args) => run_doctor(args),
         Commands::Setup(args) => run_setup(args),
         Commands::Session(args) => run_session(args),
+        Commands::Receipts(args) => run_receipts(args),
+        Commands::Caps(args) => run_caps(args),
+        Commands::Policy(args) => run_policy(args),
+        Commands::Approvals(args) => run_approvals(args),
     };
 
     match result {
@@ -673,5 +797,410 @@ fn run_session(args: SessionArgs) -> Result<(), CliError> {
         }
     }
 
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// ARD-142: Receipt Explorer
+// ---------------------------------------------------------------------------
+
+/// Read the receipt chain file and return parsed JSON lines.
+fn read_receipt_chain(root: &Path) -> Result<Vec<serde_json::Value>, CliError> {
+    let chain_path = root.join("receipts").join("chain.jsonl");
+    let contents = match std::fs::read_to_string(&chain_path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Vec::new());
+        }
+        Err(e) => return Err(CliError::Io(e)),
+    };
+    let mut receipts = Vec::new();
+    for line in contents.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<serde_json::Value>(line) {
+            Ok(v) => receipts.push(v),
+            Err(_) => continue,
+        }
+    }
+    Ok(receipts)
+}
+
+/// Run `ardur receipts` subcommands.
+fn run_receipts(args: ReceiptsArgs) -> Result<(), CliError> {
+    let root = StateDirs::resolve()?.root;
+
+    match args.action {
+        ReceiptsAction::List { limit, session } => {
+            let receipts = read_receipt_chain(&root)?;
+            let filtered: Vec<_> = receipts
+                .iter()
+                .rev()
+                .filter(|r| {
+                    if let Some(ref sess) = session {
+                        r.get("subject")
+                            .and_then(|v| v.as_str())
+                            .is_some_and(|s| s.contains(sess))
+                    } else {
+                        true
+                    }
+                })
+                .take(limit)
+                .collect();
+            if filtered.is_empty() {
+                println!("no receipts found");
+                return Ok(());
+            }
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!(filtered)).expect("receipts serialise")
+            );
+        }
+        ReceiptsAction::Show { id } => {
+            let receipts = read_receipt_chain(&root)?;
+            let found = receipts.iter().find(|r| {
+                r.get("receipt_id")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|rid| rid == id)
+            });
+            match found {
+                Some(r) => println!(
+                    "{}",
+                    serde_json::to_string_pretty(r).expect("receipt serialises")
+                ),
+                None => {
+                    return Err(CliError::State(format!("receipt `{id}` not found")));
+                }
+            }
+        }
+        ReceiptsAction::Verify { limit } => {
+            let chain_path = root.join("receipts").join("chain.jsonl");
+            if !chain_path.is_file() {
+                println!("no receipt chain found at {}", chain_path.display());
+                return Ok(());
+            }
+            let contents = std::fs::read_to_string(&chain_path)?;
+            let lines: Vec<&str> = contents.lines().filter(|l| !l.trim().is_empty()).collect();
+            let check_count = if limit == 0 {
+                lines.len()
+            } else {
+                limit.min(lines.len())
+            };
+            let mut prev_hash: Option<String> = None;
+            let mut errors = 0;
+            for (i, line) in lines.iter().take(check_count).enumerate() {
+                let receipt: serde_json::Value = match serde_json::from_str(line) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        eprintln!("  line {}: parse error: {e}", i + 1);
+                        errors += 1;
+                        continue;
+                    }
+                };
+                let parent = receipt.get("parent_hash").and_then(|v| v.as_str());
+                if i == 0 {
+                    // Genesis receipt may or may not have parent_hash
+                } else if let Some(ph) = parent {
+                    if let Some(ref prev) = prev_hash {
+                        if ph != prev {
+                            eprintln!(
+                                "  line {}: parent_hash mismatch (expected {prev}, got {ph})",
+                                i + 1
+                            );
+                            errors += 1;
+                        }
+                    }
+                } else {
+                    eprintln!(
+                        "  line {}: missing parent_hash in non-genesis receipt",
+                        i + 1
+                    );
+                    errors += 1;
+                }
+                prev_hash = receipt
+                    .get("jws_compact")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .or_else(|| {
+                        receipt
+                            .get("receipt_id")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                    });
+            }
+            if errors == 0 {
+                println!("verified {check_count} receipts: chain integrity OK");
+            } else {
+                println!("verified {check_count} receipts: {errors} error(s) found");
+                return Err(CliError::State("chain verification failed".to_string()));
+            }
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// ARD-142: Capability Wallet
+// ---------------------------------------------------------------------------
+
+/// Run `ardur caps` subcommands.
+fn run_caps(args: CapsArgs) -> Result<(), CliError> {
+    match args.action {
+        CapsAction::List => {
+            let caps = json!([
+                {"variant": "FsRead", "label": "cap.fs_read", "description": "Read from the filesystem"},
+                {"variant": "FsWrite", "label": "cap.fs_write", "description": "Write to the filesystem"},
+                {"variant": "ShellExec", "label": "cap.shell_exec", "description": "Execute a shell command"},
+                {"variant": "NetworkOut", "label": "cap.network_out", "description": "Open an outbound network connection"},
+                {"variant": "ProcessSpawn", "label": "cap.process_spawn", "description": "Spawn a child process"},
+                {"variant": "EnvRead", "label": "cap.env_read", "description": "Read process environment variables"},
+                {"variant": "ClipboardRead", "label": "cap.clipboard_read", "description": "Read the system clipboard"},
+                {"variant": "VoiceInput", "label": "cap.voice_input", "description": "Voice input (speech-to-text)"},
+                {"variant": "VoiceOutput", "label": "cap.voice_output", "description": "Voice output (text-to-speech)"},
+                {"variant": "ImageGenerate", "label": "cap.image_generate", "description": "Image generation"},
+                {"variant": "ImageAnalyze", "label": "cap.image_analyze", "description": "Image analysis / description"},
+            ]);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&caps).expect("caps serialise")
+            );
+        }
+        CapsAction::Grants { session } => {
+            let root = StateDirs::resolve()?.root;
+            let receipts = read_receipt_chain(&root)?;
+            let filtered: Vec<_> = receipts
+                .iter()
+                .rev()
+                .filter(|r| {
+                    if let Some(ref sess) = session {
+                        r.get("subject")
+                            .and_then(|v| v.as_str())
+                            .is_some_and(|s| s.contains(sess))
+                    } else {
+                        true
+                    }
+                })
+                .take(1)
+                .collect();
+            if filtered.is_empty() {
+                println!("no session receipts found to inspect cap-token grants");
+                return Ok(());
+            }
+            let receipt = &filtered[0];
+            let cap_token_id = receipt
+                .get("cap_token_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let tool_calls = receipt.get("tool_calls").cloned().unwrap_or(json!([]));
+            let tools: Vec<String> = tool_calls
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|tc| {
+                            tc.get("tool_id")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string())
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let summary = json!({
+                "cap_token_id": cap_token_id,
+                "tools_invoked": tools,
+                "subject": receipt.get("subject").and_then(|v| v.as_str()).unwrap_or("unknown"),
+                "receipt_id": receipt.get("receipt_id").and_then(|v| v.as_str()).unwrap_or("unknown"),
+            });
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&summary).expect("grants serialise")
+            );
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// ARD-142: Policy Debugger
+// ---------------------------------------------------------------------------
+
+/// Run `ardur policy` subcommands.
+fn run_policy(args: PolicyArgs) -> Result<(), CliError> {
+    let root = StateDirs::resolve()?.root;
+
+    match args.action {
+        PolicyAction::Check { tool, caps } => {
+            let requested_caps: Vec<&str> = caps.split(',').map(|s| s.trim()).collect();
+            let cedar_path = root.join("cedar.policies");
+            let policy_text = if cedar_path.is_file() {
+                std::fs::read_to_string(&cedar_path)?
+            } else {
+                "// No cedar.policies file found. All capabilities default to allow.".to_string()
+            };
+            let result = json!({
+                "tool": tool,
+                "requested_capabilities": requested_caps,
+                "cedar_policy_present": cedar_path.is_file(),
+                "policy_lines": policy_text.lines().count(),
+                "decision": "would check Cedar policy: not yet wired to live evaluator",
+                "note": "This is a structural dry-run. Full Cedar evaluation requires a live runtime context.",
+            });
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&result).expect("policy check serialises")
+            );
+        }
+        PolicyAction::Lint => {
+            let cedar_path = root.join("cedar.policies");
+            if !cedar_path.is_file() {
+                println!("no cedar.policies file found at {}", cedar_path.display());
+                return Ok(());
+            }
+            let policy_text = std::fs::read_to_string(&cedar_path)?;
+            let mut warnings = 0;
+            let lines: Vec<&str> = policy_text.lines().collect();
+            for (i, line) in lines.iter().enumerate() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() || trimmed.starts_with("//") {
+                    continue;
+                }
+                // Basic structural checks
+                if trimmed.contains("permit(") && !trimmed.contains("principal") {
+                    eprintln!("  line {}: permit clause without principal", i + 1);
+                    warnings += 1;
+                }
+                if trimmed.contains("forbid(") && !trimmed.contains("resource") {
+                    eprintln!("  line {}: forbid clause without resource", i + 1);
+                    warnings += 1;
+                }
+            }
+            if warnings == 0 {
+                println!(
+                    "cedar policy lint: {} lines checked, no issues found",
+                    lines.len()
+                );
+            } else {
+                println!(
+                    "cedar policy lint: {} lines checked, {warnings} warning(s)",
+                    lines.len()
+                );
+            }
+        }
+        PolicyAction::Explain { limit } => {
+            let receipts = read_receipt_chain(&root)?;
+            let decisions: Vec<_> = receipts
+                .iter()
+                .rev()
+                .filter(|r| {
+                    let verb = r.get("verb").and_then(|v| v.as_str()).unwrap_or("");
+                    verb.contains("deny") || verb.contains("allow")
+                })
+                .take(limit)
+                .collect();
+            if decisions.is_empty() {
+                println!("no policy decisions found in receipt chain");
+                return Ok(());
+            }
+            let summary: Vec<_> = decisions
+                .iter()
+                .map(|d| {
+                    json!({
+                        "receipt_id": d.get("receipt_id").and_then(|v| v.as_str()),
+                        "verb": d.get("verb").and_then(|v| v.as_str()),
+                        "subject": d.get("subject").and_then(|v| v.as_str()),
+                        "cap_token_id": d.get("cap_token_id").and_then(|v| v.as_str()),
+                    })
+                })
+                .collect();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!(summary)).expect("decisions serialise")
+            );
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// ARD-139: Approval Cards
+// ---------------------------------------------------------------------------
+
+/// Run `ardur approvals` subcommands.
+fn run_approvals(args: ApprovalsArgs) -> Result<(), CliError> {
+    let root = StateDirs::resolve()?.root;
+    let approvals_dir = root.join("approvals");
+    std::fs::create_dir_all(&approvals_dir)?;
+
+    match args.action {
+        ApprovalsAction::List => {
+            let mut pending = Vec::new();
+            if let Ok(entries) = std::fs::read_dir(&approvals_dir) {
+                for entry in entries.flatten() {
+                    if entry.path().extension().is_some_and(|e| e == "json") {
+                        if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
+                                let status = v
+                                    .get("status")
+                                    .and_then(|s| s.as_str())
+                                    .unwrap_or("pending");
+                                if status == "pending" {
+                                    pending.push(v);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if pending.is_empty() {
+                println!("no pending approvals");
+            } else {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!(pending)).expect("approvals serialise")
+                );
+            }
+        }
+        ApprovalsAction::Approve { id } => {
+            let path = approvals_dir.join(format!("{id}.json"));
+            if !path.is_file() {
+                return Err(CliError::State(format!("approval `{id}` not found")));
+            }
+            let mut approval: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path)?)
+                    .map_err(|e| CliError::State(e.to_string()))?;
+            approval["status"] = json!("approved");
+            approval["decided_at"] = json!(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0)
+            );
+            let json_str = serde_json::to_string_pretty(&approval)
+                .map_err(|e| CliError::State(e.to_string()))?;
+            std::fs::write(&path, json_str)?;
+            println!("approved {id}");
+        }
+        ApprovalsAction::Deny { id, reason } => {
+            let path = approvals_dir.join(format!("{id}.json"));
+            if !path.is_file() {
+                return Err(CliError::State(format!("approval `{id}` not found")));
+            }
+            let mut approval: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path)?)
+                    .map_err(|e| CliError::State(e.to_string()))?;
+            approval["status"] = json!("denied");
+            approval["deny_reason"] = json!(reason.unwrap_or_default());
+            approval["decided_at"] = json!(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0)
+            );
+            let json_str = serde_json::to_string_pretty(&approval)
+                .map_err(|e| CliError::State(e.to_string()))?;
+            std::fs::write(&path, json_str)?;
+            println!("denied {id}");
+        }
+    }
     Ok(())
 }
