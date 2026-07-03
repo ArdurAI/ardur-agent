@@ -5,12 +5,14 @@
 //! thin clap front-end over [`ardur_cli::run_chat`] and the local ops surface.
 #![forbid(unsafe_code)]
 
+mod audit;
 mod persona;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use ardur_cli::{ChatArgs, CliError, Config, StateDirs, run_chat};
+use audit::{AuditArgs, run_audit};
 use clap::{Args, Parser, Subcommand};
 use persona::{PersonaArgs, run_persona};
 use serde_json::json;
@@ -70,6 +72,8 @@ enum Commands {
     Migrate(MigrateArgs),
     /// Manage persona packs and domain packs.
     Persona(PersonaArgs),
+    /// Run supply-chain security audits (secrets, SBOM, vulns).
+    Audit(AuditArgs),
     /// Fetch a URL with the built-in allowlisted HTTP tool.
     Fetch(FetchArgs),
     /// Search the web (stub: provider wiring in Phase 2).
@@ -313,6 +317,7 @@ fn main() -> ExitCode {
         Commands::Channel(args) => run_channel(args),
         Commands::Migrate(args) => run_migrate(args),
         Commands::Persona(args) => run_persona(args),
+        Commands::Audit(args) => run_audit(args),
         Commands::Fetch(args) => run_fetch(args),
         Commands::Search(args) => run_search(args),
         Commands::Memory(args) => run_memory(args),
