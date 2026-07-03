@@ -61,6 +61,8 @@ enum Commands {
     Redact(RedactArgs),
     /// Manage scheduled automation jobs.
     Schedule(ScheduleArgs),
+    /// Manage messaging channel adapters.
+    Channel(ChannelArgs),
     /// Fetch a URL with the built-in allowlisted HTTP tool.
     Fetch(FetchArgs),
     /// Search the web (stub: provider wiring in Phase 2).
@@ -301,6 +303,7 @@ fn main() -> ExitCode {
         Commands::Token(args) => run_token(args),
         Commands::Redact(args) => run_redact(args),
         Commands::Schedule(args) => run_schedule(args),
+        Commands::Channel(args) => run_channel(args),
         Commands::Fetch(args) => run_fetch(args),
         Commands::Search(args) => run_search(args),
         Commands::Memory(args) => run_memory(args),
@@ -2057,5 +2060,186 @@ fn run_search(args: SearchArgs) -> Result<(), CliError> {
     println!(
         "      configure ARDUR_SEARCH_PROVIDER and ARDUR_SEARCH_API_KEY to enable live results."
     );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// ARD-146: Channel Manager CLI
+// ---------------------------------------------------------------------------
+
+/// Arguments to `ardur channel`.
+#[derive(Args)]
+struct ChannelArgs {
+    #[command(subcommand)]
+    action: ChannelAction,
+}
+
+/// Subcommands for `ardur channel`.
+#[derive(Subcommand)]
+enum ChannelAction {
+    /// List configured channels.
+    List,
+    /// Add or update a channel adapter configuration.
+    Add {
+        /// Channel adapter type: discord, telegram, matrix, slack.
+        #[arg(value_parser = ["discord", "telegram", "matrix", "slack"])]
+        channel_type: String,
+        /// Human-readable name.
+        name: String,
+    },
+    /// Show details for a channel.
+    Show {
+        /// Channel name.
+        name: String,
+    },
+    /// Remove a channel configuration.
+    Remove {
+        /// Channel name.
+        name: String,
+    },
+    /// Enable or disable a channel.
+    Set {
+        /// Channel name.
+        name: String,
+        /// Desired status: enabled or disabled.
+        #[arg(value_parser = ["enabled", "disabled"])]
+        status: String,
+    },
+}
+
+/// Channel configuration record stored in the state directory.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ChannelRecord {
+    name: String,
+    channel_type: String,
+    enabled: bool,
+    created_at: u64,
+    #[serde(default)]
+    env_prefix: String,
+    #[serde(default)]
+    notes: String,
+}
+
+fn channels_dir(root: &Path) -> PathBuf {
+    root.join("channels")
+}
+
+fn read_channels(root: &Path) -> Result<Vec<ChannelRecord>, CliError> {
+    let dir = channels_dir(root);
+    let mut records = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            if entry.path().extension().is_some_and(|e| e == "json") {
+                if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                    if let Ok(v) = serde_json::from_str::<ChannelRecord>(&content) {
+                        records.push(v);
+                    }
+                }
+            }
+        }
+    }
+    Ok(records)
+}
+
+fn default_env_prefix(channel_type: &str, name: &str) -> String {
+    let sanitized: String = name
+        .to_uppercase()
+        .replace(|c: char| !c.is_alphanumeric(), "_");
+    format!("{}_{}", channel_type.to_uppercase(), sanitized)
+}
+
+/// Run `ardur channel` subcommands.
+fn run_channel(args: ChannelArgs) -> Result<(), CliError> {
+    let root = StateDirs::resolve()?.root;
+    let dir = channels_dir(&root);
+    std::fs::create_dir_all(&dir)?;
+
+    match args.action {
+        ChannelAction::List => {
+            let records = read_channels(&root)?;
+            if records.is_empty() {
+                println!("no channels configured");
+            } else {
+                println!(
+                    "{NAME: <12} {TYPE: <10} {STATUS: <10} ENV_PREFIX",
+                    NAME = "NAME",
+                    TYPE = "TYPE",
+                    STATUS = "STATUS"
+                );
+                for r in &records {
+                    let status = if r.enabled { "enabled" } else { "disabled" };
+                    println!(
+                        "{: <12} {: <10} {: <10} {}",
+                        r.name, r.channel_type, status, r.env_prefix
+                    );
+                }
+            }
+        }
+        ChannelAction::Add { channel_type, name } => {
+            let path = dir.join(format!("{name}.json"));
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let record = ChannelRecord {
+                name: name.clone(),
+                channel_type: channel_type.clone(),
+                enabled: true,
+                created_at: now,
+                env_prefix: default_env_prefix(&channel_type, &name),
+                notes: format!(
+                    "Set {prefix}_TOKEN (and any required IDs) to activate this channel.",
+                    prefix = default_env_prefix(&channel_type, &name)
+                ),
+            };
+            std::fs::write(
+                &path,
+                serde_json::to_string_pretty(&record)
+                    .map_err(|e| CliError::State(e.to_string()))?,
+            )?;
+            println!("added channel {name} ({channel_type})");
+            println!("  env prefix: {}", record.env_prefix);
+        }
+        ChannelAction::Show { name } => {
+            let records = read_channels(&root)?;
+            let found = records.iter().find(|r| r.name == name);
+            match found {
+                Some(r) => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(r)
+                            .map_err(|e| CliError::State(e.to_string()))?
+                    );
+                }
+                None => {
+                    return Err(CliError::State(format!("channel `{name}` not found")));
+                }
+            }
+        }
+        ChannelAction::Remove { name } => {
+            let path = dir.join(format!("{name}.json"));
+            if !path.is_file() {
+                return Err(CliError::State(format!("channel `{name}` not found")));
+            }
+            std::fs::remove_file(&path)?;
+            println!("removed channel {name}");
+        }
+        ChannelAction::Set { name, status } => {
+            let path = dir.join(format!("{name}.json"));
+            if !path.is_file() {
+                return Err(CliError::State(format!("channel `{name}` not found")));
+            }
+            let content = std::fs::read_to_string(&path)?;
+            let mut record: ChannelRecord =
+                serde_json::from_str(&content).map_err(|e| CliError::State(e.to_string()))?;
+            record.enabled = status == "enabled";
+            std::fs::write(
+                &path,
+                serde_json::to_string_pretty(&record)
+                    .map_err(|e| CliError::State(e.to_string()))?,
+            )?;
+            println!("channel {name} is now {status}");
+        }
+    }
     Ok(())
 }
