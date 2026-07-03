@@ -59,6 +59,8 @@ enum Commands {
     Token(TokenArgs),
     /// Redact secrets from stdin, files, or JSON strings.
     Redact(RedactArgs),
+    /// Manage scheduled automation jobs.
+    Schedule(ScheduleArgs),
     /// Browse and manage memory cards.
     Memory(MemoryArgs),
     /// Print the version and exit.
@@ -294,6 +296,7 @@ fn main() -> ExitCode {
         Commands::Approvals(args) => run_approvals(args),
         Commands::Token(args) => run_token(args),
         Commands::Redact(args) => run_redact(args),
+        Commands::Schedule(args) => run_schedule(args),
         Commands::Memory(args) => run_memory(args),
     };
 
@@ -1210,6 +1213,280 @@ fn run_approvals(args: ApprovalsArgs) -> Result<(), CliError> {
                 .map_err(|e| CliError::State(e.to_string()))?;
             std::fs::write(&path, json_str)?;
             println!("denied {id}");
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// ARD-143: Schedule / Cron CLI
+// ---------------------------------------------------------------------------
+
+/// Arguments to `ardur schedule`.
+#[derive(Args)]
+struct ScheduleArgs {
+    #[command(subcommand)]
+    action: ScheduleAction,
+}
+
+/// Subcommands for `ardur schedule`.
+#[derive(Subcommand)]
+enum ScheduleAction {
+    /// Create a new schedule from a natural-language or cron pattern.
+    Create {
+        /// Human-readable label.
+        label: String,
+        /// Schedule pattern: "every 5 minutes", "daily at 9am", or a cron expression.
+        pattern: String,
+        /// Prompt to run when the schedule fires.
+        #[arg(short, long)]
+        prompt: String,
+    },
+    /// List schedules.
+    List,
+    /// Show the next few fire times for a schedule.
+    Next {
+        /// Schedule ID.
+        id: String,
+        /// Number of fire times to compute.
+        #[arg(long, default_value_t = 5)]
+        count: usize,
+    },
+    /// Delete a schedule.
+    Delete {
+        /// Schedule ID.
+        id: String,
+    },
+    /// Test fire a schedule now (dry-run).
+    Fire {
+        /// Schedule ID.
+        id: String,
+    },
+}
+
+/// Parsed schedule record stored in the state directory.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ScheduleRecord {
+    schedule_id: String,
+    label: String,
+    pattern: String,
+    prompt: String,
+    created_at: u64,
+    enabled: bool,
+}
+
+/// Simple cron-like parser for the most common NL patterns.
+fn parse_pattern(pattern: &str) -> Option<String> {
+    let p = pattern.to_lowercase();
+    if p == "every minute" {
+        return Some("* * * * *".to_string());
+    }
+    if p == "every 5 minutes" {
+        return Some("0,5,10,15,20,25,30,35,40,45,50,55 * * * *".to_string());
+    }
+    if p == "every 15 minutes" {
+        return Some("0,15,30,45 * * * *".to_string());
+    }
+    if p == "every hour" {
+        return Some("0 * * * *".to_string());
+    }
+    if p == "daily" || p == "every day" {
+        return Some("0 0 * * *".to_string());
+    }
+    if p.starts_with("daily at ") {
+        let time_part = p.strip_prefix("daily at ")?;
+        return parse_time_to_cron(time_part);
+    }
+    if p == "weekly" {
+        return Some("0 0 * * 0".to_string());
+    }
+    // Treat as raw cron if it looks like 5 fields.
+    let fields: Vec<&str> = pattern.split_whitespace().collect();
+    if fields.len() == 5 {
+        return Some(pattern.to_string());
+    }
+    None
+}
+
+fn parse_time_to_cron(time_str: &str) -> Option<String> {
+    // Accept "9am", "9:30am", "14:00", "2:30pm".
+    let s = time_str.trim().to_lowercase();
+    let re = regex::Regex::new(r"^(\d{1,2})(?::(\d{2}))?(am|pm)?$").ok()?;
+    let caps = re.captures(&s)?;
+    let mut hour: u32 = caps[1].parse().ok()?;
+    let minute: u32 = caps
+        .get(2)
+        .map(|m| m.as_str().parse().ok())
+        .unwrap_or(Some(0))?;
+    let ampm = caps.get(3).map(|m| m.as_str());
+    if let Some(ap) = ampm {
+        if ap == "pm" && hour != 12 {
+            hour += 12;
+        }
+        if ap == "am" && hour == 12 {
+            hour = 0;
+        }
+    }
+    if hour > 23 || minute > 59 {
+        return None;
+    }
+    Some(format!("{minute} {hour} * * *"))
+}
+
+/// Read schedule records from the state directory.
+fn read_schedules(root: &Path) -> Result<Vec<ScheduleRecord>, CliError> {
+    let dir = root.join("schedules");
+    let mut records = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            if entry.path().extension().is_some_and(|e| e == "json") {
+                if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                    if let Ok(v) = serde_json::from_str::<ScheduleRecord>(&content) {
+                        records.push(v);
+                    }
+                }
+            }
+        }
+    }
+    Ok(records)
+}
+
+/// Parse a 5-field cron string into a CronExpression.
+/// Supported: * (any), n (exact), n-m (range), a,b (list), */n (step).
+fn cron_to_expression(cron: &str) -> Result<ardur_cron::CronExpression, CliError> {
+    let fields: Vec<&str> = cron.split_whitespace().collect();
+    if fields.len() != 5 {
+        return Err(CliError::State(format!(
+            "cron must have 5 fields, got {}",
+            fields.len()
+        )));
+    }
+    Ok(ardur_cron::CronExpression::new(
+        fields[0], fields[1], fields[2], fields[3], fields[4],
+    ))
+}
+
+/// Compute next N fire times from a cron expression (UTC).
+fn next_fire_times(
+    cron: &str,
+    count: usize,
+) -> Result<Vec<chrono::DateTime<chrono::Utc>>, CliError> {
+    let expr = cron_to_expression(cron)?;
+    let now = chrono::Utc::now();
+    let mut fires = Vec::with_capacity(count);
+    let mut probe = now;
+    // Safety guard: stop searching after 1 year of minutes.
+    let cutoff = now + chrono::Duration::days(366);
+    while fires.len() < count && probe < cutoff {
+        probe += chrono::Duration::minutes(1);
+        if expr.is_due(probe) {
+            fires.push(probe);
+        }
+    }
+    Ok(fires)
+}
+
+/// Run `ardur schedule` subcommands.
+fn run_schedule(args: ScheduleArgs) -> Result<(), CliError> {
+    let root = StateDirs::resolve()?.root;
+    let schedules_dir = root.join("schedules");
+    std::fs::create_dir_all(&schedules_dir)?;
+
+    match args.action {
+        ScheduleAction::Create {
+            label,
+            pattern,
+            prompt,
+        } => {
+            let cron = parse_pattern(&pattern).ok_or_else(|| {
+                CliError::State(format!("unrecognized schedule pattern: {pattern}"))
+            })?;
+            // Validate cron.
+            cron_to_expression(&cron).map_err(|e| CliError::State(format!("invalid cron: {e}")))?;
+            let id = uuid::Uuid::new_v4().to_string();
+            let record = ScheduleRecord {
+                schedule_id: id.clone(),
+                label,
+                pattern: cron,
+                prompt,
+                created_at: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+                enabled: true,
+            };
+            std::fs::write(
+                schedules_dir.join(format!("{id}.json")),
+                serde_json::to_string_pretty(&record)
+                    .map_err(|e| CliError::State(e.to_string()))?,
+            )?;
+            println!("created schedule {id}");
+            let next = next_fire_times(&record.pattern, 1)?;
+            if let Some(t) = next.first() {
+                println!("next fire: {t}");
+            }
+        }
+        ScheduleAction::List => {
+            let records = read_schedules(&root)?;
+            if records.is_empty() {
+                println!("no schedules");
+            } else {
+                let summary: Vec<serde_json::Value> = records
+                    .iter()
+                    .map(|r| {
+                        json!({
+                            "schedule_id": r.schedule_id,
+                            "label": r.label,
+                            "pattern": r.pattern,
+                            "prompt": r.prompt,
+                            "enabled": r.enabled,
+                        })
+                    })
+                    .collect();
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!(summary)).expect("schedules serialise")
+                );
+            }
+        }
+        ScheduleAction::Next { id, count } => {
+            let records = read_schedules(&root)?;
+            let found = records.iter().find(|r| r.schedule_id == id);
+            match found {
+                Some(r) => {
+                    let fires = next_fire_times(&r.pattern, count)?;
+                    println!("next fire times for {id}:");
+                    for t in fires {
+                        println!("  {t}");
+                    }
+                }
+                None => {
+                    return Err(CliError::State(format!("schedule `{id}` not found")));
+                }
+            }
+        }
+        ScheduleAction::Delete { id } => {
+            let path = schedules_dir.join(format!("{id}.json"));
+            if !path.is_file() {
+                return Err(CliError::State(format!("schedule `{id}` not found")));
+            }
+            std::fs::remove_file(&path)?;
+            println!("deleted schedule {id}");
+        }
+        ScheduleAction::Fire { id } => {
+            let records = read_schedules(&root)?;
+            let found = records.iter().find(|r| r.schedule_id == id);
+            match found {
+                Some(r) => {
+                    println!("dry-run fire schedule {id}");
+                    println!("  prompt: {}", r.prompt);
+                    println!("  pattern: {}", r.pattern);
+                    println!("  note: execution engine not yet wired");
+                }
+                None => {
+                    return Err(CliError::State(format!("schedule `{id}` not found")));
+                }
+            }
         }
     }
     Ok(())
