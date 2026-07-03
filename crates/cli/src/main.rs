@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 mod audit;
+mod marketplace;
 mod persona;
 
 use std::path::{Path, PathBuf};
@@ -14,6 +15,7 @@ use std::process::ExitCode;
 use ardur_cli::{ChatArgs, CliError, Config, StateDirs, run_chat};
 use audit::{AuditArgs, run_audit};
 use clap::{Args, Parser, Subcommand};
+use marketplace::{MarketplaceArgs, run_marketplace};
 use persona::{PersonaArgs, run_persona};
 use serde_json::json;
 use sha2::Digest;
@@ -74,6 +76,8 @@ enum Commands {
     Persona(PersonaArgs),
     /// Run supply-chain security audits (secrets, SBOM, vulns).
     Audit(AuditArgs),
+    /// Browse and install skills from the marketplace.
+    Marketplace(MarketplaceArgs),
     /// Fetch a URL with the built-in allowlisted HTTP tool.
     Fetch(FetchArgs),
     /// Search the web (stub: provider wiring in Phase 2).
@@ -318,6 +322,7 @@ fn main() -> ExitCode {
         Commands::Migrate(args) => run_migrate(args),
         Commands::Persona(args) => run_persona(args),
         Commands::Audit(args) => run_audit(args),
+        Commands::Marketplace(args) => run_marketplace(args),
         Commands::Fetch(args) => run_fetch(args),
         Commands::Search(args) => run_search(args),
         Commands::Memory(args) => run_memory(args),
