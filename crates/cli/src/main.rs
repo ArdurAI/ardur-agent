@@ -54,6 +54,8 @@ enum Commands {
     Policy(PolicyArgs),
     /// Manage pending approval requests.
     Approvals(ApprovalsArgs),
+    /// Browse and manage memory cards.
+    Memory(MemoryArgs),
     /// Print the version and exit.
     Version,
 }
@@ -285,6 +287,7 @@ fn main() -> ExitCode {
         Commands::Caps(args) => run_caps(args),
         Commands::Policy(args) => run_policy(args),
         Commands::Approvals(args) => run_approvals(args),
+        Commands::Memory(args) => run_memory(args),
     };
 
     match result {
@@ -1200,6 +1203,204 @@ fn run_approvals(args: ApprovalsArgs) -> Result<(), CliError> {
                 .map_err(|e| CliError::State(e.to_string()))?;
             std::fs::write(&path, json_str)?;
             println!("denied {id}");
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// ARD-141: Memory Explorer
+// ---------------------------------------------------------------------------
+
+/// Arguments to `ardur memory`.
+#[derive(Args)]
+struct MemoryArgs {
+    #[command(subcommand)]
+    action: MemoryAction,
+}
+
+/// Subcommands for `ardur memory`.
+#[derive(Subcommand)]
+enum MemoryAction {
+    /// List memory cards from the state directory.
+    List {
+        /// Filter by workspace/subject prefix.
+        #[arg(long)]
+        workspace: Option<String>,
+        /// Maximum number of cards to show.
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
+    /// Search memory cards by keyword.
+    Search {
+        /// Search query.
+        query: String,
+        /// Maximum results.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Show a single memory card by record ID.
+    Show {
+        /// The record ID (UUID).
+        id: String,
+    },
+    /// Export memory cards to JSON.
+    Export {
+        /// Output file (defaults to stdout).
+        #[arg(long, value_name = "PATH")]
+        output: Option<PathBuf>,
+        /// Filter by workspace.
+        #[arg(long)]
+        workspace: Option<String>,
+    },
+    /// Tombstone (forget) a memory card by record ID.
+    Forget {
+        /// The record ID (UUID) to tombstone.
+        id: String,
+        /// Reason for forgetting.
+        #[arg(long, default_value = "user_requested")]
+        reason: String,
+    },
+}
+
+/// Read memory cards from the state directory.
+fn read_memory_cards(root: &Path) -> Result<Vec<serde_json::Value>, CliError> {
+    let memory_dir = root.join("memory");
+    let mut cards = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&memory_dir) {
+        for entry in entries.flatten() {
+            if entry.path().extension().is_some_and(|e| e == "json") {
+                if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
+                        cards.push(v);
+                    }
+                }
+            }
+        }
+    }
+    Ok(cards)
+}
+
+/// Run `ardur memory` subcommands.
+fn run_memory(args: MemoryArgs) -> Result<(), CliError> {
+    let root = StateDirs::resolve()?.root;
+
+    match args.action {
+        MemoryAction::List { workspace, limit } => {
+            let cards = read_memory_cards(&root)?;
+            let filtered: Vec<_> = cards
+                .iter()
+                .filter(|c| {
+                    if let Some(ref ws) = workspace {
+                        c.get("subject")
+                            .or_else(|| c.get("workspace"))
+                            .and_then(|v| v.as_str())
+                            .is_some_and(|s| s.contains(ws))
+                    } else {
+                        true
+                    }
+                })
+                .take(limit)
+                .collect();
+            if filtered.is_empty() {
+                println!("no memory cards found");
+            } else {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!(filtered)).expect("memory cards serialise")
+                );
+            }
+        }
+        MemoryAction::Search { query, limit } => {
+            let cards = read_memory_cards(&root)?;
+            let query_lower = query.to_lowercase();
+            let results: Vec<_> = cards
+                .iter()
+                .filter(|c| {
+                    let content = c
+                        .get("content")
+                        .or_else(|| c.get("body"))
+                        .or_else(|| c.get("text"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    content.to_lowercase().contains(&query_lower)
+                })
+                .take(limit)
+                .collect();
+            if results.is_empty() {
+                println!("no memory cards matching '{query}'");
+            } else {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!(results))
+                        .expect("search results serialise")
+                );
+            }
+        }
+        MemoryAction::Show { id } => {
+            let cards = read_memory_cards(&root)?;
+            let found = cards.iter().find(|c| {
+                c.get("record_id")
+                    .or_else(|| c.get("id"))
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|rid| rid == id)
+            });
+            match found {
+                Some(c) => println!(
+                    "{}",
+                    serde_json::to_string_pretty(c).expect("card serialises")
+                ),
+                None => {
+                    return Err(CliError::State(format!("memory card `{id}` not found")));
+                }
+            }
+        }
+        MemoryAction::Export { output, workspace } => {
+            let cards = read_memory_cards(&root)?;
+            let filtered: Vec<_> = cards
+                .iter()
+                .filter(|c| {
+                    if let Some(ref ws) = workspace {
+                        c.get("subject")
+                            .or_else(|| c.get("workspace"))
+                            .and_then(|v| v.as_str())
+                            .is_some_and(|s| s.contains(ws))
+                    } else {
+                        true
+                    }
+                })
+                .collect();
+            let export = json!({
+                "exported_at": std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+                "card_count": filtered.len(),
+                "cards": filtered,
+            });
+            let json_str = serde_json::to_string_pretty(&export).expect("export serialises");
+            if let Some(path) = output {
+                std::fs::write(&path, json_str)?;
+                println!("exported {} cards to {}", filtered.len(), path.display());
+            } else {
+                println!("{json_str}");
+            }
+        }
+        MemoryAction::Forget { id, reason } => {
+            let memory_dir = root.join("memory");
+            let tombstone_path = memory_dir.join(format!("{id}.tombstone.json"));
+            let tombstone = json!({
+                "record_id": id,
+                "tombstoned_at": std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+                "reason": reason,
+            });
+            let json_str = serde_json::to_string_pretty(&tombstone).expect("tombstone serialises");
+            std::fs::write(&tombstone_path, json_str)?;
+            println!("tombstoned memory card {id} (reason: {reason})");
+            println!("note: the card is not deleted — it is marked invalid for future recall");
         }
     }
     Ok(())
