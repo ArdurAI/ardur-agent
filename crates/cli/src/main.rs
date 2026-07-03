@@ -61,6 +61,10 @@ enum Commands {
     Redact(RedactArgs),
     /// Manage scheduled automation jobs.
     Schedule(ScheduleArgs),
+    /// Fetch a URL with the built-in allowlisted HTTP tool.
+    Fetch(FetchArgs),
+    /// Search the web (stub: provider wiring in Phase 2).
+    Search(SearchArgs),
     /// Browse and manage memory cards.
     Memory(MemoryArgs),
     /// Print the version and exit.
@@ -297,6 +301,8 @@ fn main() -> ExitCode {
         Commands::Token(args) => run_token(args),
         Commands::Redact(args) => run_redact(args),
         Commands::Schedule(args) => run_schedule(args),
+        Commands::Fetch(args) => run_fetch(args),
+        Commands::Search(args) => run_search(args),
         Commands::Memory(args) => run_memory(args),
     };
 
@@ -1933,5 +1939,123 @@ fn run_memory(args: MemoryArgs) -> Result<(), CliError> {
             println!("note: the card is not deleted — it is marked invalid for future recall");
         }
     }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// ARD-144 / ARD-145: Connector CLI stubs (fetch + search)
+// ---------------------------------------------------------------------------
+
+/// Arguments to `ardur fetch`.
+#[derive(Args)]
+struct FetchArgs {
+    /// URL to fetch.
+    url: String,
+    /// Optional output file (defaults to stdout).
+    #[arg(short, long, value_name = "PATH")]
+    output: Option<PathBuf>,
+    /// Maximum response size in bytes.
+    #[arg(long, default_value_t = 1_048_576)]
+    max_bytes: usize,
+    /// Additional allowed host (can be repeated).
+    #[arg(long = "allow-host")]
+    allow_hosts: Vec<String>,
+}
+
+/// Arguments to `ardur search`.
+#[derive(Args)]
+struct SearchArgs {
+    /// Search query.
+    query: String,
+    /// Provider to use.
+    #[arg(long, default_value = "web")]
+    provider: String,
+    /// Maximum number of results.
+    #[arg(long, default_value_t = 10)]
+    limit: usize,
+}
+
+/// Run `ardur fetch`.
+fn run_fetch(args: FetchArgs) -> Result<(), CliError> {
+    let url = args.url;
+    let root = StateDirs::resolve()?.root;
+
+    // Read allowlist from config if present.
+    let mut allowlist: Vec<String> = Vec::new();
+    let allowlist_path = root.join("http_allowlist.txt");
+    if allowlist_path.is_file() {
+        let content = std::fs::read_to_string(&allowlist_path)?;
+        allowlist.extend(
+            content
+                .lines()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
+        );
+    }
+    allowlist.extend(args.allow_hosts);
+
+    // Safety check: refuse non-HTTP(S) schemes.
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Err(CliError::State(format!(
+            "only http:// and https:// URLs are supported, got `{url}`"
+        )));
+    }
+
+    if allowlist.is_empty() {
+        return Err(CliError::State(
+            "no HTTP allowlist configured. Add hosts to ~/.ardur/http_allowlist.txt or use --allow-host".to_string(),
+        ));
+    }
+
+    let host = url
+        .split('/')
+        .nth(2)
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .to_lowercase();
+    if !allowlist.iter().any(|h| h.to_lowercase() == host) {
+        return Err(CliError::State(format!(
+            "host `{host}` is not in the allowlist; add it to {} or use --allow-host",
+            allowlist_path.display()
+        )));
+    }
+
+    let rt = tokio::runtime::Runtime::new()?;
+    let body = rt.block_on(async {
+        let client = reqwest::Client::new();
+        let response = client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| CliError::State(format!("request failed: {e}")))?;
+        let text = response
+            .text()
+            .await
+            .map_err(|e| CliError::State(format!("read failed: {e}")))?;
+        Ok::<String, CliError>(text.chars().take(args.max_bytes).collect())
+    })?;
+
+    match args.output {
+        Some(path) => {
+            std::fs::write(&path, &body)?;
+            println!("wrote {} bytes to {}", body.len(), path.display());
+        }
+        None => println!("{body}"),
+    }
+    Ok(())
+}
+
+/// Run `ardur search` (stub; provider wiring in Phase 2).
+fn run_search(args: SearchArgs) -> Result<(), CliError> {
+    println!(
+        "search: {} (provider: {}, limit: {})",
+        args.query, args.provider, args.limit
+    );
+    println!("note: web search provider integration is a Phase 2 wiring task.");
+    println!(
+        "      configure ARDUR_SEARCH_PROVIDER and ARDUR_SEARCH_API_KEY to enable live results."
+    );
     Ok(())
 }
