@@ -11,6 +11,7 @@ use std::process::ExitCode;
 use ardur_cli::{ChatArgs, CliError, Config, StateDirs, run_chat};
 use clap::{Args, Parser, Subcommand};
 use serde_json::json;
+use sha2::Digest;
 
 /// Ardur — a capability-secure, cost-metered agent runtime.
 #[derive(Parser)]
@@ -54,6 +55,10 @@ enum Commands {
     Policy(PolicyArgs),
     /// Manage pending approval requests.
     Approvals(ApprovalsArgs),
+    /// Manage API tokens and channel pairing secrets.
+    Token(TokenArgs),
+    /// Redact secrets from stdin, files, or JSON strings.
+    Redact(RedactArgs),
     /// Browse and manage memory cards.
     Memory(MemoryArgs),
     /// Print the version and exit.
@@ -287,6 +292,8 @@ fn main() -> ExitCode {
         Commands::Caps(args) => run_caps(args),
         Commands::Policy(args) => run_policy(args),
         Commands::Approvals(args) => run_approvals(args),
+        Commands::Token(args) => run_token(args),
+        Commands::Redact(args) => run_redact(args),
         Commands::Memory(args) => run_memory(args),
     };
 
@@ -1204,6 +1211,252 @@ fn run_approvals(args: ApprovalsArgs) -> Result<(), CliError> {
             std::fs::write(&path, json_str)?;
             println!("denied {id}");
         }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// ARD-138: Token / Pairing Secret Management
+// ---------------------------------------------------------------------------
+
+/// Arguments to `ardur token`.
+#[derive(Args)]
+struct TokenArgs {
+    #[command(subcommand)]
+    action: TokenAction,
+}
+
+/// Subcommands for `ardur token`.
+#[derive(Subcommand)]
+enum TokenAction {
+    /// Create a new token with a label and optional scope.
+    Create {
+        /// Human-readable label for the token.
+        label: String,
+        /// Optional scope: read, write, admin (default: read).
+        #[arg(long, default_value = "read")]
+        scope: String,
+    },
+    /// List stored tokens (hashes only; values never displayed).
+    List,
+    /// Revoke a token by ID.
+    Revoke {
+        /// Token ID to revoke.
+        id: String,
+    },
+}
+
+/// Generate a URL-safe random token.
+fn generate_token_value() -> String {
+    use rand::RngCore;
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    base64::engine::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, bytes)
+}
+
+/// Run `ardur token` subcommands.
+fn run_token(args: TokenArgs) -> Result<(), CliError> {
+    let root = StateDirs::resolve()?.root;
+    let tokens_dir = root.join("tokens");
+    std::fs::create_dir_all(&tokens_dir)?;
+
+    match args.action {
+        TokenAction::Create { label, scope } => {
+            let token_id = uuid::Uuid::new_v4().to_string();
+            let token_value = generate_token_value();
+            // Hash the value with a simple SHA-256 so we never store plaintext.
+            let hash = sha2::Sha256::digest(token_value.as_bytes());
+            let hash_hex = hex::encode(hash);
+            let record = json!({
+                "token_id": token_id,
+                "label": label,
+                "scope": scope,
+                "hash": hash_hex,
+                "created_at": std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+                "revoked": false,
+            });
+            std::fs::write(
+                tokens_dir.join(format!("{token_id}.json")),
+                serde_json::to_string_pretty(&record)
+                    .map_err(|e| CliError::State(e.to_string()))?,
+            )?;
+            println!("created token {token_id}");
+            println!("value: {token_value}");
+            println!("warning: this is the only time the value is shown");
+        }
+        TokenAction::List => {
+            let mut tokens = Vec::new();
+            if let Ok(entries) = std::fs::read_dir(&tokens_dir) {
+                for entry in entries.flatten() {
+                    if entry.path().extension().is_some_and(|e| e == "json") {
+                        if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                            if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&content) {
+                                // Never display the actual hash in list view.
+                                v.as_object_mut()
+                                    .map(|m| m.insert("hash".to_string(), json!("<redacted>")));
+                                tokens.push(v);
+                            }
+                        }
+                    }
+                }
+            }
+            if tokens.is_empty() {
+                println!("no tokens stored");
+            } else {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!(tokens)).expect("tokens serialise")
+                );
+            }
+        }
+        TokenAction::Revoke { id } => {
+            let path = tokens_dir.join(format!("{id}.json"));
+            if !path.is_file() {
+                return Err(CliError::State(format!("token `{id}` not found")));
+            }
+            let mut token: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path)?)
+                    .map_err(|e| CliError::State(e.to_string()))?;
+            token["revoked"] = json!(true);
+            token["revoked_at"] = json!(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0)
+            );
+            std::fs::write(
+                &path,
+                serde_json::to_string_pretty(&token).map_err(|e| CliError::State(e.to_string()))?,
+            )?;
+            println!("revoked token {id}");
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// ARD-140: Secret Redaction
+// ---------------------------------------------------------------------------
+
+/// Arguments to `ardur redact`.
+#[derive(Args)]
+struct RedactArgs {
+    /// Input file; if omitted, reads from stdin.
+    #[arg(short, long, value_name = "PATH")]
+    input: Option<PathBuf>,
+    /// Output file; if omitted, writes to stdout.
+    #[arg(short, long, value_name = "PATH")]
+    output: Option<PathBuf>,
+    /// Additional secret patterns as regex strings (can be repeated).
+    #[arg(short, long = "pattern")]
+    patterns: Vec<String>,
+    /// If set, treat input as JSON and redact string values recursively.
+    #[arg(long)]
+    json: bool,
+}
+
+/// Default secret patterns: API keys, tokens, passwords, private keys, etc.
+fn default_secret_patterns() -> Vec<regex::Regex> {
+    let patterns = [
+        // OpenAI / Anthropic API keys
+        r"(?i)sk-[a-z0-9]{48}",
+        r"(?i)sk-[a-z0-9]{20,47}",
+        // Generic secret-looking tokens
+        r"(?i)bearer\s+[a-z0-9_\-\.]{20,}",
+        r"(?i)token[a-z0-9_\-]*[:=]\s*[a-z0-9_\-\.]{8,}",
+        r"(?i)api[_\-]?key[a-z0-9_\-]*[:=]\s*[a-z0-9_\-\.]{8,}",
+        // Natural-language password/secret leakage
+        r"(?i)pass(?:word)?\s*(?:is|=|:)\s*\S+",
+        r"(?i)secret(?:\s+is|=|:)\s*\S+",
+        // AWS-style access keys
+        r"AKIA[0-9A-Z]{16}",
+        // Private keys / certs
+        r"-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----[\s\S]*?-----END",
+        // GitHub tokens
+        r"gh[pousr]_[A-Za-z0-9_]{36,}",
+    ];
+    patterns
+        .iter()
+        .filter_map(|p| regex::Regex::new(p).ok())
+        .collect()
+}
+
+/// Redact secrets in a plain string.
+fn redact_text(text: &str, patterns: &[regex::Regex]) -> String {
+    let mut out = text.to_string();
+    for re in patterns {
+        out = re.replace_all(&out, "<REDACTED>").to_string();
+    }
+    out
+}
+
+/// Recursively redact string values in a JSON object.
+fn redact_json_value(value: &mut serde_json::Value, patterns: &[regex::Regex]) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (k, v) in map.iter_mut() {
+                let k_lower = k.to_lowercase();
+                if k_lower.contains("token")
+                    || k_lower.contains("secret")
+                    || k_lower.contains("password")
+                    || k_lower.contains("api_key")
+                    || k_lower.contains("key")
+                {
+                    if let serde_json::Value::String(s) = v {
+                        *s = "<REDACTED>".to_string();
+                    } else {
+                        redact_json_value(v, patterns);
+                    }
+                } else {
+                    redact_json_value(v, patterns);
+                }
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for v in arr.iter_mut() {
+                redact_json_value(v, patterns);
+            }
+        }
+        serde_json::Value::String(s) => {
+            *s = redact_text(s, patterns);
+        }
+        _ => {}
+    }
+}
+
+/// Run `ardur redact`.
+fn run_redact(args: RedactArgs) -> Result<(), CliError> {
+    let mut patterns = default_secret_patterns();
+    for p in args.patterns {
+        if let Ok(re) = regex::Regex::new(&p) {
+            patterns.push(re);
+        }
+    }
+
+    let input = match args.input {
+        Some(path) => std::fs::read_to_string(&path)?,
+        None => {
+            let mut buf = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
+            buf
+        }
+    };
+
+    let output = if args.json {
+        let mut value: serde_json::Value = serde_json::from_str(&input)
+            .map_err(|e| CliError::State(format!("invalid json: {e}")))?;
+        redact_json_value(&mut value, &patterns);
+        serde_json::to_string_pretty(&value).map_err(|e| CliError::State(e.to_string()))?
+    } else {
+        redact_text(&input, &patterns)
+    };
+
+    match args.output {
+        Some(path) => std::fs::write(&path, output)?,
+        None => println!("{output}"),
     }
     Ok(())
 }

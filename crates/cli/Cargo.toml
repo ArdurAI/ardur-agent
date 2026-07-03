@@ -76,6 +76,12 @@ tracing-subscriber = { workspace = true }
 # The cost gate keys admission on a UUIDv4 cap-token id; the workspace pins v7,
 # so opt v4 in on top (Cargo unifies the feature set).
 uuid = { workspace = true, features = ["v4"] }
+# ARD-138: token generation and ARD-140: secret redaction.
+regex = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+base64 = { workspace = true }
+rand = "0.8"
 
 [dev-dependencies]
 # Integration tests are a separate crate; they re-declare the deps they name.
