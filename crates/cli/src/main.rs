@@ -63,6 +63,8 @@ enum Commands {
     Schedule(ScheduleArgs),
     /// Manage messaging channel adapters.
     Channel(ChannelArgs),
+    /// Import or export state from Hermes / OpenClaw.
+    Migrate(MigrateArgs),
     /// Fetch a URL with the built-in allowlisted HTTP tool.
     Fetch(FetchArgs),
     /// Search the web (stub: provider wiring in Phase 2).
@@ -304,6 +306,7 @@ fn main() -> ExitCode {
         Commands::Redact(args) => run_redact(args),
         Commands::Schedule(args) => run_schedule(args),
         Commands::Channel(args) => run_channel(args),
+        Commands::Migrate(args) => run_migrate(args),
         Commands::Fetch(args) => run_fetch(args),
         Commands::Search(args) => run_search(args),
         Commands::Memory(args) => run_memory(args),
@@ -2239,6 +2242,182 @@ fn run_channel(args: ChannelArgs) -> Result<(), CliError> {
                     .map_err(|e| CliError::State(e.to_string()))?,
             )?;
             println!("channel {name} is now {status}");
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// ARD-148: Migration Import / Export CLI
+// ---------------------------------------------------------------------------
+
+/// Arguments to `ardur migrate`.
+#[derive(Args)]
+struct MigrateArgs {
+    #[command(subcommand)]
+    action: MigrateAction,
+}
+
+/// Subcommands for `ardur migrate`.
+#[derive(Subcommand)]
+enum MigrateAction {
+    /// Export ardur state to a directory.
+    Export {
+        /// Output directory path.
+        path: PathBuf,
+    },
+    /// Import ardur state from a directory.
+    Import {
+        /// Source directory path.
+        path: PathBuf,
+    },
+    /// Convert a Hermes directory into ardur state.
+    FromHermes {
+        /// Path to Hermes data directory.
+        hermes_dir: PathBuf,
+        /// Output ardur state directory.
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+    /// Convert an OpenClaw directory into ardur state.
+    FromOpenClaw {
+        /// Path to OpenClaw data directory.
+        openclaw_dir: PathBuf,
+        /// Output ardur state directory.
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+}
+
+/// Copy all .json files from source dirs to the migration directory.
+fn export_state(root: &Path, out: &Path) -> Result<usize, CliError> {
+    let subdirs = [
+        "sessions",
+        "memory",
+        "schedules",
+        "channels",
+        "approvals",
+        "tokens",
+    ];
+    let mut count = 0;
+    for sub in &subdirs {
+        let src = root.join(sub);
+        let dst = out.join(sub);
+        if !src.is_dir() {
+            continue;
+        }
+        std::fs::create_dir_all(&dst)?;
+        for entry in std::fs::read_dir(&src)?.flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "json") {
+                let file_name = path
+                    .file_name()
+                    .ok_or_else(|| CliError::State("invalid file".into()))?;
+                std::fs::copy(&path, dst.join(file_name))?;
+                count += 1;
+            }
+        }
+    }
+    Ok(count)
+}
+
+fn import_state(src: &Path, root: &Path) -> Result<usize, CliError> {
+    export_state(src, root)
+}
+
+fn migrate_from_hermes(hermes_dir: &Path, output: &Path) -> Result<usize, CliError> {
+    std::fs::create_dir_all(output)?;
+    // Hermes stores sessions as JSON files under .hermes/history/.
+    let hermes_sessions = hermes_dir.join("history");
+    let ardur_sessions = output.join("sessions");
+    std::fs::create_dir_all(&ardur_sessions)?;
+    let mut count = 0;
+    if hermes_sessions.is_dir() {
+        for entry in std::fs::read_dir(&hermes_sessions)?.flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "json") {
+                let out_path = ardur_sessions.join(path.file_name().unwrap_or_default());
+                std::fs::copy(&path, out_path)?;
+                count += 1;
+            }
+        }
+    }
+    println!("imported {count} Hermes session files");
+    println!("note: Hermes-specific fields may need manual mapping");
+    Ok(count)
+}
+
+fn migrate_from_openclaw(openclaw_dir: &Path, output: &Path) -> Result<usize, CliError> {
+    std::fs::create_dir_all(output)?;
+    // OpenClaw stores sessions under sessions/ and memory under memory/.
+    let src_sessions = openclaw_dir.join("sessions");
+    let dst_sessions = output.join("sessions");
+    std::fs::create_dir_all(&dst_sessions)?;
+    let mut count = 0;
+    if src_sessions.is_dir() {
+        for entry in std::fs::read_dir(&src_sessions)?.flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "json") {
+                let out_path = dst_sessions.join(path.file_name().unwrap_or_default());
+                std::fs::copy(&path, out_path)?;
+                count += 1;
+            }
+        }
+    }
+    let src_memory = openclaw_dir.join("memory");
+    let dst_memory = output.join("memory");
+    if src_memory.is_dir() {
+        std::fs::create_dir_all(&dst_memory)?;
+        for entry in std::fs::read_dir(&src_memory)?.flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "json") {
+                let out_path = dst_memory.join(path.file_name().unwrap_or_default());
+                std::fs::copy(&path, out_path)?;
+                count += 1;
+            }
+        }
+    }
+    println!("imported {count} OpenClaw files");
+    println!("note: OpenClaw-specific fields may need manual mapping");
+    Ok(count)
+}
+
+/// Run `ardur migrate` subcommands.
+fn run_migrate(args: MigrateArgs) -> Result<(), CliError> {
+    let root = StateDirs::resolve()?.root;
+
+    match args.action {
+        MigrateAction::Export { path } => {
+            std::fs::create_dir_all(&path)?;
+            let count = export_state(&root, &path)?;
+            let meta = json!({
+                "exported_at": std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+                "version": "0.0.1",
+                "files": count,
+            });
+            std::fs::write(
+                path.join("manifest.json"),
+                serde_json::to_string_pretty(&meta).map_err(|e| CliError::State(e.to_string()))?,
+            )?;
+            println!("exported {count} files to {}", path.display());
+        }
+        MigrateAction::Import { path } => {
+            let count = import_state(&path, &root)?;
+            println!("imported {count} files into {}", root.display());
+        }
+        MigrateAction::FromHermes { hermes_dir, output } => {
+            migrate_from_hermes(&hermes_dir, &output)?;
+            println!("wrote ardur state to {}", output.display());
+        }
+        MigrateAction::FromOpenClaw {
+            openclaw_dir,
+            output,
+        } => {
+            migrate_from_openclaw(&openclaw_dir, &output)?;
+            println!("wrote ardur state to {}", output.display());
         }
     }
     Ok(())
