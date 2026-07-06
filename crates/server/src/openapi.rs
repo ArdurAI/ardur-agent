@@ -80,11 +80,10 @@ pub fn openapi_spec() -> Value {
             "schemas": {
                 "HealthResponse": {
                     "type": "object",
-                    "required": ["status", "build", "tests"],
+                    "required": ["status", "build"],
                     "properties": {
                         "status": {"type": "string"},
-                        "build": {"type": "string"},
-                        "tests": {"type": "string"}
+                        "build": {"type": "string"}
                     }
                 },
                 "ChatRequest": {
