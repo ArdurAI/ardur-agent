@@ -60,15 +60,35 @@ impl Config {
     /// Load config from `path` (or the [`default_path`](Self::default_path) when
     /// `None`). A missing file yields [`Config::default`]; a present-but-malformed
     /// file is a [`CliError::Config`].
+    ///
+    /// Environment variables override config-file values, matching the server's
+    /// precedence: `ARDUR_MODEL` overrides `model`.
     pub fn load(path: Option<PathBuf>) -> Result<Self, CliError> {
         let Some(path) = path.or_else(Self::default_path) else {
-            return Ok(Self::default());
+            return Ok(Self::from_env_overlay(Self::default()));
         };
-        match std::fs::read_to_string(&path) {
-            Ok(contents) => Self::from_toml_str(&contents),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(e) => Err(CliError::Io(e)),
+        let config = match std::fs::read_to_string(&path) {
+            Ok(contents) => Self::from_toml_str(&contents)?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::default(),
+            Err(e) => return Err(CliError::Io(e)),
+        };
+        Ok(Self::from_env_overlay(config))
+    }
+
+    /// Apply environment-variable overrides on top of a loaded (or default)
+    /// config. Currently honours `ARDUR_MODEL`.
+    fn from_env_overlay(mut config: Self) -> Self {
+        if let Ok(model) = std::env::var("ARDUR_MODEL") {
+            if !model.trim().is_empty() {
+                config.model = model;
+            }
         }
+        if let Ok(budget) = std::env::var("ARDUR_CLI_BUDGET_CENTS") {
+            if let Ok(cents) = budget.trim().parse::<u64>() {
+                config.budget_cents = cents;
+            }
+        }
+        config
     }
 
     /// Parse the flat Phase-1 TOML subset, overlaying any recognized keys onto
