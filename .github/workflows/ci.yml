@@ -1,6 +1,9 @@
 # CI for Ardur — the four-stage gauntlet (fmt → clippy → check → test),
 # ordered cheapest-first so a formatting failure short-circuits before the
 # expensive test compile. Matrix on {ubuntu, macos} × stable. See §0.0.
+#
+# ARD-423: supply-chain security job runs cargo-deny (license + advisory +
+# ban checks) against deny.toml on every push and PR.
 
 name: CI
 
@@ -15,6 +18,17 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  supply-chain:
+    name: cargo-deny (advisories + licenses + bans)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Run cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          arguments: --workspace check advisories bans licenses sources
+
   gauntlet:
     name: ${{ matrix.os }} / stable
     runs-on: ${{ matrix.os }}

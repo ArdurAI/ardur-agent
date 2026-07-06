@@ -72,7 +72,6 @@ async fn healthz() -> Response {
     Json(json!({
         "status": "ok",
         "build": env!("CARGO_PKG_VERSION"),
-        "tests": "147",
     }))
     .into_response()
 }
@@ -109,7 +108,15 @@ async fn health(State(state): State<Arc<AppState>>) -> Response {
 
 /// `GET /metrics` — Prometheus text exposition with counts only (no tokens or
 /// credentials). Keep labels low-cardinality and redact-by-design.
-async fn metrics(State(state): State<Arc<AppState>>) -> Response {
+///
+/// Bearer-gated via the admin token set: metrics expose operational counts
+/// (receipt totals, budget, build version) that could aid reconnaissance.
+/// When no admin tokens are configured the endpoint fails closed (401).
+async fn metrics(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Err(response) = authorize_admin(&state, &headers) {
+        return *response;
+    }
+
     let version = prometheus_label_value(env!("CARGO_PKG_VERSION"));
     let mut body = String::new();
     let _ = writeln!(body, "# HELP ardur_server_build_info Build metadata.");
@@ -160,12 +167,24 @@ async fn metrics(State(state): State<Arc<AppState>>) -> Response {
 }
 
 /// `GET /openapi.json` — return the generated OpenAPI 3.0 document.
-async fn openapi_json() -> Response {
+///
+/// Bearer-gated via the admin token set: the schema exposes the full API
+/// surface (request/response shapes) which aids reconnaissance. When no
+/// admin tokens are configured the endpoint fails closed (401).
+async fn openapi_json(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Err(response) = authorize_admin(&state, &headers) {
+        return *response;
+    }
     Json(openapi_spec()).into_response()
 }
 
 /// `GET /openapi/clients/rust` — return generated Rust client source.
-async fn openapi_rust_client() -> Response {
+///
+/// Same admin bearer gate as the OpenAPI schema.
+async fn openapi_rust_client(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Err(response) = authorize_admin(&state, &headers) {
+        return *response;
+    }
     (
         [(
             axum::http::header::CONTENT_TYPE,
@@ -215,7 +234,12 @@ fn prometheus_label_value(raw: &str) -> String {
 }
 
 /// `GET /openapi/clients/python` — return generated Python client source.
-async fn openapi_python_client() -> Response {
+///
+/// Same admin bearer gate as the OpenAPI schema.
+async fn openapi_python_client(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Err(response) = authorize_admin(&state, &headers) {
+        return *response;
+    }
     (
         [(
             axum::http::header::CONTENT_TYPE,

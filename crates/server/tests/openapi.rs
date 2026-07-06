@@ -7,15 +7,27 @@ use std::io::Write;
 use std::process::Command;
 use tempfile::NamedTempFile;
 
+const ADMIN_TOKEN: &str = "openapi-admin-token-000000000000";
+
 #[tokio::test]
 async fn openapi_json_exposes_existing_server_endpoints() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let config = support::test_config(&dir, None);
+    let config = support::test_config_with_admin(&dir, None, vec![ADMIN_TOKEN.to_string()]);
     let router = support::boot_router(&config);
+
+    // OpenAPI endpoints are bearer-gated — no token returns 401.
+    let unauthed = Request::builder()
+        .method("GET")
+        .uri("/openapi.json")
+        .body(Body::empty())
+        .expect("request builds");
+    let (unauthed_status, _) = support::oneshot(router.clone(), unauthed).await;
+    assert_eq!(unauthed_status, StatusCode::UNAUTHORIZED);
 
     let request = Request::builder()
         .method("GET")
         .uri("/openapi.json")
+        .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
         .body(Body::empty())
         .expect("request builds");
     let (status, body) = support::oneshot(router, request).await;
