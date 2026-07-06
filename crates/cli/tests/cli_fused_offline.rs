@@ -15,6 +15,15 @@ fn offline_mode_runs_a_turn_through_the_fused_stub() {
         .env("HOME", home.path())
         // Force the offline fallback regardless of the ambient environment.
         .env_remove("ANTHROPIC_API_KEY")
+        // Isolate from ambient provider/model env vars that would bypass the
+        // Anthropic stub (e.g. ARDUR_PROVIDER=ollama from a dev shell).
+        .env_remove("ARDUR_PROVIDER")
+        .env_remove("ARDUR_MODEL")
+        .env_remove("ARDUR_DATA_DIR")
+        .env_remove("OPENROUTER_API_KEY")
+        .env_remove("OPENAI_API_KEY")
+        .env_remove("OPENAI_COMPAT_API_KEY")
+        .env_remove("OLLAMA_BASE_URL")
         .write_stdin("hello fused substrate\n/quit\n")
         .output()
         .expect("the chat process runs");
