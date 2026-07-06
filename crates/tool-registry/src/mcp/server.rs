@@ -16,7 +16,7 @@ use std::sync::Arc;
 use rmcp::ErrorData as McpError;
 use rmcp::ServerHandler;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, Content, ListToolsResult, PaginatedRequestParams,
+    CallToolRequestParams, CallToolResult, ContentBlock, ListToolsResult, PaginatedRequestParams,
     ServerCapabilities, ServerInfo, Tool as McpTool,
 };
 use rmcp::service::{RequestContext, RoleServer};
@@ -132,7 +132,9 @@ impl ServerHandler for ArdurMcpServer {
             Ok(output) => Ok(CallToolResult::structured(output.content)),
             // A tool failure is reported as an MCP tool-error result (not a
             // protocol error) so the client sees `isError: true` with the cause.
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+            Err(e) => Ok(CallToolResult::error(vec![ContentBlock::text(
+                e.to_string(),
+            )])),
         }
     }
 }

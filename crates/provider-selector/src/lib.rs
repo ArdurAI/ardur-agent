@@ -204,11 +204,11 @@ impl std::error::Error for UnknownProvider {}
 /// from the environment — e.g. a missing `ANTHROPIC_API_KEY`,
 /// `OPENROUTER_API_KEY`, or `OPENAI_COMPAT_API_KEY` /
 /// `OPENAI_API_KEY` yields [`ProviderError::Unauthorized`]. An unrecognized
-/// selector is returned as [`ProviderError::InvalidRequest`] with a message that
-/// lists all supported values.
+/// selector is returned as [`ProviderError::InvalidSelection`] with a message
+/// that lists all supported values.
 pub fn select(selector: Option<&str>, model: ModelId) -> Result<Arc<dyn Provider>, ProviderError> {
     let kind = ProviderKind::resolve(selector)
-        .map_err(|e| ProviderError::InvalidRequest(format!("invalid provider selection: {e}")))?;
+        .map_err(|e| ProviderError::InvalidSelection(e.to_string()))?;
     kind.build(model)
 }
 

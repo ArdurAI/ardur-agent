@@ -44,7 +44,8 @@ ardur-channel-discord = { workspace = true }
 ardur-channel-telegram = { workspace = true }
 ardur-provider-runtime = { workspace = true }
 # §3.0 provider selection — reads ARDUR_PROVIDER and boxes the chosen backend
-# (anthropic | openrouter | ollama | codex) the bin hands to AppState::boot.
+# (anthropic | openrouter | openai-compat | ollama | codex | claude-cli) the
+# bin hands to AppState::boot.
 ardur-provider-selector = { workspace = true }
 ardur-cap-token = { workspace = true }
 ardur-cedar-policy = { workspace = true }
@@ -107,6 +108,7 @@ secrecy = { workspace = true }
 # (`ardur-runtime` / `ardur-provider-runtime` are already normal dependencies and
 # so are reachable from the integration tests.)
 async-trait = { workspace = true }
+assert_cmd = { workspace = true }
 hmac = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }

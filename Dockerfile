@@ -1,18 +1,21 @@
 # Multi-stage build for ardur-server.
 #
-# Builder: rust:1.85-slim matches the workspace MSRV in Cargo.toml.
-# Runtime: distroless cc-debian12 nonroot. The healthcheck is a small Rust
+# Builder: rust:1.96-slim currently tracks Debian 13/trixie, matching the
+# distroless runtime base below.
+# Runtime: distroless cc-debian13 nonroot. The healthcheck is a small Rust
 # binary, so the runtime image does not need curl/wget/shell packages.
-# ARD-424: Docker build is validated in CI with a /healthz smoke test.
+# ARD-303: Docker build is validated in CI with a /healthz smoke test.
 
-FROM rust:1.85-slim AS builder
+FROM rust:1.96-slim AS builder
 
-# pkg-config + libssl-dev cover openssl-sys transitive dependencies. ca-certificates
-# is needed for crates.io fetches over HTTPS during `cargo build`.
+# pkg-config + libssl-dev cover openssl-sys transitive dependencies. g++ provides
+# libstdc++ for native ML/search dependencies at the final link step.
+# ca-certificates is needed for crates.io fetches over HTTPS during `cargo build`.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         pkg-config \
         libssl-dev \
+        g++ \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
@@ -21,7 +24,7 @@ COPY . .
 
 RUN cargo build --release --bin ardur-server --bin ardur-healthcheck
 
-FROM gcr.io/distroless/cc-debian12:nonroot
+FROM gcr.io/distroless/cc-debian13:nonroot
 
 COPY --from=builder /build/target/release/ardur-server /usr/local/bin/ardur-server
 COPY --from=builder /build/target/release/ardur-healthcheck /usr/local/bin/ardur-healthcheck

@@ -100,6 +100,8 @@ once_cell = "1"
 # `rustls-tls` keeps the TLS stack pure-Rust — no OpenSSL/native-tls system
 # dependency; `json` pulls the serde request/response helpers.
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
+ignore = "0.4"
+cargo-lock = "10.1"
 # URL parsing + host classification for the §6.2 built-in `http.fetch` tool
 # (crates/tool-registry): rejects relative/non-http(s) URLs and exposes the
 # host as a typed `Host` (domain vs IP literal) for the SSRF allowlist + IP
@@ -131,7 +133,7 @@ maud = { version = "0.27", features = ["axum"] }
 # In-process axum test harness — `axum-test::TestServer` drives the admin-ui
 # router without binding a port, backing the endpoint integration tests
 # (crates/admin-ui dev-dependency, §13.X).
-axum-test = "20"
+axum-test = "21"
 # Tracing & observability.
 tracing = "0.1"
 # OpenTelemetry GenAI semantic-convention emission (crates/provider-runtime
@@ -169,7 +171,7 @@ rustyline = "18"
 # (not its HTML/ANSI formatters), so `default-features = false` drops the CLI,
 # xdg, syntect-bridge, and shortcode features we don't use and keeps just the
 # parser + node arena.
-comrak = { version = "0.52", default-features = false }
+comrak = { version = "0.53", default-features = false }
 # Syntax highlighting for fenced code blocks. `regex-fancy` is the pure-Rust
 # regex engine (avoids the `onig` C dependency in CI); `default-syntaxes` +
 # `default-themes` bundle the Sublime grammars + themes we map languages and
@@ -208,13 +210,13 @@ futures = "0.3"
 # for the `RemoteMcpToolset` that consumes remote ones, and
 # `transport-streamable-http-server` for the axum-mounted Streamable-HTTP
 # service in `crates/server`. Pinned here so both crates share one version.
-rmcp = { version = "1", default-features = false, features = ["server", "client", "transport-streamable-http-server", "transport-streamable-http-client-reqwest"] }
+rmcp = { version = "2", default-features = false, features = ["server", "client", "transport-streamable-http-server", "transport-streamable-http-client-reqwest"] }
 # Docker daemon API for terminal Docker exec backend (ARD-315/ARD-324).
 bollard = "0.21"
 # SSH client library for terminal SSH remote backend (ARD-315/ARD-324). Disable
 # russh's default `rsa` feature because upstream rsa has an unfixed Marvin timing
 # side-channel advisory (RUSTSEC-2023-0071); keep compression and aws-lc crypto.
-russh = { version = "0.61", default-features = false, features = ["flate2", "aws-lc-rs"] }
+russh = { version = "0.62", default-features = false, features = ["flate2", "aws-lc-rs"] }
 
 # --- Internal crate path-deps (one per Phase-0 crate). Declared here so
 #     cross-crate wiring in Phase 1 references `{ workspace = true }`. ---

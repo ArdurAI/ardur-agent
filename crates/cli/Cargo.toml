@@ -29,7 +29,7 @@ ardur-receipt = { workspace = true }
 # engine wires when the selected backend is unavailable.
 ardur-provider-runtime = { workspace = true }
 # §3.0 provider selection — reads ARDUR_PROVIDER and boxes the chosen backend
-# (anthropic | openrouter | ollama | codex) at boot.
+# (anthropic | openrouter | openai-compat | ollama | codex | claude-cli) at boot.
 ardur-provider-selector = { workspace = true }
 # §11.14 cost gate — the budget store + admission gate every turn routes through.
 ardur-cost-gate = { workspace = true }
@@ -76,6 +76,20 @@ tracing-subscriber = { workspace = true }
 # The cost gate keys admission on a UUIDv4 cap-token id; the workspace pins v7,
 # so opt v4 in on top (Cargo unifies the feature set).
 uuid = { workspace = true, features = ["v4"] }
+# ARD-138: token generation and ARD-140: secret redaction.
+regex = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+base64 = { workspace = true }
+rand = "0.8"
+# ARD-143: schedule / cron CLI.
+chrono = { workspace = true }
+ardur-cron = { workspace = true }
+# ARD-144/145: connector HTTP fetch.
+reqwest = { workspace = true }
+# ARD-120/121/132: supply-chain audit tooling.
+ignore = { workspace = true }
+cargo-lock = { workspace = true }
 
 [dev-dependencies]
 # Integration tests are a separate crate; they re-declare the deps they name.

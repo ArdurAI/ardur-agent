@@ -15,13 +15,18 @@ use ardur_cap_token::{
 use ardur_cedar_policy::{CedarPolicyBundle, PolicyBundle, PolicySource};
 use ardur_cost_gate::{Clock, CostTuple as GateCostTuple, HolderId as GateHolderId, ManualClock};
 use ardur_fused_runtime::FusedRuntimeBuilder;
-use ardur_lifecycle_hooks::{HookDecision, HookId, LifecycleHook, PreSubmitCtx};
+use ardur_lifecycle_hooks::{
+    HookDecision, HookError, HookId, LifecycleHook, PostReceiptCtx, PreSubmitCtx,
+};
 use ardur_provider_runtime::{
     CompletionRequest, CompletionResponse, FinishReason, ModelId, Provider, ProviderError,
     RateCard, Usage,
 };
 use ardur_receipt::Es256SigningKey;
 use ardur_runtime::{CapTokenRef, ChatMessage, CostTuple, Role, SessionId, SubmitRequest};
+use ardur_tool_registry::{
+    Capability, Tool, ToolContext, ToolError, ToolId, ToolOutput, ToolRegistry, ToolSchema,
+};
 use async_trait::async_trait;
 use biscuit_auth::{Algorithm, PrivateKey};
 use parking_lot::Mutex;
@@ -333,6 +338,111 @@ impl Provider for BillingProvider {
     fn rate_card(&self) -> &RateCard {
         &self.rate_card
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct ObservedPostReceiptCost {
+    pub ctx_cost: CostTuple,
+    pub receipt_cost: ardur_receipt::CostTuple,
+    pub response_cost: CostTuple,
+}
+
+pub fn assert_runtime_cost_matches_receipt(runtime: CostTuple, receipt: &ardur_receipt::CostTuple) {
+    assert_eq!(runtime.tokens_in, receipt.tokens_in);
+    assert_eq!(runtime.tokens_out, receipt.tokens_out);
+    assert_eq!(runtime.cents, receipt.cents);
+    assert_eq!(runtime.wall_ms, receipt.wall_ms);
+    assert_eq!(runtime.attention_score, receipt.attention_score);
+}
+
+pub struct CapturingPostReceiptCostHook {
+    id: HookId,
+    observed: Arc<Mutex<Vec<ObservedPostReceiptCost>>>,
+}
+
+impl CapturingPostReceiptCostHook {
+    pub fn new(id: &str) -> Self {
+        Self {
+            id: HookId::new(id),
+            observed: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    pub fn observed(&self) -> Vec<ObservedPostReceiptCost> {
+        self.observed.lock().clone()
+    }
+}
+
+#[async_trait]
+impl LifecycleHook for CapturingPostReceiptCostHook {
+    async fn on_post_receipt(&self, ctx: &PostReceiptCtx<'_>) -> Result<(), HookError> {
+        self.observed.lock().push(ObservedPostReceiptCost {
+            ctx_cost: ctx.cost,
+            receipt_cost: ctx.receipt.cost.clone(),
+            response_cost: ctx.response.cost,
+        });
+        Ok(())
+    }
+
+    fn hook_id(&self) -> HookId {
+        self.id.clone()
+    }
+}
+
+pub struct PaidTool {
+    id: ToolId,
+    schema: ToolSchema,
+    cost: CostTuple,
+}
+
+impl PaidTool {
+    pub fn new(id: &str, cost: CostTuple) -> Self {
+        Self {
+            id: ToolId::new(id),
+            schema: ToolSchema {
+                description: "returns its input and charges a fixed test cost".to_string(),
+                input_schema: serde_json::json!({ "type": "object" }),
+                output_schema: serde_json::json!({ "type": "object" }),
+                examples: vec![],
+            },
+            cost,
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for PaidTool {
+    fn id(&self) -> ToolId {
+        self.id.clone()
+    }
+
+    fn schema(&self) -> &ToolSchema {
+        &self.schema
+    }
+
+    async fn invoke(
+        &self,
+        _ctx: &ToolContext,
+        args: serde_json::Value,
+    ) -> Result<ToolOutput, ToolError> {
+        Ok(ToolOutput {
+            content: args.clone(),
+            cost: self.cost,
+            receipt_data: args,
+        })
+    }
+
+    fn required_capabilities(&self) -> &[Capability] {
+        &[]
+    }
+}
+
+pub fn paid_registry(tool_name: &str, cost: CostTuple) -> Arc<ToolRegistry> {
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(Box::new(PaidTool::new(tool_name, cost)))
+        .expect("paid tool id is unique");
+    Arc::new(registry)
 }
 
 /// A provider that always fails, counting its calls.

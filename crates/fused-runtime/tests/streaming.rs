@@ -31,8 +31,10 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use ardur_cost_gate::{CostEnvelope, CostTuple as GateCostTuple};
 use ardur_fused_runtime::{FusedEvent, StageKind, load_persisted_chain, verify_persisted_chain};
 use ardur_injection_defense::{FilterRegistry, PatternBasedFilter};
+use ardur_lifecycle_hooks::HookRegistry;
 use ardur_provider_runtime::{
     CompletionRequest, CompletionResponse, FinishReason, Provider, ProviderError, ProviderStream,
     RateCard, StreamEvent, Usage,
@@ -46,8 +48,10 @@ use parking_lot::Mutex;
 use serde_json::json;
 
 use support::{
-    AUDIENCE, EchoProvider, TOOL, deny_all_policy, mint_token_as, request_for, runtime_builder,
-    runtime_builder_with_policy, user_request, valid_token,
+    AUDIENCE, CapturingPostReceiptCostHook, EchoProvider, HOLDER, TOOL,
+    assert_runtime_cost_matches_receipt, deny_all_policy, gate_holder, mint_token_as,
+    paid_registry, request_for, runtime_builder, runtime_builder_with_policy, user_request,
+    valid_token,
 };
 
 // ---- providers -------------------------------------------------------------
@@ -113,6 +117,78 @@ impl Provider for MultiDeltaProvider {
     }
 }
 
+/// An OpenRouter-like streaming provider: the rate card itself is zero, but the
+/// final streamed usage carries the provider-reported exact cost.
+struct ReportedCostStreamProvider {
+    cost_cents: u64,
+    calls: AtomicUsize,
+    rate_card: RateCard,
+}
+
+impl ReportedCostStreamProvider {
+    fn new(cost_cents: u64) -> Self {
+        Self {
+            cost_cents,
+            calls: AtomicUsize::new(0),
+            rate_card: RateCard {
+                version_id: "openrouter-zero-passthrough-test".to_string(),
+                cents_per_1k_input: 0.0,
+                cents_per_1k_output: 0.0,
+                cents_per_request: 0.0,
+            },
+        }
+    }
+
+    fn call_count(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl Provider for ReportedCostStreamProvider {
+    async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let usage = Usage {
+            tokens_in: 11,
+            tokens_out: 4,
+            cost_cents: Some(self.cost_cents),
+        };
+        Ok(CompletionResponse {
+            content: "paid".to_string(),
+            finish_reason: FinishReason::Stop,
+            usage,
+            cost: self.rate_card.price(usage),
+            raw_provider_response: None,
+        })
+    }
+
+    async fn stream(&self, _req: CompletionRequest) -> Result<ProviderStream, ProviderError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let events = vec![
+            StreamEvent::ContentDelta("paid".to_string()),
+            StreamEvent::Usage(Usage {
+                tokens_in: 11,
+                tokens_out: 4,
+                cost_cents: Some(self.cost_cents),
+            }),
+            StreamEvent::Finish(FinishReason::Stop),
+        ];
+        Ok(Box::pin(futures::stream::iter(events.into_iter().map(Ok))))
+    }
+
+    fn id(&self) -> ProviderId {
+        ProviderId("openrouter-reported-cost-test".to_string())
+    }
+
+    fn supports_streaming(&self) -> bool {
+        true
+    }
+
+    fn rate_card(&self) -> &RateCard {
+        &self.rate_card
+    }
+}
+
 /// A provider returning a scripted queue of responses, one per call (the same
 /// shape `tool_execution.rs` uses). It implements only `complete()`, so the
 /// runtime streams it through the trait's default `complete()`-wrapping
@@ -162,6 +238,15 @@ impl Provider for ScriptedProvider {
 
 /// A `ToolUse` response asking for `name` with `args`.
 fn tool_call(id: &str, name: &str, args: serde_json::Value) -> CompletionResponse {
+    tool_call_with_usage(id, name, args, Usage::default())
+}
+
+fn tool_call_with_usage(
+    id: &str,
+    name: &str,
+    args: serde_json::Value,
+    usage: Usage,
+) -> CompletionResponse {
     CompletionResponse {
         content: String::new(),
         finish_reason: FinishReason::ToolUse(vec![ToolCall {
@@ -169,8 +254,14 @@ fn tool_call(id: &str, name: &str, args: serde_json::Value) -> CompletionRespons
             name: name.to_string(),
             arguments: args,
         }]),
-        usage: Usage::default(),
-        cost: CostTuple::default(),
+        usage,
+        cost: CostTuple {
+            tokens_in: u64::from(usage.tokens_in),
+            tokens_out: u64::from(usage.tokens_out),
+            cents: usage.cost_cents.unwrap_or_default(),
+            wall_ms: 0,
+            attention_score: 0.0,
+        },
         raw_provider_response: None,
     }
 }
@@ -230,6 +321,23 @@ async fn collect_stream(
     req: ardur_runtime::SubmitRequest,
 ) -> Vec<Result<FusedEvent, RuntimeError>> {
     Box::pin(runtime.stream(req)).collect().await
+}
+
+fn cents_envelope(cents: u32) -> CostEnvelope {
+    CostEnvelope {
+        cents_max: cents,
+        ..Default::default()
+    }
+}
+
+fn envelope_for(cost: CostTuple) -> CostEnvelope {
+    CostEnvelope {
+        tokens_in_max: cost.tokens_in as u32,
+        tokens_out_max: cost.tokens_out as u32,
+        cents_max: cost.cents as u32,
+        wall_ms_max: cost.wall_ms as u32,
+        attention_score_max: cost.attention_score.ceil() as u32,
+    }
 }
 
 // ---- tests -----------------------------------------------------------------
@@ -365,6 +473,97 @@ async fn fused_stream_executes_tools_mid_stream() {
     verify_persisted_chain(&chain).expect("the two-receipt chain verifies");
 }
 
+#[tokio::test]
+async fn fused_stream_post_receipt_hook_cost_matches_combined_receipt_cost_for_tool_turn() {
+    let provider_usage = Usage {
+        tokens_in: 2,
+        tokens_out: 3,
+        cost_cents: Some(5),
+    };
+    let provider_cost = CostTuple {
+        tokens_in: 2,
+        tokens_out: 3,
+        cents: 5,
+        wall_ms: 0,
+        attention_score: 0.0,
+    };
+    let tool_cost = CostTuple {
+        tokens_in: 11,
+        tokens_out: 13,
+        cents: 17,
+        wall_ms: 19,
+        attention_score: 0.5,
+    };
+    let expected = CostTuple {
+        tokens_in: 13,
+        tokens_out: 16,
+        cents: 22,
+        wall_ms: 19,
+        attention_score: 0.5,
+    };
+    let tool_name = "priced.tool";
+    let provider = Arc::new(ScriptedProvider::new(
+        vec![
+            tool_call_with_usage(
+                "call-1",
+                tool_name,
+                json!({ "payload": "bill me" }),
+                provider_usage,
+            ),
+            stop("done"),
+        ],
+        stop("default"),
+    ));
+    let capture = Arc::new(CapturingPostReceiptCostHook::new(
+        "capture-stream-post-receipt-cost",
+    ));
+    let mut hooks = HookRegistry::new();
+    hooks.register(capture.clone());
+    let receipt_log = tempfile::NamedTempFile::new().expect("receipt log");
+    let runtime = runtime_builder(provider.clone())
+        .with_tools(paid_registry(tool_name, tool_cost))
+        .registry(Arc::new(hooks))
+        .projected_envelope(envelope_for(expected))
+        .receipt_log(receipt_log.path())
+        .build()
+        .expect("runtime builds");
+    let token = mint_token_as(HOLDER, AUDIENCE, &[TOOL, tool_name]);
+
+    let events = collect_stream(&runtime, user_request("use paid tool", &token)).await;
+
+    assert!(matches!(
+        events.last(),
+        Some(Ok(FusedEvent::Finish(FinishReason::Stop)))
+    ));
+    assert_eq!(provider.call_count(), 2);
+    let observed = capture.observed();
+    assert_eq!(
+        observed.len(),
+        2,
+        "one post-receipt hook runs per streamed provider round"
+    );
+    let tool_round = &observed[0];
+    assert_eq!(
+        tool_round.response_cost, provider_cost,
+        "the streaming regression needs non-zero provider-only cost"
+    );
+    assert_runtime_cost_matches_receipt(tool_round.ctx_cost, &tool_round.receipt_cost);
+    assert_eq!(
+        tool_round.ctx_cost, expected,
+        "post-receipt hooks must see provider + tool cost"
+    );
+    assert!(
+        tool_round.ctx_cost.cents > tool_round.response_cost.cents,
+        "the hook cost includes the paid tool, not just the provider response"
+    );
+
+    let chain = load_persisted_chain(receipt_log.path()).expect("chain loads");
+    assert_eq!(chain.len(), 2);
+    assert_runtime_cost_matches_receipt(expected, &chain[0].body.cost);
+    assert_eq!(chain[0].body.tool_calls[0].cost.cents, tool_cost.cents);
+    verify_persisted_chain(&chain).expect("the two-receipt chain verifies");
+}
+
 /// Whether a `StageStart` for `stage` appears in the feed (executed at all).
 fn has_stage_executed(events: &[Result<FusedEvent, RuntimeError>], stage: StageKind) -> bool {
     events.iter().any(|e| {
@@ -409,6 +608,85 @@ async fn fused_stream_mints_receipt_at_end() {
     );
     assert_eq!(receipts[0].0.0, chain[0].body.receipt_id);
     verify_persisted_chain(&chain).expect("the chain verifies");
+}
+
+#[tokio::test]
+async fn fused_stream_receipts_provider_reported_cost_cents() {
+    let provider = Arc::new(ReportedCostStreamProvider::new(7));
+    let receipt_log = tempfile::NamedTempFile::new().expect("receipt log");
+    let runtime = runtime_builder(provider.clone())
+        .projected_envelope(cents_envelope(1))
+        .provision_budget(gate_holder(), GateCostTuple::cents(10))
+        .receipt_log(receipt_log.path())
+        .build()
+        .expect("runtime builds");
+
+    let events = collect_stream(&runtime, user_request("paid stream", &valid_token())).await;
+
+    assert!(matches!(
+        events.last(),
+        Some(Ok(FusedEvent::Finish(FinishReason::Stop)))
+    ));
+    assert_eq!(provider.call_count(), 1);
+    assert!(events.iter().any(|e| matches!(
+        e,
+        Ok(FusedEvent::Usage(Usage {
+            tokens_in: 11,
+            tokens_out: 4,
+            cost_cents: Some(7),
+        }))
+    )));
+
+    let chain = load_persisted_chain(receipt_log.path()).expect("chain loads");
+    assert_eq!(chain.len(), 1);
+    assert_eq!(chain[0].body.cost.cents, 7);
+    assert_eq!(chain[0].body.cost.tokens_in, 11);
+    assert_eq!(chain[0].body.cost.tokens_out, 4);
+    verify_persisted_chain(&chain).expect("the chain verifies");
+
+    let remaining = runtime
+        .remaining_budget(&gate_holder())
+        .await
+        .expect("holder is provisioned");
+    assert_eq!(remaining.cents, 3, "10c funded, 7c actual spend");
+}
+
+#[tokio::test]
+async fn fused_stream_reported_cost_depletes_budget_and_blocks_next_turn() {
+    let provider = Arc::new(ReportedCostStreamProvider::new(5));
+    let runtime = runtime_builder(provider.clone())
+        .projected_envelope(cents_envelope(1))
+        .provision_budget(gate_holder(), GateCostTuple::cents(5))
+        .build()
+        .expect("runtime builds");
+
+    let first = collect_stream(&runtime, user_request("paid stream", &valid_token())).await;
+    assert!(matches!(
+        first.last(),
+        Some(Ok(FusedEvent::Finish(FinishReason::Stop)))
+    ));
+    assert_eq!(provider.call_count(), 1);
+    let after_first = runtime
+        .remaining_budget(&gate_holder())
+        .await
+        .expect("holder is provisioned");
+    assert_eq!(after_first.cents, 0, "5c funded, 5c actual spend");
+
+    let second = collect_stream(&runtime, user_request("second stream", &valid_token())).await;
+    assert!(has_failed_stage(&second, StageKind::CostGateAdmit));
+    assert!(matches!(
+        terminal_error(&second),
+        Some(RuntimeError::CostCeilingExceeded)
+    ));
+    assert!(
+        !has_stage_executed(&second, StageKind::ProviderStream),
+        "exhausted budget must block before provider streaming"
+    );
+    assert_eq!(
+        provider.call_count(),
+        1,
+        "the rejected second turn never reaches the provider"
+    );
 }
 
 #[tokio::test]
