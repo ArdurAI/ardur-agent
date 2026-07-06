@@ -16,6 +16,8 @@ fn config_view_redacts_secret_and_config_set_edits_file() {
 
     let view = Command::cargo_bin("ardur")
         .expect("the `ardur` binary builds")
+        .env_remove("ARDUR_MODEL")
+        .env_remove("ARDUR_CLI_BUDGET_CENTS")
         .args(["config", "--config"])
         .arg(&config_path)
         .assert()
@@ -33,6 +35,8 @@ fn config_view_redacts_secret_and_config_set_edits_file() {
 
     Command::cargo_bin("ardur")
         .expect("the `ardur` binary builds")
+        .env_remove("ARDUR_MODEL")
+        .env_remove("ARDUR_CLI_BUDGET_CENTS")
         .args(["config", "--config"])
         .arg(&config_path)
         .args(["set", "model", "claude-new"])
