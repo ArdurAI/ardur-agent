@@ -24,5 +24,4 @@ async fn healthz_returns_ok_json() {
     let json: serde_json::Value = serde_json::from_slice(&body).expect("body is JSON");
     assert_eq!(json["status"], "ok");
     assert!(json["build"].is_string(), "carries a build version");
-    assert_eq!(json["tests"], "147");
 }

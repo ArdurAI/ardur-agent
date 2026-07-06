@@ -36,9 +36,19 @@ async fn metrics_are_prometheus_parseable_and_do_not_leak_tokens() {
     let config = support::test_config_with_admin(&dir, None, vec![ADMIN_TOKEN.to_string()]);
     let router = support::boot_router(&config);
 
+    // Metrics are now bearer-gated — a request without a token is rejected.
+    let unauthed = Request::builder()
+        .method("GET")
+        .uri("/metrics")
+        .body(Body::empty())
+        .expect("request builds");
+    let (unauthed_status, _) = support::oneshot(router.clone(), unauthed).await;
+    assert_eq!(unauthed_status, StatusCode::UNAUTHORIZED);
+
     let request = Request::builder()
         .method("GET")
         .uri("/metrics")
+        .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
         .body(Body::empty())
         .expect("request builds");
 
