@@ -27,7 +27,7 @@ jobs:
       - name: Run cargo-deny
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
-          arguments: --workspace check advisories bans licenses sources
+          arguments: --workspace advisories bans licenses sources
 
   gauntlet:
     name: ${{ matrix.os }} / stable

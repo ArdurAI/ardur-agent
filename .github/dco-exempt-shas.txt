@@ -2,6 +2,8 @@
 # Pre-policy (before PR #24 merged 2026-06-02 14:02:40 -0500)
 7b49f60
 c086428
+93436dd
+3d551b3
 # In-flight at policy enforcement (squash-merged within ~3h of #24)
 77e3a71
 de9ae77
