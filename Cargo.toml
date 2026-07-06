@@ -216,7 +216,7 @@ bollard = "0.21"
 # SSH client library for terminal SSH remote backend (ARD-315/ARD-324). Disable
 # russh's default `rsa` feature because upstream rsa has an unfixed Marvin timing
 # side-channel advisory (RUSTSEC-2023-0071); keep compression and aws-lc crypto.
-russh = { version = "0.61", default-features = false, features = ["flate2", "aws-lc-rs"] }
+russh = { version = "0.62", default-features = false, features = ["flate2", "aws-lc-rs"] }
 
 # --- Internal crate path-deps (one per Phase-0 crate). Declared here so
 #     cross-crate wiring in Phase 1 references `{ workspace = true }`. ---
