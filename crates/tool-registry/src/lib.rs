@@ -62,6 +62,7 @@ mod tool;
 
 pub use builtins::{
     BuiltinOpts, HttpFetchOpts, HttpFetchTool, ListDirTool, ReadFileTool, ShellTool, WriteFileTool,
+    is_internal_ip,
 };
 pub use capability::Capability;
 pub use echo::EchoTool;
