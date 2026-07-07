@@ -1,5 +1,5 @@
 use ardur_automation::{
-    BundleHash, FlowControl, FlowNode, FlowStep, MockTaskFlowOrchestrator, ProviderId,
+    BundleHash, FlowControl, FlowNode, FlowStep, InMemoryTaskFlowOrchestrator, ProviderId,
     Sha256Digest, StepDispatch, StepId, TaskCreationRequest, TaskFlowDag, TaskFlowOrchestrator,
     TaskRecord, TaskStatus, ToolId,
 };
@@ -85,8 +85,8 @@ fn task_record_defaults_flow_fields_for_single_step_records() {
 }
 
 #[tokio::test]
-async fn mock_orchestrator_tracks_create_get_and_cancel() {
-    let orchestrator = MockTaskFlowOrchestrator::new();
+async fn in_memory_orchestrator_tracks_create_get_and_cancel() {
+    let orchestrator = InMemoryTaskFlowOrchestrator::new();
     let token = verified_claims();
     let handle = orchestrator
         .create_task(

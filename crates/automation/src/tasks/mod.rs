@@ -504,14 +504,14 @@ fn execute_step(step: &FlowStep, state: &mut TaskRuntimeState, timeout_ms: u32) 
     true
 }
 
-/// In-memory orchestrator used by tests and downstream contract checks.
+/// In-memory orchestrator used by downstream contract checks.
 #[derive(Clone, Debug, Default)]
-pub struct MockTaskFlowOrchestrator {
+pub struct InMemoryTaskFlowOrchestrator {
     states: Arc<Mutex<HashMap<TaskId, TaskRuntimeState>>>,
 }
 
-impl MockTaskFlowOrchestrator {
-    /// Create a mock orchestrator with no tasks.
+impl InMemoryTaskFlowOrchestrator {
+    /// Create an in-memory orchestrator with no tasks.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -519,7 +519,7 @@ impl MockTaskFlowOrchestrator {
 }
 
 #[async_trait]
-impl TaskFlowOrchestrator for MockTaskFlowOrchestrator {
+impl TaskFlowOrchestrator for InMemoryTaskFlowOrchestrator {
     async fn create_task(
         &self,
         _token: &VerifiedClaims,
@@ -544,7 +544,7 @@ impl TaskFlowOrchestrator for MockTaskFlowOrchestrator {
 
         self.states
             .lock()
-            .expect("mock state lock poisoned")
+            .expect("in-memory state lock poisoned")
             .insert(task_id, state);
         Ok(TaskHandle { task_id })
     }
@@ -554,7 +554,7 @@ impl TaskFlowOrchestrator for MockTaskFlowOrchestrator {
         _token: &VerifiedClaims,
         task_id: TaskId,
     ) -> Result<(), TaskFlowError> {
-        let mut states = self.states.lock().expect("mock state lock poisoned");
+        let mut states = self.states.lock().expect("in-memory state lock poisoned");
         let state = states
             .get_mut(&task_id)
             .ok_or(TaskFlowError::TaskNotFound(task_id))?;
@@ -567,7 +567,7 @@ impl TaskFlowOrchestrator for MockTaskFlowOrchestrator {
     async fn get_task_state(&self, task_id: TaskId) -> Result<TaskRuntimeState, TaskFlowError> {
         self.states
             .lock()
-            .expect("mock state lock poisoned")
+            .expect("in-memory state lock poisoned")
             .get(&task_id)
             .cloned()
             .ok_or(TaskFlowError::TaskNotFound(task_id))
@@ -586,7 +586,7 @@ impl TaskFlowOrchestrator for MockTaskFlowOrchestrator {
             ));
         }
 
-        let mut states = self.states.lock().expect("mock state lock poisoned");
+        let mut states = self.states.lock().expect("in-memory state lock poisoned");
         let state = states
             .get_mut(&task_id)
             .ok_or(TaskFlowError::TaskNotFound(task_id))?;
@@ -594,3 +594,8 @@ impl TaskFlowOrchestrator for MockTaskFlowOrchestrator {
         Ok(())
     }
 }
+
+/// Backward-compatible alias for pre-ARD-280 callers. New code should use
+/// [`InMemoryTaskFlowOrchestrator`] so production examples do not imply this is
+/// a mock-only path.
+pub type MockTaskFlowOrchestrator = InMemoryTaskFlowOrchestrator;

@@ -14,6 +14,8 @@ import os
 import pathlib
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 from datetime import date
 from typing import Any
 
@@ -24,6 +26,10 @@ PLAN_LINEARIZATION_PROJECT_NAME = "Plan Corpus Linearization"
 LINEAR_ORG_URL_KEY = "ardur-agent"
 LINEAR_TEAM_KEY = "ARD"
 LINEAR_KEYCHAIN_SERVICE = "LINEAR_API_KEY_ALL"
+LINEAR_ARDUR_KEYCHAIN_SERVICE = "LINEAR_ARDUR_AGENT_KEY"
+LINEAR_API_ENDPOINT = "https://api.linear.app/graphql"
+LINEAR_ENV_KEYS = ("LINEAR_ARDUR_AGENT_KEY", "LINEAR_API_KEY")
+LINEAR_KEYCHAIN_SERVICES = (LINEAR_ARDUR_KEYCHAIN_SERVICE, LINEAR_KEYCHAIN_SERVICE)
 LINEAR_QUERY_TIMEOUT_SECONDS = 30
 COMMAND_TIMEOUT_SECONDS = 8
 
@@ -324,8 +330,9 @@ def linear_helper(primary_root: pathlib.Path) -> pathlib.Path:
 def linear_recovery_steps(primary_root: pathlib.Path) -> list[str]:
     return [
         f"Do not claim non-`{LINEAR_TEAM_KEY}` issues from the generic Linear connector.",
-        f"Confirm the Keychain item exists: `security find-generic-password -a \"$USER\" -s {LINEAR_KEYCHAIN_SERVICE} -w >/dev/null`.",
-        f"Verify ARD access directly: `python3 {linear_helper(primary_root)} - < /tmp/ardur-linear-check.graphql`.",
+        f"For internal ARD work, provide `LINEAR_ARDUR_AGENT_KEY`/`LINEAR_API_KEY` or a Keychain item named `{LINEAR_ARDUR_KEYCHAIN_SERVICE}`.",
+        f"If the private helper exists, verify ARD access directly: `python3 {linear_helper(primary_root)} - < /tmp/ardur-linear-check.graphql`.",
+        "For public contributors without ARD Linear credentials, use GitHub Issues/PRs and keep Linear claiming optional.",
         f"Expected Linear workspace URL key: `{LINEAR_ORG_URL_KEY}`; expected team key: `{LINEAR_TEAM_KEY}`.",
     ]
 
@@ -360,51 +367,131 @@ def validate_linear_workspace(payload: dict[str, Any]) -> tuple[bool, str | None
     return True, None, metadata
 
 
+def linear_api_key_candidates(env: dict[str, str] | None = None) -> list[tuple[str, str]]:
+    """Return ARD Linear API-key candidates without logging secret values."""
+    source_env = os.environ if env is None else env
+    candidates: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    for name in LINEAR_ENV_KEYS:
+        value = source_env.get(name)
+        if value and value not in seen:
+            candidates.append((f"env:{name}", value))
+            seen.add(value)
+
+    if sys.platform == "darwin":
+        for service in LINEAR_KEYCHAIN_SERVICES:
+            commands = [
+                ["security", "find-generic-password", "-s", service, "-w"],
+                [
+                    "security",
+                    "find-generic-password",
+                    "-a",
+                    source_env.get("USER", ""),
+                    "-s",
+                    service,
+                    "-w",
+                ],
+            ]
+            for command in commands:
+                result = run_command(command, timeout=2)
+                value = result["stdout"].strip() if result["ok"] else ""
+                if value and value not in seen:
+                    candidates.append((f"keychain:{service}", value))
+                    seen.add(value)
+                    break
+
+    return candidates
+
+
+def query_linear_direct_payload() -> dict[str, Any]:
+    """Query Linear directly when the private helper is absent."""
+    candidates = linear_api_key_candidates()
+    if not candidates:
+        return {
+            "ok": False,
+            "error": "Linear helper missing and no ARD Linear API key found in env or Keychain",
+        }
+
+    failures: list[str] = []
+    body = json.dumps({"query": BOOTSTRAP_QUERY}).encode("utf-8")
+    for source, api_key in candidates:
+        request = urllib.request.Request(
+            LINEAR_API_ENDPOINT,
+            data=body,
+            headers={"Authorization": api_key, "Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=LINEAR_QUERY_TIMEOUT_SECONDS) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except (OSError, urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+            failures.append(f"{source}: {type(exc).__name__}: {exc}")
+            continue
+
+        if payload.get("errors"):
+            failures.append(f"{source}: {json.dumps(payload['errors'])}")
+            continue
+
+        workspace_ok, workspace_error, _metadata = validate_linear_workspace(payload)
+        if workspace_ok:
+            return {"ok": True, "payload": payload, "source": source}
+        failures.append(f"{source}: {workspace_error}")
+
+    return {
+        "ok": False,
+        "error": "; ".join(failures) or "No ARD Linear API key candidate reached the expected workspace",
+    }
+
+
 def query_linear(primary_root: pathlib.Path) -> dict[str, Any]:
     helper = linear_helper(primary_root)
-    if not helper.is_file():
-        return {
-            "available": False,
-            "error": f"Linear helper missing at {helper}",
-            "workspace": None,
-            "teams": [],
-            "recovery_steps": linear_recovery_steps(primary_root),
-            "project": None,
-            "active_issues": [],
-            "parallel_ready_candidates": [],
-        }
+    if helper.is_file():
+        result = run_command(
+            [sys.executable, str(helper), "-"],
+            cwd=primary_root,
+            stdin=BOOTSTRAP_QUERY,
+            timeout=LINEAR_QUERY_TIMEOUT_SECONDS,
+        )
+        if not result["ok"]:
+            return {
+                "available": False,
+                "error": result["stderr"] or result["stdout"] or "Linear query failed",
+                "workspace": None,
+                "teams": [],
+                "recovery_steps": linear_recovery_steps(primary_root),
+                "project": None,
+                "active_issues": [],
+                "parallel_ready_candidates": [],
+            }
 
-    result = run_command(
-        [sys.executable, str(helper), "-"],
-        cwd=primary_root,
-        stdin=BOOTSTRAP_QUERY,
-        timeout=LINEAR_QUERY_TIMEOUT_SECONDS,
-    )
-    if not result["ok"]:
-        return {
-            "available": False,
-            "error": result["stderr"] or result["stdout"] or "Linear query failed",
-            "workspace": None,
-            "teams": [],
-            "recovery_steps": linear_recovery_steps(primary_root),
-            "project": None,
-            "active_issues": [],
-            "parallel_ready_candidates": [],
-        }
-
-    try:
-        payload = json.loads(result["stdout"])
-    except json.JSONDecodeError as exc:
-        return {
-            "available": False,
-            "error": f"Linear returned invalid JSON: {exc}",
-            "workspace": None,
-            "teams": [],
-            "recovery_steps": linear_recovery_steps(primary_root),
-            "project": None,
-            "active_issues": [],
-            "parallel_ready_candidates": [],
-        }
+        try:
+            payload = json.loads(result["stdout"])
+        except json.JSONDecodeError as exc:
+            return {
+                "available": False,
+                "error": f"Linear returned invalid JSON: {exc}",
+                "workspace": None,
+                "teams": [],
+                "recovery_steps": linear_recovery_steps(primary_root),
+                "project": None,
+                "active_issues": [],
+                "parallel_ready_candidates": [],
+            }
+    else:
+        direct = query_linear_direct_payload()
+        if not direct["ok"]:
+            return {
+                "available": False,
+                "error": f"Linear helper missing at {helper}; {direct['error']}",
+                "workspace": None,
+                "teams": [],
+                "recovery_steps": linear_recovery_steps(primary_root),
+                "project": None,
+                "active_issues": [],
+                "parallel_ready_candidates": [],
+            }
+        payload = direct["payload"]
 
     if payload.get("errors"):
         return {
