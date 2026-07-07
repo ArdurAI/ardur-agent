@@ -62,9 +62,11 @@ struct Forwarder {
 }
 
 impl Forwarder {
-    /// Whether `channel_id` is permitted (empty allowlist = all channels).
+    /// Whether `channel_id` is permitted. Deny-by-default (ARD-475): an empty
+    /// allowlist drops every channel, so the operator must explicitly allow the
+    /// channels the bot may read — matching the Matrix adapter.
     fn channel_allowed(&self, channel_id: u64) -> bool {
-        self.allowed_channels.is_empty() || self.allowed_channels.contains(&channel_id)
+        !self.allowed_channels.is_empty() && self.allowed_channels.contains(&channel_id)
     }
 
     /// Gate, echo-filter, and forward one inbound Discord message.
@@ -270,4 +272,34 @@ fn now_millis() -> UnixTsMillis {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn channel_allowed_is_deny_by_default() {
+        // ARD-475: an empty allowlist denies every channel (previously it allowed
+        // all); a configured allowlist admits only its members.
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let deny_all = Forwarder {
+            tx,
+            allowed_channels: Arc::new(HashSet::new()),
+            bot_id: 0,
+            channel_prefix: "discord://0".to_string(),
+        };
+        assert!(!deny_all.channel_allowed(1));
+        assert!(!deny_all.channel_allowed(0));
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let allow_one = Forwarder {
+            tx,
+            allowed_channels: Arc::new([42u64].into_iter().collect()),
+            bot_id: 0,
+            channel_prefix: "discord://0".to_string(),
+        };
+        assert!(allow_one.channel_allowed(42));
+        assert!(!allow_one.channel_allowed(43));
+    }
 }

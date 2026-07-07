@@ -64,9 +64,11 @@ struct Forwarder {
 }
 
 impl Forwarder {
-    /// Whether `chat_id` is permitted (empty allowlist = all chats).
+    /// Whether `chat_id` is permitted. Deny-by-default (ARD-475): an empty
+    /// allowlist drops every chat, so the operator must explicitly allow the
+    /// chats the bot may read — matching the Matrix adapter.
     fn chat_allowed(&self, chat_id: i64) -> bool {
-        self.allowed_chats.is_empty() || self.allowed_chats.contains(&chat_id)
+        !self.allowed_chats.is_empty() && self.allowed_chats.contains(&chat_id)
     }
 
     /// Gate, echo-filter, and forward one inbound Telegram message.
@@ -264,4 +266,34 @@ fn now_millis() -> UnixTsMillis {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chat_allowed_is_deny_by_default() {
+        // ARD-475: an empty allowlist denies every chat (previously it allowed
+        // all); a configured allowlist admits only its members.
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let deny_all = Forwarder {
+            tx,
+            allowed_chats: Arc::new(HashSet::new()),
+            bot_id: 0,
+            channel_prefix: "telegram://0".to_string(),
+        };
+        assert!(!deny_all.chat_allowed(-100));
+        assert!(!deny_all.chat_allowed(0));
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let allow_one = Forwarder {
+            tx,
+            allowed_chats: Arc::new([-42_i64].into_iter().collect()),
+            bot_id: 0,
+            channel_prefix: "telegram://0".to_string(),
+        };
+        assert!(allow_one.chat_allowed(-42));
+        assert!(!allow_one.chat_allowed(-43));
+    }
 }

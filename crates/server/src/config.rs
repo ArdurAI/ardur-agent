@@ -56,6 +56,10 @@ pub struct Config {
     /// Slack app id (`SLACK_APP_ID`) — namespaces channel ids and drops the
     /// bot's own messages (loop-prevention).
     pub slack_app_id: String,
+    /// Inbound Slack sender allowlist (`SLACK_ALLOWED_SENDERS`, CSV). Deny-
+    /// by-default (ARD-475): empty drops every sender, so the operator must
+    /// list the Slack user ids permitted to command the bot.
+    pub slack_allowed_senders: Vec<String>,
     /// Root of persistent state (`ARDUR_DATA_DIR`, default `./data`): the
     /// `memory/`, `journals/`, `receipts/`, and `keys/` subdirectories.
     pub data_dir: PathBuf,
@@ -175,6 +179,7 @@ impl fmt::Debug for Config {
                 &redacted_present(&self.slack_signing_secret),
             )
             .field("slack_app_id", &self.slack_app_id)
+            .field("slack_allowed_senders", &self.slack_allowed_senders)
             .field("data_dir", &self.data_dir)
             .field("bind_addr", &self.bind_addr)
             .field(
@@ -313,6 +318,7 @@ impl Config {
             slack_bot_token: require("SLACK_BOT_TOKEN")?,
             slack_signing_secret: require("SLACK_SIGNING_SECRET")?,
             slack_app_id: require("SLACK_APP_ID")?,
+            slack_allowed_senders: parse_csv(optional("SLACK_ALLOWED_SENDERS").as_deref()),
             data_dir: optional("ARDUR_DATA_DIR")
                 .map_or_else(|| PathBuf::from("./data"), PathBuf::from),
             bind_addr: optional("ARDUR_BIND_ADDR").unwrap_or_else(|| "127.0.0.1:3000".to_string()),

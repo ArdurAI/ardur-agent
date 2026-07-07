@@ -1,6 +1,7 @@
 //! [`SlackAdapter`] — the Slack backend for the §4.0 [`MessagingGateway`]
 //! contract.
 
+use std::collections::HashSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -49,6 +50,10 @@ pub struct SlackAdapter {
     app_id: String,
     http: reqwest::Client,
     base_url: String,
+    /// Inbound sender (Slack user id) allowlist. Deny-by-default (ARD-475):
+    /// an empty set drops every sender; otherwise only listed user ids may
+    /// command the bot.
+    allowed_senders: HashSet<String>,
 }
 
 impl SlackAdapter {
@@ -61,6 +66,7 @@ impl SlackAdapter {
             app_id,
             http: reqwest::Client::new(),
             base_url: DEFAULT_BASE_URL.to_owned(),
+            allowed_senders: HashSet::new(),
         }
     }
 
@@ -73,17 +79,45 @@ impl SlackAdapter {
         let bot_token = read_env("SLACK_BOT_TOKEN")?;
         let signing_secret = read_env("SLACK_SIGNING_SECRET")?;
         let app_id = read_env("SLACK_APP_ID")?;
+        // ARD-475: optional comma-separated sender allowlist (deny-by-default —
+        // unset/empty drops every sender, so the operator must list the Slack
+        // user ids permitted to command the bot).
+        let allowed_senders = std::env::var("SLACK_ALLOWED_SENDERS")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .map(|v| {
+                v.split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         Ok(Self::new(
             SecretString::from(bot_token),
             SecretString::from(signing_secret),
             app_id,
-        ))
+        )
+        .with_allowed_senders(allowed_senders))
     }
 
     /// Override the Web-API base URL (e.g. point at a mock server in tests).
     #[must_use]
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = base_url.into();
+        self
+    }
+
+    /// Restrict inbound messages to senders whose Slack user id is in `senders`
+    /// (ARD-475). Deny-by-default: an empty set drops every sender, so the
+    /// operator must list the user ids permitted to command the bot.
+    #[must_use]
+    pub fn with_allowed_senders<I, S>(mut self, senders: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.allowed_senders = senders.into_iter().map(Into::into).collect();
         self
     }
 
@@ -235,6 +269,15 @@ impl SlackAdapter {
                 // bot author.)
                 let own_app = event.app_id.as_deref() == Some(self.app_id.as_str());
                 if own_app || event.bot_id.is_some() {
+                    return Ok(SlackEvent::Ignored);
+                }
+                // ARD-475: deny-by-default sender allowlist. An empty allowlist
+                // drops every sender; otherwise only listed Slack user ids may
+                // command the bot. (Slack's HMAC only proves the request came
+                // from Slack — any user's message is signed — so this is the
+                // control that restricts *which* users can drive the agent.)
+                let user = event.user.as_deref().unwrap_or("");
+                if !self.allowed_senders.contains(user) {
                     return Ok(SlackEvent::Ignored);
                 }
                 Ok(SlackEvent::Message(message_to_incoming(
