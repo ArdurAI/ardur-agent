@@ -93,6 +93,40 @@ pub struct PerRequestProvisioning {
 }
 
 /// A [`ChatRuntime`] that fuses every Phase-1 substrate crate behind one
+/// ARD-488: releases a turn's cost reservation when the turn future is dropped
+/// before it settles (outer `tokio::time::timeout`, `select!` loss, client or
+/// stream disconnect). `take_reservation` is idempotent (returns `None` if
+/// `finalize`/`release` already removed the reservation), so this is a pure
+/// backstop — the in-band finalize/release paths are unchanged.
+struct ReservationCancelGuard {
+    gate: Arc<InMemoryCostAdmissionGate<SharedBudget>>,
+    budget: SharedBudget,
+    reservation_id: uuid::Uuid,
+}
+
+impl ReservationCancelGuard {
+    fn new(
+        gate: Arc<InMemoryCostAdmissionGate<SharedBudget>>,
+        budget: SharedBudget,
+        reservation_id: uuid::Uuid,
+    ) -> Self {
+        Self {
+            gate,
+            budget,
+            reservation_id,
+        }
+    }
+}
+
+impl Drop for ReservationCancelGuard {
+    fn drop(&mut self) {
+        if let Some(handle) = self.gate.take_reservation(self.reservation_id) {
+            let delta = ardur_cost_gate::CostDelta::full_credit(&handle.reserved);
+            let _ = self.budget.refund_sync(handle, delta);
+        }
+    }
+}
+
 /// [`submit`](FusedRuntime::submit). Build it with
 /// [`FusedRuntimeBuilder`](crate::FusedRuntimeBuilder).
 pub struct FusedRuntime {
@@ -112,7 +146,7 @@ pub struct FusedRuntime {
     pub(crate) max_tokens: u32,
     pub(crate) receipt_key: Es256SigningKey,
     pub(crate) verb: VerbObject,
-    pub(crate) gate: InMemoryCostAdmissionGate<SharedBudget>,
+    pub(crate) gate: Arc<InMemoryCostAdmissionGate<SharedBudget>>,
     pub(crate) budget: SharedBudget,
     pub(crate) gate_provider_id: GateProviderId,
     pub(crate) gate_model_id: GateModelId,
@@ -1052,6 +1086,14 @@ impl FusedRuntime {
                 }
             };
 
+            // ARD-488: release the reservation if this turn is cancelled (future
+            // dropped / outer timeout) before it settles.
+            let _cancel_guard = ReservationCancelGuard::new(
+                Arc::clone(&self.gate),
+                self.budget.clone(),
+                reservation.reservation_id,
+            );
+
             // 5. provider dispatch.
             let response = match self.provider.complete(iter_request).await {
                 Ok(response) => response,
@@ -1528,6 +1570,13 @@ impl FusedRuntime {
                 // the divergence of the error paths from NLL, so a bare move
                 // would look like a double-move across loop iterations. `.take()`
                 // moves the value out without moving the binding.
+                // ARD-488: release the reservation if this streaming round is
+                // cancelled (stream dropped / outer timeout) before it settles.
+                let _cancel_guard = ReservationCancelGuard::new(
+                    Arc::clone(&self.gate),
+                    self.budget.clone(),
+                    reservation_handle.reservation_id,
+                );
                 let mut reservation = Some(reservation_handle);
 
                 // 5. provider stream: forward each delta as it arrives.

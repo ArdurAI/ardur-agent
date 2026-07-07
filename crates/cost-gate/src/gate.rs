@@ -109,6 +109,18 @@ impl<B: BudgetStore> InMemoryCostAdmissionGate<B> {
         self
     }
 
+    /// Remove and return the reservation handle for `reservation_id`, if it is
+    /// still active (idempotent: `None` if already finalized/expired/cancelled).
+    /// Lets a release-on-drop guard (ARD-488) claim a cancelled turn's
+    /// reservation synchronously and refund it through whatever budget store the
+    /// gate shares — without an await point, so it can run from `Drop`.
+    pub fn take_reservation(&self, reservation_id: Uuid) -> Option<ReservationHandle> {
+        self.reservations
+            .write()
+            .remove(&reservation_id)
+            .map(|record| record.handle)
+    }
+
     /// Restrict admission to these providers (an empty set denies all). Without
     /// this, every provider is allowed.
     pub fn with_allowed_providers(mut self, providers: HashSet<ProviderId>) -> Self {

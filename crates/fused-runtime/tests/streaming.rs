@@ -652,6 +652,48 @@ async fn fused_stream_receipts_provider_reported_cost_cents() {
 }
 
 #[tokio::test]
+async fn fused_stream_dropped_refunds_reservation() {
+    // ARD-488: a turn cancelled mid-flight (stream dropped before it settles)
+    // must refund its cost-gate reservation immediately, not leak it.
+    let provider = Arc::new(EchoProvider::new());
+    let runtime = runtime_builder(provider)
+        .projected_envelope(cents_envelope(1))
+        .provision_budget(gate_holder(), GateCostTuple::cents(10))
+        .build()
+        .expect("runtime builds");
+
+    let before = runtime
+        .remaining_budget(&gate_holder())
+        .await
+        .expect("holder is provisioned");
+    assert_eq!(before.cents, 10);
+
+    // Drive the stream past the cost-gate admit — a content delta arrives only
+    // after admit has decremented the budget — then drop it, cancelling the turn.
+    {
+        let mut stream = Box::pin(runtime.stream(user_request("cancel me", &valid_token())));
+        let mut saw_content = false;
+        while let Some(item) = stream.next().await {
+            if matches!(item, Ok(FusedEvent::Content(_))) {
+                saw_content = true;
+                break;
+            }
+        }
+        assert!(saw_content, "a content delta arrives after the admit");
+        // `stream` drops here -> the ReservationCancelGuard refunds the hold.
+    }
+
+    let after = runtime
+        .remaining_budget(&gate_holder())
+        .await
+        .expect("holder is provisioned");
+    assert_eq!(
+        after.cents, 10,
+        "a cancelled turn refunds its reservation, not leaks it (ARD-488)"
+    );
+}
+
+#[tokio::test]
 async fn fused_stream_reported_cost_depletes_budget_and_blocks_next_turn() {
     let provider = Arc::new(ReportedCostStreamProvider::new(5));
     let runtime = runtime_builder(provider.clone())

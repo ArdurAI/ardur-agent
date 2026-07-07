@@ -68,6 +68,17 @@ impl SharedBudget {
     pub fn set_balance(&self, holder: HolderId, balance: CostTuple) {
         self.0.set_balance(holder, balance);
     }
+
+    /// Synchronous refund (delegates to
+    /// [`InMemoryBudgetStore::refund_sync`]); see that method for why the cost
+    /// gate needs a sync path (ARD-488).
+    pub fn refund_sync(
+        &self,
+        handle: ReservationHandle,
+        delta: CostDelta,
+    ) -> Result<(), ardur_cost_gate::BudgetError> {
+        self.0.refund_sync(handle, delta)
+    }
 }
 
 #[async_trait]

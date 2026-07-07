@@ -393,6 +393,10 @@ impl FusedRuntimeBuilder {
         if let Some(cap) = self.provision_cap {
             gate = gate.with_provision_cap(cap);
         }
+        // ARD-488: the runtime hands `Arc` clones of the gate to per-turn
+        // release-on-drop guards, so a cancelled turn can refund its hold from
+        // `Drop` without an await point.
+        let gate = Arc::new(gate);
 
         let gate_provider_id = ardur_cost_gate::ProviderId(self.provider.id().0);
         let gate_model_id = ardur_cost_gate::ModelId(self.model.0.clone());
