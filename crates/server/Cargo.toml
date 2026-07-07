@@ -80,6 +80,7 @@ biscuit-auth = { workspace = true }
 # HTTP server + the Slack bot-token / signing-secret custody type.
 axum = { workspace = true }
 tokio = { workspace = true }
+futures = { workspace = true }
 secrecy = { workspace = true }
 
 # Structured logging (env-driven `RUST_LOG`; JSON when `ARDUR_LOG_FORMAT=json`).
