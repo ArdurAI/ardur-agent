@@ -89,6 +89,24 @@ impl InMemoryBudgetStore {
         entry.balance = balance;
         entry.version = entry.version.wrapping_add(1);
     }
+
+    /// Synchronous refund — the sync body of [`BudgetStore::refund`], exposed so
+    /// a release-on-drop guard can refund a cancelled reservation without an
+    /// await point (ARD-488). Same semantics: credits `delta` to the handle's
+    /// holder and bumps the version.
+    pub fn refund_sync(
+        &self,
+        handle: ReservationHandle,
+        delta: CostDelta,
+    ) -> Result<(), BudgetError> {
+        let mut accounts = self.accounts.write();
+        let acct = accounts
+            .get_mut(&handle.holder)
+            .ok_or(BudgetError::HolderNotFound)?;
+        acct.balance = acct.balance.apply_delta(&delta);
+        acct.version = acct.version.wrapping_add(1);
+        Ok(())
+    }
 }
 
 #[async_trait]
