@@ -334,7 +334,8 @@ impl AppState {
             SecretString::from(config.slack_bot_token.clone()),
             SecretString::from(config.slack_signing_secret.clone()),
             config.slack_app_id.clone(),
-        );
+        )
+        .with_allowed_senders(config.slack_allowed_senders.clone());
         if let Some(base) = &config.slack_base_url {
             slack = slack.with_base_url(base.clone());
         }

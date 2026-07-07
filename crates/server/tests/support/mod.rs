@@ -56,6 +56,7 @@ pub fn test_config(data_dir: &TempDir, slack_base: Option<String>) -> Config {
         slack_bot_token: BOT_TOKEN.to_string(),
         slack_signing_secret: SIGNING_SECRET.to_string(),
         slack_app_id: APP_ID.to_string(),
+        slack_allowed_senders: vec!["U4242".to_string()],
         data_dir: data_dir.path().to_path_buf(),
         bind_addr: "127.0.0.1:0".to_string(),
         chat_bearer_tokens: vec![CHAT_TOKEN.to_string()],
