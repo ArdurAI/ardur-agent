@@ -55,7 +55,13 @@ impl RateCard {
                 let computed = self.cents_per_1k_input * f64::from(usage.tokens_in) / 1000.0
                     + self.cents_per_1k_output * f64::from(usage.tokens_out) / 1000.0
                     + self.cents_per_request;
-                computed.round() as u64
+                // ARD-495: round UP and never to zero for a positive cost, so a
+                // sub-cent turn still depletes the budget by at least 1 cent.
+                if computed <= 0.0 {
+                    0
+                } else {
+                    (computed.ceil() as u64).max(1)
+                }
             }
         };
         CostTuple {

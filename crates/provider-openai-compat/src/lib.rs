@@ -749,11 +749,14 @@ fn map_finish_reason(reason: Option<&str>, tool_calls: Vec<ToolCall>) -> FinishR
     }
 }
 
-/// Convert an optional dollar cost into whole US cents, rounding to the nearest
-/// cent. Missing cost (OpenAI proper and many compatible endpoints) is `0`.
+/// Convert an optional dollar cost into whole US cents, rounding UP to the next
+/// cent (minimum 1¢ for any positive cost — ARD-495: sub-cent costs must not
+/// round to 0 and bypass the budget). Missing cost is `0`.
 fn dollars_to_cents(cost: Option<f64>) -> u64 {
     match cost {
-        Some(dollars) if dollars.is_finite() && dollars > 0.0 => (dollars * 100.0).round() as u64,
+        Some(dollars) if dollars.is_finite() && dollars > 0.0 => {
+            ((dollars * 100.0).ceil() as u64).max(1)
+        }
         _ => 0,
     }
 }
@@ -803,9 +806,12 @@ mod tests {
     }
 
     #[test]
-    fn dollars_round_to_nearest_cent_and_default_zero() {
-        assert_eq!(dollars_to_cents(Some(0.014)), 1);
-        assert_eq!(dollars_to_cents(Some(0.026)), 3);
+    fn dollars_round_up_to_whole_cent_and_never_zero() {
+        // ARD-495: a positive cost rounds UP, never down to 0.
+        assert_eq!(dollars_to_cents(Some(0.003)), 1, "0.3¢ -> 1¢, not 0");
+        assert_eq!(dollars_to_cents(Some(0.014)), 2, "1.4¢ -> 2¢ (ceil)");
+        assert_eq!(dollars_to_cents(Some(0.026)), 3, "2.6¢ -> 3¢");
+        assert_eq!(dollars_to_cents(Some(0.05)), 5);
         assert_eq!(dollars_to_cents(None), 0);
         assert_eq!(dollars_to_cents(Some(0.0)), 0);
         assert_eq!(dollars_to_cents(Some(f64::NAN)), 0);
@@ -958,7 +964,7 @@ mod tests {
         assert_eq!(resp.usage.tokens_out, 2);
         assert_eq!(resp.cost.tokens_in, 11);
         assert_eq!(resp.cost.tokens_out, 2);
-        assert_eq!(resp.cost.cents, 1); // 0.0123 USD → 1.23¢ → 1¢
+        assert_eq!(resp.cost.cents, 2); // 0.0123 USD → 1.23¢ → 2¢ (ceil, ARD-495)
         assert!(resp.raw_provider_response.is_some());
     }
 

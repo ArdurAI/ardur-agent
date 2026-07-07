@@ -293,10 +293,12 @@ fn process_chunk(
 
     if let Some(u) = parsed.usage {
         // ARD-295: Preserve exact streaming cost from OpenRouter.
-        // Convert dollars to whole cents, rounding to nearest cent.
+        // Convert dollars to whole cents, rounding UP to the next cent and
+        // never to zero for a positive cost (ARD-495: sub-cent costs must not
+        // bypass the budget).
         let cost_cents = u.cost.and_then(|d| {
             if d.is_finite() && d > 0.0 {
-                Some((d * 100.0).round() as u64)
+                Some(((d * 100.0).ceil() as u64).max(1))
             } else {
                 None
             }
@@ -682,7 +684,7 @@ mod tests {
             vec![OpenRouterChunk::Usage(Usage {
                 tokens_in: 11,
                 tokens_out: 4,
-                cost_cents: Some(1), // 0.012345 USD → 1.2345¢ → rounds to 1¢
+                cost_cents: Some(2), // 0.012345 USD → 1.2345¢ → 2¢ (ceil, ARD-495)
             })]
         );
     }
@@ -714,7 +716,7 @@ mod tests {
             vec![OpenRouterChunk::Usage(Usage {
                 tokens_in: 100,
                 tokens_out: 50,
-                cost_cents: Some(12), // 0.123456 USD → 12.3456¢ → rounds to 12¢
+                cost_cents: Some(13), // 0.123456 USD → 12.3456¢ → 13¢ (ceil, ARD-495)
             })]
         );
     }
