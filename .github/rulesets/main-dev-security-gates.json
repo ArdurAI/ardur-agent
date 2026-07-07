@@ -21,7 +21,6 @@
         "require_code_owner_review": true,
         "require_last_push_approval": true,
         "required_review_thread_resolution": true,
-        "automatic_copilot_code_review_enabled": false,
         "allowed_merge_methods": ["squash", "rebase"]
       }
     },
@@ -30,11 +29,11 @@
       "parameters": {
         "strict_required_status_checks_policy": true,
         "required_status_checks": [
-          { "context": "rust / ubuntu-latest" },
-          { "context": "rust / macos-latest" },
-          { "context": "site / hugo" },
-          { "context": "security / audit-sbom-secrets" },
-          { "context": "docker / build-healthcheck-scan" },
+          { "context": "cargo-deny (advisories + licenses + bans)" },
+          { "context": "ubuntu-latest / stable" },
+          { "context": "macos-15 / stable" },
+          { "context": "hugo" },
+          { "context": "build-healthcheck-scan" },
           { "context": "Check DCO sign-off" }
         ]
       }
