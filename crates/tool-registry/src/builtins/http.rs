@@ -89,7 +89,7 @@ fn host_is_localhost(host: &Host<&str>) -> bool {
 /// (`::a.b.c.d`) — mapping IPv4-in-IPv6 down to its v4 form first so an
 /// `::ffff:10.0.0.1`, `64:ff9b::10.0.0.1`, `2002:0a00:0001::`, or
 /// `::10.0.0.1` cannot smuggle a private address past the check.
-fn is_internal_ip(ip: IpAddr) -> bool {
+pub fn is_internal_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
             let octets = v4.octets();
