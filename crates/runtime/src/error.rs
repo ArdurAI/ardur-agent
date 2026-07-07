@@ -195,6 +195,18 @@ pub enum RuntimeError {
         tool: String,
     },
 
+    /// A provider's streamed response exceeded the per-turn accumulated-content
+    /// cap (env `ARDUR_STREAM_CONTENT_MAX_BYTES`). The streamed turn is aborted
+    /// and no receipt/journal/memory record is produced — a partial, never-
+    /// finished response must not enter the auditable chain (ARD-491).
+    #[error("streamed content cap exceeded: {actual} bytes > {limit} limit")]
+    StreamedContentCapExceeded {
+        /// The configured byte limit on accumulated streamed assistant content.
+        limit: usize,
+        /// The accumulated byte count when the cap was breached.
+        actual: usize,
+    },
+
     /// No command was registered under the dispatched name.
     #[error("command not found: {0}")]
     CommandNotFound(String),
