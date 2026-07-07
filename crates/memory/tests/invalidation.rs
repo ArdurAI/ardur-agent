@@ -64,6 +64,59 @@ fn invalidate_appends_and_cuts_the_chain() {
     }
 }
 
+/// ARD-477: recall (`search` / `search_scoped`) must not surface a memory whose
+/// correction chain has been invalidated. Invalidation is append-only — the
+/// original row keeps `invalidation_time = None` and a tombstone is appended —
+/// so the only thing that can hide the original from recall is the chain-level
+/// cutoff, which is exactly what the fix adds.
+#[test]
+fn search_honors_invalidation() {
+    let rt = InMemoryMemoryRuntime::new();
+    let s = HolderId::from("s");
+
+    let a = MemoryRecord::new(
+        s.clone(),
+        RecordKind::Fact,
+        json!({ "predicate": "prefers", "object": "oolong tea" }),
+        UnixTsMillis(100),
+        UnixTsMillis(100),
+        None,
+        UnixTsMillis(100),
+    );
+    let a_id = rt.record(a).unwrap();
+
+    // Before invalidation the memory is recalled (payload text lowercases to
+    // "prefers oolong tea", so the "oolong" query matches).
+    assert_eq!(
+        rt.search("oolong", 5).expect("search").len(),
+        1,
+        "a live memory is recalled before invalidation"
+    );
+    assert_eq!(
+        rt.search_scoped(&s, "oolong", 5)
+            .expect("scoped search")
+            .len(),
+        1,
+    );
+
+    rt.invalidate(a_id, UnixTsMillis(200), InvalidationReason::UserCorrection)
+        .unwrap();
+
+    // After invalidation the original row still has `invalidation_time = None`
+    // (the tombstone is a separate appended row), so without the chain-level
+    // cutoff it would still be recalled. The fix excludes the whole chain.
+    assert!(
+        rt.search("oolong", 5).expect("search").is_empty(),
+        "a forgotten memory is not re-injected by recall"
+    );
+    assert!(
+        rt.search_scoped(&s, "oolong", 5)
+            .expect("scoped search")
+            .is_empty(),
+        "a forgotten memory is not re-injected by scoped recall"
+    );
+}
+
 fn uuid_v4() -> uuid::Uuid {
     uuid::Uuid::new_v4()
 }

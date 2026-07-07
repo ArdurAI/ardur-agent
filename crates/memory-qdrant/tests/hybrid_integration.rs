@@ -23,7 +23,9 @@
 
 use std::sync::Arc;
 
-use ardur_memory::{HolderId, MemoryRecord, MemoryRuntime, RecordKind, UnixTsMillis};
+use ardur_memory::{
+    HolderId, InvalidationReason, MemoryRecord, MemoryRuntime, RecordId, RecordKind, UnixTsMillis,
+};
 use ardur_memory_qdrant::{
     Bm25Index, Embedder, FastEmbedEmbedder, HybridMemoryRetriever, MockEmbedder,
     QdrantMemoryConfig, QdrantMemoryRuntime,
@@ -243,6 +245,78 @@ fn hybrid_beats_either() {
         hits[0].payload.get("object").and_then(|v| v.as_str()),
         Some("green tea in the morning"),
         "the record strong on both axes ranks first"
+    );
+
+    hybrid.qdrant().delete_collection().ok();
+}
+
+/// ARD-477: a memory whose correction chain has been invalidated is not
+/// re-injected by hybrid recall — neither the dense nor the lexical half
+/// surfaces it — while a still-live memory in the same subject stays recallable.
+/// Gated on the Qdrant integration gate (the dense half is a real ANN search).
+#[test]
+fn recall_excludes_invalidated_memory() {
+    let Some(cfg) = qdrant_gate("ardur_hyb_inval") else {
+        return;
+    };
+    let async_rt = async_rt();
+    let hybrid = retriever(cfg, Arc::new(MockEmbedder::new(384)));
+    let subject = HolderId::from("user:inval");
+
+    // Two facts in the same subject: "oolong tea" (will be forgotten) and
+    // "green tea" (stays live, to prove recall still works afterwards).
+    let target = fact("user:inval", "prefers", "oolong tea", 1_000);
+    let target_id = target.record_id;
+    let keeper = fact("user:inval", "prefers", "green tea", 1_010);
+    let keeper_id = keeper.record_id;
+    async_rt
+        .block_on(hybrid.record(target))
+        .expect("record target");
+    async_rt
+        .block_on(hybrid.record(keeper))
+        .expect("record keeper");
+
+    // Sanity: the target is recallable before invalidation (lexical "oolong").
+    let before = async_rt
+        .block_on(hybrid.search_for_subject(&subject, "oolong", 5))
+        .expect("search before");
+    assert!(
+        before.iter().any(|r| r.record_id == target_id),
+        "the live memory is recalled before invalidation"
+    );
+
+    // Forget the target — appends a tombstone in its correction chain.
+    hybrid
+        .invalidate(
+            RecordId(target_id),
+            UnixTsMillis(2_000),
+            InvalidationReason::UserCorrection,
+        )
+        .expect("invalidate");
+
+    // ARD-477: the forgotten memory is not re-injected by either recall surface.
+    let scoped = async_rt
+        .block_on(hybrid.search_for_subject(&subject, "oolong", 5))
+        .expect("scoped search after");
+    assert!(
+        !scoped.iter().any(|r| r.record_id == target_id),
+        "a forgotten memory is not re-injected by scoped recall"
+    );
+    let global = async_rt
+        .block_on(hybrid.search("oolong", 5))
+        .expect("global search after");
+    assert!(
+        !global.iter().any(|r| r.record_id == target_id),
+        "a forgotten memory is not re-injected by global recall"
+    );
+
+    // The still-live memory in the same subject is still recallable.
+    let keeper_hits = async_rt
+        .block_on(hybrid.search_for_subject(&subject, "green", 5))
+        .expect("keeper search");
+    assert!(
+        keeper_hits.iter().any(|r| r.record_id == keeper_id),
+        "the non-forgotten memory is still recalled"
     );
 
     hybrid.qdrant().delete_collection().ok();

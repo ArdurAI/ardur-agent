@@ -22,7 +22,7 @@
 //! [`tokio::task::block_in_place`] so it does not deadlock the caller's runtime;
 //! otherwise it blocks on its own runtime directly.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use ardur_embeddings::Embedder;
@@ -360,6 +360,25 @@ impl QdrantMemoryRuntime {
             .collect())
     }
 
+    /// The set of `correction_chain_root`s tombstoned within `subject`'s records
+    /// (or across **all** records when `subject` is `None`) — the chains hybrid
+    /// recall must exclude so a forgotten memory is never re-injected (ARD-477).
+    ///
+    /// Scrolls the relevant records once and derives the dead set from their
+    /// tombstones via the same chain-cutoff logic [`live_at`] applies. `pub(crate)`
+    /// for the sibling [`HybridMemoryRetriever`](crate::HybridMemoryRetriever).
+    ///
+    /// # Errors
+    /// [`MemoryError::Backend`] if the scroll fails.
+    pub(crate) fn dead_chains(&self, subject: Option<&HolderId>) -> Result<HashSet<Uuid>> {
+        let filter = match subject {
+            Some(s) => Filter::must([Condition::matches("subject", s.0.clone())]),
+            None => Filter::default(),
+        };
+        let records = self.scroll_records(filter)?;
+        Ok(chain_cutoff_map(&records).into_keys().collect())
+    }
+
     /// Fetch a single record by its UUID (the point id), if present.
     fn get_record(&self, id: Uuid) -> Result<Option<MemoryRecord>> {
         let points = self.block_on(async {
@@ -485,12 +504,12 @@ fn record_from_payload(payload: &HashMap<String, Value>) -> Option<MemoryRecord>
     }
 }
 
-/// The bi-temporal "as-of" view over a set of a single subject's records — the
-/// same predicate the in-process [`ardur_memory::InMemoryMemoryRuntime`] applies:
-/// live data rows within their valid interval whose correction chain has not been
-/// cut off at or before `as_of`.
-fn live_at(records: &[MemoryRecord], as_of: UnixTsMillis) -> Vec<MemoryRecord> {
-    // First pass: the earliest invalidation cutoff per correction chain.
+/// Per-`correction_chain_root` earliest invalidation cutoff over a set of
+/// records (including tombstones). A chain present in the map has been
+/// invalidated. Shared by [`live_at`] (bi-temporal view, compared against
+/// `as_of`) and [`QdrantMemoryRuntime::dead_chains`] (live recall view: any
+/// chain with a tombstone is dead).
+fn chain_cutoff_map(records: &[MemoryRecord]) -> HashMap<Uuid, UnixTsMillis> {
     let mut cutoff: HashMap<Uuid, UnixTsMillis> = HashMap::new();
     for r in records {
         if let Some(t) = r.invalidation_time {
@@ -504,9 +523,18 @@ fn live_at(records: &[MemoryRecord], as_of: UnixTsMillis) -> Vec<MemoryRecord> {
                 .or_insert(t);
         }
     }
+    cutoff
+}
 
-    // Second pass: live data rows still within their valid interval and not yet
-    // cut off by their chain's invalidation.
+/// The bi-temporal "as-of" view over a set of a single subject's records — the
+/// same predicate the in-process [`ardur_memory::InMemoryMemoryRuntime`] applies:
+/// live data rows within their valid interval whose correction chain has not been
+/// cut off at or before `as_of`.
+fn live_at(records: &[MemoryRecord], as_of: UnixTsMillis) -> Vec<MemoryRecord> {
+    let cutoff = chain_cutoff_map(records);
+
+    // Live data rows still within their valid interval and not yet cut off by
+    // their chain's invalidation.
     records
         .iter()
         .filter(|r| r.invalidation_time.is_none())
