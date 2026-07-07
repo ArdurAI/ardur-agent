@@ -21,9 +21,11 @@ pub(crate) const ENV_ALLOWED_CHATS: &str = "TELEGRAM_ALLOWED_CHATS";
 pub struct TelegramConfig {
     /// The bot's Bot-API token (required) — the `<id>:<secret>` credential.
     pub bot_token: SecretString,
-    /// Chat-id allowlist. Empty means "all chats"; otherwise inbound messages
-    /// from chats not in this list are dropped. Telegram chat ids are signed
-    /// (`i64`): negative for groups/supergroups, positive for private chats.
+    /// Chat-id allowlist. Deny-by-default (ARD-475): empty means drop *all*
+    /// chats; otherwise inbound messages from chats not in this list are
+    /// dropped. The operator must explicitly list the chats the bot may read.
+    /// Telegram chat ids are signed (`i64`): negative for groups/supergroups,
+    /// positive for private chats.
     pub allowed_chat_ids: Vec<i64>,
 }
 
