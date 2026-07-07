@@ -263,7 +263,7 @@ async fn single_turn_through_full_substrate() {
     // signature is valid under the publishing JWKS.
     let verified = ReceiptVerifier::verify(&signed, &jwks).expect("the genesis receipt verifies");
     assert_eq!(verified.kid, receipt_key.key_id());
-    ardur_receipt::verify_chain(std::slice::from_ref(&signed))
+    ardur_receipt::verify_chain(std::slice::from_ref(&signed), &jwks)
         .expect("the single-receipt chain verifies");
 
     // ---- 7. session-journals: persist the turn and replay it off disk.
