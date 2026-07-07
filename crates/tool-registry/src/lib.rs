@@ -68,7 +68,8 @@ pub use echo::EchoTool;
 pub use error::{RegistryError, ToolError};
 pub use health::HealthCheckTool;
 pub use mcp::{
-    ArdurMcpServer, RemoteMcpTool, RemoteMcpToolset, bearer_token_allowed, extract_bearer_token,
+    ArdurMcpServer, MCP_CAPABILITY, RemoteMcpTool, RemoteMcpToolset, bearer_token_allowed,
+    extract_bearer_token,
 };
 pub use registry::ToolRegistry;
 pub use skills::{Skill, SkillError, SkillFrontmatter, SkillLoader, SkillTool};

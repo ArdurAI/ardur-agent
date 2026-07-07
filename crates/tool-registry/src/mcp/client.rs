@@ -22,6 +22,16 @@ use crate::capability::Capability;
 use crate::error::ToolError;
 use crate::tool::{Tool, ToolContext, ToolId, ToolOutput, ToolSchema};
 
+/// The `cap.*` label every remote-MCP-sourced tool requires, so the fused
+/// runtime's cap-token/Cedar gate (`authorize_tool_capabilities`) subjects it
+/// to the issuing cap-token's scope instead of short-circuiting on empty caps
+/// (ARD-478). The server's per-turn mint propagates this into issued tokens
+/// automatically via `tool_allowlist_for_runtime`.
+pub const MCP_CAPABILITY: &str = "cap.mcp";
+
+static MCP_CAPS: std::sync::LazyLock<Vec<Capability>> =
+    std::sync::LazyLock::new(|| vec![Capability::Custom("mcp".to_string())]);
+
 /// A live connection to one remote MCP server.
 ///
 /// Built with [`connect`](Self::connect); its [`into_tools`](Self::into_tools)
@@ -109,8 +119,11 @@ impl RemoteMcpToolset {
 /// A single remote MCP tool, presented as a local [`Tool`].
 ///
 /// Its [`invoke`](Tool::invoke) forwards the arguments as a `tools/call` over
-/// the shared connection and returns the remote result. It declares no local
-/// [`Capability`] — the remote server enforces its own authorization.
+/// the shared connection and returns the remote result. It declares the
+/// blanket [`Capability::Custom("mcp")`] ([`MCP_CAPABILITY`]) so the fused
+/// runtime's cap-token/Cedar gate authorizes every MCP-boundary crossing
+/// against the issuing cap-token's scope (ARD-478); the remote server may
+/// enforce its own authorization on top.
 pub struct RemoteMcpTool {
     id: ToolId,
     schema: ToolSchema,
@@ -178,6 +191,6 @@ impl Tool for RemoteMcpTool {
     }
 
     fn required_capabilities(&self) -> &[Capability] {
-        &[]
+        &MCP_CAPS
     }
 }
