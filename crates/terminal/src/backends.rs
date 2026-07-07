@@ -77,7 +77,28 @@ impl TerminalPolicy {
     }
 
     /// Check a command against the policy.
+    ///
+    /// Two gates, both failing closed:
+    /// 1. **Safe-charset allowlist** — the command may contain only alphanumerics,
+    ///    whitespace, and the punctuation common to flags, paths, and `key=value`
+    ///    pairs ([`is_safe_command_char`]). Every shell operator, metacharacter,
+    ///    expansion, and quote is rejected, so no backend — even one that hands
+    ///    the string to a remote shell — can suffer command injection (ARD-476).
+    /// 2. **Binary allowlist** — the first token (the real binary, never an
+    ///    operator-disguised prefix) must be in `command_allowlist` (or `"*"`).
+    ///
+    /// Shell composition, quoting, and expansions are intentionally unsupported
+    /// here; the separate `shell.run` builtin owns that surface.
     pub fn check_command(&self, command: &str) -> Result<()> {
+        if let Some(bad) = command.chars().find(|c| !is_safe_command_char(*c)) {
+            return Err(TerminalError::PolicyDenied {
+                reason: format!(
+                    "command contains a disallowed character {bad:?}; terminal.exec accepts only \
+                     simple commands without shell operators, quotes, or expansions (use shell.run \
+                     for shell composition)"
+                ),
+            });
+        }
         let first =
             command
                 .split_whitespace()
@@ -102,6 +123,25 @@ impl Default for TerminalPolicy {
     fn default() -> Self {
         Self::deny_all()
     }
+}
+
+/// Whether `c` is permitted inside a terminal command (see
+/// [`TerminalPolicy::check_command`]). An **allowlist** — alphanumerics,
+/// whitespace, and the punctuation that appears in flags, paths, and
+/// `key=value` pairs — rather than an operator denylist, so it fails closed
+/// against anything novel and rejects every shell operator/metacharacter/
+/// expansion/quote outright.
+fn is_safe_command_char(c: char) -> bool {
+    c.is_ascii_alphanumeric()
+        // Only space and tab are admitted as separators — crucially *not* the
+        // other ASCII whitespace chars (`\n`, `\r`, `\x0b`, `\x0c`), which are
+        // shell command separators and an injection vector.
+        || c == ' '
+        || c == '\t'
+        || matches!(
+            c,
+            '-' | '_' | '.' | '/' | ':' | ',' | '=' | '+' | '@' | '%'
+        )
 }
 
 /// Result of executing a command in a backend.
@@ -204,9 +244,16 @@ impl TerminalBackend for LocalBackend {
     async fn execute(&self, command: &str, timeout_secs: u64) -> Result<ExecResult> {
         self.policy.check_command(command)?;
         let start = now_ms();
-        let fut = Command::new("/bin/sh")
-            .arg("-c")
-            .arg(command)
+        // `check_command` guarantees a non-empty, safe-charset command, so the
+        // first token is the binary and the rest are literal arguments. Exec it
+        // directly — no `/bin/sh -c` — so no metacharacter can ever be
+        // interpreted (ARD-476).
+        let mut tokens = command.split_whitespace();
+        let binary = tokens
+            .next()
+            .expect("check_command guarantees a non-empty command");
+        let fut = Command::new(binary)
+            .args(tokens)
             .kill_on_drop(true)
             .output();
         let output = tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), fut)
@@ -280,17 +327,17 @@ impl TerminalBackend for DockerBackend {
 
         let docker = Docker::connect_with_socket_defaults()
             .map_err(|e| TerminalError::BackendNotAvailable(format!("docker socket: {e}")))?;
+        // `check_command` (run above) guarantees a safe-charset command, so pass
+        // the parsed argv straight to `docker exec` — no `/bin/sh -lc` — and no
+        // metacharacter can be re-interpreted (ARD-476).
+        let argv: Vec<String> = command.split_whitespace().map(String::from).collect();
         let exec_id = docker
             .create_exec(
                 &self.container,
                 bollard::models::ExecConfig {
                     attach_stdout: Some(true),
                     attach_stderr: Some(true),
-                    cmd: Some(vec![
-                        "/bin/sh".to_string(),
-                        "-lc".to_string(),
-                        command.to_string(),
-                    ]),
+                    cmd: Some(argv),
                     ..Default::default()
                 },
             )
@@ -538,6 +585,88 @@ impl TerminalBackend for ModalBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ARD-476: the safe-charset allowlist admits ordinary commands, flags,
+    /// paths, and `key=value` pairs (under a permissive policy, so only the
+    /// charset is exercised).
+    #[test]
+    fn check_command_accepts_safe_charset() {
+        let p = TerminalPolicy::permissive();
+        for ok in [
+            "printf hello",
+            "cargo build --release",
+            "./scripts/x.sh --flag=a/b:c",
+            "kubectl get pods -n=foo,bar",
+            "git@github.com:org/repo.git",
+            "python3 -m http.server 8000",
+        ] {
+            assert!(
+                p.check_command(ok).is_ok(),
+                "safe-charset command should be accepted: {ok:?}"
+            );
+        }
+    }
+
+    /// ARD-476: shell operators, metacharacters, expansions, quotes, globs, and
+    /// command separators (including newline/CR) are all rejected at the charset
+    /// gate, before the binary allowlist is even consulted.
+    #[test]
+    fn check_command_rejects_shell_metacharacters() {
+        let p = TerminalPolicy::permissive();
+        let rejected = [
+            "printf a; b",
+            "printf a | b",
+            "printf a && b",
+            "printf $(reboot)",
+            "printf `reboot`",
+            "printf > /etc/passwd",
+            "printf < /etc/passwd",
+            "printf \"a b\"",
+            "printf 'a b'",
+            "printf $HOME",
+            "printf a#b",
+            "printf *.rs",
+            "printf ~",
+            "printf a\nb",
+            "printf a\rb",
+        ];
+        for evil in rejected {
+            let err = p
+                .check_command(evil)
+                .expect_err(&format!("should reject {evil:?}"));
+            assert!(
+                matches!(err, TerminalError::PolicyDenied { .. }),
+                "expected PolicyDenied for {evil:?}, got {err:?}"
+            );
+        }
+    }
+
+    /// ARD-476: even with the binary allowlisted, a command bearing a shell
+    /// operator is rejected at the charset gate — so `printf … ; rm` cannot
+    /// sneak past an allowlist that permits `printf`.
+    #[test]
+    fn check_command_rejects_injection_past_allowlisted_binary() {
+        let p = TerminalPolicy::allow_commands(["printf"]);
+        assert!(p.check_command("printf hi").is_ok());
+        assert!(matches!(
+            p.check_command("printf hi ; rm -rf /").unwrap_err(),
+            TerminalError::PolicyDenied { .. }
+        ));
+    }
+
+    /// ARD-476: deny-all stays deny-all, and the binary allowlist still gates
+    /// non-allowlisted binaries.
+    #[test]
+    fn check_command_binary_allowlist_and_deny_all() {
+        assert!(
+            TerminalPolicy::deny_all()
+                .check_command("printf hi")
+                .is_err()
+        );
+        let p = TerminalPolicy::allow_commands(["printf"]);
+        assert!(p.check_command("printf hi").is_ok());
+        assert!(p.check_command("ls -la").is_err());
+    }
 
     #[tokio::test]
     async fn local_backend_execute() {
