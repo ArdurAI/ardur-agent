@@ -177,21 +177,9 @@ impl MemoryRuntime for InMemoryMemoryRuntime {
             return Vec::new();
         };
 
-        // First pass: the earliest invalidation cutoff per correction chain.
-        let mut cutoff: HashMap<Uuid, UnixTsMillis> = HashMap::new();
-        for &p in positions {
-            let r = &store.records[p];
-            if let Some(t) = r.invalidation_time {
-                cutoff
-                    .entry(r.correction_chain_root)
-                    .and_modify(|e| {
-                        if t < *e {
-                            *e = t;
-                        }
-                    })
-                    .or_insert(t);
-            }
-        }
+        // Per-chain earliest invalidation cutoff (built via `chain_cutoff_map`,
+        // shared with `search`'s live view).
+        let cutoff = chain_cutoff_map(positions.iter().map(|&p| &store.records[p]));
 
         // Second pass: live data rows within their valid interval and not yet
         // cut off by their chain's invalidation.
@@ -294,6 +282,31 @@ impl MemoryRuntime for InMemoryMemoryRuntime {
     }
 }
 
+/// Per-`correction_chain_root` earliest invalidation cutoff, built from a set
+/// of records (including their tombstones). A chain present in the returned
+/// map has been invalidated. `at_time` compares each entry against an `as_of`
+/// for the bi-temporal view; `search_records` treats any presence as "dead"
+/// for the live recall view.
+fn chain_cutoff_map<'a, I>(records: I) -> HashMap<Uuid, UnixTsMillis>
+where
+    I: IntoIterator<Item = &'a MemoryRecord>,
+{
+    let mut cutoff: HashMap<Uuid, UnixTsMillis> = HashMap::new();
+    for r in records {
+        if let Some(t) = r.invalidation_time {
+            cutoff
+                .entry(r.correction_chain_root)
+                .and_modify(|e| {
+                    if t < *e {
+                        *e = t;
+                    }
+                })
+                .or_insert(t);
+        }
+    }
+    cutoff
+}
+
 fn search_records<'a, I>(
     records: I,
     query: &str,
@@ -307,10 +320,18 @@ where
     if terms.is_empty() || top_k == 0 {
         return Vec::new();
     }
-    let mut scored: Vec<(usize, UnixTsMillis, MemoryRecord)> = records
+    // Collect once: the tombstones (`invalidation_time = Some`) must stay
+    // visible long enough to build the per-chain cutoff, after which only live
+    // data rows are scored.
+    let all: Vec<&MemoryRecord> = records.into_iter().collect();
+    let dead_chains = chain_cutoff_map(all.iter().copied());
+    let mut scored: Vec<(usize, UnixTsMillis, MemoryRecord)> = all
         .into_iter()
         .filter(|r| r.invalidation_time.is_none())
         .filter(|r| subject.is_none_or(|s| &r.subject == s))
+        // ARD-477: a forgotten memory's chain is tombstoned, so exclude every
+        // record sharing that `correction_chain_root` from recall.
+        .filter(|r| !dead_chains.contains_key(&r.correction_chain_root))
         .filter_map(|r| {
             let text = record_text(r);
             let score = terms
