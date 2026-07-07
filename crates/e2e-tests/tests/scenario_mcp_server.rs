@@ -33,6 +33,7 @@ async fn spawn_server(bearer: &str) -> String {
         slack_bot_token: "xoxb-e2e".to_string(),
         slack_signing_secret: "e2e-signing-secret-0000000000".to_string(),
         slack_app_id: "A0E2EMCP".to_string(),
+        slack_allowed_senders: Vec::new(),
         data_dir: data_dir.path().to_path_buf(),
         bind_addr: "127.0.0.1:0".to_string(),
         chat_bearer_tokens: vec!["e2e-chat-token".to_string()],
