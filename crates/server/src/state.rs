@@ -36,6 +36,7 @@
 //! session budget provisioning, which needs a request-time provisioning API on
 //! the runtime (or an injectable shared budget store).
 
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -64,6 +65,7 @@ use ardur_session_journals::{FileSessionJournal, SessionJournal};
 use ardur_slack_adapter::SlackAdapter;
 use ardur_tool_registry::ToolRegistry;
 use biscuit_auth::{Algorithm, PrivateKey};
+use futures::FutureExt;
 use secrecy::SecretString;
 use tokio::sync::{mpsc, oneshot};
 
@@ -898,9 +900,26 @@ fn spawn_worker(
             // `block_on` drives the `!Send` per-turn futures on this one thread.
             rt.block_on(async move {
                 while let Some(item) = rx.recv().await {
-                    match item {
-                        WorkItem::Channel(message) => processor.handle(message).await,
-                        WorkItem::Http(turn) => processor.handle_http(turn).await,
+                    // ARD-493: isolate each turn so a panic in one turn's
+                    // processing is caught here instead of unwinding through
+                    // `block_on` and killing the worker thread (which would
+                    // silently stop all future turns). The processor may be in
+                    // an inconsistent state after a panic, but a degraded
+                    // worker that keeps draining the queue beats a dead one.
+                    let panicked = match item {
+                        WorkItem::Channel(message) => AssertUnwindSafe(processor.handle(message))
+                            .catch_unwind()
+                            .await
+                            .is_err(),
+                        WorkItem::Http(turn) => AssertUnwindSafe(processor.handle_http(turn))
+                            .catch_unwind()
+                            .await
+                            .is_err(),
+                    };
+                    if panicked {
+                        tracing::error!(
+                            "turn worker: a turn panicked; isolating it and continuing"
+                        );
                     }
                 }
             });
@@ -1098,6 +1117,39 @@ fn write_private(path: &Path, contents: &str) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use ardur_session_journals::InMemorySessionJournal;
+
+    /// ARD-493: a panic inside a `catch_unwind`-wrapped turn future is caught,
+    /// so the worker loop survives and later turns still run — the exact wrap
+    /// `spawn_worker` now applies to every turn.
+    #[test]
+    fn catch_unwind_isolates_a_panicking_turn() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime builds");
+        let ran = Arc::new(Mutex::new(Vec::<u32>::new()));
+        let ran_loop = ran.clone();
+        runtime.block_on(async move {
+            // The per-turn wrap spawn_worker uses, over a sequence that
+            // includes a panicking turn (2).
+            for val in [1u32, 2, 3] {
+                let ran = ran_loop.clone();
+                let fut = async move {
+                    if val == 2 {
+                        panic!("simulated turn panic");
+                    }
+                    ran.lock().unwrap().push(val);
+                };
+                let panicked = AssertUnwindSafe(fut).catch_unwind().await.is_err();
+                assert!(val != 2 || panicked, "turn 2 should have panicked");
+            }
+        });
+        assert_eq!(
+            *ran.lock().unwrap(),
+            vec![1, 3],
+            "the panicking turn was isolated; turns before and after still ran"
+        );
+    }
 
     #[test]
     fn shutdown_closes_worker_queue_and_joins_thread() {
