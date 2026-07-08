@@ -167,6 +167,9 @@ pub struct FusedRuntime {
     pub(crate) max_tool_iterations: u32,
     /// §6.0 — the per-tool-call deadline.
     pub(crate) tool_timeout: Duration,
+    /// ARD-491 — the per-turn cap (bytes) on accumulated streamed assistant
+    /// content.
+    pub(crate) stream_content_max_bytes: usize,
 }
 
 impl FusedRuntime {
@@ -1599,6 +1602,28 @@ impl FusedRuntime {
                     match item {
                         Ok(StreamEvent::ContentDelta(text)) => {
                             content.push_str(&text);
+                            // ARD-491: cap accumulated streamed content so an
+                            // adversarial/buggy provider can't drive this buffer
+                            // (and the receipt/memory/journal chain it feeds) to
+                            // unbounded size. Fail closed: abort the turn, no
+                            // partial response enters the auditable chain.
+                            if content.len() > self.stream_content_max_bytes {
+                                self.release(
+                                    reservation.take().expect("reservation held"),
+                                )
+                                .await;
+                                let err = RuntimeError::StreamedContentCapExceeded {
+                                    limit: self.stream_content_max_bytes,
+                                    actual: content.len(),
+                                };
+                                yield FusedEvent::StageEnd {
+                                    stage: StageKind::ProviderStream,
+                                    ok: false,
+                                };
+                                self.fire_error(session_id, LifecyclePhase::Provider, &err)
+                                    .await;
+                                Err(err)?;
+                            }
                             yield FusedEvent::Content(text);
                         }
                         Ok(StreamEvent::ToolCallStart(call)) => {

@@ -57,6 +57,9 @@ const DEFAULT_MAX_TOOL_ITERATIONS: u32 = 5;
 /// §6.0 — the default per-tool-call deadline in seconds, overridable via
 /// `ARDUR_TOOL_TIMEOUT_SECS`.
 const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 30;
+/// ARD-491 — the default per-turn cap on accumulated streamed assistant content
+/// (bytes), overridable via `ARDUR_STREAM_CONTENT_MAX_BYTES`.
+const DEFAULT_STREAM_CONTENT_MAX_BYTES: usize = 1 << 20; // 1 MiB
 
 /// The default max tool iterations, read from `ARDUR_TOOL_MAX_ITERATIONS` (a
 /// positive integer) and otherwise [`DEFAULT_MAX_TOOL_ITERATIONS`].
@@ -77,6 +80,17 @@ fn default_tool_timeout() -> Duration {
         .filter(|&n| n > 0)
         .unwrap_or(DEFAULT_TOOL_TIMEOUT_SECS);
     Duration::from_secs(secs)
+}
+
+/// ARD-491 — the default streamed-content cap, read from
+/// `ARDUR_STREAM_CONTENT_MAX_BYTES` (a positive integer) and otherwise
+/// [`DEFAULT_STREAM_CONTENT_MAX_BYTES`].
+fn default_stream_content_max_bytes() -> usize {
+    std::env::var("ARDUR_STREAM_CONTENT_MAX_BYTES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_STREAM_CONTENT_MAX_BYTES)
 }
 
 /// Builder for [`FusedRuntime`]. See the module docs for the default policy.
@@ -110,6 +124,7 @@ pub struct FusedRuntimeBuilder {
     tools: Arc<ToolRegistry>,
     max_tool_iterations: u32,
     tool_timeout: Duration,
+    stream_content_max_bytes: usize,
 }
 
 impl FusedRuntimeBuilder {
@@ -153,6 +168,7 @@ impl FusedRuntimeBuilder {
             tools: Arc::new(ToolRegistry::new()),
             max_tool_iterations: default_max_tool_iterations(),
             tool_timeout: default_tool_timeout(),
+            stream_content_max_bytes: default_stream_content_max_bytes(),
         }
     }
 
@@ -310,6 +326,19 @@ impl FusedRuntimeBuilder {
         self
     }
 
+    /// **ARD-491.** The per-turn cap (bytes) on accumulated streamed assistant
+    /// content. A stream whose concatenated content deltas exceed it aborts the
+    /// turn with [`RuntimeError::StreamedContentCapExceeded`] (no partial
+    /// response enters the auditable chain). Defaults to
+    /// `ARDUR_STREAM_CONTENT_MAX_BYTES` (else 1 MiB).
+    #[must_use]
+    pub fn stream_content_max_bytes(mut self, max: usize) -> Self {
+        if max > 0 {
+            self.stream_content_max_bytes = max;
+        }
+        self
+    }
+
     /// **§6.0.** The per-tool-call deadline. A tool that overruns it aborts the
     /// turn with
     /// [`RuntimeError::ToolTimeout`](ardur_runtime::RuntimeError::ToolTimeout).
@@ -433,6 +462,7 @@ impl FusedRuntimeBuilder {
             tools: self.tools,
             max_tool_iterations: self.max_tool_iterations,
             tool_timeout: self.tool_timeout,
+            stream_content_max_bytes: self.stream_content_max_bytes,
         })
     }
 

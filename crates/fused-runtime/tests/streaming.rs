@@ -855,6 +855,37 @@ async fn fused_stream_cost_gate_deny_emits_error() {
     assert!(!has_stage_executed(&events, StageKind::ProviderStream));
 }
 
+/// ARD-491: a stream whose accumulated content exceeds the per-turn cap aborts
+/// with `StreamedContentCapExceeded`, fails the provider-stream stage, and mints
+/// no receipt (no partial response enters the auditable chain).
+#[tokio::test]
+async fn fused_stream_aborts_when_content_exceeds_cap() {
+    let big = "x".repeat(2048);
+    let provider = Arc::new(MultiDeltaProvider::new(&[&big]));
+    let runtime = runtime_builder(provider)
+        .stream_content_max_bytes(1024)
+        .build()
+        .expect("runtime builds");
+
+    let events = collect_stream(&runtime, user_request("overflow", &valid_token())).await;
+
+    assert!(
+        has_failed_stage(&events, StageKind::ProviderStream),
+        "the provider-stream stage should end in failure"
+    );
+    assert!(matches!(
+        terminal_error(&events),
+        Some(RuntimeError::StreamedContentCapExceeded { limit, actual })
+            if *limit == 1024 && *actual > 1024
+    ));
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Ok(FusedEvent::Receipt { .. }))),
+        "a capped stream must not mint a receipt"
+    );
+}
+
 #[tokio::test]
 async fn fused_stream_injection_block_stops_pipeline() {
     let provider = Arc::new(EchoProvider::new());
