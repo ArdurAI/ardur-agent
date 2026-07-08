@@ -498,10 +498,15 @@ impl FusedRuntime {
         )
     }
 
-    /// **ARD-420.** Check the tool's declared [`Capability`]s against the
-    /// verified cap-token claims before `invoke` runs. Each required capability
-    /// (as a `cap.*` string via [`Capability::as_str`]) must appear in the
-    /// cap-token's `tool_allowlist`; otherwise the call is denied with
+    /// **ARD-420 / ARD-474.** Check the tool's declared [`Capability`]s against
+    /// the cap-token before `invoke` runs. Each required capability (as a
+    /// `cap.*` string via [`Capability::as_str`]) is re-verified against the
+    /// token (presented as a `tool` fact to the biscuit authorizer) rather than
+    /// read off the turn-level `claims.tool_allowlist`: that field echoes the
+    /// issuing authority's root allowlist (ARD-473) and so cannot reflect
+    /// attenuation. The biscuit check is signature-enforced, so this is
+    /// non-decisional for the broad per-turn mint today and narrows correctly
+    /// once tokens are attenuated. A missing capability denies with
     /// [`RuntimeError::CapDenied`] before the tool body executes.
     fn authorize_tool_capabilities(
         &self,
@@ -514,10 +519,14 @@ impl FusedRuntime {
         if required.is_empty() {
             return Ok(());
         }
-        let claims = self.stage_cap_token_for_tool(req, provisioning, now_unix, tool_name)?;
         for cap in required {
             let label = cap.as_str();
-            if !claims.tool_allowlist.iter().any(|t| t == &label) {
+            // ARD-474: re-verify the cap-token for the capability label rather
+            // than trusting `claims.tool_allowlist` (the root authority).
+            if self
+                .stage_cap_token_for_tool(req, provisioning, now_unix, &label)
+                .is_err()
+            {
                 return Err(RuntimeError::CapDenied {
                     reason: format!(
                         "tool `{tool_name}` requires capability `{label}` which is not granted by the cap-token"
