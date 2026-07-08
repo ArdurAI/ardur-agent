@@ -337,6 +337,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "biscuit-auth",
+ "prost 0.10.4",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -949,6 +950,7 @@ dependencies = [
  "async-trait",
  "axum 0.8.9",
  "biscuit-auth",
+ "futures",
  "hex",
  "hmac 0.13.0",
  "reqwest 0.12.28",

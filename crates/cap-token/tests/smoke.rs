@@ -158,6 +158,70 @@ fn attenuation_narrows() {
 }
 
 #[test]
+fn verification_returns_effective_claims_after_attenuation() {
+    let issuer = issuer();
+    let root = issuer.public_key();
+    let parent = issuer
+        .issue(
+            HolderId("alice".to_string()),
+            scope("svc-a", ISSUE_EXPIRY, 1000, &["search", "fetch", "delete"]),
+        )
+        .expect("issue");
+
+    let attenuator = BiscuitCapTokenAttenuator;
+    let verifier = verifier();
+    let child = attenuator
+        .attenuate(&parent, AttenuationRule::ReduceBudget(800).into())
+        .expect("attenuate first budget");
+    let child = attenuator
+        .attenuate(&child, AttenuationRule::ReduceBudget(250).into())
+        .expect("attenuate second budget");
+    let child = attenuator
+        .attenuate(&child, AttenuationRule::EarlierExpiry(1_800_000_000).into())
+        .expect("attenuate expiry");
+    let child = attenuator
+        .attenuate(
+            &child,
+            AttenuationRule::RestrictTools(vec!["fetch".to_string(), "delete".to_string()]).into(),
+        )
+        .expect("attenuate first tools");
+    let child = attenuator
+        .attenuate(
+            &child,
+            AttenuationRule::RestrictTools(vec!["fetch".to_string(), "shell".to_string()]).into(),
+        )
+        .expect("attenuate second tools");
+
+    let claims = verifier
+        .verify(&child, &root, &request(NOW, "svc-a", "fetch", 10))
+        .expect("verify child");
+
+    assert_eq!(claims.budget_remaining, 250);
+    assert_eq!(claims.tool_allowlist, vec!["fetch".to_string()]);
+}
+
+#[test]
+fn non_narrowing_budget_attenuation_cannot_widen_returned_claims() {
+    let issuer = issuer();
+    let root = issuer.public_key();
+    let parent = issuer
+        .issue(
+            HolderId("alice".to_string()),
+            scope("svc-a", ISSUE_EXPIRY, 1000, &["search"]),
+        )
+        .expect("issue");
+
+    let child = BiscuitCapTokenAttenuator
+        .attenuate(&parent, AttenuationRule::ReduceBudget(10_000).into())
+        .expect("attenuate wider budget");
+    let claims = verifier()
+        .verify(&child, &root, &request(NOW, "svc-a", "search", 10))
+        .expect("verify child");
+
+    assert_eq!(claims.budget_remaining, 1000);
+}
+
+#[test]
 fn expiry_rejected() {
     let issuer = issuer();
     let root = issuer.public_key();
