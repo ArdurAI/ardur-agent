@@ -18,12 +18,16 @@ mod support;
 
 use std::sync::Arc;
 
+use ardur_cap_token::{
+    AttenuationRule, BiscuitCapTokenAttenuator, CapScope, CapTokenAttenuator, CapTokenIssuer,
+    HolderId as CapHolderId,
+};
 use ardur_cedar_policy::{CedarPolicyBundle, PolicyBundle, PolicySource};
 use ardur_runtime::{ChatRuntime, RuntimeError};
 
 use support::{
-    AUDIENCE, EchoProvider, TOOL, gate_holder_for, generous_budget, mint_token_as,
-    runtime_builder_with_policy, user_request,
+    AUDIENCE, EchoProvider, NOW_UNIX, TOOL, cap_issuer, gate_holder_for, generous_budget,
+    mint_token_as, runtime_builder_with_policy, user_request,
 };
 
 /// Compile an embedded Cedar bundle for one test (a parse failure is a test
@@ -128,4 +132,61 @@ async fn cedar_context_carries_cap_claims() {
         "the claim-gated turn reached the provider"
     );
     assert_eq!(provider.call_count(), 1, "the provider was reached");
+}
+
+/// ARD-473: Cedar resource attributes must see the cap-token's *effective*
+/// claims after attenuation, not the root authority claims serialized in the
+/// authority context. The parent token grants `chat.submit` + `echo` and budget
+/// 1000, then the child attenuates to `chat.submit` + budget 100. A Cedar policy
+/// that would pass under the root claims must deny under the child claims.
+#[tokio::test]
+async fn cedar_resource_claims_reflect_attenuated_tools_and_budget() {
+    let provider = Arc::new(EchoProvider::new());
+    let runtime = runtime_builder_with_policy(
+        provider.clone(),
+        bundle(
+            r#"permit (principal, action, resource)
+               when { resource.tools.contains("echo") || resource.budget_remaining == 1000 };"#,
+        ),
+    )
+    .provision_budget(gate_holder_for("dana"), generous_budget())
+    .build()
+    .expect("runtime builds");
+
+    let parent = cap_issuer()
+        .issue(
+            CapHolderId("dana".to_string()),
+            CapScope {
+                audience: AUDIENCE.to_string(),
+                expires_unix: NOW_UNIX + 3_600,
+                budget_remaining: 1000,
+                tool_allowlist: vec![TOOL.to_string(), "echo".to_string()],
+            },
+        )
+        .expect("issue parent token");
+    let child = BiscuitCapTokenAttenuator
+        .attenuate(&parent, AttenuationRule::ReduceBudget(100).into())
+        .expect("attenuate budget");
+    let child = BiscuitCapTokenAttenuator
+        .attenuate(
+            &child,
+            AttenuationRule::RestrictTools(vec![TOOL.to_string()]).into(),
+        )
+        .expect("attenuate tools");
+    let token = child.to_base64().expect("serialize child token");
+
+    let err = runtime
+        .submit(user_request("root claims must not leak into Cedar", &token))
+        .await
+        .expect_err("effective claims no longer satisfy the root-claim policy");
+
+    assert!(
+        matches!(err, RuntimeError::PolicyDenied { .. }),
+        "attenuated resource.tools/resource.budget_remaining should deny, got {err:?}"
+    );
+    assert_eq!(
+        provider.call_count(),
+        0,
+        "a Cedar-denied turn never reaches the provider"
+    );
 }
