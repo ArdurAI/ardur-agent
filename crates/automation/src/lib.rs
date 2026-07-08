@@ -13,13 +13,12 @@
 //!   plan.
 //! - [`TaskFlowDag`], [`FlowStep`], and [`FlowControl`] — the serializable
 //!   declared DAG model for multi-step tasks.
-//! - [`TaskFlowOrchestrator`] — the closed orchestration trait. The production
-//!   implementation is intentionally not present in Phase 1; later phases add
-//!   DAG validation, execution, Cedar invariant checks, receipt emission, CRUD,
-//!   persistence, and daemon restart resumption.
-//! - [`MockTaskFlowOrchestrator`] — an in-memory test implementation that lets
-//!   downstream crates compile against the contract without pretending the
-//!   execution engine exists.
+//! - [`TaskFlowOrchestrator`] — the closed orchestration trait. The default
+//!   in-memory implementation validates DAG shape, cap-token dispatch allowlists,
+//!   timeout/error paths, cancellation, and operator override semantics without
+//!   dispatching external side effects.
+//! - [`InMemoryTaskFlowOrchestrator`] — a small compatibility in-memory
+//!   implementation for downstream contract checks that only need create/get/cancel.
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
@@ -46,6 +45,6 @@ pub use tasks::flow::{
     TaskFlowReceiptBody, TaskId, TaskOutcome, ToolId, VerificationVerdict,
 };
 pub use tasks::{
-    DefaultTaskFlowOrchestrator, MockTaskFlowOrchestrator, TaskCreationRequest,
-    TaskFlowOrchestrator, TaskHandle, TaskRuntimeState,
+    DefaultTaskFlowOrchestrator, InMemoryTaskFlowOrchestrator, MockTaskFlowOrchestrator,
+    TaskCreationRequest, TaskFlowOrchestrator, TaskHandle, TaskRuntimeState,
 };
