@@ -112,7 +112,7 @@ that POSTs to `/chat`.
 
 **Skills.** Filesystem `SKILL.md` skills (YAML frontmatter + Markdown body, with
 progressive disclosure via `@./file.md` references) register as tools from
-`ARDUR_SKILLS_DIRS`. Nine example skills ship under
+`ARDUR_SKILLS_DIRS`. Ten example skills ship under
 [`examples/skills/`](examples/skills/).
 
 ## Architecture

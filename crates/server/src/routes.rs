@@ -15,10 +15,11 @@
 
 use std::fmt::Write as _;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Router;
 use axum::body::Bytes;
-use axum::extract::State;
+use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
@@ -37,6 +38,9 @@ use crate::openapi::{generate_python_client, generate_rust_client, openapi_spec}
 use crate::state::{
     AUDIENCE, AppState, CAP_TTL_SECS, ChatSubmitError, ChatTurnOutcome, GATEWAY_SUBJECT,
 };
+
+const HTTP_BODY_LIMIT_BYTES: usize = 64 * 1024;
+const HTTP_TURN_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Build the application router over the shared [`AppState`].
 ///
@@ -64,7 +68,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         ));
     }
 
-    router.with_state(state)
+    router
+        .layer(DefaultBodyLimit::max(HTTP_BODY_LIMIT_BYTES))
+        .with_state(state)
 }
 
 /// `GET /healthz` — always 200 with build metadata.
@@ -253,8 +259,7 @@ async fn openapi_python_client(State(state): State<Arc<AppState>>, headers: Head
 /// The `POST /chat` request body.
 ///
 /// `session_id` is a UUID string (the runtime's [`SessionId`]); omit it to have
-/// the server mint a fresh one. `stream` requests an SSE response — not yet
-/// implemented (P1.5), so a `true` value is rejected with `400`.
+/// the server mint a fresh one. `stream` requests the SSE response variant.
 #[derive(Debug, Deserialize)]
 struct ChatRequest {
     /// The user's message to run one turn against. Required and non-empty.
@@ -315,15 +320,16 @@ impl From<ChatTurnOutcome> for ChatResponse {
 ///
 /// Parses the JSON body, runs one turn through the fused runtime via
 /// [`AppState::submit_chat`], and returns the consolidated result. Status codes:
-/// `400` for a malformed body, a missing/empty `message`, or `stream: true`
-/// (unsupported); `502` when the runtime rejects or fails the turn (cost gate
-/// denied, injection blocked, provider error, …); `200` otherwise.
+/// `400` for a malformed/oversized body or missing/empty `message`; `502` when
+/// the runtime rejects or fails the turn (cost gate denied, injection blocked,
+/// provider error, …); `503` when the bounded worker queue is saturated; `504`
+/// when the HTTP turn wait times out; `200` otherwise.
 async fn chat(State(state): State<Arc<AppState>>, headers: HeaderMap, body: Bytes) -> Response {
     if let Err(response) = authorize_chat(&state, &headers) {
         return *response;
     }
 
-    if body.len() > 64 * 1024 {
+    if body.len() > HTTP_BODY_LIMIT_BYTES {
         return bad_request("request body exceeds 64KiB".to_string());
     }
 
@@ -347,20 +353,37 @@ async fn chat(State(state): State<Arc<AppState>>, headers: HeaderMap, body: Byte
     // one mints a fresh, time-ordered session (`SessionId::default` == `new`).
     let session_id = request.session_id.unwrap_or_default();
 
-    match state.submit_chat(request.message, session_id).await {
-        Ok(outcome) => (StatusCode::OK, Json(ChatResponse::from(outcome))).into_response(),
-        // The runtime rejected or failed the turn — a bad-gateway from the HTTP
-        // surface's point of view (the upstream pipeline refused or errored).
-        Err(ChatSubmitError::Runtime(e)) => (
-            StatusCode::BAD_GATEWAY,
-            Json(json!({ "error": e.to_string() })),
+    match tokio::time::timeout(
+        HTTP_TURN_TIMEOUT,
+        state.submit_chat(request.message, session_id),
+    )
+    .await
+    {
+        Err(_elapsed) => (
+            StatusCode::GATEWAY_TIMEOUT,
+            Json(json!({ "error": "turn processing timed out" })),
         )
             .into_response(),
-        Err(ChatSubmitError::WorkerGone) => (
-            StatusCode::BAD_GATEWAY,
-            Json(json!({ "error": "turn worker is unavailable" })),
-        )
-            .into_response(),
+        Ok(result) => match result {
+            Ok(outcome) => (StatusCode::OK, Json(ChatResponse::from(outcome))).into_response(),
+            // The runtime rejected or failed the turn — a bad-gateway from the HTTP
+            // surface's point of view (the upstream pipeline refused or errored).
+            Err(ChatSubmitError::Runtime(e)) => (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response(),
+            Err(ChatSubmitError::WorkerGone) => (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": "turn worker is unavailable" })),
+            )
+                .into_response(),
+            Err(ChatSubmitError::QueueFull) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "turn worker queue is full" })),
+            )
+                .into_response(),
+        },
     }
 }
 
@@ -379,30 +402,48 @@ async fn stream_chat(
     // Run the turn synchronously through the worker, then wrap the result as
     // one SSE event. This preserves the exact same semantics (receipt, cost,
     // journal) while satisfying the `text/event-stream` contract.
-    match state.submit_chat(message, session_id).await {
-        Ok(outcome) => {
-            let response = ChatResponse::from(outcome);
-            let json = serde_json::to_string(&response).expect("ChatResponse serializes");
-            let sse_body = format!("data: {json}\n\n");
-            (
-                StatusCode::OK,
+    match tokio::time::timeout(HTTP_TURN_TIMEOUT, state.submit_chat(message, session_id)).await {
+        Err(_elapsed) => (
+            StatusCode::GATEWAY_TIMEOUT,
+            [(header::CONTENT_TYPE, "text/event-stream")],
+            "data: {\"error\":\"turn processing timed out\"}\n\n",
+        )
+            .into_response(),
+        Ok(result) => match result {
+            Ok(outcome) => {
+                let response = ChatResponse::from(outcome);
+                let json = serde_json::to_string(&response).expect("ChatResponse serializes");
+                let sse_body = format!("data: {json}\n\n");
+                (
+                    StatusCode::OK,
+                    [(header::CONTENT_TYPE, "text/event-stream")],
+                    sse_body,
+                )
+                    .into_response()
+            }
+            Err(ChatSubmitError::Runtime(e)) => {
+                let json = serde_json::to_string(&json!({ "error": e.to_string() }))
+                    .expect("stream error JSON serializes");
+                (
+                    StatusCode::BAD_GATEWAY,
+                    [(header::CONTENT_TYPE, "text/event-stream")],
+                    format!("data: {json}\n\n"),
+                )
+                    .into_response()
+            }
+            Err(ChatSubmitError::WorkerGone) => (
+                StatusCode::BAD_GATEWAY,
                 [(header::CONTENT_TYPE, "text/event-stream")],
-                sse_body,
+                "data: {\"error\":\"turn worker is unavailable\"}\n\n",
             )
-                .into_response()
-        }
-        Err(ChatSubmitError::Runtime(e)) => (
-            StatusCode::BAD_GATEWAY,
-            [(header::CONTENT_TYPE, "text/event-stream")],
-            format!("data: {{\"error\":\"{}\"}}\n\n", e),
-        )
-            .into_response(),
-        Err(ChatSubmitError::WorkerGone) => (
-            StatusCode::BAD_GATEWAY,
-            [(header::CONTENT_TYPE, "text/event-stream")],
-            "data: {\"error\":\"turn worker is unavailable\"}\n\n",
-        )
-            .into_response(),
+                .into_response(),
+            Err(ChatSubmitError::QueueFull) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(header::CONTENT_TYPE, "text/event-stream")],
+                "data: {\"error\":\"turn worker queue is full\"}\n\n",
+            )
+                .into_response(),
+        },
     }
 }
 
@@ -416,7 +457,7 @@ async fn acp(State(state): State<Arc<AppState>>, headers: HeaderMap, body: Bytes
     if let Err(response) = authorize_chat(&state, &headers) {
         return *response;
     }
-    if body.len() > 64 * 1024 {
+    if body.len() > HTTP_BODY_LIMIT_BYTES {
         return bad_request("request body exceeds 64KiB".to_string());
     }
     let message: AcpMessage = match serde_json::from_slice(&body) {
@@ -442,43 +483,66 @@ async fn acp(State(state): State<Arc<AppState>>, headers: HeaderMap, body: Bytes
                 .into_response();
         }
     };
-    match state.submit_chat(prompt, SessionId::new()).await {
-        Ok(outcome) => {
-            let result = json!({
-                "accepted": true,
-                "method": request.method,
-                "receipt_id": outcome.receipt_id,
-                "reply": outcome.reply,
-                "tokens": {
-                    "input": outcome.tokens_in,
-                    "output": outcome.tokens_out,
-                },
-                "cost_usd": outcome.cents as f64 / 100.0,
-            });
-            (
-                StatusCode::OK,
-                Json(AcpMessage::Response(AcpResponse::success(
-                    request.id, result,
+    match tokio::time::timeout(
+        HTTP_TURN_TIMEOUT,
+        state.submit_chat(prompt, SessionId::new()),
+    )
+    .await
+    {
+        Err(_elapsed) => (
+            StatusCode::GATEWAY_TIMEOUT,
+            Json(AcpMessage::Response(AcpResponse::failure(
+                request.id,
+                AcpErrorObject::new(-32003, "turn processing timed out", None),
+            ))),
+        )
+            .into_response(),
+        Ok(result) => match result {
+            Ok(outcome) => {
+                let result = json!({
+                    "accepted": true,
+                    "method": request.method,
+                    "receipt_id": outcome.receipt_id,
+                    "reply": outcome.reply,
+                    "tokens": {
+                        "input": outcome.tokens_in,
+                        "output": outcome.tokens_out,
+                    },
+                    "cost_usd": outcome.cents as f64 / 100.0,
+                });
+                (
+                    StatusCode::OK,
+                    Json(AcpMessage::Response(AcpResponse::success(
+                        request.id, result,
+                    ))),
+                )
+                    .into_response()
+            }
+            Err(ChatSubmitError::Runtime(e)) => (
+                StatusCode::BAD_GATEWAY,
+                Json(AcpMessage::Response(AcpResponse::failure(
+                    request.id,
+                    AcpErrorObject::new(-32000, e.to_string(), None),
                 ))),
             )
-                .into_response()
-        }
-        Err(ChatSubmitError::Runtime(e)) => (
-            StatusCode::BAD_GATEWAY,
-            Json(AcpMessage::Response(AcpResponse::failure(
-                request.id,
-                AcpErrorObject::new(-32000, e.to_string(), None),
-            ))),
-        )
-            .into_response(),
-        Err(ChatSubmitError::WorkerGone) => (
-            StatusCode::BAD_GATEWAY,
-            Json(AcpMessage::Response(AcpResponse::failure(
-                request.id,
-                AcpErrorObject::new(-32001, "turn worker is unavailable", None),
-            ))),
-        )
-            .into_response(),
+                .into_response(),
+            Err(ChatSubmitError::WorkerGone) => (
+                StatusCode::BAD_GATEWAY,
+                Json(AcpMessage::Response(AcpResponse::failure(
+                    request.id,
+                    AcpErrorObject::new(-32001, "turn worker is unavailable", None),
+                ))),
+            )
+                .into_response(),
+            Err(ChatSubmitError::QueueFull) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(AcpMessage::Response(AcpResponse::failure(
+                    request.id,
+                    AcpErrorObject::new(-32002, "turn worker queue is full", None),
+                ))),
+            )
+                .into_response(),
+        },
     }
 }
 
@@ -542,34 +606,46 @@ fn authorize_admin(state: &AppState, headers: &HeaderMap) -> Result<(), Box<Resp
 }
 
 fn authorize_bearer(allowed_tokens: &[String], headers: &HeaderMap) -> Result<(), ()> {
+    const MAX_BEARER_TOKEN_LEN: usize = 4096;
     let presented = header_str(headers, "Authorization");
     let Some(token) = presented.strip_prefix("Bearer ") else {
         return Err(());
     };
+    // ARD-485: reject attacker-controlled, oversized bearer values before any
+    // constant-time comparison work. The previous implementation allocated two
+    // vectors sized to the presented token for every configured token, so a
+    // pre-auth request could force unbounded memory churn.
+    if token.len() > MAX_BEARER_TOKEN_LEN {
+        return Err(());
+    }
     // Fail closed when no tokens are configured — every request is denied.
     if allowed_tokens.is_empty() {
         return Err(());
     }
     // Constant-time comparison to prevent timing side-channel attacks that
-    // could leak the correct token byte-by-byte. We compare every allowed
-    // token against the presented value regardless of length mismatch, using
-    // a fixed-length pad so ct_eq always runs on equal-length slices.
+    // could leak the correct token byte-by-byte. Every configured token is
+    // compared against a fixed-width, zero-padded buffer, and the length check is
+    // folded into the constant-time result instead of branching on equality.
     let presented_bytes = token.as_bytes();
+    let presented_padded = padded_bearer::<MAX_BEARER_TOKEN_LEN>(presented_bytes);
+    let presented_len = presented_bytes.len() as u64;
     let mut found = subtle::Choice::from(0);
     for allowed in allowed_tokens {
         let allowed_bytes = allowed.as_bytes();
-        // ct_eq requires equal-length slices. When lengths differ, compare
-        // the shorter against a zero-padded version of the longer so the
-        // comparison still runs in constant time (the result is always
-        // false, but the operation takes the same path).
-        let max_len = presented_bytes.len().max(allowed_bytes.len());
-        let mut padded_presented = vec![0u8; max_len];
-        let mut padded_allowed = vec![0u8; max_len];
-        padded_presented[..presented_bytes.len()].copy_from_slice(presented_bytes);
-        padded_allowed[..allowed_bytes.len()].copy_from_slice(allowed_bytes);
-        found |= padded_presented.ct_eq(&padded_allowed);
+        let allowed_padded = padded_bearer::<MAX_BEARER_TOKEN_LEN>(allowed_bytes);
+        let allowed_len = allowed_bytes.len() as u64;
+        found |= presented_len.ct_eq(&allowed_len)
+            & presented_padded.as_slice().ct_eq(allowed_padded.as_slice());
     }
     if found.into() { Ok(()) } else { Err(()) }
+}
+
+fn padded_bearer<const N: usize>(bytes: &[u8]) -> [u8; N] {
+    let mut out = [0_u8; N];
+    for (idx, slot) in out.iter_mut().enumerate() {
+        *slot = bytes.get(idx).copied().unwrap_or(0);
+    }
+    out
 }
 
 fn unauthorized() -> Response {

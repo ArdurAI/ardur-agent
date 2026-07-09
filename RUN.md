@@ -168,8 +168,9 @@ ARDUR_MEMORY=hybrid QDRANT_URL=http://localhost:6334 ardur-server
 ```
 
 The collection (Cosine distance, the configured dim) and its payload indexes
-(`subject`, `channel_id`, `session_id`) are created automatically on first boot
-if absent.
+(`subject`, `channel_id`, `session_id`, `correction_chain_root`, and the
+event/validity/invalidation time fields used by read and GC filters) are created
+or reconciled automatically on boot if absent.
 
 ### Embeddings + hybrid retrieval
 

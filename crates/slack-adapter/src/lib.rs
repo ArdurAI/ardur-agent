@@ -16,10 +16,11 @@
 //!   [`SlackAdapter::post_message`] is the native send that preserves the full
 //!   [`SlackError`] taxonomy.
 //! - **Inbound**: [`SlackAdapter::parse_event`] verifies the signing-secret
-//!   HMAC in constant time, rejects requests outside the ±5-minute replay
-//!   window, and parses the body into a [`SlackEvent`] — the
-//!   `url_verification` handshake, a real [`SlackEvent::Message`], or an
-//!   [`Ignored`](SlackEvent::Ignored) bot-own message.
+//!   HMAC in constant time, rejects stale timestamps outside the ±5-minute
+//!   replay window, rejects duplicate signed deliveries inside that window, and
+//!   parses the body into a [`SlackEvent`] — the `url_verification` handshake, a
+//!   real [`SlackEvent::Message`], or an [`Ignored`](SlackEvent::Ignored)
+//!   bot-own message.
 //! - [`SlackError`] — the typed failure surface;
 //!   [`into_gateway_error`](SlackError::into_gateway_error) lowers it onto
 //!   [`GatewayError`] at the trait boundary.

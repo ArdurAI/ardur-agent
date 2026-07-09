@@ -52,6 +52,7 @@ use crate::reconcile::{
 use crate::shared::{SharedBudget, SharedDenyList};
 use crate::streaming::{FusedEvent, StageKind};
 use futures::{Stream, StreamExt as _};
+use tokio::sync::Mutex as AsyncMutex;
 
 /// The receipt verb minted for a completed turn (`verb.object.state.vN`).
 pub(crate) const COMPLETION_VERB: &str = "llm.completion.minted.v1";
@@ -156,6 +157,10 @@ pub struct FusedRuntime {
     pub(crate) memory: Option<Arc<dyn MemoryRuntime + Send + Sync>>,
     pub(crate) journal: Option<Arc<dyn SessionJournal>>,
     pub(crate) chain_tail: Mutex<Option<Sha256Digest>>,
+    /// Serializes receipt signing + journal/receipt persistence so concurrent
+    /// turns cannot fork the receipt hash chain or roll back each other's
+    /// journal entries.
+    pub(crate) commit_lock: AsyncMutex<()>,
     pub(crate) receipt_log: Option<PathBuf>,
     pub(crate) reconciliation_strategy: ReconciliationStrategy,
     /// §6.0 — the tools the model may call, advertised to the provider and
@@ -669,14 +674,17 @@ impl FusedRuntime {
         now_ms: u64,
     ) -> Result<ReceiptBody, RuntimeError> {
         let receipt = signed.body().clone();
-        let journal_start_len = match &self.journal {
-            Some(journal) => Some(journal.len().await.map_err(|e| {
-                RuntimeError::Internal(anyhow::anyhow!(
-                    "journal length read failed before receipt commit: {e}"
-                ))
-            })?),
-            None => None,
-        };
+
+        // Persist the signed receipt first: if the process crashes before the
+        // journal append, boot reconciliation sees a durable orphan receipt and
+        // can append a synthetic journal entry. The inverse (journal-only residue)
+        // is not reconstructable from the receipt chain.
+        if let Err(e) = self.persist_receipt(signed.jws_compact()) {
+            return Err(RuntimeError::Internal(anyhow::anyhow!(
+                "receipt persist failed before journal append: {e}"
+            )));
+        }
+        *self.chain_tail.lock() = Some(Sha256Digest::of(signed.jws_compact().as_bytes()));
 
         if let Some(journal) = &self.journal {
             if iteration == 1 {
@@ -689,7 +697,7 @@ impl FusedRuntime {
                         .await
                     {
                         return Err(RuntimeError::Internal(anyhow::anyhow!(
-                            "journal user append failed before receipt commit: {e}"
+                            "journal user append failed after receipt commit; boot reconciliation can heal the durable orphan receipt: {e}"
                         )));
                     }
                 }
@@ -702,28 +710,12 @@ impl FusedRuntime {
                 })
                 .await
             {
-                if let Some(start_len) = journal_start_len {
-                    let _ = journal.truncate(start_len).await;
-                }
                 return Err(RuntimeError::Internal(anyhow::anyhow!(
-                    "journal assistant append failed before receipt commit: {e}"
+                    "journal assistant append failed after receipt commit; boot reconciliation can heal the durable orphan receipt: {e}"
                 )));
             }
         }
 
-        if let Err(e) = self.persist_receipt(signed.jws_compact()) {
-            if let (Some(journal), Some(start_len)) = (&self.journal, journal_start_len) {
-                if let Err(rollback_err) = journal.truncate(start_len).await {
-                    return Err(RuntimeError::Internal(anyhow::anyhow!(
-                        "receipt persist failed after journal append: {e}; journal rollback failed: {rollback_err}"
-                    )));
-                }
-            }
-            return Err(RuntimeError::Internal(anyhow::anyhow!(
-                "receipt persist failed after journal append: {e}"
-            )));
-        }
-        *self.chain_tail.lock() = Some(Sha256Digest::of(signed.jws_compact().as_bytes()));
         Ok(receipt)
     }
 
@@ -980,12 +972,12 @@ impl FusedRuntime {
         provisioning: PerRequestProvisioning,
     ) -> Result<SubmitResult, RuntimeError> {
         let session_id = req.session_id;
-        let now_ms = self.clock.now_ms();
-        let now_unix = now_ms / 1000;
+        let turn_start_ms = self.clock.now_ms();
+        let turn_start_unix = turn_start_ms / 1000;
 
         // ---- 1. cap-token: parse + verify against the root, audience, tool,
         //         and deny-list.
-        let claims = match self.stage_cap_token(&req, &provisioning, now_unix) {
+        let claims = match self.stage_cap_token(&req, &provisioning, turn_start_unix) {
             Ok(claims) => claims,
             Err(err) => {
                 self.fire_error(session_id, LifecyclePhase::Submit, &err)
@@ -1052,6 +1044,10 @@ impl FusedRuntime {
 
         let (receipt, final_content) = loop {
             iteration += 1;
+            // ARD-480: expiry-sensitive re-verification happens throughout the
+            // tool loop, so use the clock at this iteration, not turn start.
+            let iteration_now_ms = self.clock.now_ms();
+            let iteration_now_unix = iteration_now_ms / 1000;
 
             // Build this iteration's request from the current transcript + tools.
             let mut iter_request =
@@ -1143,11 +1139,12 @@ impl FusedRuntime {
                             .await;
                         return Err(err);
                     };
+                    let tool_auth_now_unix = self.clock.now_ms() / 1000;
                     if let Err(err) = self.authorize_tool_invocation(
                         &req,
                         &provisioning,
                         session_id,
-                        now_unix,
+                        tool_auth_now_unix,
                         &call.name,
                     ) {
                         self.release(reservation).await;
@@ -1160,7 +1157,7 @@ impl FusedRuntime {
                     if let Err(err) = self.authorize_tool_capabilities(
                         &req,
                         &provisioning,
-                        now_unix,
+                        tool_auth_now_unix,
                         &call.name,
                         tool.required_capabilities(),
                     ) {
@@ -1239,46 +1236,75 @@ impl FusedRuntime {
 
             // 6. receipt: mint over the provider response, recording the tool
             //    calls and the combined (provider + tool) cost, chained onto the
-            //    prior receipt.
+            //    prior receipt. The commit lock covers parent-hash selection,
+            //    signing, cost finalization, journal append, receipt persistence,
+            //    and tail update; this prevents concurrent turns from forking the
+            //    receipt chain or rolling back each other's journals.
             let combined_cost = add_cost(response.cost, &tool_cost);
-            let parent_hash = *self.chain_tail.lock();
-            let body = ReceiptBody {
-                receipt_id: uuid::Uuid::new_v4(),
-                parent_hash,
-                verb: self.verb.clone(),
-                issued_at: ardur_receipt::UnixTsMillis(now_ms),
-                subject: ardur_receipt::HolderId(claims.subject.0.clone()),
-                cap_token_id: ardur_receipt::TokenId(claims.token_id.to_string()),
-                payload_digest: Sha256Digest::of(response.content.as_bytes()),
-                cost: runtime_cost_to_receipt(&combined_cost),
-                tool_calls: tool_receipts,
-                provider: Some(self.provider.name()),
-            };
-            let signed = match ReceiptSigner::sign(body, &self.receipt_key) {
-                Ok(signed) => signed,
-                Err(e) => {
-                    self.release(reservation).await;
-                    self.fire_error(session_id, LifecyclePhase::Receipt, &e)
-                        .await;
-                    return Err(RuntimeError::Internal(anyhow::anyhow!(
-                        "receipt mint failed: {e}"
-                    )));
+            let (signed, receipt) = {
+                let _commit_guard = self.commit_lock.lock().await;
+                let parent_hash = *self.chain_tail.lock();
+                let body = ReceiptBody {
+                    receipt_id: uuid::Uuid::new_v4(),
+                    parent_hash,
+                    verb: self.verb.clone(),
+                    issued_at: ardur_receipt::UnixTsMillis(iteration_now_ms),
+                    subject: ardur_receipt::HolderId(claims.subject.0.clone()),
+                    cap_token_id: ardur_receipt::TokenId(claims.token_id.to_string()),
+                    payload_digest: Sha256Digest::of(response.content.as_bytes()),
+                    cost: runtime_cost_to_receipt(&combined_cost),
+                    tool_calls: tool_receipts,
+                    provider: Some(self.provider.name()),
+                };
+                let signed = match ReceiptSigner::sign(body, &self.receipt_key) {
+                    Ok(signed) => signed,
+                    Err(e) => {
+                        self.release(reservation).await;
+                        self.fire_error(session_id, LifecyclePhase::Receipt, &e)
+                            .await;
+                        return Err(RuntimeError::Internal(anyhow::anyhow!(
+                            "receipt mint failed: {e}"
+                        )));
+                    }
+                };
+
+                // 7. cost-gate finalize: settle this iteration against the
+                //    combined actual (provider + tools) before making the turn
+                //    durable. If the reservation expired, no receipt/journal entry
+                //    is committed for a turn the cost gate rejected.
+                let actual = runtime_cost_to_gate(&combined_cost);
+                match self.gate.finalize(reservation, actual).await {
+                    Ok(_) => {}
+                    Err(e) => {
+                        let err = map_admission_error(e);
+                        self.fire_error(session_id, LifecyclePhase::CostGate, &err)
+                            .await;
+                        return Err(err);
+                    }
                 }
-            };
-            let receipt = match self
-                .commit_receipt_and_journal(session_id, iteration, &req, &response, &signed, now_ms)
-                .await
-            {
-                Ok(receipt) => receipt,
-                Err(err) => {
-                    self.release(reservation).await;
-                    self.fire_error(session_id, LifecyclePhase::Receipt, &err)
-                        .await;
-                    return Err(err);
-                }
+
+                let receipt = match self
+                    .commit_receipt_and_journal(
+                        session_id,
+                        iteration,
+                        &req,
+                        &response,
+                        &signed,
+                        iteration_now_ms,
+                    )
+                    .await
+                {
+                    Ok(receipt) => receipt,
+                    Err(err) => {
+                        self.fire_error(session_id, LifecyclePhase::Receipt, &err)
+                            .await;
+                        return Err(err);
+                    }
+                };
+                (signed, receipt)
             };
 
-            // 7. post-receipt hooks (observational; the call already happened).
+            // 8. post-receipt hooks (observational; the call already happened).
             let post_ctx = PostReceiptCtx {
                 session_id,
                 signed_receipt: &signed,
@@ -1288,19 +1314,6 @@ impl FusedRuntime {
             };
             for err in self.registry.run_post_receipt(&post_ctx).await {
                 tracing::warn!(error = %err, "post-receipt hook error (non-fatal)");
-            }
-
-            // 8. cost-gate finalize: settle this iteration against the combined
-            //    actual (provider + the tools it triggered).
-            let actual = runtime_cost_to_gate(&combined_cost);
-            match self.gate.finalize(reservation, actual).await {
-                Ok(_) => {}
-                Err(e) => {
-                    let err = map_admission_error(e);
-                    self.fire_error(session_id, LifecyclePhase::CostGate, &err)
-                        .await;
-                    return Err(err);
-                }
             }
 
             // 9. memory: record this round as a bi-temporal fact. Non-fatal, but
@@ -1319,7 +1332,7 @@ impl FusedRuntime {
                             &token,
                             &self.cap_root,
                             &RequiredCaveats {
-                                now_unix,
+                                now_unix: iteration_now_unix,
                                 audience,
                                 tool: ardur_memory::MEMORY_WRITE_CAPABILITY.to_string(),
                                 cost: self.cost_units,
@@ -1328,8 +1341,12 @@ impl FusedRuntime {
                     });
                 match memory_write_claims {
                     Ok(mem_claims) => {
-                        let record =
-                            turn_record(&mem_claims.subject.0, &response, &receipt, now_ms);
+                        let record = turn_record(
+                            &mem_claims.subject.0,
+                            &response,
+                            &receipt,
+                            iteration_now_ms,
+                        );
                         let plane = MemoryControlPlane::new(memory.as_ref(), self.policies.clone());
                         if let Err(mem_err) = plane.record(&mem_claims, record) {
                             self.fire_error(session_id, LifecyclePhase::MemoryWrite, &mem_err)

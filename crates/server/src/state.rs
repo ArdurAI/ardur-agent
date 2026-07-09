@@ -94,6 +94,10 @@ pub const CAP_TTL_SECS: u64 = 5 * 60;
 /// down to the configured budget so a tiny budget still admits its first turn.
 const PER_TURN_CENTS_CAP: u64 = 1_000;
 
+/// Maximum number of turns waiting on the single current-thread worker. This
+/// bounds pre-processing memory growth under bursty gateway traffic.
+const WORKER_QUEUE_CAPACITY: usize = 1024;
+
 /// The built-in development Cedar policy: permit chat submission plus the
 /// tool-invocation action that is still constrained by cap-token tool caveats.
 /// It is available only when `ARDUR_DEV_PERMISSIVE_POLICY=true` is explicitly set.
@@ -159,6 +163,10 @@ pub enum ChatSubmitError {
     /// The turn worker has shut down, so no turn can be processed.
     #[error("turn worker is unavailable")]
     WorkerGone,
+    /// The bounded turn queue is full, so accepting more work would risk
+    /// unbounded memory growth.
+    #[error("turn worker queue is full")]
+    QueueFull,
 }
 
 /// The wired application state shared (behind an [`Arc`]) across request handlers.
@@ -169,7 +177,7 @@ pub enum ChatSubmitError {
 /// the cap-token issuer live on the worker thread (see the module docs).
 pub struct AppState {
     slack: Arc<SlackAdapter>,
-    work_tx: Arc<Mutex<Option<mpsc::UnboundedSender<WorkItem>>>>,
+    work_tx: Arc<Mutex<Option<mpsc::Sender<WorkItem>>>>,
     /// The OS-thread handle for the turn worker — used by [`shutdown`](Self::shutdown)
     /// to join the worker after closing the work channel. `None` in test harnesses
     /// that construct an `AppState` without spawning a real worker.
@@ -509,7 +517,7 @@ impl AppState {
     #[must_use]
     pub fn enqueue(&self, message: IncomingMessage) -> bool {
         self.work_sender()
-            .is_some_and(|tx| tx.send(WorkItem::Channel(message)).is_ok())
+            .is_some_and(|tx| tx.try_send(WorkItem::Channel(message)).is_ok())
     }
 
     /// Run a synchronous chat turn (the `POST /chat` path): hand the prompt to the
@@ -537,8 +545,10 @@ impl AppState {
         let Some(work_tx) = self.work_sender() else {
             return Err(ChatSubmitError::WorkerGone);
         };
-        if work_tx.send(WorkItem::Http(turn)).is_err() {
-            return Err(ChatSubmitError::WorkerGone);
+        match work_tx.try_send(WorkItem::Http(turn)) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => return Err(ChatSubmitError::QueueFull),
+            Err(mpsc::error::TrySendError::Closed(_)) => return Err(ChatSubmitError::WorkerGone),
         }
         match reply_rx.await {
             Ok(result) => result.map_err(ChatSubmitError::Runtime),
@@ -583,7 +593,7 @@ impl AppState {
         }
     }
 
-    fn work_sender(&self) -> Option<mpsc::UnboundedSender<WorkItem>> {
+    fn work_sender(&self) -> Option<mpsc::Sender<WorkItem>> {
         self.work_tx
             .lock()
             .expect("work_tx mutex poisoned")
@@ -880,10 +890,8 @@ impl Processor {
 /// Spawn the worker thread: a current-thread Tokio runtime that drains the work
 /// queue, processing each message to completion in arrival order. Returns the
 /// sender the HTTP layer enqueues onto.
-fn spawn_worker(
-    processor: Processor,
-) -> (mpsc::UnboundedSender<WorkItem>, std::thread::JoinHandle<()>) {
-    let (tx, mut rx) = mpsc::unbounded_channel::<WorkItem>();
+fn spawn_worker(processor: Processor) -> (mpsc::Sender<WorkItem>, std::thread::JoinHandle<()>) {
+    let (tx, mut rx) = mpsc::channel::<WorkItem>(WORKER_QUEUE_CAPACITY);
     let handle = std::thread::Builder::new()
         .name("ardur-turn-worker".to_string())
         .spawn(move || {
@@ -935,7 +943,7 @@ fn spawn_worker(
 /// in log lines.
 fn spawn_inbound_forwarder<G>(
     label: &'static str,
-    work_tx: Arc<Mutex<Option<mpsc::UnboundedSender<WorkItem>>>>,
+    work_tx: Arc<Mutex<Option<mpsc::Sender<WorkItem>>>>,
     channel: Arc<G>,
 ) where
     G: MessagingGateway + Send + Sync + 'static,
@@ -956,9 +964,21 @@ fn spawn_inbound_forwarder<G>(
                         );
                         break;
                     };
-                    if tx.send(WorkItem::Channel(incoming)).is_err() {
-                        tracing::error!(channel = label, "turn worker is gone; stopping forwarder");
-                        break;
+                    match tx.try_send(WorkItem::Channel(incoming)) {
+                        Ok(()) => {}
+                        Err(mpsc::error::TrySendError::Full(_)) => {
+                            tracing::warn!(
+                                channel = label,
+                                "turn worker queue is full; dropping inbound message"
+                            );
+                        }
+                        Err(mpsc::error::TrySendError::Closed(_)) => {
+                            tracing::error!(
+                                channel = label,
+                                "turn worker is gone; stopping forwarder"
+                            );
+                            break;
+                        }
                     }
                 }
                 Err(e) => {
@@ -1153,7 +1173,7 @@ mod tests {
 
     #[test]
     fn shutdown_closes_worker_queue_and_joins_thread() {
-        let (work_tx, mut work_rx) = mpsc::unbounded_channel::<WorkItem>();
+        let (work_tx, mut work_rx) = mpsc::channel::<WorkItem>(1);
         let (joined_tx, joined_rx) = std::sync::mpsc::channel();
         let worker_handle = std::thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()

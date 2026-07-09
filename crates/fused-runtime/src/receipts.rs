@@ -65,25 +65,62 @@ fn decode_body(jws_compact: &str) -> Result<ReceiptBody, ReceiptChainError> {
 }
 
 /// Load every persisted receipt from `path`, in append (chain) order. A missing
-/// file is an empty chain (no turns have been receipted yet).
+/// file is an empty chain (no turns have been receipted yet). A single malformed
+/// unterminated tail is treated as a torn write from a crash: it is dropped and
+/// the file is truncated back to the last complete line so future appends cannot
+/// concatenate onto corrupt bytes.
 pub fn load_persisted_chain(
     path: impl AsRef<Path>,
 ) -> Result<Vec<PersistedReceipt>, ReceiptChainError> {
-    let raw = match std::fs::read_to_string(path.as_ref()) {
+    let path = path.as_ref();
+    let raw = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(ReceiptChainError::Io(e)),
     };
-    raw.lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| {
-            let body = decode_body(line)?;
-            Ok(PersistedReceipt {
+    let (chain, torn_tail_start) = parse_receipt_lines(&raw)?;
+    if let Some(offset) = torn_tail_start {
+        tracing::warn!(
+            path = %path.display(),
+            truncate_at = offset,
+            "dropping torn trailing receipt-log line"
+        );
+        let file = std::fs::OpenOptions::new().write(true).open(path)?;
+        file.set_len(offset as u64)?;
+        file.sync_all()?;
+    }
+    Ok(chain)
+}
+
+fn parse_receipt_lines(
+    raw: &str,
+) -> Result<(Vec<PersistedReceipt>, Option<usize>), ReceiptChainError> {
+    let mut chain = Vec::new();
+    let mut offset = 0;
+    for (line_index, segment) in raw.split_inclusive('\n').enumerate() {
+        let segment_start = offset;
+        offset += segment.len();
+        let line = segment.strip_suffix('\n').unwrap_or(segment);
+        if line.trim().is_empty() {
+            continue;
+        }
+        match decode_body(line) {
+            Ok(body) => chain.push(PersistedReceipt {
                 jws_compact: line.to_string(),
                 body,
-            })
-        })
-        .collect()
+            }),
+            Err(err) if !segment.ends_with('\n') && offset == raw.len() => {
+                tracing::warn!(
+                    line_index,
+                    error = %err,
+                    "ignoring malformed trailing receipt-log line"
+                );
+                return Ok((chain, Some(segment_start)));
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Ok((chain, None))
 }
 
 /// Verify the hash linkage of a loaded chain: the first receipt must be a

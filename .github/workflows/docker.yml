@@ -1,4 +1,6 @@
-# Validates the production Docker image path documented in RUN.md.
+# Validates the production Docker image path documented in RUN.md, including the
+# image contract, SBOM generation, vulnerability scanning, and provenance
+# attestation on trusted pushes.
 #
 # Keep this as a separate Ubuntu-only workflow: the release Docker build is
 # materially more expensive than the Rust fmt/clippy/check/test gauntlet and
@@ -14,6 +16,9 @@ on:
 
 permissions:
   contents: read
+  id-token: write
+  attestations: write
+  security-events: write
 
 concurrency:
   group: docker-${{ github.ref }}
@@ -41,10 +46,60 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Inspect image contract
+        id: inspect
         run: |
           set -euo pipefail
           docker image inspect ardur-agent:ci \
-            --format 'id={{.Id}} user={{.Config.User}} entrypoint={{json .Config.Entrypoint}} healthcheck={{json .Config.Healthcheck.Test}}'
+            --format 'id={{.Id}} user={{.Config.User}} entrypoint={{json .Config.Entrypoint}} healthcheck={{json .Config.Healthcheck.Test}}' \
+            | tee image-contract.txt
+          image_id="$(docker image inspect ardur-agent:ci --format '{{.Id}}')"
+          case "${image_id}" in
+            sha256:*) ;;
+            *) echo "unexpected image id: ${image_id}" >&2; exit 1 ;;
+          esac
+          echo "image_id=${image_id}" >> "${GITHUB_OUTPUT}"
+
+      - name: Attest image provenance
+        if: github.event_name == 'push'
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-name: ardur-agent
+          subject-digest: ${{ steps.inspect.outputs.image_id }}
+
+      - name: Generate SPDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          image: ardur-agent:ci
+          format: spdx-json
+          output-file: ardur-agent.spdx.json
+          upload-artifact: false
+
+      - name: Trivy vulnerability scan (SARIF)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ardur-agent:ci
+          format: sarif
+          output: trivy-results.sarif
+          vuln-type: os,library
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: '0'
+
+      - name: Upload Trivy SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@99df26d4f13ea111d4ec1a7dddef6063f76b97e9 # v4
+        with:
+          sarif_file: trivy-results.sarif
+
+      - name: Trivy vulnerability gate
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ardur-agent:ci
+          format: table
+          vuln-type: os,library
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: '1'
 
       - name: Smoke /healthz through container healthcheck
         run: |
@@ -61,7 +116,6 @@ jobs:
             -e SLACK_SIGNING_SECRET=dummy \
             -e SLACK_APP_ID=dummy \
             -e ARDUR_PROVIDER=ollama \
-            -e ARDUR_DATA_DIR=/tmp/ardur-data \
             ardur-agent:ci
 
           for _ in $(seq 1 15); do

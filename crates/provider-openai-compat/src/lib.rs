@@ -752,7 +752,7 @@ fn map_finish_reason(reason: Option<&str>, tool_calls: Vec<ToolCall>) -> FinishR
 /// Convert an optional dollar cost into whole US cents, rounding UP to the next
 /// cent (minimum 1¢ for any positive cost — ARD-495: sub-cent costs must not
 /// round to 0 and bypass the budget). Missing cost is `0`.
-fn dollars_to_cents(cost: Option<f64>) -> u64 {
+pub(crate) fn dollars_to_cents(cost: Option<f64>) -> u64 {
     match cost {
         Some(dollars) if dollars.is_finite() && dollars > 0.0 => {
             ((dollars * 100.0).ceil() as u64).max(1)

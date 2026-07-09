@@ -1,11 +1,12 @@
 //! [`SlackAdapter`] — the Slack backend for the §4.0 [`MessagingGateway`]
 //! contract.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use hmac::{Hmac, KeyInit, Mac};
+use parking_lot::Mutex;
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -54,6 +55,10 @@ pub struct SlackAdapter {
     /// an empty set drops every sender; otherwise only listed user ids may
     /// command the bot.
     allowed_senders: HashSet<String>,
+    /// Default in-memory duplicate-delivery guard (ARD-481): timestamp skew
+    /// stops stale signed requests, while this cache rejects the same valid
+    /// Slack signature if it is replayed again inside the freshness window.
+    replay_cache: Mutex<HashMap<String, u64>>,
 }
 
 impl SlackAdapter {
@@ -67,6 +72,7 @@ impl SlackAdapter {
             http: reqwest::Client::new(),
             base_url: DEFAULT_BASE_URL.to_owned(),
             allowed_senders: HashSet::new(),
+            replay_cache: Mutex::new(HashMap::new()),
         }
     }
 
@@ -217,8 +223,8 @@ impl SlackAdapter {
     /// `now_unix` (seconds) — the deterministic core
     /// [`parse_event`](Self::parse_event) delegates to.
     ///
-    /// Verification order: replay-window check on the timestamp, then the
-    /// constant-time HMAC signature check, then JSON parsing.
+    /// Verification order: replay-window check on the timestamp, constant-time
+    /// HMAC signature check, duplicate-delivery replay check, then JSON parsing.
     ///
     /// # Errors
     /// - [`SlackError::ParseError`] if the timestamp header or body is malformed.
@@ -246,6 +252,12 @@ impl SlackAdapter {
 
         // Signature: v0=HMAC-SHA256(signing_secret, "v0:{ts}:{body}").
         self.verify_signature(&headers.signature, &headers.timestamp, body)?;
+
+        // ARD-481: Slack's timestamp freshness window alone still accepts the
+        // same signed body repeatedly for five minutes. After proving the HMAC
+        // is valid, remember the signature and reject duplicates inside the
+        // window by default.
+        self.reject_duplicate_replay(&headers.signature, ts, now_unix)?;
 
         let envelope: EventEnvelope = serde_json::from_str(body)
             .map_err(|e| SlackError::ParseError(format!("malformed event body: {e}")))?;
@@ -310,6 +322,27 @@ impl SlackAdapter {
         } else {
             Err(SlackError::InvalidSignature)
         }
+    }
+
+    /// Reject duplicate signed inbound deliveries within the configured replay
+    /// window. Called only after the timestamp and HMAC have already verified,
+    /// so attacker-supplied invalid signatures cannot fill the cache.
+    fn reject_duplicate_replay(
+        &self,
+        signature: &str,
+        timestamp: u64,
+        now_unix: u64,
+    ) -> Result<(), SlackError> {
+        let mut cache = self.replay_cache.lock();
+        cache.retain(|_, seen_ts| now_unix.abs_diff(*seen_ts) <= REPLAY_WINDOW_SECONDS);
+
+        let key = format!("{timestamp}:{signature}");
+        if cache.insert(key, timestamp).is_some() {
+            return Err(SlackError::Replay {
+                age_seconds: now_unix.abs_diff(timestamp),
+            });
+        }
+        Ok(())
     }
 
     /// Resolve an [`OutgoingMessage`] target into the Slack `channel` argument.

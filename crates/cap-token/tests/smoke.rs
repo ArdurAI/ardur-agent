@@ -5,7 +5,7 @@
 use ardur_cap_token::{
     AttenuationRule, BiscuitCapTokenAttenuator, BiscuitCapTokenIssuer, BiscuitCapTokenVerifier,
     CapScope, CapToken, CapTokenAttenuator, CapTokenError, CapTokenIssuer, CapTokenVerifier,
-    Caveat, HashSetDenyList, HolderId, KeyPair, RequiredCaveats,
+    Caveat, FileDenyList, HashSetDenyList, HolderId, KeyPair, RequiredCaveats,
 };
 
 // Fixed timestamps keep the tests deterministic (no wall clock).
@@ -312,4 +312,67 @@ fn revocation() {
     ));
     // A separately issued token has distinct revocation ids and still verifies.
     assert!(verifier.verify(&live, &root, &req).is_ok());
+}
+
+#[test]
+fn file_deny_list_persists_revocations_across_reopen() {
+    let issuer = issuer();
+    let root = issuer.public_key();
+    let token = issuer
+        .issue(
+            HolderId("alice".to_string()),
+            scope("svc-a", ISSUE_EXPIRY, 1000, &["search"]),
+        )
+        .expect("issue");
+    let req = request(NOW, "svc-a", "search", 10);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("cap-denylist.hex");
+
+    let deny = FileDenyList::open(&path).expect("open deny list");
+    assert!(
+        BiscuitCapTokenVerifier::new(deny)
+            .verify(&token, &root, &req)
+            .is_ok(),
+        "token starts live before any file-backed revocation"
+    );
+
+    let deny = FileDenyList::open(&path).expect("reopen deny list");
+    deny.revoke_token(&token).expect("persist revocation");
+
+    let reopened = FileDenyList::open(&path).expect("reopen persisted deny list");
+    let verifier = BiscuitCapTokenVerifier::new(reopened);
+    assert!(matches!(
+        verifier.verify(&token, &root, &req),
+        Err(CapTokenError::Revoked)
+    ));
+}
+
+#[test]
+fn file_deny_list_propagates_revocations_to_existing_verifiers() {
+    let issuer = issuer();
+    let root = issuer.public_key();
+    let token = issuer
+        .issue(
+            HolderId("alice".to_string()),
+            scope("svc-a", ISSUE_EXPIRY, 1000, &["search"]),
+        )
+        .expect("issue");
+    let req = request(NOW, "svc-a", "search", 10);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("cap-denylist.hex");
+
+    let writer = FileDenyList::open(&path).expect("writer deny list");
+    let reader = FileDenyList::open(&path).expect("reader deny list");
+    let verifier = BiscuitCapTokenVerifier::new(reader);
+    assert!(
+        verifier.verify(&token, &root, &req).is_ok(),
+        "reader verifier sees token as live before writer revokes it"
+    );
+
+    writer.revoke_token(&token).expect("persist revocation");
+
+    assert!(matches!(
+        verifier.verify(&token, &root, &req),
+        Err(CapTokenError::Revoked)
+    ));
 }

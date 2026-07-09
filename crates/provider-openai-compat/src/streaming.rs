@@ -29,15 +29,17 @@ use ardur_provider_runtime::{FinishReason, ProviderError, StreamEvent, ToolCall,
 use futures::{Stream, StreamExt};
 use serde::Deserialize;
 
+use crate::dollars_to_cents;
+
 /// One event yielded by the [`stream_chat`](crate::OpenAiCompatProvider::stream_chat)
 /// stream.
 ///
 /// The stream interleaves these as the upstream produces them: any number of
-/// [`Content`](Self::Content) / [`ToolCall`](Self::ToolCall) deltas, then a
-/// single [`Done`](Self::Done) when the choice's `finish_reason` arrives, then —
-/// when `stream_options.include_usage` was requested — a final
-/// [`Usage`](Self::Usage). The stream ends (yields `None`) at the `[DONE]`
-/// marker.
+/// [`Content`](Self::Content) / [`ToolCall`](Self::ToolCall) deltas, then — when
+/// `stream_options.include_usage` was requested — a final [`Usage`](Self::Usage),
+/// then a single [`Done`](Self::Done). The OpenAI wire sends `finish_reason`
+/// before the terminal usage chunk, so this adapter buffers the finish reason
+/// until usage (or `[DONE]` when no usage arrives) to keep `Done` terminal.
 #[derive(Clone, Debug, PartialEq)]
 pub enum OpenAiCompatChunk {
     /// An incremental slice of assistant text (`choices[0].delta.content`).
@@ -203,14 +205,17 @@ struct DeltaFunction {
     arguments: Option<String>,
 }
 
-/// The streamed `usage` object (final chunk). Only token counts are surfaced;
-/// streamed chunks do not carry OpenAI-compatible's per-call `cost`.
+/// The streamed `usage` object (final chunk). `cost` is a non-standard optional
+/// dollar cost emitted by some OpenAI-compatible gateways; OpenAI proper omits
+/// it.
 #[derive(Debug, Deserialize)]
 struct StreamUsage {
     #[serde(default)]
     prompt_tokens: u32,
     #[serde(default)]
     completion_tokens: u32,
+    #[serde(default)]
+    cost: Option<f64>,
 }
 
 /// Lift one streamed wire tool-call into the public [`ToolCallDelta`], dropping
@@ -252,11 +257,14 @@ fn map_stream_finish_reason(reason: &str, acc: &ToolCallAccumulator) -> FinishRe
 ///
 /// A chunk may carry a content delta, tool-call deltas, a finish reason, and/or
 /// usage; each present part becomes its own event, emitted content → tool-call →
-/// done → usage. A chunk that fails to parse becomes a single
+/// usage → done. The OpenAI wire's finish reason is buffered in
+/// `pending_finish` until the usage chunk arrives, so `Done` remains terminal.
+/// A chunk that fails to parse becomes a single
 /// [`ProviderError::Upstream`].
 fn process_chunk(
     json: &str,
     acc: &mut ToolCallAccumulator,
+    pending_finish: &mut Option<FinishReason>,
     out: &mut VecDeque<Result<OpenAiCompatChunk, ProviderError>>,
 ) {
     let parsed: ChatCompletionStreamResponse = match serde_json::from_str(json) {
@@ -281,18 +289,27 @@ fn process_chunk(
             out.push_back(Ok(OpenAiCompatChunk::ToolCall(delta)));
         }
         if let Some(reason) = choice.finish_reason {
-            out.push_back(Ok(OpenAiCompatChunk::Done(map_stream_finish_reason(
-                &reason, acc,
-            ))));
+            *pending_finish = Some(map_stream_finish_reason(&reason, acc));
         }
     }
 
     if let Some(u) = parsed.usage {
+        let cost_cents = u.cost.map(|dollars| dollars_to_cents(Some(dollars)));
         out.push_back(Ok(OpenAiCompatChunk::Usage(Usage {
             tokens_in: u.prompt_tokens,
             tokens_out: u.completion_tokens,
-            cost_cents: None,
+            cost_cents,
         })));
+        flush_pending_finish(pending_finish, out);
+    }
+}
+
+fn flush_pending_finish(
+    pending_finish: &mut Option<FinishReason>,
+    out: &mut VecDeque<Result<OpenAiCompatChunk, ProviderError>>,
+) {
+    if let Some(reason) = pending_finish.take() {
+        out.push_back(Ok(OpenAiCompatChunk::Done(reason)));
     }
 }
 
@@ -305,6 +322,7 @@ struct StreamState {
     buf: Vec<u8>,
     pending: VecDeque<Result<OpenAiCompatChunk, ProviderError>>,
     acc: ToolCallAccumulator,
+    pending_finish: Option<FinishReason>,
     finished: bool,
 }
 
@@ -325,10 +343,16 @@ fn handle_sse_line(line: &str, st: &mut StreamState) {
         return;
     }
     if payload == "[DONE]" {
+        flush_pending_finish(&mut st.pending_finish, &mut st.pending);
         st.finished = true;
         return;
     }
-    process_chunk(payload, &mut st.acc, &mut st.pending);
+    process_chunk(
+        payload,
+        &mut st.acc,
+        &mut st.pending_finish,
+        &mut st.pending,
+    );
 }
 
 /// Pull every complete line (terminated by `\n`) out of the byte buffer and
@@ -365,6 +389,7 @@ pub(crate) fn into_chunk_stream(
         buf: Vec::new(),
         pending: VecDeque::new(),
         acc: ToolCallAccumulator::new(),
+        pending_finish: None,
         finished: false,
     };
 
@@ -395,6 +420,7 @@ pub(crate) fn into_chunk_stream(
                             handle_sse_line(text, &mut st);
                         }
                     }
+                    flush_pending_finish(&mut st.pending_finish, &mut st.pending);
                     st.finished = true;
                 }
             }
@@ -558,8 +584,10 @@ mod tests {
     /// Drain a single JSON chunk into the events it produces.
     fn events_of(json: &str) -> Vec<OpenAiCompatChunk> {
         let mut acc = ToolCallAccumulator::new();
+        let mut pending_finish = None;
         let mut out = VecDeque::new();
-        process_chunk(json, &mut acc, &mut out);
+        process_chunk(json, &mut acc, &mut pending_finish, &mut out);
+        flush_pending_finish(&mut pending_finish, &mut out);
         out.into_iter().map(|r| r.unwrap()).collect()
     }
 
@@ -607,25 +635,30 @@ mod tests {
     #[test]
     fn finish_reason_tool_calls_carries_assembled_calls() {
         let mut acc = ToolCallAccumulator::new();
+        let mut pending_finish = None;
         let mut out = VecDeque::new();
         // Opening fragment: id + name, empty args.
         process_chunk(
             r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_9","function":{"name":"echo","arguments":""}}]}}]}"#,
             &mut acc,
+            &mut pending_finish,
             &mut out,
         );
         // Argument fragment, no finish.
         process_chunk(
             r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"msg\":\"hi\"}"}}]}}]}"#,
             &mut acc,
+            &mut pending_finish,
             &mut out,
         );
         // Terminal chunk: finish_reason tool_calls, empty delta.
         process_chunk(
             r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
             &mut acc,
+            &mut pending_finish,
             &mut out,
         );
+        flush_pending_finish(&mut pending_finish, &mut out);
         let done = out.into_iter().map(|r| r.unwrap()).next_back().unwrap();
         match done {
             OpenAiCompatChunk::Done(FinishReason::ToolUse(calls)) => {
@@ -659,10 +692,62 @@ mod tests {
     }
 
     #[test]
+    fn usage_chunk_preserves_provider_reported_cost() {
+        let events = events_of(
+            r#"{"choices":[],"usage":{"prompt_tokens":11,"completion_tokens":4,"cost":0.0234}}"#,
+        );
+        assert_eq!(
+            events,
+            vec![OpenAiCompatChunk::Usage(Usage {
+                tokens_in: 11,
+                tokens_out: 4,
+                // 0.0234 USD → 2.34¢ → 3¢, matching non-streaming ARD-495 behavior.
+                cost_cents: Some(3),
+            })]
+        );
+    }
+
+    #[test]
+    fn finish_reason_is_buffered_until_after_usage() {
+        let mut acc = ToolCallAccumulator::new();
+        let mut pending_finish = None;
+        let mut out = VecDeque::new();
+
+        process_chunk(
+            r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#,
+            &mut acc,
+            &mut pending_finish,
+            &mut out,
+        );
+        assert!(out.is_empty(), "finish_reason is held until usage or DONE");
+
+        process_chunk(
+            r#"{"choices":[],"usage":{"prompt_tokens":2,"completion_tokens":1,"cost":0.003}}"#,
+            &mut acc,
+            &mut pending_finish,
+            &mut out,
+        );
+        let events: Vec<_> = out.into_iter().map(|r| r.unwrap()).collect();
+        assert_eq!(
+            events,
+            vec![
+                OpenAiCompatChunk::Usage(Usage {
+                    tokens_in: 2,
+                    tokens_out: 1,
+                    cost_cents: Some(1),
+                }),
+                OpenAiCompatChunk::Done(FinishReason::Stop),
+            ],
+            "usage/cost must be observable before the terminal Done event"
+        );
+    }
+
+    #[test]
     fn malformed_chunk_becomes_upstream_error() {
         let mut acc = ToolCallAccumulator::new();
+        let mut pending_finish = None;
         let mut out = VecDeque::new();
-        process_chunk("{not json", &mut acc, &mut out);
+        process_chunk("{not json", &mut acc, &mut pending_finish, &mut out);
         assert!(matches!(
             out.pop_front().unwrap(),
             Err(ProviderError::Upstream(_))
