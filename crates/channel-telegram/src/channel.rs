@@ -26,7 +26,7 @@ use ardur_messaging_gateway::{
 };
 
 use teloxide::prelude::*;
-use teloxide::types::ChatId;
+use teloxide::types::{ChatId, MessageId};
 
 use crate::config::TelegramConfig;
 use crate::error::TelegramError;
@@ -194,6 +194,30 @@ impl TelegramChannel {
             .await
             .map_err(|e| TelegramError::Send(e.to_string()))?;
         Ok(sent.id.0.to_string())
+    }
+
+    /// Edit a previously-sent Telegram chat message.
+    ///
+    /// # Errors
+    /// - [`TelegramError::InvalidChatId`] if `chat_id` is not an `i64`.
+    /// - [`TelegramError::Send`] if `message_id` is malformed or Telegram rejects the edit.
+    pub async fn edit_text(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+        text: &str,
+    ) -> Result<String, TelegramError> {
+        let chat = chat_id
+            .parse::<i64>()
+            .map_err(|_| TelegramError::InvalidChatId(chat_id.to_owned()))?;
+        let message = message_id.parse::<i32>().map_err(|_| {
+            TelegramError::Send(format!("invalid telegram message id: {message_id}"))
+        })?;
+        self.bot
+            .edit_message_text(ChatId(chat), MessageId(message), text)
+            .await
+            .map_err(|e| TelegramError::Send(e.to_string()))?;
+        Ok(message.to_string())
     }
 
     /// Resolve an [`OutgoingMessage`] target into a chat id string.

@@ -5,8 +5,8 @@
 //! [`ardur_server`] axum router (driven in-process via
 //! `tower::ServiceExt::oneshot`), routed through the real [`AppState`] →
 //! [`FusedRuntime`](ardur_fused_runtime::FusedRuntime) pipeline over a stub
-//! provider, and the assistant's reply is observed landing on a wiremock
-//! `chat.postMessage`.
+//! provider, and the assistant's reply is observed as progressive Slack delivery:
+//! a wiremock `chat.postMessage` placeholder followed by `chat.update`.
 //!
 //! Unlike the per-crate suite in `crates/server/tests`, this scenario lives in
 //! the cross-crate host — proving the binary's wiring composes with the rest of
@@ -52,10 +52,19 @@ fn now_unix_string() -> String {
 
 #[tokio::test]
 async fn server_routes_signed_slack_message_through_runtime_to_chat_post_message() {
-    // Mock Slack's outbound `chat.postMessage`.
+    // Mock Slack's progressive outbound delivery.
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/chat.postMessage"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "ok": true,
+            "ts": "1700000000.000900",
+            "channel": "C0DEPLOY"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/chat.update"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "ok": true,
             "ts": "1700000000.000900",
@@ -132,9 +141,9 @@ async fn server_routes_signed_slack_message_through_runtime_to_chat_post_message
         "the webhook acks the event"
     );
 
-    // The reply lands on the mocked Slack within the deadline.
-    let sent = wait_for_post(&server, Duration::from_secs(10)).await;
-    assert_eq!(sent.len(), 1, "exactly one reply was posted");
+    // The progressive reply lands on the mocked Slack within the deadline.
+    let sent = wait_for_posts(&server, 2, Duration::from_secs(10)).await;
+    assert_eq!(sent.len(), 2, "placeholder post plus final update");
 
     let posted: serde_json::Value =
         serde_json::from_slice(&sent[0].body).expect("posted body is JSON");
@@ -142,9 +151,17 @@ async fn server_routes_signed_slack_message_through_runtime_to_chat_post_message
         posted["channel"], "C0DEPLOY",
         "reply targets the source channel"
     );
+    assert_eq!(posted["text"], "…", "the placeholder is posted immediately");
+    let updated: serde_json::Value =
+        serde_json::from_slice(&sent[1].body).expect("updated body is JSON");
+    assert_eq!(updated["channel"], "C0DEPLOY");
     assert_eq!(
-        posted["text"], "[anthropic stub]",
-        "the runtime's response crosses the wire as the reply"
+        updated["ts"], "1700000000.000900",
+        "the update targets the placeholder message"
+    );
+    assert_eq!(
+        updated["text"], "[anthropic stub]",
+        "the runtime's streamed response crosses the wire as the final edit"
     );
 
     // Boot persisted the receipt chain + journal — the deployment is durable.
@@ -154,18 +171,22 @@ async fn server_routes_signed_slack_message_through_runtime_to_chat_post_message
     );
 }
 
-/// Poll the mock until it has recorded at least one request, or `timeout`
+/// Poll the mock until it has recorded at least `count` requests, or `timeout`
 /// elapses (panicking — the worker should always post within it).
-async fn wait_for_post(server: &MockServer, timeout: Duration) -> Vec<wiremock::Request> {
+async fn wait_for_posts(
+    server: &MockServer,
+    count: usize,
+    timeout: Duration,
+) -> Vec<wiremock::Request> {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         if let Some(requests) = server.received_requests().await {
-            if !requests.is_empty() {
+            if requests.len() >= count {
                 return requests;
             }
         }
         if tokio::time::Instant::now() >= deadline {
-            panic!("timed out waiting for the worker to POST chat.postMessage");
+            panic!("timed out waiting for the worker's progressive Slack calls");
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }

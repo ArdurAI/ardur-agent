@@ -24,8 +24,8 @@ use ardur_messaging_gateway::{
 };
 
 use serenity::all::{
-    ChannelId as DiscordChannelId, Client, Context, EventHandler, GatewayIntents, Http, Message,
-    Ready,
+    ChannelId as DiscordChannelId, Client, Context, EditMessage, EventHandler, GatewayIntents,
+    Http, Message, MessageId as DiscordMessageId, Ready,
 };
 
 use crate::config::DiscordConfig;
@@ -200,6 +200,34 @@ impl DiscordChannel {
             .await
             .map_err(|e| DiscordError::Send(e.to_string()))?;
         Ok(sent.id.to_string())
+    }
+
+    /// Edit a previously-sent Discord channel message.
+    ///
+    /// # Errors
+    /// - [`DiscordError::InvalidChannelId`] if `channel_id` is not a `u64`.
+    /// - [`DiscordError::Send`] if `message_id` is malformed or Discord rejects the edit.
+    pub async fn edit_text(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        text: &str,
+    ) -> Result<String, DiscordError> {
+        let channel = channel_id
+            .parse::<u64>()
+            .map_err(|_| DiscordError::InvalidChannelId(channel_id.to_owned()))?;
+        let message = message_id
+            .parse::<u64>()
+            .map_err(|_| DiscordError::Send(format!("invalid discord message id: {message_id}")))?;
+        let edited = DiscordChannelId::new(channel)
+            .edit_message(
+                &self.http,
+                DiscordMessageId::new(message),
+                EditMessage::new().content(text),
+            )
+            .await
+            .map_err(|e| DiscordError::Send(e.to_string()))?;
+        Ok(edited.id.to_string())
     }
 
     /// Resolve an [`OutgoingMessage`] target into a channel id string.

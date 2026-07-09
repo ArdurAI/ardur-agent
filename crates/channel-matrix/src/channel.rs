@@ -29,9 +29,9 @@ use matrix_sdk::event_handler::Ctx;
 use matrix_sdk::room::Room;
 use matrix_sdk::ruma::events::room::member::{MembershipState, StrippedRoomMemberEvent};
 use matrix_sdk::ruma::events::room::message::{
-    MessageType, OriginalSyncRoomMessageEvent, RoomMessageEventContent,
+    MessageType, OriginalSyncRoomMessageEvent, ReplacementMetadata, RoomMessageEventContent,
 };
-use matrix_sdk::ruma::{OwnedUserId, RoomId, UserId};
+use matrix_sdk::ruma::{OwnedEventId, OwnedUserId, RoomId, UserId};
 use matrix_sdk::{SessionMeta, SessionTokens};
 
 use crate::config::MatrixConfig;
@@ -175,6 +175,38 @@ impl MatrixChannel {
             .get_room(&parsed)
             .ok_or_else(|| MatrixError::RoomNotFound(room_id.to_owned()))?;
         let content = RoomMessageEventContent::text_plain(text);
+        let resp = room
+            .send(content)
+            .await
+            .map_err(|e| MatrixError::Send(e.to_string()))?;
+        Ok(resp.response.event_id.to_string())
+    }
+
+    /// Send a Matrix replacement event for a previously-sent room message.
+    ///
+    /// Matrix edits are represented as new events with an `m.replace` relation;
+    /// the returned id is the replacement event id.
+    ///
+    /// # Errors
+    /// - [`MatrixError::InvalidRoomId`] if `room_id` is malformed.
+    /// - [`MatrixError::RoomNotFound`] if the bot is not joined to the room.
+    /// - [`MatrixError::Send`] if `event_id` is malformed or the homeserver rejects the edit.
+    pub async fn edit_text(
+        &self,
+        room_id: &str,
+        event_id: &str,
+        text: &str,
+    ) -> Result<String, MatrixError> {
+        let parsed =
+            RoomId::parse(room_id).map_err(|_| MatrixError::InvalidRoomId(room_id.to_owned()))?;
+        let room = self
+            .client
+            .get_room(&parsed)
+            .ok_or_else(|| MatrixError::RoomNotFound(room_id.to_owned()))?;
+        let original = OwnedEventId::try_from(event_id.to_owned())
+            .map_err(|_| MatrixError::Send(format!("invalid matrix event id: {event_id}")))?;
+        let content = RoomMessageEventContent::text_plain(text)
+            .make_replacement(ReplacementMetadata::new(original, None));
         let resp = room
             .send(content)
             .await

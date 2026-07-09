@@ -66,6 +66,7 @@ tempfile = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
+futures = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 parking_lot = { workspace = true }

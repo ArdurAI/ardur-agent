@@ -14,10 +14,20 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[tokio::test]
 async fn signed_message_runs_through_runtime_and_posts_reply() {
-    // Mock Slack's `chat.postMessage`.
+    // Mock Slack's progressive channel delivery: `chat.postMessage` placeholder,
+    // then `chat.update` with the accumulated streamed content.
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/chat.postMessage"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "ok": true,
+            "ts": "1700000000.000300",
+            "channel": "C99999"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/chat.update"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "ok": true,
             "ts": "1700000000.000300",
@@ -58,9 +68,9 @@ async fn signed_message_runs_through_runtime_and_posts_reply() {
     let (status, _ack) = support::oneshot(router, request).await;
     assert_eq!(status, StatusCode::OK, "the webhook acks the event");
 
-    // Wait for the worker's `chat.postMessage` to land on the mock.
-    let sent = wait_for_post(&server, Duration::from_secs(10)).await;
-    assert_eq!(sent.len(), 1, "exactly one reply was posted");
+    // Wait for the worker's progressive Slack calls to land on the mock.
+    let sent = wait_for_posts(&server, 2, Duration::from_secs(10)).await;
+    assert_eq!(sent.len(), 2, "placeholder post plus final update");
 
     let posted: serde_json::Value =
         serde_json::from_slice(&sent[0].body).expect("posted body is JSON");
@@ -68,35 +78,52 @@ async fn signed_message_runs_through_runtime_and_posts_reply() {
         posted["channel"], "C99999",
         "reply targets the source channel"
     );
-    // The stub provider's deterministic completion is echoed back to Slack.
     assert_eq!(
-        posted["text"], "[anthropic stub]",
-        "the runtime's response is posted as the reply text"
+        posted["text"], "…",
+        "the first Slack call is the immediate typing/progress placeholder"
+    );
+    let updated: serde_json::Value =
+        serde_json::from_slice(&sent[1].body).expect("updated body is JSON");
+    assert_eq!(updated["channel"], "C99999");
+    assert_eq!(
+        updated["ts"], "1700000000.000300",
+        "the update targets the placeholder message"
+    );
+    // The stub provider's deterministic completion is edited into Slack.
+    assert_eq!(
+        updated["text"], "[anthropic stub]",
+        "the runtime's response is streamed into the reply text"
     );
 
-    // The reply carried the bot-token bearer auth.
-    assert_eq!(
-        sent[0]
-            .headers
-            .get("authorization")
-            .map(|v| v.to_str().unwrap_or_default())
-            .unwrap_or_default(),
-        format!("Bearer {}", support::BOT_TOKEN)
-    );
+    // Both Slack calls carried the bot-token bearer auth.
+    for request in &sent {
+        assert_eq!(
+            request
+                .headers
+                .get("authorization")
+                .map(|v| v.to_str().unwrap_or_default())
+                .unwrap_or_default(),
+            format!("Bearer {}", support::BOT_TOKEN)
+        );
+    }
 }
 
-/// Poll the mock until it has recorded at least one request, or `timeout`
+/// Poll the mock until it has recorded at least `count` requests, or `timeout`
 /// elapses (panicking — the worker should always post within it).
-async fn wait_for_post(server: &MockServer, timeout: Duration) -> Vec<wiremock::Request> {
+async fn wait_for_posts(
+    server: &MockServer,
+    count: usize,
+    timeout: Duration,
+) -> Vec<wiremock::Request> {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         if let Some(requests) = server.received_requests().await {
-            if !requests.is_empty() {
+            if requests.len() >= count {
                 return requests;
             }
         }
         if tokio::time::Instant::now() >= deadline {
-            panic!("timed out waiting for the worker to POST chat.postMessage");
+            panic!("timed out waiting for the worker's progressive Slack calls");
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
