@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 mod audit;
+mod device_mesh;
 mod marketplace;
 mod persona;
 mod project_surface;
@@ -17,6 +18,7 @@ use ardur_cli::{ChatArgs, CliError, Config, StateDirs, run_chat};
 use ardur_session_journals::JournalEntry;
 use audit::{AuditArgs, run_audit};
 use clap::{Args, Parser, Subcommand};
+use device_mesh::{NodesArgs, run_nodes};
 use marketplace::{MarketplaceArgs, run_marketplace};
 use persona::{PersonaArgs, run_persona};
 use project_surface::{ProjectArgs, run_project};
@@ -69,6 +71,8 @@ enum Commands {
     Token(TokenArgs),
     /// Redact secrets from stdin, files, or JSON strings.
     Redact(RedactArgs),
+    /// Manage paired companion devices and mesh routing.
+    Nodes(NodesArgs),
     /// Manage scheduled automation jobs.
     Schedule(ScheduleArgs),
     /// Manage messaging channel adapters.
@@ -322,6 +326,7 @@ fn main() -> ExitCode {
         Commands::Approvals(args) => run_approvals(args),
         Commands::Token(args) => run_token(args),
         Commands::Redact(args) => run_redact(args),
+        Commands::Nodes(args) => run_nodes(args),
         Commands::Schedule(args) => run_schedule(args),
         Commands::Channel(args) => run_channel(args),
         Commands::Migrate(args) => run_migrate(args),
