@@ -2,8 +2,9 @@
 # ordered cheapest-first so a formatting failure short-circuits before the
 # expensive test compile. Matrix on {ubuntu, macos} × stable. See §0.0.
 #
-# ARD-423: supply-chain security job runs cargo-deny (license + advisory +
-# ban checks) against deny.toml on every push and PR.
+# ARD-423/ARD-309: supply-chain security jobs run cargo-deny (license +
+# advisory + ban checks), CodeQL Rust analysis, and dependency review on PRs.
+# Docker image SBOM, provenance, and Trivy gates live in docker.yml.
 
 name: CI
 
@@ -35,6 +36,50 @@ jobs:
           #   cargo-deny --workspace check advisories bans licenses sources
           arguments: --workspace
           command-arguments: advisories bans licenses sources
+
+  dependency-review:
+    name: dependency-review
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Review dependency changes
+        uses: actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48 # v4.9.0
+        with:
+          fail-on-severity: high
+
+  codeql-rust:
+    name: CodeQL / Rust
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@99df26d4f13ea111d4ec1a7dddef6063f76b97e9 # v4.37.0
+        with:
+          languages: rust
+          build-mode: manual
+
+      - name: Install pinned toolchain components
+        run: rustup toolchain install 1.96.1 --profile minimal
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Build for CodeQL
+        run: cargo check --workspace --all-targets
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@99df26d4f13ea111d4ec1a7dddef6063f76b97e9 # v4.37.0
+        with:
+          category: "/language:rust"
 
   gauntlet:
     name: ${{ matrix.os }} / stable

@@ -39,6 +39,30 @@ class GitHubSecurityWorkflowTests(unittest.TestCase):
                 )
                 self.assertIsNone(TAGGED_ACTION_RE.search(match.group(0)))
 
+    def test_ci_runs_codeql_and_dependency_review_security_gates(self):
+        ci = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
+
+        self.assertIn("name: CodeQL / Rust", ci)
+        self.assertIn(
+            "github/codeql-action/init@99df26d4f13ea111d4ec1a7dddef6063f76b97e9",
+            ci,
+        )
+        self.assertIn(
+            "github/codeql-action/analyze@99df26d4f13ea111d4ec1a7dddef6063f76b97e9",
+            ci,
+        )
+        self.assertIn("security-events: write", ci)
+        self.assertIn("languages: rust", ci)
+
+        self.assertIn("name: dependency-review", ci)
+        self.assertIn("if: github.event_name == 'pull_request'", ci)
+        self.assertIn("pull-requests: read", ci)
+        self.assertIn(
+            "actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48",
+            ci,
+        )
+        self.assertIn("fail-on-severity: high", ci)
+
     def test_site_workflow_validates_main_and_dev_but_deploys_only_main(self):
         site = (WORKFLOWS / "site-deploy.yml").read_text(encoding="utf-8")
 
@@ -68,6 +92,8 @@ class GitHubSecurityWorkflowTests(unittest.TestCase):
             contexts,
             {
                 "cargo-deny (advisories + licenses + bans)",
+                "dependency-review",
+                "CodeQL / Rust",
                 "ubuntu-latest / stable",
                 "macos-15 / stable",
                 "hugo",
