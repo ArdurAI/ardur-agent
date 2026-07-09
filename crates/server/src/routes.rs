@@ -13,12 +13,13 @@
 //! - `GET /metrics` — Prometheus-compatible, secret-free process metrics.
 //! - `GET /admin/runtime` — bearer-gated runtime inspection snapshot.
 
+use std::convert::Infallible;
 use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
-use axum::body::Bytes;
+use axum::body::{Body, Bytes};
 use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Json, Response};
@@ -31,7 +32,8 @@ use ardur_acp::{
     ACP_METHOD_INITIALIZE, ACP_METHOD_SESSION_PROMPT, AcpErrorObject, AcpMessage, AcpRequest,
     AcpResponse,
 };
-use ardur_runtime::SessionId;
+use ardur_fused_runtime::{FusedEvent, StageKind};
+use ardur_runtime::{RuntimeError, SessionId};
 use ardur_slack_adapter::{SlackError, SlackEvent, SlackHeaders};
 
 use crate::openapi::{generate_python_client, generate_rust_client, openapi_spec};
@@ -267,7 +269,7 @@ struct ChatRequest {
     /// The session this turn belongs to; minted fresh when absent.
     #[serde(default)]
     session_id: Option<SessionId>,
-    /// Whether to stream the reply as SSE. Unsupported in P1 (see the handler).
+    /// Whether to stream the reply as SSE using progressive fused-runtime events.
     #[serde(default)]
     stream: bool,
 }
@@ -387,63 +389,143 @@ async fn chat(State(state): State<Arc<AppState>>, headers: HeaderMap, body: Byte
     }
 }
 
-/// `POST /chat` streaming variant — returns SSE with a single consolidated event.
+/// `POST /chat` streaming variant — returns real SSE fused-runtime events.
 ///
-/// This is a pragmatic interim implementation (P1.5): the full token-by-token
-/// streaming pipeline will replace this once the worker thread can share the
-/// fused runtime for concurrent streaming and non-streaming turns.
+/// The HTTP handler only authenticates/parses/enqueues. The dedicated worker
+/// thread owns the non-`Send` fused runtime and forwards each [`FusedEvent`] into
+/// this response body. Dropping the body closes the receiver; the worker then
+/// drops the fused stream, cancelling the provider before receipt/journal/memory
+/// side effects are committed.
 async fn stream_chat(
     state: Arc<AppState>,
     message: String,
     session_id: Option<SessionId>,
 ) -> Response {
     let session_id = session_id.unwrap_or_default();
-
-    // Run the turn synchronously through the worker, then wrap the result as
-    // one SSE event. This preserves the exact same semantics (receipt, cost,
-    // journal) while satisfying the `text/event-stream` contract.
-    match tokio::time::timeout(HTTP_TURN_TIMEOUT, state.submit_chat(message, session_id)).await {
-        Err(_elapsed) => (
-            StatusCode::GATEWAY_TIMEOUT,
-            [(header::CONTENT_TYPE, "text/event-stream")],
-            "data: {\"error\":\"turn processing timed out\"}\n\n",
-        )
-            .into_response(),
-        Ok(result) => match result {
-            Ok(outcome) => {
-                let response = ChatResponse::from(outcome);
-                let json = serde_json::to_string(&response).expect("ChatResponse serializes");
-                let sse_body = format!("data: {json}\n\n");
-                (
-                    StatusCode::OK,
-                    [(header::CONTENT_TYPE, "text/event-stream")],
-                    sse_body,
-                )
-                    .into_response()
-            }
-            Err(ChatSubmitError::Runtime(e)) => {
-                let json = serde_json::to_string(&json!({ "error": e.to_string() }))
-                    .expect("stream error JSON serializes");
-                (
-                    StatusCode::BAD_GATEWAY,
-                    [(header::CONTENT_TYPE, "text/event-stream")],
-                    format!("data: {json}\n\n"),
-                )
-                    .into_response()
-            }
-            Err(ChatSubmitError::WorkerGone) => (
+    let events = match state.stream_chat(message, session_id) {
+        Ok(events) => events,
+        Err(ChatSubmitError::WorkerGone) => {
+            return (
                 StatusCode::BAD_GATEWAY,
                 [(header::CONTENT_TYPE, "text/event-stream")],
-                "data: {\"error\":\"turn worker is unavailable\"}\n\n",
+                sse_frame(&json!({ "type": "error", "error": "turn worker is unavailable" })),
             )
-                .into_response(),
-            Err(ChatSubmitError::QueueFull) => (
+                .into_response();
+        }
+        Err(ChatSubmitError::QueueFull) => {
+            return (
                 StatusCode::SERVICE_UNAVAILABLE,
                 [(header::CONTENT_TYPE, "text/event-stream")],
-                "data: {\"error\":\"turn worker queue is full\"}\n\n",
+                sse_frame(&json!({ "type": "error", "error": "turn worker queue is full" })),
             )
-                .into_response(),
-        },
+                .into_response();
+        }
+        Err(ChatSubmitError::Runtime(e)) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                [(header::CONTENT_TYPE, "text/event-stream")],
+                sse_frame(&stream_error_json(&e)),
+            )
+                .into_response();
+        }
+    };
+
+    let body = Body::from_stream(futures::stream::unfold(events, |mut events| async move {
+        events.recv().await.map(|event| {
+            let payload = match event {
+                Ok(event) => fused_event_json(event),
+                Err(err) => stream_error_json(&err),
+            };
+            let frame = Bytes::from(sse_frame(&payload));
+            (Ok::<Bytes, Infallible>(frame), events)
+        })
+    }));
+
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "text/event-stream"),
+            (header::CACHE_CONTROL, "no-cache"),
+            (header::CONNECTION, "keep-alive"),
+        ],
+        body,
+    )
+        .into_response()
+}
+
+fn sse_frame(payload: &serde_json::Value) -> String {
+    let json = serde_json::to_string(payload).expect("SSE payload serializes");
+    format!("data: {json}\n\n")
+}
+
+fn stream_error_json(err: &RuntimeError) -> serde_json::Value {
+    json!({
+        "type": "error",
+        "error": err.to_string(),
+    })
+}
+
+fn fused_event_json(event: FusedEvent) -> serde_json::Value {
+    match event {
+        FusedEvent::StageStart { stage } => json!({
+            "type": "stage_start",
+            "stage": stage_label(stage),
+        }),
+        FusedEvent::StageEnd { stage, ok } => json!({
+            "type": "stage_end",
+            "stage": stage_label(stage),
+            "ok": ok,
+        }),
+        FusedEvent::Content(text) => json!({
+            "type": "content",
+            "text": text,
+        }),
+        FusedEvent::ToolCallStart { id, name } => json!({
+            "type": "tool_call_start",
+            "id": id,
+            "name": name,
+        }),
+        FusedEvent::ToolCallDelta { id, delta } => json!({
+            "type": "tool_call_delta",
+            "id": id,
+            "delta": delta,
+        }),
+        FusedEvent::ToolCallResult { id, result } => json!({
+            "type": "tool_call_result",
+            "id": id,
+            "result": result,
+        }),
+        FusedEvent::Usage(usage) => json!({
+            "type": "usage",
+            "usage": usage,
+        }),
+        FusedEvent::Receipt {
+            receipt_id,
+            chain_hash,
+        } => json!({
+            "type": "receipt",
+            "receipt_id": receipt_id,
+            "chain_hash": chain_hash,
+        }),
+        FusedEvent::Finish(reason) => json!({
+            "type": "finish",
+            "reason": reason,
+        }),
+    }
+}
+
+fn stage_label(stage: StageKind) -> &'static str {
+    match stage {
+        StageKind::CapTokenVerify => "cap_token_verify",
+        StageKind::CedarCheck => "cedar_check",
+        StageKind::InjectionScan => "injection_scan",
+        StageKind::CostGateAdmit => "cost_gate_admit",
+        StageKind::ProviderStream => "provider_stream",
+        StageKind::ToolExec => "tool_exec",
+        StageKind::ReceiptMint => "receipt_mint",
+        StageKind::CostGateFinalize => "cost_gate_finalize",
+        StageKind::MemoryRecord => "memory_record",
+        StageKind::JournalAppend => "journal_append",
     }
 }
 

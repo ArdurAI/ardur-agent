@@ -535,6 +535,7 @@ dependencies = [
  "async-trait",
  "axum 0.8.9",
  "biscuit-auth",
+ "futures",
  "hex",
  "hmac 0.13.0",
  "parking_lot",

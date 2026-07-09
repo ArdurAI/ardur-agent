@@ -206,6 +206,65 @@ impl SlackAdapter {
         })
     }
 
+    /// POST `chat.update` for an existing message and return the updated message `ts`.
+    ///
+    /// # Errors
+    /// Same transport and Slack API error classes as [`post_message`](Self::post_message).
+    pub async fn update_message(
+        &self,
+        channel: &str,
+        ts: &str,
+        text: &str,
+        blocks: Option<Value>,
+    ) -> Result<String, SlackError> {
+        let url = format!("{}/chat.update", self.base_url);
+        let mut payload = json!({ "channel": channel, "ts": ts, "text": text });
+        if let Some(blocks) = blocks {
+            payload["blocks"] = blocks;
+        }
+
+        let resp = self
+            .http
+            .post(&url)
+            .bearer_auth(self.bot_token.expose_secret())
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| SlackError::NetworkFailure(e.to_string()))?;
+
+        let retry_after_ms = resp
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .map(|secs| secs.saturating_mul(1_000));
+
+        if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return Err(SlackError::RateLimited {
+                retry_after_ms: retry_after_ms.unwrap_or(0),
+            });
+        }
+
+        let parsed: PostMessageResponse = resp
+            .json()
+            .await
+            .map_err(|e| SlackError::ParseError(e.to_string()))?;
+
+        if parsed.ok {
+            return Ok(parsed.ts.unwrap_or_else(|| ts.to_owned()));
+        }
+
+        Err(match parsed.error.as_deref().unwrap_or("") {
+            "not_in_channel" => SlackError::Forbidden,
+            "channel_not_found" => SlackError::ChannelNotFound,
+            "invalid_auth" => SlackError::Unauthorized,
+            "ratelimited" => SlackError::RateLimited {
+                retry_after_ms: retry_after_ms.unwrap_or(0),
+            },
+            other => SlackError::Upstream(other.to_owned()),
+        })
+    }
+
     /// Verify and parse an inbound Events-API request, using the current wall
     /// clock for the replay check.
     ///

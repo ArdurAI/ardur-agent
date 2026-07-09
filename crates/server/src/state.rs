@@ -49,7 +49,7 @@ use ardur_channel_discord::DiscordChannel;
 use ardur_channel_matrix::MatrixChannel;
 use ardur_channel_telegram::TelegramChannel;
 use ardur_cost_gate::{CostEnvelope, CostTuple as GateCostTuple, HolderId as GateHolderId};
-use ardur_fused_runtime::{FusedRuntime, FusedRuntimeBuilder, load_persisted_chain};
+use ardur_fused_runtime::{FusedEvent, FusedRuntime, FusedRuntimeBuilder, load_persisted_chain};
 use ardur_memory::{InMemoryMemoryRuntime, MemoryRuntime};
 use ardur_memory_qdrant::{
     Bm25Index, Embedder, FastEmbedEmbedder, HybridMemoryRetriever, QdrantMemoryConfig,
@@ -65,7 +65,7 @@ use ardur_session_journals::{FileSessionJournal, SessionJournal};
 use ardur_slack_adapter::SlackAdapter;
 use ardur_tool_registry::ToolRegistry;
 use biscuit_auth::{Algorithm, PrivateKey};
-use futures::FutureExt;
+use futures::{FutureExt, StreamExt, pin_mut};
 use secrecy::SecretString;
 use tokio::sync::{mpsc, oneshot};
 
@@ -120,6 +120,10 @@ enum WorkItem {
     Channel(IncomingMessage),
     /// A synchronous `POST /chat` turn; result returned over the oneshot.
     Http(HttpTurn),
+    /// A streaming `POST /chat` turn; each fused-runtime event is forwarded to
+    /// the HTTP body. Dropping the receiver cancels the in-flight stream before
+    /// receipt/journal/memory side effects are committed.
+    HttpStream(HttpStreamTurn),
 }
 
 /// A synchronous chat turn submitted over `POST /chat`: the prompt, the session
@@ -129,6 +133,12 @@ struct HttpTurn {
     message: String,
     session_id: SessionId,
     reply: oneshot::Sender<Result<ChatTurnOutcome, RuntimeError>>,
+}
+
+struct HttpStreamTurn {
+    message: String,
+    session_id: SessionId,
+    events: mpsc::Sender<Result<FusedEvent, RuntimeError>>,
 }
 
 /// The result of a successful synchronous `/chat` turn, surfaced to the HTTP
@@ -557,6 +567,37 @@ impl AppState {
         }
     }
 
+    /// Run a streaming chat turn (the `POST /chat { stream: true }` path): hand
+    /// the prompt to the turn worker and return a receiver that carries the
+    /// progressive fused-runtime event feed. If the HTTP response body is
+    /// dropped, the receiver closes; the worker observes the failed send and
+    /// drops the in-flight fused stream, preserving the no-receipt cancellation
+    /// contract.
+    ///
+    /// # Errors
+    /// Returns [`ChatSubmitError::WorkerGone`] if the worker is unavailable, or
+    /// [`ChatSubmitError::QueueFull`] if the bounded turn queue is saturated.
+    pub fn stream_chat(
+        &self,
+        message: String,
+        session_id: SessionId,
+    ) -> Result<mpsc::Receiver<Result<FusedEvent, RuntimeError>>, ChatSubmitError> {
+        let (events_tx, events_rx) = mpsc::channel(16);
+        let turn = HttpStreamTurn {
+            message,
+            session_id,
+            events: events_tx,
+        };
+        let Some(work_tx) = self.work_sender() else {
+            return Err(ChatSubmitError::WorkerGone);
+        };
+        match work_tx.try_send(WorkItem::HttpStream(turn)) {
+            Ok(()) => Ok(events_rx),
+            Err(mpsc::error::TrySendError::Full(_)) => Err(ChatSubmitError::QueueFull),
+            Err(mpsc::error::TrySendError::Closed(_)) => Err(ChatSubmitError::WorkerGone),
+        }
+    }
+
     /// The session journal handle (used by graceful shutdown to fsync + close).
     #[must_use]
     pub fn journal(&self) -> &Arc<dyn SessionJournal> {
@@ -705,32 +746,93 @@ impl Processor {
             requested_provider: None,
         };
 
-        match self.runtime.submit(request).await {
-            Ok(result) => {
-                let reply = result.response.content;
-                match self.post_reply(origin, &channel, &reply).await {
-                    Ok(id) => tracing::info!(
-                        %user,
-                        %channel,
-                        receipt_id = %result.receipt_id.0,
-                        provider_message_id = %id,
-                        "turn completed and reply posted"
-                    ),
-                    Err(e) => {
-                        tracing::error!(%user, %channel, error = %e, "failed to post reply");
+        let provider_message_id = match self.post_reply(origin, &channel, "…").await {
+            Ok(id) => id,
+            Err(e) => {
+                tracing::error!(%user, %channel, error = %e, "failed to post streaming placeholder");
+                return;
+            }
+        };
+        let mut reply = String::new();
+        let mut last_sent = "…".to_string();
+        let mut receipt_id = None;
+        let mut terminal_error = None;
+
+        let stream = self.runtime.stream(request);
+        pin_mut!(stream);
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(FusedEvent::Content(delta)) => {
+                    if delta.is_empty() {
+                        continue;
+                    }
+                    reply.push_str(&delta);
+                    if reply != last_sent {
+                        match self
+                            .edit_reply(origin, &channel, &provider_message_id, &reply)
+                            .await
+                        {
+                            Ok(_edit_id) => {
+                                last_sent.clone_from(&reply);
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    %user,
+                                    %channel,
+                                    provider_message_id = %provider_message_id,
+                                    error = %e,
+                                    "failed to edit progressive channel reply; will keep streaming"
+                                );
+                            }
+                        }
                     }
                 }
-            }
-            Err(e) => {
-                tracing::error!(%user, %channel, error = %e, "turn failed");
-                let apology = format!("Sorry, that turn failed: {e}");
-                if let Err(post_err) = self.post_reply(origin, &channel, &apology).await {
-                    tracing::error!(
-                        %user, %channel, error = %post_err, "failed to post failure notice"
-                    );
+                Ok(FusedEvent::Receipt { receipt_id: id, .. }) => {
+                    receipt_id = Some(id.0);
+                }
+                Ok(FusedEvent::Finish(_reason)) => break,
+                Ok(_event) => {}
+                Err(e) => {
+                    terminal_error = Some(e);
+                    break;
                 }
             }
         }
+
+        if let Some(e) = terminal_error {
+            tracing::error!(%user, %channel, error = %e, "streamed channel turn failed");
+            let apology = format!("Sorry, that turn failed: {e}");
+            if let Err(edit_err) = self
+                .edit_reply(origin, &channel, &provider_message_id, &apology)
+                .await
+            {
+                tracing::error!(
+                    %user,
+                    %channel,
+                    error = %edit_err,
+                    "failed to edit failure notice"
+                );
+            }
+            return;
+        }
+
+        if reply.is_empty() {
+            reply.push_str("No response generated.");
+            if let Err(e) = self
+                .edit_reply(origin, &channel, &provider_message_id, &reply)
+                .await
+            {
+                tracing::warn!(%user, %channel, error = %e, "failed to edit empty-response notice");
+            }
+        }
+
+        tracing::info!(
+            %user,
+            %channel,
+            receipt_id = receipt_id.map(|id| id.to_string()).unwrap_or_else(|| "none".to_owned()),
+            provider_message_id = %provider_message_id,
+            "streamed turn completed and channel reply updated"
+        );
     }
 
     /// Run one synchronous `/chat` turn through the fused runtime and return the
@@ -794,6 +896,62 @@ impl Processor {
         // A dropped receiver means the HTTP caller's request future was cancelled
         // (client hung up); nothing to do but discard the outcome.
         let _ = reply.send(outcome);
+    }
+
+    /// Run one `/chat` SSE turn through the progressive fused-runtime pipeline.
+    /// Each event is forwarded to the HTTP response body. If forwarding fails,
+    /// the receiver has been dropped by the client; dropping the fused stream at
+    /// that point cancels the in-flight provider round before receipt/journal/
+    /// memory side effects are committed.
+    async fn handle_http_stream(&self, turn: HttpStreamTurn) {
+        let HttpStreamTurn {
+            message,
+            session_id,
+            events,
+        } = turn;
+
+        let token = match self.mint_session_token(now_unix()) {
+            Ok(token) => token,
+            Err(e) => {
+                let err = RuntimeError::Internal(anyhow::anyhow!("minting session cap-token: {e}"));
+                let _ = events.send(Err(err)).await;
+                return;
+            }
+        };
+
+        let request = SubmitRequest {
+            messages: vec![ChatMessage::user(message)],
+            cap_token: CapTokenRef(token),
+            session_id,
+            requested_provider: None,
+        };
+
+        let stream = self.runtime.stream(request);
+        pin_mut!(stream);
+        loop {
+            let item = tokio::select! {
+                _ = events.closed() => {
+                    tracing::info!(
+                        session_id = %session_id.0,
+                        "SSE client disconnected; cancelling streamed turn"
+                    );
+                    break;
+                }
+                item = stream.next() => item,
+            };
+            let Some(item) = item else { break };
+            let terminal_error = item.is_err();
+            if events.send(item).await.is_err() {
+                tracing::info!(
+                    session_id = %session_id.0,
+                    "SSE client disconnected; cancelling streamed turn"
+                );
+                break;
+            }
+            if terminal_error {
+                break;
+            }
+        }
     }
 
     /// The number of receipts currently persisted in the chain log (`0` if the
@@ -871,6 +1029,51 @@ impl Processor {
         }
     }
 
+    /// Edit a previously-posted channel reply, preserving the backend-specific
+    /// message id returned by [`post_reply`](Self::post_reply).
+    async fn edit_reply(
+        &self,
+        origin: Origin,
+        channel: &str,
+        message_id: &str,
+        text: &str,
+    ) -> anyhow::Result<String> {
+        match origin {
+            Origin::Slack => self
+                .slack
+                .update_message(channel, message_id, text, None)
+                .await
+                .map_err(|e| anyhow::anyhow!(e.to_string())),
+            Origin::Matrix => {
+                let matrix = self.matrix.get().ok_or_else(|| {
+                    anyhow::anyhow!("matrix edit requested but no channel attached")
+                })?;
+                matrix
+                    .edit_text(channel, message_id, text)
+                    .await
+                    .map_err(|e| anyhow::anyhow!(e.to_string()))
+            }
+            Origin::Discord => {
+                let discord = self.discord.get().ok_or_else(|| {
+                    anyhow::anyhow!("discord edit requested but no channel attached")
+                })?;
+                discord
+                    .edit_text(channel, message_id, text)
+                    .await
+                    .map_err(|e| anyhow::anyhow!(e.to_string()))
+            }
+            Origin::Telegram => {
+                let telegram = self.telegram.get().ok_or_else(|| {
+                    anyhow::anyhow!("telegram edit requested but no channel attached")
+                })?;
+                telegram
+                    .edit_text(channel, message_id, text)
+                    .await
+                    .map_err(|e| anyhow::anyhow!(e.to_string()))
+            }
+        }
+    }
+
     /// Mint a fresh, short-lived ([`CAP_TTL_SECS`]) cap-token (base64) for this
     /// turn: scoped to [`AUDIENCE`] / [`TOOL`], issued under [`GATEWAY_SUBJECT`].
     fn mint_session_token(&self, now_unix: u64) -> anyhow::Result<String> {
@@ -923,6 +1126,12 @@ fn spawn_worker(processor: Processor) -> (mpsc::Sender<WorkItem>, std::thread::J
                             .catch_unwind()
                             .await
                             .is_err(),
+                        WorkItem::HttpStream(turn) => {
+                            AssertUnwindSafe(processor.handle_http_stream(turn))
+                                .catch_unwind()
+                                .await
+                                .is_err()
+                        }
                     };
                     if panicked {
                         tracing::error!(
