@@ -9,6 +9,7 @@
 mod support;
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ardur_provider_runtime::{
@@ -63,6 +64,19 @@ fn scripted_router(provider: Arc<dyn Provider>) -> Router {
     build_router(state)
 }
 
+/// Boot a production-like router with no configured Cedar policy and no dev
+/// fallback. The server should boot with the built-in deny-all policy, then deny
+/// `/chat` requests before reaching the provider.
+fn production_deny_all_router(provider: Arc<dyn Provider>) -> Router {
+    let dir = Box::leak(Box::new(tempfile::tempdir().expect("tempdir")));
+    let mut config: Config = support::test_config(dir, None);
+    config.dev_permissive_policy = false;
+    config.cedar_policy_path = None;
+    let tools = Arc::new(example_registry("scripted", "in-memory"));
+    let state = AppState::boot(&config, provider, tools).expect("AppState boots");
+    build_router(state)
+}
+
 // ---------------------------------------------------------------------------
 // A scripted provider: returns a queued step per `complete` call, defaulting to
 // a terminal stub reply once the script is drained.
@@ -82,6 +96,7 @@ enum Step {
 struct ScriptedProvider {
     rate_card: RateCard,
     steps: Mutex<VecDeque<Step>>,
+    calls: AtomicUsize,
 }
 
 impl ScriptedProvider {
@@ -89,13 +104,19 @@ impl ScriptedProvider {
         Arc::new(Self {
             rate_card: RateCard::anthropic_2026_q2_v1(),
             steps: Mutex::new(steps.into_iter().collect()),
+            calls: AtomicUsize::new(0),
         })
+    }
+
+    fn call_count(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
     }
 }
 
 #[async_trait]
 impl Provider for ScriptedProvider {
     async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
         let step = self.steps.lock().expect("steps lock").pop_front();
         match step {
             Some(Step::Error) => Err(ProviderError::Upstream(
@@ -199,6 +220,33 @@ async fn chat_rejects_oversized_bearer_without_processing_body() {
             .as_str()
             .unwrap_or_default()
             .contains("bearer")
+    );
+}
+
+#[tokio::test]
+async fn production_missing_cedar_policy_denies_chat_before_provider_dispatch() {
+    let provider = ScriptedProvider::new(vec![Step::Reply {
+        content: "must not be reached".to_string(),
+        cost: CostTuple::default(),
+    }]);
+    let (status, json) = post_chat(
+        production_deny_all_router(provider.clone()),
+        json!({ "message": "deny by default" }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("policy denied"),
+        "missing Cedar policy should deny through the built-in deny-all policy: {json}"
+    );
+    assert_eq!(
+        provider.call_count(),
+        0,
+        "deny-all policy blocks before provider dispatch"
     );
 }
 

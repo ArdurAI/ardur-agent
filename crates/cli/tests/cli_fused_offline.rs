@@ -20,6 +20,9 @@ fn offline_mode_runs_a_turn_through_the_fused_stub() {
         .env_remove("ARDUR_PROVIDER")
         .env_remove("ARDUR_MODEL")
         .env_remove("ARDUR_DATA_DIR")
+        // Missing CLI Cedar policy is fail-closed by default; this smoke test is
+        // intentionally the local-dev path over the offline provider.
+        .env("ARDUR_DEV_PERMISSIVE_POLICY", "true")
         .env_remove("OPENROUTER_API_KEY")
         .env_remove("OPENAI_API_KEY")
         .env_remove("OPENAI_COMPAT_API_KEY")
