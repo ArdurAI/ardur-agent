@@ -155,6 +155,8 @@ pub struct FusedRuntime {
     pub(crate) registry: Arc<HookRegistry>,
     pub(crate) injection_filters: FilterRegistry,
     pub(crate) memory: Option<Arc<dyn MemoryRuntime + Send + Sync>>,
+    pub(crate) memory_recall_k: usize,
+    pub(crate) memory_recall_threshold: f32,
     pub(crate) journal: Option<Arc<dyn SessionJournal>>,
     pub(crate) chain_tail: Mutex<Option<Sha256Digest>>,
     /// Serializes receipt signing + journal/receipt persistence so concurrent
@@ -613,6 +615,9 @@ impl FusedRuntime {
         let Some(memory) = &self.memory else {
             return Ok(request);
         };
+        if self.memory_recall_k == 0 {
+            return Ok(request);
+        }
         let Some(query) = request
             .messages
             .iter()
@@ -627,7 +632,7 @@ impl FusedRuntime {
         }
         let subject = MemoryHolderId(claims.subject.0.clone());
         let hits = memory
-            .search_scoped(&subject, query, 5)
+            .search_scoped(&subject, query, self.memory_recall_k)
             .map_err(|e| RuntimeError::Internal(anyhow::anyhow!("memory recall failed: {e}")))?;
         if hits.is_empty() {
             return Ok(request);
@@ -637,8 +642,16 @@ impl FusedRuntime {
             "Relevant memories (scoped to verified subject {}):\n",
             claims.subject.0
         );
+        let mut injected = 0usize;
         for rec in hits {
+            if injected >= self.memory_recall_k {
+                break;
+            }
             let card = MemoryCard::from_record(&rec);
+            let score = memory_recall_score(query, &card);
+            if score < self.memory_recall_threshold {
+                continue;
+            }
             let receipt = card
                 .receipt_id
                 .map(|r| r.0.to_string())
@@ -650,7 +663,7 @@ impl FusedRuntime {
                 .map(|c| format!("{c:.2}"))
                 .unwrap_or_else(|| "unknown".to_string());
             block.push_str(&format!(
-                "- id={} source={} scope={} confidence={} receipt={} valid_from={}: {}\n",
+                "- id={} source={} scope={} confidence={} recall_score={score:.2} receipt={} valid_from={}: {}\n",
                 card.record_id,
                 source,
                 scope,
@@ -659,6 +672,10 @@ impl FusedRuntime {
                 card.valid_from.0,
                 memory_payload_text(&card.payload)
             ));
+            injected += 1;
+        }
+        if injected == 0 {
+            return Ok(request);
         }
         request.messages.insert(0, ChatMessage::system(block));
         Ok(request)
@@ -2168,6 +2185,67 @@ fn memory_payload_text(payload: &serde_json::Value) -> String {
         serde_json::Value::String(s) => s.clone(),
         other => other.to_string(),
     }
+}
+
+/// A conservative context-injection score for the unscored `MemoryRuntime`
+/// recall seam. Hybrid backends rank before returning hits; this final guard
+/// filters weak lexical overlaps and low-confidence records before they enter
+/// provider context.
+fn memory_recall_score(query: &str, card: &MemoryCard) -> f32 {
+    let terms = recall_terms(query);
+    if terms.is_empty() {
+        return 0.0;
+    }
+    let text = memory_payload_text(&card.payload).to_ascii_lowercase();
+    let matched = terms
+        .iter()
+        .filter(|term| text.contains(term.as_str()))
+        .count();
+    let relevance = matched as f32 / terms.len() as f32;
+    let confidence = card.confidence.unwrap_or(1.0) as f32;
+    relevance.min(confidence.clamp(0.0, 1.0))
+}
+
+fn recall_terms(query: &str) -> Vec<String> {
+    query
+        .split(|c: char| !c.is_alphanumeric())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_ascii_lowercase)
+        .filter(|term| !is_recall_stopword(term))
+        .collect()
+}
+
+fn is_recall_stopword(term: &str) -> bool {
+    matches!(
+        term,
+        "a" | "an"
+            | "and"
+            | "are"
+            | "about"
+            | "be"
+            | "do"
+            | "does"
+            | "for"
+            | "how"
+            | "in"
+            | "is"
+            | "me"
+            | "of"
+            | "on"
+            | "or"
+            | "please"
+            | "should"
+            | "tell"
+            | "the"
+            | "to"
+            | "we"
+            | "what"
+            | "when"
+            | "where"
+            | "why"
+            | "with"
+    )
 }
 
 /// The most recent user message in a transcript — the prompt journaled for the
