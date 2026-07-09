@@ -53,6 +53,8 @@ class GitHubSecurityWorkflowTests(unittest.TestCase):
         )
         self.assertIn("security-events: write", ci)
         self.assertIn("languages: rust", ci)
+        self.assertIn("build-mode: none", ci)
+        self.assertNotIn("build-mode: manual", ci)
 
         self.assertIn("name: dependency-review", ci)
         self.assertIn("if: github.event_name == 'pull_request'", ci)
