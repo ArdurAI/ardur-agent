@@ -81,6 +81,8 @@ regex = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 base64 = { workspace = true }
+# ARD-317: signed marketplace capability manifests use ES256/P-256 public keys.
+p256 = { workspace = true }
 rand = "0.8"
 # ARD-143: schedule / cron CLI.
 chrono = { workspace = true }
