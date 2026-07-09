@@ -30,6 +30,8 @@
         "strict_required_status_checks_policy": true,
         "required_status_checks": [
           { "context": "cargo-deny (advisories + licenses + bans)" },
+          { "context": "dependency-review" },
+          { "context": "CodeQL / Rust" },
           { "context": "ubuntu-latest / stable" },
           { "context": "macos-15 / stable" },
           { "context": "hugo" },
