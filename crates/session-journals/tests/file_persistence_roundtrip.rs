@@ -1,6 +1,8 @@
 //! §7.10: a file-backed journal survives being dropped — reconstructing one
 //! from the same path replays the entries written before the drop.
 
+use std::io::Write as _;
+
 use ardur_session_journals::{FileSessionJournal, JournalEntry, SessionId, SessionJournal};
 
 #[tokio::test]
@@ -47,4 +49,55 @@ async fn file_journal_roundtrips_across_a_drop() {
         .await
         .expect("append after reopen");
     assert_eq!(next.value(), 3, "fourth entry lands at position 3");
+}
+
+#[tokio::test]
+async fn file_journal_drops_and_truncates_torn_trailing_line() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let session_id = SessionId::new();
+
+    let journal = FileSessionJournal::new(dir.path(), session_id).expect("open");
+    journal
+        .append(JournalEntry::UserMessage {
+            content: "before crash".into(),
+            at: 1,
+        })
+        .await
+        .expect("append first");
+    let journal_path = journal.path().to_path_buf();
+    journal.close().await.expect("close before torn write");
+
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&journal_path)
+        .expect("open raw journal")
+        .write_all(b"{\"type\":\"UserMessage\",\"content\":")
+        .expect("write torn tail");
+
+    let reopened = FileSessionJournal::new(dir.path(), session_id).expect("reopen repairs tail");
+    assert_eq!(reopened.len().await.expect("len"), 1);
+    let replayed = reopened.replay(session_id).await.expect("replay");
+    assert_eq!(replayed.len(), 1);
+    let next = reopened
+        .append(JournalEntry::UserMessage {
+            content: "after repair".into(),
+            at: 2,
+        })
+        .await
+        .expect("append after repair");
+    assert_eq!(
+        next.value(),
+        1,
+        "new append follows the last complete entry"
+    );
+
+    let raw = std::fs::read_to_string(&journal_path).expect("read repaired file");
+    assert_eq!(
+        raw.lines().count(),
+        2,
+        "partial tail did not poison the next line"
+    );
+    for line in raw.lines() {
+        serde_json::from_str::<JournalEntry>(line).expect("every remaining line is valid JSONL");
+    }
 }

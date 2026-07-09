@@ -120,9 +120,11 @@ impl QdrantMemoryRuntime {
         Ok(this)
     }
 
-    /// Create the collection (Cosine distance, the configured dim) and its
-    /// payload indexes (`subject`, `channel_id`, `session_id`) if they are not
-    /// already present. Idempotent — safe to call on every boot.
+    /// Create the collection (Cosine distance, the configured dim) if missing and
+    /// reconcile payload indexes used by read/GC filters (`subject`,
+    /// `channel_id`, `session_id`, `correction_chain_root`, and temporal fields)
+    /// on every boot. Idempotent — safe to call on every boot, including after an
+    /// older deployment created the collection without newer indexes.
     ///
     /// # Errors
     /// [`MemoryError::Backend`] on any Qdrant transport or collection error.
@@ -145,22 +147,32 @@ impl QdrantMemoryRuntime {
                     )
                     .await
                     .map_err(|e| MemoryError::Backend(format!("create_collection: {e}")))?;
-
-                for field in ["subject", "channel_id", "session_id"] {
-                    self.client
-                        .create_field_index(CreateFieldIndexCollectionBuilder::new(
-                            &self.config.collection_name,
-                            field,
-                            FieldType::Keyword,
-                        ))
-                        .await
-                        .map_err(|e| {
-                            MemoryError::Backend(format!("create index on {field}: {e}"))
-                        })?;
-                }
             }
+            self.ensure_payload_indexes().await?;
             Ok(())
         })
+    }
+
+    async fn ensure_payload_indexes(&self) -> Result<()> {
+        for (field, field_type) in payload_indexes() {
+            let result = self
+                .client
+                .create_field_index(CreateFieldIndexCollectionBuilder::new(
+                    &self.config.collection_name,
+                    field,
+                    field_type,
+                ))
+                .await;
+            if let Err(e) = result {
+                let msg = e.to_string();
+                if !qdrant_index_already_exists(&msg) {
+                    return Err(MemoryError::Backend(format!(
+                        "create index on {field}: {e}"
+                    )));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Take a Qdrant snapshot of the collection and record it as a
@@ -417,6 +429,26 @@ impl QdrantMemoryRuntime {
     }
 }
 
+fn payload_indexes() -> Vec<(&'static str, FieldType)> {
+    vec![
+        ("subject", FieldType::Keyword),
+        ("channel_id", FieldType::Keyword),
+        ("session_id", FieldType::Keyword),
+        ("correction_chain_root", FieldType::Keyword),
+        ("event_time", FieldType::Integer),
+        ("valid_from", FieldType::Integer),
+        ("valid_to", FieldType::Integer),
+        ("invalidation_time", FieldType::Integer),
+    ]
+}
+
+fn qdrant_index_already_exists(message: &str) -> bool {
+    let msg = message.to_ascii_lowercase();
+    msg.contains("already exists")
+        || msg.contains("already has")
+        || msg.contains("already been created")
+}
+
 impl MemoryRuntime for QdrantMemoryRuntime {
     fn record(&self, rec: MemoryRecord) -> Result<RecordId> {
         let id = rec.record_id;
@@ -638,5 +670,30 @@ mod tests {
         assert_eq!(tomb.correction_chain_root, f1.correction_chain_root);
         assert_eq!(tomb.invalidation_time, Some(UnixTsMillis(2_000)));
         assert_ne!(tomb.record_id, f1.record_id);
+    }
+
+    #[test]
+    fn payload_indexes_cover_every_filter_field() {
+        let indexes: HashMap<_, _> = payload_indexes().into_iter().collect();
+        assert_eq!(indexes.get("subject"), Some(&FieldType::Keyword));
+        assert_eq!(indexes.get("channel_id"), Some(&FieldType::Keyword));
+        assert_eq!(indexes.get("session_id"), Some(&FieldType::Keyword));
+        assert_eq!(
+            indexes.get("correction_chain_root"),
+            Some(&FieldType::Keyword)
+        );
+        assert_eq!(indexes.get("event_time"), Some(&FieldType::Integer));
+        assert_eq!(indexes.get("valid_from"), Some(&FieldType::Integer));
+        assert_eq!(indexes.get("valid_to"), Some(&FieldType::Integer));
+        assert_eq!(indexes.get("invalidation_time"), Some(&FieldType::Integer));
+    }
+
+    #[test]
+    fn existing_index_errors_are_idempotent() {
+        assert!(qdrant_index_already_exists("Index already exists"));
+        assert!(qdrant_index_already_exists(
+            "Bad request: collection already has an index for subject"
+        ));
+        assert!(!qdrant_index_already_exists("transport unavailable"));
     }
 }

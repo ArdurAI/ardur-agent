@@ -8,6 +8,7 @@ mod support;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use ardur_cost_gate::{CostEnvelope, ManualClock};
 use ardur_fused_runtime::{load_persisted_chain, verify_persisted_chain};
 use ardur_lifecycle_hooks::{
     HookError, HookEvent, HookId, HookRegistry, LifecycleHook, LifecyclePhase, PostReceiptCtx,
@@ -599,6 +600,108 @@ async fn receipts_chain_across_turns() {
         );
     }
     verify_persisted_chain(&chain).expect("the three-receipt chain verifies");
+}
+
+/// ARD-486/487/490: concurrent turns must serialize receipt parent selection and
+/// durable commit, leaving exactly one genesis receipt and a verifiable chain.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_turns_serialize_receipt_chain() {
+    let provider = Arc::new(EchoProvider::new());
+    let receipt_log = tempfile::NamedTempFile::new().expect("receipt log");
+    let runtime = Arc::new(
+        runtime_builder(provider.clone())
+            .projected_envelope(CostEnvelope {
+                cents_max: 1,
+                ..Default::default()
+            })
+            .receipt_log(receipt_log.path())
+            .build()
+            .expect("builds"),
+    );
+    let token = valid_token();
+
+    let mut joins = Vec::new();
+    for i in 0..16 {
+        let runtime = runtime.clone();
+        let token = token.clone();
+        joins.push(tokio::spawn(async move {
+            runtime
+                .submit(user_request(&format!("concurrent turn {i}"), &token))
+                .await
+        }));
+    }
+    for join in joins {
+        join.await
+            .expect("submit task joins")
+            .expect("concurrent turn completes");
+    }
+
+    let chain = load_persisted_chain(receipt_log.path()).expect("chain loads");
+    assert_eq!(chain.len(), 16);
+    assert_eq!(
+        chain
+            .iter()
+            .filter(|receipt| receipt.body.parent_hash.is_none())
+            .count(),
+        1,
+        "only the first concurrent receipt may be a genesis receipt"
+    );
+    verify_persisted_chain(&chain).expect("the concurrent receipt chain verifies");
+}
+
+/// ARD-489: cost-gate finalization must happen before the receipt/journal commit
+/// boundary. If a reservation expires during provider execution, the turn fails
+/// without leaving a durable receipt or journal entry.
+#[tokio::test]
+async fn expired_reservation_does_not_commit_receipt_or_journal() {
+    let provider = Arc::new(PausingProvider::new());
+    let clock = Arc::new(ManualClock::new(NOW_MS));
+    let journal_dir = tempfile::tempdir().expect("journal dir");
+    let session_id = SessionId::new();
+    let journal =
+        Arc::new(FileSessionJournal::new(journal_dir.path(), session_id).expect("journal opens"));
+    let receipt_log = tempfile::NamedTempFile::new().expect("receipt log");
+    let runtime = Arc::new(
+        runtime_builder(provider.clone())
+            .clock(clock.clone())
+            .with_journal(journal.clone())
+            .receipt_log(receipt_log.path())
+            .build()
+            .expect("runtime builds"),
+    );
+    let token = valid_token();
+
+    let submit = {
+        let runtime = runtime.clone();
+        tokio::spawn(async move {
+            runtime
+                .submit(request_for("expires in provider", &token, session_id))
+                .await
+        })
+    };
+    provider.wait_started().await;
+    clock.advance(31_000);
+    provider.resume();
+
+    let err = submit
+        .await
+        .expect("submit task joins")
+        .expect_err("expired reservation fails before durable commit");
+    assert!(matches!(err, RuntimeError::CostCeilingExceeded));
+    assert!(
+        load_persisted_chain(receipt_log.path())
+            .expect("chain loads")
+            .is_empty(),
+        "no receipt should be durable after finalize rejects the turn"
+    );
+    assert!(
+        journal
+            .replay(session_id)
+            .await
+            .expect("journal replays")
+            .is_empty(),
+        "no journal entry should be durable after finalize rejects the turn"
+    );
 }
 
 /// Stage 5: a provider failure releases the reservation and surfaces a runtime

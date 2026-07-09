@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use ardur_fused_runtime::{ReceiptChainError, load_persisted_chain};
+use ardur_fused_runtime::{ReceiptChainError, load_persisted_chain, verify_persisted_chain};
 use ardur_receipt::{ReceiptBody, ReceiptSigner, Sha256Digest, VerbObject};
 use ardur_runtime::{ChatRuntime, SessionId};
 use ardur_session_journals::{EntryId, JournalEntry, JournalError, SessionJournal};
@@ -48,7 +48,7 @@ impl SessionJournal for FailingAppendJournal {
 }
 
 #[tokio::test]
-async fn journal_append_failure_does_not_persist_receipt() {
+async fn journal_append_failure_leaves_reconcilable_orphan_receipt() {
     let root = tempfile::tempdir().expect("tempdir");
     let receipt_log = root.path().join("receipts.jsonl");
     let session_id = SessionId::new();
@@ -67,10 +67,13 @@ async fn journal_append_failure_does_not_persist_receipt() {
 
     assert!(result.is_err(), "journal failure must fail the turn commit");
     let chain = load_persisted_chain(&receipt_log).expect("chain load succeeds");
-    assert!(
-        chain.is_empty(),
-        "receipt must not be durable without its journal entry"
+    assert_eq!(
+        chain.len(),
+        1,
+        "journal append failure leaves exactly one durable orphan receipt for boot reconciliation"
     );
+    assert!(chain[0].body.parent_hash.is_none());
+    verify_persisted_chain(&chain).expect("orphan receipt is still a valid chain element");
 }
 
 #[tokio::test]
@@ -107,12 +110,12 @@ async fn receipt_persist_failure_rolls_back_journal_entries() {
         .expect("journal replay succeeds");
     assert!(
         entries.is_empty(),
-        "two-phase commit rolls back journal entries when the receipt cannot persist: {entries:?}"
+        "receipt-first commit writes no journal entries when the receipt cannot persist: {entries:?}"
     );
 }
 
 #[tokio::test]
-async fn stream_journal_append_failure_does_not_persist_receipt() {
+async fn stream_journal_append_failure_leaves_reconcilable_orphan_receipt() {
     let root = tempfile::tempdir().expect("tempdir");
     let receipt_log = root.path().join("receipts.jsonl");
     let session_id = SessionId::new();
@@ -138,10 +141,13 @@ async fn stream_journal_append_failure_does_not_persist_receipt() {
         "stream journal failure must fail the turn commit: {events:?}"
     );
     let chain = load_persisted_chain(&receipt_log).expect("chain load succeeds");
-    assert!(
-        chain.is_empty(),
-        "stream receipt must not be durable without its journal entry"
+    assert_eq!(
+        chain.len(),
+        1,
+        "stream journal append failure leaves exactly one durable orphan receipt for boot reconciliation"
     );
+    assert!(chain[0].body.parent_hash.is_none());
+    verify_persisted_chain(&chain).expect("stream orphan receipt is still a valid chain element");
 }
 
 #[tokio::test]
@@ -178,7 +184,7 @@ async fn stream_receipt_persist_failure_rolls_back_journal_entries() {
         .expect("journal replay succeeds");
     assert!(
         entries.is_empty(),
-        "stream two-phase commit rolls back journal entries when the receipt cannot persist: {entries:?}"
+        "stream receipt-first commit writes no journal entries when the receipt cannot persist: {entries:?}"
     );
 }
 
@@ -227,5 +233,44 @@ fn boot_refuses_broken_receipt_chain() {
     assert!(
         matches!(err, ReceiptChainError::BrokenChain { at: 1 }),
         "expected broken chain at second receipt, got {err:?}"
+    );
+}
+
+#[test]
+fn load_persisted_chain_drops_and_truncates_torn_trailing_line() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let receipt_log = root.path().join("receipts.jsonl");
+    let key = support::receipt_key();
+
+    let body = ReceiptBody {
+        receipt_id: uuid::Uuid::new_v4(),
+        parent_hash: None,
+        verb: VerbObject::new("llm.completion.minted.v1").expect("verb"),
+        issued_at: ardur_receipt::UnixTsMillis(support::NOW_MS),
+        subject: ardur_receipt::HolderId(support::HOLDER.to_string()),
+        cap_token_id: ardur_receipt::TokenId("cap".to_string()),
+        payload_digest: Sha256Digest::of(b"complete"),
+        cost: ardur_receipt::CostTuple {
+            tokens_in: 0,
+            tokens_out: 0,
+            cents: 0,
+            wall_ms: 0,
+            attention_score: 0.0,
+        },
+        tool_calls: Vec::new(),
+        provider: Some("test".to_string()),
+    };
+    let signed = ReceiptSigner::sign(body, &key).expect("sign");
+    let valid_prefix = format!("{}\n", signed.jws_compact());
+    std::fs::write(&receipt_log, format!("{valid_prefix}partial-jws-fragment"))
+        .expect("write torn log");
+
+    let chain = load_persisted_chain(&receipt_log).expect("torn tail is ignored");
+    assert_eq!(chain.len(), 1, "only the complete receipt is loaded");
+    verify_persisted_chain(&chain).expect("remaining chain is valid");
+    assert_eq!(
+        std::fs::read_to_string(&receipt_log).expect("read repaired log"),
+        valid_prefix,
+        "the malformed unterminated tail is truncated before the next append"
     );
 }

@@ -20,14 +20,15 @@
 //! - [`CapTokenVerifier`] / [`BiscuitCapTokenVerifier`] — re-bind the token to
 //!   a root key, screen it against a [`DenyList`], and authorize it against a
 //!   concrete request ([`RequiredCaveats`]), returning [`VerifiedClaims`].
-//! - [`DenyList`] / [`HashSetDenyList`] — revocation by Biscuit revocation id.
+//! - [`DenyList`] / [`HashSetDenyList`] / [`FileDenyList`] — revocation by
+//!   Biscuit revocation id, either in-memory or persisted to a shared file.
 //!
 //! Biscuit's `KeyPair`/`PublicKey` are Ed25519; they are re-exported below so
 //! callers issue and verify against the same key types the token is signed
 //! with.
 //!
 //! Phase 2 (see inline `// TODO §11.14 Phase 2:` markers) adds third-party
-//! caveats, sealed tokens, and a persisted (non-in-memory) deny list.
+//! caveats and sealed tokens.
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
@@ -44,7 +45,7 @@ mod verify;
 pub use biscuit_auth::{Biscuit, KeyPair, PublicKey};
 
 pub use attenuate::{BiscuitCapTokenAttenuator, CapTokenAttenuator};
-pub use denylist::{DenyList, HashSetDenyList};
+pub use denylist::{DenyList, FileDenyList, HashSetDenyList};
 pub use error::CapTokenError;
 pub use issue::{BiscuitCapTokenIssuer, CapTokenIssuer};
 pub use types::{

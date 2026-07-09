@@ -276,10 +276,22 @@ impl MemoryRuntime for HybridMemoryRetriever {
         at: UnixTsMillis,
         reason: InvalidationReason,
     ) -> Result<()> {
-        // Invalidation is a Qdrant-only tombstone write; the BM25 lexical index
-        // is append-mostly and carries no tombstones (recall already drops any
-        // invalidated record it surfaces, see `search`).
-        self.qdrant.invalidate(record_id, at, reason)
+        // ARD-504: Qdrant is the source of truth and records the tombstone first.
+        // After that succeeds, GC every already-indexed row in the invalidated
+        // correction chain from BM25 so lexical recall does not accumulate stale
+        // candidates forever. If BM25 cleanup fails, surface the error; Qdrant's
+        // tombstone still prevents stale hydration from crossing the API boundary.
+        let chain = self.qdrant.history_of(record_id);
+        self.qdrant.invalidate(record_id, at, reason)?;
+        self.qdrant.block_on(async {
+            let mut bm25 = self.bm25.lock().await;
+            for rec in chain {
+                bm25.delete(&rec.record_id.to_string())
+                    .await
+                    .map_err(|e| MemoryError::Backend(format!("bm25 delete: {e}")))?;
+            }
+            Ok(())
+        })
     }
 
     fn search(&self, query: &str, top_k: usize) -> Result<Vec<MemoryRecord>> {

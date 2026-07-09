@@ -29,7 +29,7 @@ use tantivy::collector::TopDocs;
 use tantivy::directory::MmapDirectory;
 use tantivy::query::QueryParser;
 use tantivy::schema::{FAST, Field, STORED, STRING, Schema, TEXT, TantivyDocument, Value};
-use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, TantivyError};
+use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, TantivyError, Term};
 
 /// Tantivy writer heap budget. 50 MB is Tantivy's documented sane floor for a
 /// single-threaded writer; the BM25 index here is small (memory cache), so this
@@ -134,6 +134,16 @@ impl Bm25Index {
         doc.add_text(self.doc_id_field, &doc_id);
         doc.add_text(self.text_field, &text);
         self.writer.add_document(doc)?;
+        self.writer.commit()?;
+        self.reader.reload()?;
+        Ok(())
+    }
+
+    /// Delete every indexed document whose `doc_id` equals `doc_id`, then commit
+    /// so subsequent queries stop returning stale lexical hits.
+    pub async fn delete(&mut self, doc_id: &str) -> Result<(), Bm25Error> {
+        self.writer
+            .delete_term(Term::from_field_text(self.doc_id_field, doc_id));
         self.writer.commit()?;
         self.reader.reload()?;
         Ok(())
@@ -250,5 +260,28 @@ mod tests {
         let mut idx = Bm25Index::new(None).unwrap();
         idx.add("d".into(), "anything".into()).await.unwrap();
         assert!(idx.query("anything", 0).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn delete_removes_all_docs_for_doc_id() {
+        let mut idx = Bm25Index::new(None).unwrap();
+        idx.add("stale".into(), "alpha stale memory".into())
+            .await
+            .unwrap();
+        idx.add("stale".into(), "alpha duplicate stale memory".into())
+            .await
+            .unwrap();
+        idx.add("live".into(), "alpha live memory".into())
+            .await
+            .unwrap();
+
+        let before = idx.query("alpha", 10).await.unwrap();
+        assert_eq!(before.len(), 3, "both stale duplicates and live doc match");
+
+        idx.delete("stale").await.unwrap();
+
+        let after = idx.query("alpha", 10).await.unwrap();
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].doc_id, "live");
     }
 }

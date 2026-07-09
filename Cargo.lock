@@ -337,9 +337,12 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "biscuit-auth",
+ "hex",
+ "parking_lot",
  "prost 0.10.4",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "uuid",
 ]
@@ -986,6 +989,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
  "uuid",
 ]
 
@@ -998,6 +1002,7 @@ dependencies = [
  "async-trait",
  "hex",
  "hmac 0.13.0",
+ "parking_lot",
  "reqwest 0.12.28",
  "secrecy 0.10.3",
  "serde",

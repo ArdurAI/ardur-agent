@@ -24,3 +24,11 @@ prost = { workspace = true }
 # Workspace pins v7; cap-token ids are v4 (random) per §11.14 Phase 1, so opt v4
 # in on top of the shared pin (Cargo unifies the feature set).
 uuid = { workspace = true, features = ["v4"] }
+# FileDenyList stores Biscuit revocation ids as newline-delimited hex.
+hex = { workspace = true }
+# Non-poisoning lock around the file-backed deny-list cache.
+parking_lot = { workspace = true }
+
+[dev-dependencies]
+# Throwaway deny-list files for persistence/propagation tests.
+tempfile = { workspace = true }

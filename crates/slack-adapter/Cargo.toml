@@ -47,6 +47,10 @@ sha2 = { workspace = true }
 subtle = { workspace = true }
 # Hex-encode the HMAC digest to Slack's `v0=<hex>` wire form.
 hex = { workspace = true }
+# Non-poisoning lock for the default in-memory inbound replay cache. Slack's
+# timestamp window stops stale requests; this cache also stops duplicate signed
+# deliveries inside that window (ARD-481).
+parking_lot = { workspace = true }
 # A parsed inbound message is assigned a fresh v4 correlation id (the workspace
 # pin is v7; opt v4 in on top, as provider-runtime does).
 uuid = { workspace = true, features = ["v4"] }

@@ -244,18 +244,33 @@ async fn usage_at_end() {
     let body = sse_body(&[
         r#"{"choices":[{"index":0,"delta":{"content":"hi"}}]}"#,
         r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#,
-        r#"{"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":5,"total_tokens":17}}"#,
+        r#"{"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":5,"total_tokens":17,"cost":0.0234}}"#,
     ]);
     let events = collect_events(&server, body).await;
-    let usage = events
+    let usage_pos = events
         .iter()
-        .find_map(|e| match e {
-            StreamEvent::Usage(u) => Some(*u),
-            _ => None,
-        })
+        .position(|e| matches!(e, StreamEvent::Usage(_)))
         .expect("a Usage event");
+    let finish_pos = events
+        .iter()
+        .position(|e| matches!(e, StreamEvent::Finish(_)))
+        .expect("a Finish event");
+    assert!(
+        usage_pos < finish_pos,
+        "usage/cost must be emitted before terminal Finish so the runtime can price the turn"
+    );
+
+    let StreamEvent::Usage(usage) = events[usage_pos] else {
+        unreachable!("usage_pos points at Usage")
+    };
     assert_eq!(usage.tokens_in, 12);
     assert_eq!(usage.tokens_out, 5);
+    // 0.0234 USD → 2.34¢ → 3¢, matching non-streaming ARD-495 behavior.
+    assert_eq!(usage.cost_cents, Some(3));
+    assert!(
+        matches!(events.last(), Some(StreamEvent::Finish(FinishReason::Stop))),
+        "Finish remains terminal after usage is surfaced"
+    );
 }
 
 #[tokio::test]

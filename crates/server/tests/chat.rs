@@ -185,6 +185,24 @@ async fn chat_rejects_invalid_bearer() {
 }
 
 #[tokio::test]
+async fn chat_rejects_oversized_bearer_without_processing_body() {
+    let oversized = "x".repeat(5000);
+    let (status, json) = post_chat_with_auth(
+        stub_router(),
+        json!({ "message": "hello" }),
+        Some(&oversized),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("bearer")
+    );
+}
+
+#[tokio::test]
 async fn chat_returns_reply_with_offline_provider() {
     let (status, json) = post_chat(stub_router(), json!({ "message": "hello ardur" })).await;
     assert_eq!(status, StatusCode::OK);

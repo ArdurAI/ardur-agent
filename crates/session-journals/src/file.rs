@@ -57,7 +57,7 @@ impl FileSessionJournal {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let count = Self::count_existing(&path)?;
+        let count = Self::recover_existing(&path)?;
         let handle = OpenOptions::new().create(true).append(true).open(&path)?;
         Ok(Self {
             session_id,
@@ -72,29 +72,75 @@ impl FileSessionJournal {
         &self.path
     }
 
-    /// Count the non-empty lines already present at `path` (0 if absent).
-    fn count_existing(path: &Path) -> Result<u64, JournalError> {
-        match fs::read_to_string(path) {
-            Ok(contents) => Ok(contents.lines().filter(|l| !l.is_empty()).count() as u64),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
-            Err(e) => Err(JournalError::Io(e)),
+    /// Read existing entries, repairing a single malformed unterminated tail
+    /// left by a crash before the append handle is opened (0 if absent).
+    fn recover_existing(path: &Path) -> Result<u64, JournalError> {
+        let contents = match fs::read_to_string(path) {
+            Ok(contents) => contents,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(e) => return Err(JournalError::Io(e)),
+        };
+        let (entries, torn_tail_start) = Self::parse_entries(&contents)?;
+        if let Some(offset) = torn_tail_start {
+            tracing::warn!(
+                path = %path.display(),
+                truncate_at = offset,
+                "dropping torn trailing session-journal line"
+            );
+            let file = OpenOptions::new().write(true).open(path)?;
+            file.set_len(offset as u64)?;
+            file.sync_all()?;
         }
+        Ok(entries.len() as u64)
+    }
+
+    fn parse_entries(contents: &str) -> Result<(Vec<JournalEntry>, Option<usize>), JournalError> {
+        let mut entries = Vec::new();
+        let mut offset = 0;
+        for (line_index, segment) in contents.split_inclusive('\n').enumerate() {
+            let segment_start = offset;
+            offset += segment.len();
+            let line = segment.strip_suffix('\n').unwrap_or(segment);
+            if line.trim().is_empty() {
+                continue;
+            }
+            match serde_json::from_str(line) {
+                Ok(entry) => entries.push(entry),
+                Err(err) if !segment.ends_with('\n') && offset == contents.len() => {
+                    tracing::warn!(
+                        line_index,
+                        error = %err,
+                        "ignoring malformed trailing session-journal line"
+                    );
+                    return Ok((entries, Some(segment_start)));
+                }
+                Err(err) => return Err(JournalError::Serde(err)),
+            }
+        }
+        Ok((entries, None))
     }
 
     /// Read and deserialize every entry, under the append lock so we never see
     /// a partially written line.
     fn read_all(&self) -> Result<Vec<JournalEntry>, JournalError> {
-        let _guard = self.state.lock();
+        let mut state = self.state.lock();
         let contents = match fs::read_to_string(&self.path) {
             Ok(c) => c,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(e) => return Err(JournalError::Io(e)),
         };
-        contents
-            .lines()
-            .filter(|l| !l.is_empty())
-            .map(|l| serde_json::from_str(l).map_err(JournalError::Serde))
-            .collect()
+        let (entries, torn_tail_start) = Self::parse_entries(&contents)?;
+        if let Some(offset) = torn_tail_start {
+            tracing::warn!(
+                path = %self.path.display(),
+                truncate_at = offset,
+                "dropping torn trailing session-journal line"
+            );
+            state.handle.set_len(offset as u64)?;
+            state.handle.sync_all()?;
+            state.count = entries.len() as u64;
+        }
+        Ok(entries)
     }
 }
 

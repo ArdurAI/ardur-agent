@@ -457,6 +457,7 @@ impl FusedRuntimeBuilder {
             memory: self.memory,
             journal: self.journal,
             chain_tail: Mutex::new(chain_tail),
+            commit_lock: tokio::sync::Mutex::new(()),
             receipt_log: self.receipt_log,
             reconciliation_strategy: self.reconciliation_strategy,
             tools: self.tools,

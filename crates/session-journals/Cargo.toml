@@ -30,6 +30,9 @@ anyhow = { workspace = true }
 # Non-poisoning mutex guarding the append-only file handle, and the registry's
 # id→journal map (§7.10).
 parking_lot = { workspace = true }
+# Torn-tail recovery logs when it drops a crash-fragment from the append-only
+# JSONL file.
+tracing = { workspace = true }
 # Workspace pins v7 (time-ordered ids); the locally-defined `ReservationId`
 # placeholder mints v4 (random), so opt v4 in on top of the shared pin.
 uuid = { workspace = true, features = ["v4"] }
