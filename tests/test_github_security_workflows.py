@@ -65,6 +65,39 @@ class GitHubSecurityWorkflowTests(unittest.TestCase):
         )
         self.assertIn("fail-on-severity: high", ci)
 
+    def test_release_workflow_uploads_sbom_signed_assets_and_provenance(self):
+        release_path = WORKFLOWS / "release.yml"
+        self.assertTrue(release_path.is_file(), "release workflow must exist")
+        release = release_path.read_text(encoding="utf-8")
+
+        self.assertIn("name: release-supply-chain", release)
+        self.assertIn("release:\n    types: [published]", release)
+        self.assertNotIn("pull_request:", release)
+
+        self.assertIn("contents: write", release)
+        self.assertIn("id-token: write", release)
+        self.assertIn("attestations: write", release)
+        self.assertNotIn("security-events: write", release)
+
+        self.assertIn("cargo build --workspace --bins --release --locked", release)
+        self.assertIn("anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610", release)
+        self.assertIn("format: spdx-json", release)
+        self.assertIn("output-file: dist/ardur-agent-${{ env.RELEASE_TAG }}.spdx.json", release)
+        self.assertIn("sha256sum", release)
+        self.assertIn("SHA256SUMS", release)
+
+        self.assertIn("actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373", release)
+        self.assertIn("subject-path: dist/*", release)
+
+        self.assertIn("sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6", release)
+        self.assertIn("cosign sign-blob --yes", release)
+        self.assertIn("--output-signature", release)
+        self.assertIn("--output-certificate", release)
+        self.assertIn("--bundle", release)
+
+        self.assertIn("gh release upload", release)
+        self.assertIn("--clobber", release)
+
     def test_site_workflow_validates_main_and_dev_but_deploys_only_main(self):
         site = (WORKFLOWS / "site-deploy.yml").read_text(encoding="utf-8")
 
