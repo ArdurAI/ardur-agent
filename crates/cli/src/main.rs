@@ -8,6 +8,7 @@
 mod audit;
 mod marketplace;
 mod persona;
+mod project_surface;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -18,6 +19,7 @@ use audit::{AuditArgs, run_audit};
 use clap::{Args, Parser, Subcommand};
 use marketplace::{MarketplaceArgs, run_marketplace};
 use persona::{PersonaArgs, run_persona};
+use project_surface::{ProjectArgs, run_project};
 use serde_json::json;
 use sha2::Digest;
 
@@ -75,6 +77,8 @@ enum Commands {
     Migrate(MigrateArgs),
     /// Manage persona packs and domain packs.
     Persona(PersonaArgs),
+    /// Manage the Kanban board and multi-agent run ledger.
+    Project(ProjectArgs),
     /// Run supply-chain security audits (secrets, SBOM, vulns).
     Audit(AuditArgs),
     /// Browse and install skills from the marketplace.
@@ -322,6 +326,7 @@ fn main() -> ExitCode {
         Commands::Channel(args) => run_channel(args),
         Commands::Migrate(args) => run_migrate(args),
         Commands::Persona(args) => run_persona(args),
+        Commands::Project(args) => run_project(args),
         Commands::Audit(args) => run_audit(args),
         Commands::Marketplace(args) => run_marketplace(args),
         Commands::Fetch(args) => run_fetch(args),
