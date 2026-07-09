@@ -60,6 +60,10 @@ const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 30;
 /// ARD-491 — the default per-turn cap on accumulated streamed assistant content
 /// (bytes), overridable via `ARDUR_STREAM_CONTENT_MAX_BYTES`.
 const DEFAULT_STREAM_CONTENT_MAX_BYTES: usize = 1 << 20; // 1 MiB
+/// ARD-230/266 — default number of memories recalled into a provider turn.
+const DEFAULT_MEMORY_RECALL_K: usize = 5;
+/// ARD-230/266 — default minimum recall relevance/confidence for injection.
+const DEFAULT_MEMORY_RECALL_THRESHOLD: f32 = 0.5;
 
 /// The default max tool iterations, read from `ARDUR_TOOL_MAX_ITERATIONS` (a
 /// positive integer) and otherwise [`DEFAULT_MAX_TOOL_ITERATIONS`].
@@ -93,6 +97,27 @@ fn default_stream_content_max_bytes() -> usize {
         .unwrap_or(DEFAULT_STREAM_CONTENT_MAX_BYTES)
 }
 
+/// The default memory recall count, read from `ARDUR_MEMORY_RECALL_K` (positive
+/// integer) and otherwise [`DEFAULT_MEMORY_RECALL_K`].
+fn default_memory_recall_k() -> usize {
+    std::env::var("ARDUR_MEMORY_RECALL_K")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_MEMORY_RECALL_K)
+}
+
+/// The default memory recall threshold, read from
+/// `ARDUR_MEMORY_RECALL_THRESHOLD` (`0.0..=1.0`) and otherwise
+/// [`DEFAULT_MEMORY_RECALL_THRESHOLD`].
+fn default_memory_recall_threshold() -> f32 {
+    std::env::var("ARDUR_MEMORY_RECALL_THRESHOLD")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .filter(|v| (0.0..=1.0).contains(v))
+        .unwrap_or(DEFAULT_MEMORY_RECALL_THRESHOLD)
+}
+
 /// Builder for [`FusedRuntime`]. See the module docs for the default policy.
 pub struct FusedRuntimeBuilder {
     cap_root: ardur_cap_token::PublicKey,
@@ -118,6 +143,8 @@ pub struct FusedRuntimeBuilder {
     registry: Arc<HookRegistry>,
     injection_filters: FilterRegistry,
     memory: Option<Arc<dyn MemoryRuntime + Send + Sync>>,
+    memory_recall_k: usize,
+    memory_recall_threshold: f32,
     journal: Option<Arc<dyn SessionJournal>>,
     receipt_log: Option<PathBuf>,
     reconciliation_strategy: ReconciliationStrategy,
@@ -162,6 +189,8 @@ impl FusedRuntimeBuilder {
             registry: Arc::new(HookRegistry::new()),
             injection_filters: FilterRegistry::new(),
             memory: None,
+            memory_recall_k: default_memory_recall_k(),
+            memory_recall_threshold: default_memory_recall_threshold(),
             journal: None,
             receipt_log: None,
             reconciliation_strategy: ReconciliationStrategy::default(),
@@ -365,6 +394,25 @@ impl FusedRuntimeBuilder {
         self
     }
 
+    /// Configure how many relevant memories are injected before provider
+    /// dispatch. A value of `0` disables recall injection while leaving memory
+    /// writes enabled.
+    #[must_use]
+    pub fn memory_recall_k(mut self, k: usize) -> Self {
+        self.memory_recall_k = k;
+        self
+    }
+
+    /// Configure the minimum recall relevance/confidence for context injection.
+    /// Values outside `0.0..=1.0` are ignored in favour of the current setting.
+    #[must_use]
+    pub fn memory_recall_threshold(mut self, threshold: f32) -> Self {
+        if (0.0..=1.0).contains(&threshold) {
+            self.memory_recall_threshold = threshold;
+        }
+        self
+    }
+
     /// Attach the durable session journal (stage 10).
     #[must_use]
     pub fn with_journal(mut self, journal: Arc<dyn SessionJournal>) -> Self {
@@ -455,6 +503,8 @@ impl FusedRuntimeBuilder {
             registry: self.registry,
             injection_filters: self.injection_filters,
             memory: self.memory,
+            memory_recall_k: self.memory_recall_k,
+            memory_recall_threshold: self.memory_recall_threshold,
             journal: self.journal,
             chain_tail: Mutex::new(chain_tail),
             commit_lock: tokio::sync::Mutex::new(()),
