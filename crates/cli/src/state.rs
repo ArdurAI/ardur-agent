@@ -5,7 +5,7 @@
 //!
 //! ```text
 //! ~/.ardur/
-//! ├── cedar.policies                     # Cedar bundle (optional; permissive default)
+//! ├── cedar.policies                     # Cedar bundle (optional; absent => deny-all unless dev fallback is explicit)
 //! ├── keys/
 //! │   ├── issuer.key                      # Ed25519 cap-token issuer private key (32 raw bytes)
 //! │   └── receipt.pem                     # P-256 receipt signing key (PKCS#8 PEM)
@@ -27,9 +27,12 @@ use biscuit_auth::{Algorithm, KeyPair, PrivateKey};
 
 use crate::error::CliError;
 
-/// The permissive Cedar bundle used when no `cedar.policies` file is present: a
-/// single unconditional `permit`. Drop a real policy file at
-/// [`StateDirs::cedar_path`] to tighten the authorization seam.
+/// The deny-all Cedar bundle used when no `cedar.policies` file is present.
+/// Operators must either provide a real policy file or opt into the explicit
+/// development escape hatch (`ARDUR_DEV_PERMISSIVE_POLICY=true`).
+const DENY_ALL_POLICY: &str = "forbid(principal, action, resource);";
+
+/// Explicit local-development fallback for ad-hoc CLI smoke tests.
 const PERMISSIVE_POLICY: &str = "permit(principal, action, resource);";
 
 /// The resolved `~/.ardur/` state directories for a session. Construct with
@@ -150,13 +153,27 @@ impl StateDirs {
     }
 
     /// Load the Cedar policy bundle from [`cedar_path`](Self::cedar_path) if it
-    /// exists, else fall back to the built-in permissive `permit`.
+    /// exists. When absent, load a deny-all policy unless the operator has
+    /// explicitly enabled the local-development fallback with
+    /// `ARDUR_DEV_PERMISSIVE_POLICY=true`.
     pub fn load_cedar_policies(&self) -> Result<CedarPolicyBundle, CliError> {
+        self.load_cedar_policies_with_dev_fallback(dev_permissive_policy_enabled())
+    }
+
+    /// Load Cedar policies with the caller-supplied dev-mode decision. Exposed so
+    /// tests can verify the security default without mutating process-global
+    /// environment variables.
+    pub fn load_cedar_policies_with_dev_fallback(
+        &self,
+        dev_permissive_policy: bool,
+    ) -> Result<CedarPolicyBundle, CliError> {
         let path = self.cedar_path();
         let source = if path.exists() {
             PolicySource::File(path)
-        } else {
+        } else if dev_permissive_policy {
             PolicySource::Embedded(PERMISSIVE_POLICY.to_string())
+        } else {
+            PolicySource::Embedded(DENY_ALL_POLICY.to_string())
         };
         CedarPolicyBundle::load(source)
             .map_err(|e| CliError::State(format!("loading Cedar policies: {e}")))
@@ -171,6 +188,18 @@ impl StateDirs {
     pub fn local_subject(&self) -> String {
         format!("cli://localhost-{}", local_uid(&self.root))
     }
+}
+
+/// Whether the explicit local-development permissive Cedar fallback is enabled.
+fn dev_permissive_policy_enabled() -> bool {
+    std::env::var("ARDUR_DEV_PERMISSIVE_POLICY")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
 }
 
 /// Write `bytes` to `path`, owner-read/write only on unix (`0o600`) so private
@@ -203,4 +232,56 @@ fn local_uid(home: &Path) -> String {
     std::env::var("USER")
         .or_else(|_| std::env::var("USERNAME"))
         .unwrap_or_else(|_| "anonymous".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use ardur_cedar_policy::{
+        ActionRef, Decision, EvaluationContext, PolicyBundle, PrincipalRef, ResourceRef,
+    };
+    use serde_json::Value;
+
+    use super::*;
+
+    fn state_under(home: &Path) -> StateDirs {
+        StateDirs {
+            root: home.join(".ardur"),
+            memory: home.join(".ardur/memory"),
+            journals: home.join(".ardur/journals"),
+            receipts: home.join(".ardur/receipts"),
+            keys: home.join(".ardur/keys"),
+        }
+    }
+
+    fn eval_chat_submit(bundle: &CedarPolicyBundle) -> Decision {
+        bundle.evaluate(&EvaluationContext {
+            principal: PrincipalRef("User::\"cli://test\"".to_string()),
+            action: ActionRef("Action::Submit".to_string()),
+            resource: ResourceRef("Session::\"local\"".to_string()),
+            attributes: Value::Null,
+        })
+    }
+
+    #[test]
+    fn missing_cli_cedar_policy_denies_by_default() {
+        let home = tempfile::tempdir().expect("temp home");
+        let state = state_under(home.path());
+
+        let bundle = state
+            .load_cedar_policies_with_dev_fallback(false)
+            .expect("missing policy loads deny-all fallback");
+        assert!(matches!(eval_chat_submit(&bundle), Decision::Deny { .. }));
+    }
+
+    #[test]
+    fn explicit_dev_permissive_policy_allows_missing_cli_policy() {
+        let home = tempfile::tempdir().expect("temp home");
+        let state = state_under(home.path());
+
+        let bundle = state
+            .load_cedar_policies_with_dev_fallback(true)
+            .expect("explicit dev fallback loads permissive policy");
+
+        assert!(matches!(eval_chat_submit(&bundle), Decision::Allow { .. }));
+    }
 }
