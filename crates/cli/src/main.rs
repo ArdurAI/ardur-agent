@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use ardur_cli::{ChatArgs, CliError, Config, StateDirs, run_chat};
+use ardur_session_journals::JournalEntry;
 use audit::{AuditArgs, run_audit};
 use clap::{Args, Parser, Subcommand};
 use marketplace::{MarketplaceArgs, run_marketplace};
@@ -727,40 +728,48 @@ fn human_size(bytes: u64) -> String {
 /// Run `ardur session` subcommands.
 fn run_session(args: SessionArgs) -> Result<(), CliError> {
     let root = StateDirs::resolve()?.root;
-    let journals_dir = root.join("journals");
+    let sessions_dir = session_store_dir(&root);
 
     match args.action {
         SessionAction::List { workspace } => {
             let mut sessions = Vec::new();
-            if let Ok(entries) = std::fs::read_dir(&journals_dir) {
+            if let Ok(entries) = std::fs::read_dir(&sessions_dir) {
                 for entry in entries.flatten() {
                     let path = entry.path();
-                    if path.is_dir() {
-                        let name = path
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("unknown");
-                        let meta = entry.metadata().ok();
-                        let age = meta.as_ref().map(|m| {
-                            m.modified()
-                                .ok()
-                                .and_then(|t| t.elapsed().ok())
-                                .map(|d| format!("{}d", d.as_secs() / 86400))
-                                .unwrap_or_else(|| "?".to_string())
-                        });
-                        let size = estimate_dir_size(&path);
-                        if let Some(ref ws) = workspace {
-                            if !name.contains(ws) {
-                                continue;
-                            }
-                        }
-                        sessions.push(json!({
-                            "id": name,
-                            "age": age,
-                            "size_bytes": size,
-                            "size_human": human_size(size),
-                        }));
+                    if !path.is_dir() {
+                        continue;
                     }
+                    let id = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("unknown");
+                    if let Some(ref ws) = workspace {
+                        if !id.contains(ws) {
+                            continue;
+                        }
+                    }
+                    let journal_path = path.join("journal.jsonl");
+                    let entries = read_session_entries(&journal_path)?;
+                    let receipts = session_receipts(&entries);
+                    let meta = entry.metadata().ok();
+                    let age = meta.as_ref().map(|m| {
+                        m.modified()
+                            .ok()
+                            .and_then(|t| t.elapsed().ok())
+                            .map(|d| format!("{}d", d.as_secs() / 86400))
+                            .unwrap_or_else(|| "?".to_string())
+                    });
+                    let size = estimate_dir_size(&path);
+                    sessions.push(json!({
+                        "id": id,
+                        "age": age,
+                        "turns": session_turns(&entries),
+                        "entries": entries.len(),
+                        "receipts": receipts.len(),
+                        "last_receipt_id": receipts.last(),
+                        "size_bytes": size,
+                        "size_human": human_size(size),
+                    }));
                 }
             }
             println!(
@@ -769,44 +778,63 @@ fn run_session(args: SessionArgs) -> Result<(), CliError> {
             );
         }
         SessionAction::Resume { id } => {
-            let session_dir = journals_dir.join(&id);
-            if !session_dir.is_dir() {
-                return Err(CliError::State(format!("session `{id}` not found")));
-            }
+            let journal_path = session_journal_path(&sessions_dir, &id);
+            let entries = require_session_entries(&journal_path, &id)?;
             println!("resuming session {id}...");
-            println!("session context restored from {}", session_dir.display());
-            println!("run `ardur chat --session-id {id}` to continue");
-        }
-        SessionAction::Export { id, format, output } => {
-            let session_dir = journals_dir.join(&id);
-            if !session_dir.is_dir() {
-                return Err(CliError::State(format!("session `{id}` not found")));
-            }
-            let mut entries = Vec::new();
-            if let Ok(files) = std::fs::read_dir(&session_dir) {
-                for file in files.flatten() {
-                    if let Ok(content) = std::fs::read_to_string(file.path()) {
-                        entries.push(content);
+            println!("session context restored from {}", journal_path.display());
+            println!("messages:");
+            for entry in &entries {
+                match entry {
+                    JournalEntry::UserMessage { content, .. } => println!("USER: {content}"),
+                    JournalEntry::AssistantMessage {
+                        content,
+                        receipt_id,
+                        ..
+                    } => println!("ASSISTANT ({}): {content}", receipt_id.0),
+                    JournalEntry::ToolInvocation {
+                        tool_id,
+                        receipt_id,
+                        ..
+                    } => println!("TOOL {} ({})", tool_id.0, receipt_id.0),
+                    JournalEntry::CostFinalized { actual, .. } => {
+                        println!("COST finalized: {}c", actual.cents);
                     }
+                    JournalEntry::Checkpoint { summary, .. } => {
+                        println!("CHECKPOINT: {summary}");
+                    }
+                    JournalEntry::Invalidation {
+                        target_entry_id,
+                        reason,
+                        ..
+                    } => println!("INVALIDATED entry {target_entry_id}: {reason}"),
                 }
             }
-            let content = if format == "json" {
-                serde_json::to_string_pretty(&json!({
+            println!("run `ardur chat --session-id {id}` to continue with this context");
+        }
+        SessionAction::Export { id, format, output } => {
+            let journal_path = session_journal_path(&sessions_dir, &id);
+            let entries = require_session_entries(&journal_path, &id)?;
+            let receipts = session_receipts(&entries);
+            let content = match format.as_str() {
+                "json" => serde_json::to_string_pretty(&json!({
                     "session_id": id,
+                    "journal_path": journal_path.display().to_string(),
                     "entries": entries,
+                    "receipts": receipts,
                     "exported_at": std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_secs())
                         .unwrap_or(0),
                 }))
-                .expect("export serializes")
-            } else {
-                // Markdown format
-                let mut md = format!("# Session Export: {id}\n\n");
-                for (i, entry) in entries.iter().enumerate() {
-                    md.push_str(&format!("## Turn {}\n\n```\n{}\n```\n\n", i + 1, entry));
+                .expect("export serializes"),
+                "markdown" | "md" => {
+                    render_session_markdown(&id, &journal_path, &entries, &receipts)
                 }
-                md
+                other => {
+                    return Err(CliError::State(format!(
+                        "unsupported export format `{other}` (expected markdown or json)"
+                    )));
+                }
             };
             if let Some(path) = output {
                 std::fs::write(&path, content)?;
@@ -819,14 +847,14 @@ fn run_session(args: SessionArgs) -> Result<(), CliError> {
             let cutoff =
                 std::time::SystemTime::now() - std::time::Duration::from_secs(older_than * 86400);
             let mut removed = 0;
-            if let Ok(entries) = std::fs::read_dir(&journals_dir) {
+            if let Ok(entries) = std::fs::read_dir(&sessions_dir) {
                 for entry in entries.flatten() {
                     let path = entry.path();
                     if path.is_dir() {
                         if let Ok(meta) = entry.metadata() {
                             if let Ok(modified) = meta.modified() {
                                 if modified < cutoff {
-                                    let _ = std::fs::remove_dir_all(&path);
+                                    std::fs::remove_dir_all(&path)?;
                                     removed += 1;
                                 }
                             }
@@ -839,6 +867,140 @@ fn run_session(args: SessionArgs) -> Result<(), CliError> {
     }
 
     Ok(())
+}
+
+fn session_store_dir(root: &Path) -> PathBuf {
+    root.join("journals").join("sessions")
+}
+
+fn session_journal_path(sessions_dir: &Path, id: &str) -> PathBuf {
+    sessions_dir.join(id).join("journal.jsonl")
+}
+
+fn require_session_entries(path: &Path, id: &str) -> Result<Vec<JournalEntry>, CliError> {
+    if !path.is_file() {
+        return Err(CliError::State(format!("session `{id}` not found")));
+    }
+    read_session_entries(path)
+}
+
+fn read_session_entries(path: &Path) -> Result<Vec<JournalEntry>, CliError> {
+    let contents = match std::fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(CliError::Io(e)),
+    };
+    let mut entries = Vec::new();
+    for (line_no, line) in contents.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let entry = serde_json::from_str::<JournalEntry>(line).map_err(|e| {
+            CliError::State(format!(
+                "failed to parse {} line {}: {e}",
+                path.display(),
+                line_no + 1
+            ))
+        })?;
+        entries.push(entry);
+    }
+    Ok(entries)
+}
+
+fn session_turns(entries: &[JournalEntry]) -> usize {
+    entries
+        .iter()
+        .filter(|entry| matches!(entry, JournalEntry::UserMessage { .. }))
+        .count()
+}
+
+fn session_receipts(entries: &[JournalEntry]) -> Vec<String> {
+    let mut receipts = Vec::new();
+    for entry in entries {
+        match entry {
+            JournalEntry::AssistantMessage { receipt_id, .. }
+            | JournalEntry::ToolInvocation { receipt_id, .. } => {
+                receipts.push(receipt_id.0.to_string())
+            }
+            _ => {}
+        }
+    }
+    receipts.sort();
+    receipts.dedup();
+    receipts
+}
+
+fn render_session_markdown(
+    id: &str,
+    journal_path: &Path,
+    entries: &[JournalEntry],
+    receipts: &[String],
+) -> String {
+    let mut md = format!("# Session Export: {id}\n\n");
+    md.push_str(&format!("Journal: `{}`\n\n", journal_path.display()));
+    if receipts.is_empty() {
+        md.push_str("Receipts: none\n\n");
+    } else {
+        md.push_str("## Receipts\n\n");
+        for receipt in receipts {
+            md.push_str(&format!("- `{receipt}`\n"));
+        }
+        md.push('\n');
+    }
+    md.push_str("## Transcript\n\n");
+    for (i, entry) in entries.iter().enumerate() {
+        match entry {
+            JournalEntry::UserMessage { content, .. } => {
+                md.push_str(&format!("### {}. User\n\n{}\n\n", i + 1, content));
+            }
+            JournalEntry::AssistantMessage {
+                content,
+                receipt_id,
+                ..
+            } => {
+                md.push_str(&format!(
+                    "### {}. Assistant\n\nReceipt: `{}`\n\n{}\n\n",
+                    i + 1,
+                    receipt_id.0,
+                    content
+                ));
+            }
+            JournalEntry::ToolInvocation {
+                tool_id,
+                receipt_id,
+                ..
+            } => {
+                md.push_str(&format!(
+                    "### {}. Tool invocation\n\nTool: `{}`\nReceipt: `{}`\n\n",
+                    i + 1,
+                    tool_id.0,
+                    receipt_id.0
+                ));
+            }
+            JournalEntry::CostFinalized { actual, .. } => {
+                md.push_str(&format!(
+                    "### {}. Cost finalized\n\n{} cents\n\n",
+                    i + 1,
+                    actual.cents
+                ));
+            }
+            JournalEntry::Checkpoint { summary, .. } => {
+                md.push_str(&format!("### {}. Checkpoint\n\n{}\n\n", i + 1, summary));
+            }
+            JournalEntry::Invalidation {
+                target_entry_id,
+                reason,
+                ..
+            } => {
+                md.push_str(&format!(
+                    "### {}. Invalidation\n\nTarget entry: `{target_entry_id}`\nReason: {}\n\n",
+                    i + 1,
+                    reason
+                ));
+            }
+        }
+    }
+    md
 }
 
 // ---------------------------------------------------------------------------

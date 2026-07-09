@@ -48,10 +48,13 @@ mod util;
 mod welcome;
 
 use std::io::{IsTerminal, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use ardur_provider_runtime::{TelemetryConfig, init_genai_tracing, shutdown_genai_tracing};
-use ardur_runtime::{ChatMessage, CommandBus, CommandContext, InMemoryCommandBus, RuntimeError};
+use ardur_runtime::{
+    ChatMessage, CommandBus, CommandContext, InMemoryCommandBus, RuntimeError, SessionId,
+};
+use ardur_session_journals::JournalEntry;
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 
@@ -106,6 +109,14 @@ pub struct ChatArgs {
     /// `--no-stream`. (`NO_COLOR` and a non-tty stdout select this automatically.)
     #[arg(long)]
     pub plain: bool,
+
+    /// Resume an existing durable session journal by UUID.
+    ///
+    /// The previous user/assistant transcript is replayed into context before
+    /// new turns are submitted, and new journal entries append to the same
+    /// `~/.ardur/journals/sessions/<uuid>/journal.jsonl` file.
+    #[arg(long = "session-id", value_name = "UUID")]
+    pub session_id: Option<String>,
 }
 
 /// The active chat substrate for a session: the default [`FusedEngine`] or the
@@ -209,6 +220,47 @@ pub fn run_chat(args: ChatArgs) -> Result<(), CliError> {
     result
 }
 
+fn parse_session_id(raw: &str) -> Result<SessionId, CliError> {
+    uuid::Uuid::parse_str(raw)
+        .map(SessionId)
+        .map_err(|e| CliError::State(format!("invalid session id `{raw}`: {e}")))
+}
+
+fn session_journal_path(dirs: &StateDirs, session_id: SessionId) -> PathBuf {
+    dirs.journals
+        .join("sessions")
+        .join(session_id.0.to_string())
+        .join("journal.jsonl")
+}
+
+fn load_history_from_journal(path: &Path) -> Result<Vec<ChatMessage>, CliError> {
+    let contents = std::fs::read_to_string(path)?;
+    let mut history = Vec::new();
+    for (line_no, line) in contents.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let entry: JournalEntry = serde_json::from_str(line).map_err(|e| {
+            CliError::State(format!(
+                "failed to parse {} line {}: {e}",
+                path.display(),
+                line_no + 1
+            ))
+        })?;
+        match entry {
+            JournalEntry::UserMessage { content, .. } => history.push(ChatMessage::user(content)),
+            JournalEntry::AssistantMessage { content, .. } => {
+                history.push(ChatMessage::assistant(content));
+            }
+            JournalEntry::ToolInvocation { .. }
+            | JournalEntry::CostFinalized { .. }
+            | JournalEntry::Checkpoint { .. }
+            | JournalEntry::Invalidation { .. } => {}
+        }
+    }
+    Ok(history)
+}
+
 /// Resolve the effective per-session budget: the `--budget-cents` flag wins,
 /// then the [`BUDGET_CENTS_ENV`] environment variable, then the config-file (or
 /// default) value.
@@ -241,18 +293,50 @@ async fn run_chat_loop(config: Config, args: &ChatArgs) -> Result<(), CliError> 
     // session into the single-`complete()` full-pipeline path for every turn.
     let stream_enabled = !args.no_stream && !force_plain;
 
+    if args.echo && args.session_id.is_some() {
+        return Err(CliError::State(
+            "--session-id cannot be used with --echo because echo sessions are in-memory"
+                .to_string(),
+        ));
+    }
+
+    let resume_session_id = args
+        .session_id
+        .as_deref()
+        .map(parse_session_id)
+        .transpose()?;
+
     let mut state = ReplState {
         theme,
         cost: SessionCost::default(),
         osc8,
     };
 
+    let mut restored_history: Vec<ChatMessage> = Vec::new();
+
     let engine = if args.echo {
         ActiveEngine::Echo(Box::new(ChatEngine::new(&config)?))
     } else {
         let dirs = StateDirs::resolve()?;
         dirs.create()?;
-        let fused = FusedEngine::new(&config, &dirs, config.budget_cents)?;
+        if let Some(session_id) = resume_session_id {
+            let journal_path = session_journal_path(&dirs, session_id);
+            if !journal_path.is_file() {
+                return Err(CliError::State(format!(
+                    "session `{}` not found at {}",
+                    session_id.0,
+                    journal_path.display()
+                )));
+            }
+            restored_history = load_history_from_journal(&journal_path)?;
+            println!(
+                "resumed session {} with {} prior messages",
+                session_id.0,
+                restored_history.len()
+            );
+        }
+        let fused =
+            FusedEngine::new_for_session(&config, &dirs, config.budget_cents, resume_session_id)?;
         if fused.offline() {
             println!(
                 "running in offline mode (stub provider) — set ANTHROPIC_API_KEY for real LLM calls."
@@ -285,7 +369,7 @@ async fn run_chat_loop(config: Config, args: &ChatArgs) -> Result<(), CliError> 
         state.theme.paint(Role::Accent, "/help"),
     );
 
-    let mut history: Vec<ChatMessage> = Vec::new();
+    let mut history: Vec<ChatMessage> = restored_history;
     // A tty drives the rich line-editor; piped/redirected stdin reads lines
     // directly so `echo "hi" | ardur chat` (and the integration tests) work.
     if stdin_tty {
