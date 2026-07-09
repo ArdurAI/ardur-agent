@@ -93,10 +93,25 @@ pub struct FusedEngine {
 }
 
 impl FusedEngine {
-    /// Wire a fresh engine: resolve the provider, load/mint the persistent keys
-    /// and Cedar policies, mint the session cap-token, and build the fused
-    /// runtime over file-backed receipts + journals.
+    /// Wire a fresh engine over a newly-minted session id.
+    ///
+    /// Resolves the provider, loads/mints persistent keys and Cedar policies,
+    /// mints the session cap-token, and builds the fused runtime over
+    /// file-backed receipts + journals.
     pub fn new(config: &Config, dirs: &StateDirs, budget_cents: u64) -> Result<Self, CliError> {
+        Self::new_for_session(config, dirs, budget_cents, None)
+    }
+
+    /// Wire an engine over a specific session id, or mint a fresh one when absent.
+    ///
+    /// Supplying `session_id` reopens that session's file-backed journal so new
+    /// turns append to the existing transcript instead of starting a new log.
+    pub fn new_for_session(
+        config: &Config,
+        dirs: &StateDirs,
+        budget_cents: u64,
+        session_id: Option<SessionId>,
+    ) -> Result<Self, CliError> {
         let model = ModelId::new(&config.model);
 
         // Select the live backend via `ARDUR_PROVIDER` (default `anthropic`).
@@ -178,7 +193,7 @@ impl FusedEngine {
             attention_score_max: 0,
         };
 
-        let session_id = SessionId::new();
+        let session_id = session_id.unwrap_or_default();
         let journal = FileSessionJournal::new(&dirs.journals, session_id)
             .map_err(|e| CliError::State(format!("opening the session journal: {e}")))?;
         // TODO §7.0: no file-backed `MemoryRuntime` exists yet, so the bi-temporal
