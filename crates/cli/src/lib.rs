@@ -39,6 +39,7 @@ mod error;
 mod fused;
 mod links;
 mod markdown;
+mod secure_io;
 mod slash;
 mod state;
 mod stream;
@@ -66,9 +67,14 @@ pub use error::CliError;
 pub use fused::FusedEngine;
 pub use links::{osc8_from_env, terminal_supports_osc8};
 pub use markdown::{render_markdown, render_markdown_with};
+pub use secure_io::{
+    create_private_file_no_follow, directory_modified_no_follow, list_directory_names_no_follow,
+    read_file_no_follow, read_string_no_follow, remove_directory_tree_no_follow,
+    write_private_file_atomic_no_follow, write_private_file_no_follow,
+};
 pub use slash::{apply_theme_command, phase1_help};
-pub use state::StateDirs;
-pub use stream::{RenderCtx, StreamOutcome, drive_turn};
+pub use state::{SessionMetadata, StateDirs};
+pub use stream::{RenderCtx, StreamOutcome, drive_fused_turn, drive_turn};
 pub use theme::{Attr, Role, Theme, ThemeName};
 pub use toolbox::{MAX_BOX_COLS, SessionCost, TurnStats, render_cost_line, render_tool_call_box};
 pub use util::{display_width, layout_width};
@@ -234,7 +240,7 @@ fn session_journal_path(dirs: &StateDirs, session_id: SessionId) -> PathBuf {
 }
 
 fn load_history_from_journal(path: &Path) -> Result<Vec<ChatMessage>, CliError> {
-    let contents = std::fs::read_to_string(path)?;
+    let contents = secure_io::read_string_no_follow(path)?;
     let mut history = Vec::new();
     for (line_no, line) in contents.lines().enumerate() {
         if line.trim().is_empty() {
@@ -336,7 +342,8 @@ async fn run_chat_loop(config: Config, args: &ChatArgs) -> Result<(), CliError> 
             );
         }
         let fused =
-            FusedEngine::new_for_session(&config, &dirs, config.budget_cents, resume_session_id)?;
+            FusedEngine::new_for_session(&config, &dirs, config.budget_cents, resume_session_id)
+                .await?;
         if fused.offline() {
             println!(
                 "running in offline mode (stub provider) — set ANTHROPIC_API_KEY for real LLM calls."
@@ -518,10 +525,9 @@ fn dispatch_slash(
 ///
 /// When the session streams (`--no-stream` absent) and the active engine is the
 /// fused substrate backing a streaming-capable provider, the turn renders
-/// progressively via [`FusedEngine::stream_turn`] (which bypasses the fused
-/// pipeline — see [`crate::stream`]). Otherwise it routes through the full
-/// pipeline [`run_turn`](FusedEngine::run_turn)/echo path and prints the reply
-/// with its cost.
+/// progressively through [`FusedEngine::stream_turn`] and the full fused
+/// pipeline. Otherwise it routes through [`run_turn`](FusedEngine::run_turn)/echo
+/// and prints the reply with its cost.
 async fn run_chat_message(
     engine: &ActiveEngine,
     state: &mut ReplState,
@@ -593,14 +599,7 @@ async fn run_streamed_message(
                     outcome.cost_cents.unwrap_or(0) as f64 / 100.0,
                 );
             }
-            // A clean stream (or one that errored *after* emitting content) leaves
-            // a usable reply to record; an error with no content drops the user
-            // message so a retry starts clean — the error was already printed.
-            if outcome.content.is_empty() && outcome.error.is_some() {
-                history.pop();
-            } else {
-                history.push(ChatMessage::assistant(outcome.content));
-            }
+            apply_streamed_outcome_to_history(history, outcome);
         }
         Err(e) => {
             // An I/O failure writing to stdout (not a provider error) — drop the
@@ -611,11 +610,116 @@ async fn run_streamed_message(
     }
 }
 
+fn apply_streamed_outcome_to_history(history: &mut Vec<ChatMessage>, outcome: StreamOutcome) {
+    // Before the first receipt, a terminal error leaves no durable turn, so
+    // remove the unanswered user message. Every receipt corresponds to one
+    // journaled assistant response; preserve those round boundaries so live
+    // tool-loop history matches a later journal replay. Any trailing partial
+    // content after the last receipt remains display-only.
+    if outcome.error.is_some() && outcome.receipt_ids.is_empty() {
+        history.pop();
+    } else if !outcome.receipt_ids.is_empty() {
+        debug_assert_eq!(
+            outcome.receipt_ids.len(),
+            outcome.committed_assistant_messages.len()
+        );
+        history.extend(
+            outcome
+                .committed_assistant_messages
+                .into_iter()
+                .map(ChatMessage::assistant),
+        );
+    } else {
+        history.push(ChatMessage::assistant(outcome.content));
+    }
+}
+
 /// Map a non-EOF line-editor failure onto [`CliError::Io`] (EOF/interrupt are
 /// handled by the loop and never reach here).
 fn readline_to_cli(e: ReadlineError) -> CliError {
     match e {
         ReadlineError::Io(io) => CliError::Io(io),
         other => CliError::Io(std::io::Error::other(other.to_string())),
+    }
+}
+
+#[cfg(test)]
+mod streamed_history_tests {
+    use super::*;
+    use ardur_runtime::ReceiptId;
+
+    #[test]
+    fn pre_commit_stream_error_removes_the_unanswered_user_message() {
+        let mut history = vec![ChatMessage::user("question")];
+        apply_streamed_outcome_to_history(
+            &mut history,
+            StreamOutcome {
+                content: "partial".to_string(),
+                error: Some("provider unavailable".to_string()),
+                ..StreamOutcome::default()
+            },
+        );
+        assert!(history.is_empty());
+    }
+
+    #[test]
+    fn post_commit_stream_error_preserves_durable_local_history() {
+        let mut history = vec![ChatMessage::user("question")];
+        apply_streamed_outcome_to_history(
+            &mut history,
+            StreamOutcome {
+                content: "durable answer".to_string(),
+                committed_assistant_messages: vec!["durable answer".to_string()],
+                receipt_ids: vec![ReceiptId(uuid::Uuid::new_v4())],
+                error: Some("later provider round failed".to_string()),
+                ..StreamOutcome::default()
+            },
+        );
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[1].content, "durable answer");
+    }
+
+    #[test]
+    fn multi_round_stream_preserves_journal_assistant_boundaries() {
+        let mut history = vec![ChatMessage::user("question")];
+        apply_streamed_outcome_to_history(
+            &mut history,
+            StreamOutcome {
+                content: "tool planfinal answer".to_string(),
+                committed_assistant_messages: vec![
+                    "tool plan".to_string(),
+                    "final answer".to_string(),
+                ],
+                receipt_ids: vec![
+                    ReceiptId(uuid::Uuid::new_v4()),
+                    ReceiptId(uuid::Uuid::new_v4()),
+                ],
+                ..StreamOutcome::default()
+            },
+        );
+        assert_eq!(history.len(), 3);
+        assert_eq!(history[1].content, "tool plan");
+        assert_eq!(history[2].content, "final answer");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn journal_history_loader_rejects_symlinked_files() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dir_path = dir.path().canonicalize().expect("canonical tempdir");
+        let target = dir_path.join("target.jsonl");
+        let journal = dir_path.join("journal.jsonl");
+        std::fs::write(
+            &target,
+            r#"{"kind":"UserMessage","content":"forged","at":1}"#,
+        )
+        .expect("target journal");
+        symlink(&target, &journal).expect("journal symlink");
+
+        let error = load_history_from_journal(&journal)
+            .expect_err("session history must not follow a journal symlink");
+        assert!(error.to_string().contains("symlink"), "{error}");
     }
 }

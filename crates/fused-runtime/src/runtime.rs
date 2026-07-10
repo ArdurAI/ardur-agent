@@ -45,7 +45,10 @@ use ardur_session_journals::{JournalEntry, SessionJournal};
 use ardur_tool_registry::{Capability, InvocationId, ToolContext, ToolError, ToolId, ToolRegistry};
 use parking_lot::Mutex;
 
-use crate::receipts::{PersistedReceipt, load_persisted_chain};
+use crate::receipts::{
+    PersistedReceipt, load_persisted_chain, replace_receipt_log_no_follow,
+    verify_persisted_chain_with_jwks,
+};
 use crate::reconcile::{
     ReconciliationAction, ReconciliationError, ReconciliationReport, ReconciliationStrategy,
 };
@@ -128,8 +131,13 @@ impl Drop for ReservationCancelGuard {
     }
 }
 
-/// [`submit`](FusedRuntime::submit). Build it with
-/// [`FusedRuntimeBuilder`](crate::FusedRuntimeBuilder).
+enum DurableCommitError {
+    BeforeReceipt(RuntimeError),
+    AfterReceipt(RuntimeError),
+}
+
+/// Runtime implementation that fuses authorization, provider execution, cost
+/// admission, receipt durability, journaling, and memory behind one entry point.
 pub struct FusedRuntime {
     pub(crate) cap_root: PublicKey,
     pub(crate) verifier: BiscuitCapTokenVerifier<SharedDenyList>,
@@ -266,7 +274,11 @@ impl FusedRuntime {
     /// be acted on (the turn is already aborting), and an un-refunded hold lapses
     /// on the gate's TTL regardless.
     async fn release(&self, reservation: Reservation) {
-        let _ = self.gate.finalize(reservation, GateCostTuple::ZERO).await;
+        if let Ok(finalization) = self.gate.finalize(reservation, GateCostTuple::ZERO).await {
+            self.gate
+                .commit_finalization(finalization.reservation_id)
+                .await;
+        }
     }
 
     /// **Stage 4.5 (ARD-48).** Scan the outbound completion request's prompt
@@ -689,7 +701,7 @@ impl FusedRuntime {
         response: &CompletionResponse,
         signed: &ardur_receipt::SignedReceipt,
         now_ms: u64,
-    ) -> Result<ReceiptBody, RuntimeError> {
+    ) -> Result<ReceiptBody, DurableCommitError> {
         let receipt = signed.body().clone();
 
         // Persist the signed receipt first: if the process crashes before the
@@ -697,8 +709,8 @@ impl FusedRuntime {
         // can append a synthetic journal entry. The inverse (journal-only residue)
         // is not reconstructable from the receipt chain.
         if let Err(e) = self.persist_receipt(signed.jws_compact()) {
-            return Err(RuntimeError::Internal(anyhow::anyhow!(
-                "receipt persist failed before journal append: {e}"
+            return Err(DurableCommitError::BeforeReceipt(RuntimeError::Internal(
+                anyhow::anyhow!("receipt persist failed before journal append: {e}"),
             )));
         }
         *self.chain_tail.lock() = Some(Sha256Digest::of(signed.jws_compact().as_bytes()));
@@ -713,8 +725,10 @@ impl FusedRuntime {
                         })
                         .await
                     {
-                        return Err(RuntimeError::Internal(anyhow::anyhow!(
-                            "journal user append failed after receipt commit; boot reconciliation can heal the durable orphan receipt: {e}"
+                        return Err(DurableCommitError::AfterReceipt(RuntimeError::Internal(
+                            anyhow::anyhow!(
+                                "journal user append failed after receipt commit; boot reconciliation can heal the durable orphan receipt: {e}"
+                            ),
                         )));
                     }
                 }
@@ -727,8 +741,10 @@ impl FusedRuntime {
                 })
                 .await
             {
-                return Err(RuntimeError::Internal(anyhow::anyhow!(
-                    "journal assistant append failed after receipt commit; boot reconciliation can heal the durable orphan receipt: {e}"
+                return Err(DurableCommitError::AfterReceipt(RuntimeError::Internal(
+                    anyhow::anyhow!(
+                        "journal assistant append failed after receipt commit; boot reconciliation can heal the durable orphan receipt: {e}"
+                    ),
                 )));
             }
         }
@@ -743,10 +759,7 @@ impl FusedRuntime {
             return Ok(());
         };
         use std::io::Write as _;
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)?;
+        let mut file = crate::receipts::open_append_no_follow(path)?;
         writeln!(file, "{jws_compact}")?;
         // fsync the line so the chain survives a crash — the same durability
         // contract the session journal makes for its entries.
@@ -807,6 +820,8 @@ impl FusedRuntime {
         };
 
         let chain = load_persisted_chain(receipt_log)?;
+        let receipt_jwks = ardur_receipt::Jwks::from_public_key(&self.receipt_key.public_key());
+        verify_persisted_chain_with_jwks(&chain, &receipt_jwks)?;
         let session_id = *journal.session_id();
         let entries = journal.replay(session_id).await?;
 
@@ -823,10 +838,17 @@ impl FusedRuntime {
             })
             .collect();
 
+        let relevant_receipt_count = chain
+            .iter()
+            .filter(|receipt| receipt.body.session_id == Some(session_id.0))
+            .count();
         let orphan_indices: Vec<usize> = chain
             .iter()
             .enumerate()
-            .filter(|(_, r)| !journaled.contains(&r.body.receipt_id))
+            .filter(|(_, receipt)| {
+                receipt.body.session_id == Some(session_id.0)
+                    && !journaled.contains(&receipt.body.receipt_id)
+            })
             .map(|(i, _)| i)
             .collect();
         let orphan_receipt_ids: Vec<uuid::Uuid> = orphan_indices
@@ -835,7 +857,7 @@ impl FusedRuntime {
             .collect();
 
         let mut report = ReconciliationReport {
-            receipt_count: chain.len(),
+            receipt_count: relevant_receipt_count,
             journaled_receipt_count: journaled.len(),
             orphan_receipt_ids,
             action: ReconciliationAction::NoOrphans,
@@ -925,20 +947,8 @@ impl FusedRuntime {
             body.push_str(&receipt.jws_compact);
             body.push('\n');
         }
-        let tmp = receipt_log.with_extension("jsonl.reconcile-tmp");
-        std::fs::write(&tmp, body.as_bytes()).map_err(ReconciliationError::Io)?;
-        // fsync the temp file's contents before the rename so the truncation is
-        // durable, then atomically replace the log.
-        {
-            use std::io::Write as _;
-            let mut f = std::fs::OpenOptions::new()
-                .append(true)
-                .open(&tmp)
-                .map_err(ReconciliationError::Io)?;
-            f.flush().map_err(ReconciliationError::Io)?;
-            f.sync_all().map_err(ReconciliationError::Io)?;
-        }
-        std::fs::rename(&tmp, receipt_log).map_err(ReconciliationError::Io)?;
+        replace_receipt_log_no_follow(receipt_log, body.as_bytes())
+            .map_err(ReconciliationError::Io)?;
 
         // Reset the in-memory chain tail to the new last receipt (or None if the
         // whole chain was orphaned), so the next turn chains correctly. build()
@@ -1064,7 +1074,6 @@ impl FusedRuntime {
             // ARD-480: expiry-sensitive re-verification happens throughout the
             // tool loop, so use the clock at this iteration, not turn start.
             let iteration_now_ms = self.clock.now_ms();
-            let iteration_now_unix = iteration_now_ms / 1000;
 
             // Build this iteration's request from the current transcript + tools.
             let mut iter_request =
@@ -1269,6 +1278,7 @@ impl FusedRuntime {
                     subject: ardur_receipt::HolderId(claims.subject.0.clone()),
                     cap_token_id: ardur_receipt::TokenId(claims.token_id.to_string()),
                     payload_digest: Sha256Digest::of(response.content.as_bytes()),
+                    session_id: Some(session_id.0),
                     cost: runtime_cost_to_receipt(&combined_cost),
                     tool_calls: tool_receipts,
                     provider: Some(self.provider.name()),
@@ -1290,15 +1300,15 @@ impl FusedRuntime {
                 //    durable. If the reservation expired, no receipt/journal entry
                 //    is committed for a turn the cost gate rejected.
                 let actual = runtime_cost_to_gate(&combined_cost);
-                match self.gate.finalize(reservation, actual).await {
-                    Ok(_) => {}
+                let finalization = match self.gate.finalize(reservation, actual).await {
+                    Ok(finalization) => finalization,
                     Err(e) => {
                         let err = map_admission_error(e);
                         self.fire_error(session_id, LifecyclePhase::CostGate, &err)
                             .await;
                         return Err(err);
                     }
-                }
+                };
 
                 let receipt = match self
                     .commit_receipt_and_journal(
@@ -1311,8 +1321,28 @@ impl FusedRuntime {
                     )
                     .await
                 {
-                    Ok(receipt) => receipt,
-                    Err(err) => {
+                    Ok(receipt) => {
+                        self.gate
+                            .commit_finalization(finalization.reservation_id)
+                            .await;
+                        receipt
+                    }
+                    Err(DurableCommitError::BeforeReceipt(err)) => {
+                        if let Err(rollback) =
+                            self.gate.rollback_finalization(finalization.clone()).await
+                        {
+                            return Err(RuntimeError::Internal(anyhow::anyhow!(
+                                "receipt commit failed ({err}); cost rollback also failed: {rollback}"
+                            )));
+                        }
+                        self.fire_error(session_id, LifecyclePhase::Receipt, &err)
+                            .await;
+                        return Err(err);
+                    }
+                    Err(DurableCommitError::AfterReceipt(err)) => {
+                        self.gate
+                            .commit_finalization(finalization.reservation_id)
+                            .await;
                         self.fire_error(session_id, LifecyclePhase::Receipt, &err)
                             .await;
                         return Err(err);
@@ -1343,13 +1373,15 @@ impl FusedRuntime {
                     .audience
                     .clone()
                     .unwrap_or_else(|| self.audience.clone());
+                let memory_now_ms = self.clock.now_ms();
+                let memory_now_unix = memory_now_ms / 1000;
                 let memory_write_claims = CapToken::from_base64(&req.cap_token.0, &self.cap_root)
                     .and_then(|token| {
                         self.verifier.verify(
                             &token,
                             &self.cap_root,
                             &RequiredCaveats {
-                                now_unix: iteration_now_unix,
+                                now_unix: memory_now_unix,
                                 audience,
                                 tool: ardur_memory::MEMORY_WRITE_CAPABILITY.to_string(),
                                 cost: self.cost_units,
@@ -1730,11 +1762,12 @@ impl FusedRuntime {
                             Err(err)?;
                             unreachable!()
                         };
+                        let invocation_now_unix = self.clock.now_ms() / 1000;
                         if let Err(err) = self.authorize_tool_invocation(
                             &req,
                             &provisioning,
                             session_id,
-                            now_unix,
+                            invocation_now_unix,
                             &call.name,
                         ) {
                             self.release(reservation.take().expect("reservation held")).await;
@@ -1748,7 +1781,7 @@ impl FusedRuntime {
                         if let Err(err) = self.authorize_tool_capabilities(
                             &req,
                             &provisioning,
-                            now_unix,
+                            invocation_now_unix,
                             &call.name,
                             tool.required_capabilities(),
                         ) {
@@ -1836,6 +1869,9 @@ impl FusedRuntime {
                 // 7. receipt mint + chain.
                 yield FusedEvent::StageStart { stage: StageKind::ReceiptMint };
                 let combined_cost = add_cost(response.cost, &tool_cost);
+                // Match the non-streaming atomicity contract: serialize parent-tail
+                // selection, cost settlement, receipt persistence, and journal append.
+                let _commit_guard = self.commit_lock.lock().await;
                 let parent_hash = *self.chain_tail.lock();
                 let body = ReceiptBody {
                     receipt_id: uuid::Uuid::new_v4(),
@@ -1845,6 +1881,7 @@ impl FusedRuntime {
                     subject: ardur_receipt::HolderId(claims.subject.0.clone()),
                     cap_token_id: ardur_receipt::TokenId(claims.token_id.to_string()),
                     payload_digest: Sha256Digest::of(response.content.as_bytes()),
+                    session_id: Some(session_id.0),
                     cost: runtime_cost_to_receipt(&combined_cost),
                     tool_calls: tool_receipts,
                     provider: Some(self.provider.name()),
@@ -1861,13 +1898,62 @@ impl FusedRuntime {
                         unreachable!()
                     }
                 };
+
+                // Settle the provider-plus-tool actual before any receipt or
+                // journal state becomes durable. A rejected/expired reservation
+                // therefore cannot produce authoritative spend evidence.
+                yield FusedEvent::StageStart { stage: StageKind::CostGateFinalize };
+                let actual = runtime_cost_to_gate(&combined_cost);
+                let finalization = match self
+                    .gate
+                    .finalize(reservation.take().expect("reservation held"), actual)
+                    .await
+                {
+                    Ok(finalization) => {
+                        yield FusedEvent::StageEnd { stage: StageKind::CostGateFinalize, ok: true };
+                        finalization
+                    }
+                    Err(e) => {
+                        let err = map_admission_error(e);
+                        self.fire_error(session_id, LifecyclePhase::CostGate, &err).await;
+                        yield FusedEvent::StageEnd { stage: StageKind::CostGateFinalize, ok: false };
+                        yield FusedEvent::StageEnd { stage: StageKind::ReceiptMint, ok: false };
+                        Err(err)?;
+                        unreachable!()
+                    }
+                };
+
                 let receipt = match self
                     .commit_receipt_and_journal(session_id, iteration, &req, &response, &signed, now_ms)
                     .await
                 {
-                    Ok(receipt) => receipt,
-                    Err(err) => {
-                        self.release(reservation.take().expect("reservation held")).await;
+                    Ok(receipt) => {
+                        self.gate
+                            .commit_finalization(finalization.reservation_id)
+                            .await;
+                        receipt
+                    }
+                    Err(DurableCommitError::BeforeReceipt(err)) => {
+                        if let Err(rollback) = self
+                            .gate
+                            .rollback_finalization(finalization.clone())
+                            .await
+                        {
+                            yield FusedEvent::StageEnd { stage: StageKind::ReceiptMint, ok: false };
+                            Err(RuntimeError::Internal(anyhow::anyhow!(
+                                "receipt commit failed ({err}); cost rollback also failed: {rollback}"
+                            )))?;
+                            unreachable!()
+                        }
+                        self.fire_error(session_id, LifecyclePhase::Receipt, &err).await;
+                        yield FusedEvent::StageEnd { stage: StageKind::ReceiptMint, ok: false };
+                        Err(err)?;
+                        unreachable!()
+                    }
+                    Err(DurableCommitError::AfterReceipt(err)) => {
+                        self.gate
+                            .commit_finalization(finalization.reservation_id)
+                            .await;
                         self.fire_error(session_id, LifecyclePhase::Receipt, &err).await;
                         yield FusedEvent::StageEnd { stage: StageKind::ReceiptMint, ok: false };
                         Err(err)?;
@@ -1878,10 +1964,11 @@ impl FusedRuntime {
                 yield FusedEvent::Receipt {
                     receipt_id: ReceiptId(receipt.receipt_id),
                     chain_hash: format!("{chain_hash}"),
+                    cost_cents: combined_cost.cents,
                 };
                 yield FusedEvent::StageEnd { stage: StageKind::ReceiptMint, ok: true };
 
-                // 7'. post-receipt hooks (observational).
+                // 8. post-receipt hooks (observational).
                 let post_ctx = PostReceiptCtx {
                     session_id,
                     signed_receipt: &signed,
@@ -1891,26 +1978,6 @@ impl FusedRuntime {
                 };
                 for err in self.registry.run_post_receipt(&post_ctx).await {
                     tracing::warn!(error = %err, "post-receipt hook error (non-fatal)");
-                }
-
-                // 8. cost-gate finalize.
-                yield FusedEvent::StageStart { stage: StageKind::CostGateFinalize };
-                let actual = runtime_cost_to_gate(&combined_cost);
-                match self
-                    .gate
-                    .finalize(reservation.take().expect("reservation held"), actual)
-                    .await
-                {
-                    Ok(_) => {
-                        yield FusedEvent::StageEnd { stage: StageKind::CostGateFinalize, ok: true };
-                    }
-                    Err(e) => {
-                        let err = map_admission_error(e);
-                        self.fire_error(session_id, LifecyclePhase::CostGate, &err).await;
-                        yield FusedEvent::StageEnd { stage: StageKind::CostGateFinalize, ok: false };
-                        Err(err)?;
-                        unreachable!()
-                    }
                 }
 
                 // 9. memory (only when a backend is configured). We RE-VERIFY the
@@ -1924,13 +1991,15 @@ impl FusedRuntime {
                         .audience
                         .clone()
                         .unwrap_or_else(|| self.audience.clone());
+                    let memory_now_ms = self.clock.now_ms();
+                    let memory_now_unix = memory_now_ms / 1000;
                     let memory_write_claims = CapToken::from_base64(&req.cap_token.0, &self.cap_root)
                         .and_then(|token| {
                             self.verifier.verify(
                                 &token,
                                 &self.cap_root,
                                 &RequiredCaveats {
-                                    now_unix,
+                                    now_unix: memory_now_unix,
                                     audience,
                                     tool: ardur_memory::MEMORY_WRITE_CAPABILITY.to_string(),
                                     cost: self.cost_units,
@@ -1939,7 +2008,12 @@ impl FusedRuntime {
                         });
                     match memory_write_claims {
                         Ok(mem_claims) => {
-                            let record = turn_record(&mem_claims.subject.0, &response, &receipt, now_ms);
+                            let record = turn_record(
+                                &mem_claims.subject.0,
+                                &response,
+                                &receipt,
+                                memory_now_ms,
+                            );
                             let plane = MemoryControlPlane::new(memory.as_ref(), self.policies.clone());
                             if let Err(mem_err) = plane.record(&mem_claims, record) {
                                 self.fire_error(session_id, LifecyclePhase::MemoryWrite, &mem_err)

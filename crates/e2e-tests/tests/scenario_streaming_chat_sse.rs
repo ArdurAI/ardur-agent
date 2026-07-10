@@ -80,7 +80,9 @@ async fn scenario_streaming_chat_sse_emits_fused_events_and_receipt() {
     let provider: Arc<dyn Provider> =
         Arc::new(AnthropicProvider::stub(ModelId::new(&config.model)));
     let tools = Arc::new(ardur_server::example_registry("stub", "in-memory"));
-    let state = AppState::boot(&config, provider, tools).expect("server boots");
+    let state = AppState::boot(&config, provider, tools)
+        .await
+        .expect("server boots");
     let router = build_router(state.clone());
 
     let response = router
@@ -180,7 +182,9 @@ async fn scenario_streaming_chat_cancel_drops_before_receipt() {
         rate_card: RateCard::anthropic_2026_q2_v1(),
     });
     let tools = Arc::new(ardur_server::example_registry("stub", "in-memory"));
-    let state = AppState::boot(&config, provider, tools).expect("server boots");
+    let state = AppState::boot(&config, provider, tools)
+        .await
+        .expect("server boots");
     let router = build_router(state.clone());
 
     let response = router

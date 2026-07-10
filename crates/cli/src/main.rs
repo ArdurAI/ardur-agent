@@ -11,10 +11,15 @@ mod marketplace;
 mod persona;
 mod project_surface;
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use ardur_cli::{ChatArgs, CliError, Config, StateDirs, run_chat};
+use ardur_cli::{
+    ChatArgs, CliError, Config, SessionMetadata, StateDirs, directory_modified_no_follow,
+    list_directory_names_no_follow, read_string_no_follow, remove_directory_tree_no_follow,
+    run_chat, write_private_file_no_follow,
+};
 use ardur_session_journals::JournalEntry;
 use audit::{AuditArgs, run_audit};
 use clap::{Args, Parser, Subcommand};
@@ -57,7 +62,8 @@ enum Commands {
     Doctor(DoctorArgs),
     /// Interactive setup wizard for first-time configuration.
     Setup(SetupArgs),
-    /// Manage sessions (list, resume, export, prune).
+    /// Manage sessions (list, resume, export, prune). `session` is also accepted.
+    #[command(name = "sessions", alias = "session")]
     Session(SessionArgs),
     /// Inspect and verify the receipt chain.
     Receipts(ReceiptsArgs),
@@ -175,11 +181,11 @@ enum SessionAction {
         /// The session ID to resume.
         id: String,
     },
-    /// Export a session to markdown or JSON.
+    /// Export a session to redacted markdown, JSON, or JSONL.
     Export {
         /// The session ID to export.
         id: String,
-        /// Output format: markdown or json.
+        /// Output format: markdown, json, or jsonl.
         #[arg(long, default_value = "markdown")]
         format: String,
         /// Output file path (defaults to stdout).
@@ -191,6 +197,9 @@ enum SessionAction {
         /// Remove sessions older than this many days.
         #[arg(long, default_value_t = 30)]
         older_than: u64,
+        /// Permanently delete the listed candidates. Omit for a dry run.
+        #[arg(long)]
+        confirm: bool,
     },
 }
 
@@ -742,41 +751,82 @@ fn run_session(args: SessionArgs) -> Result<(), CliError> {
 
     match args.action {
         SessionAction::List { workspace } => {
+            let receipt_inventory = load_session_receipt_inventory(&root);
             let mut sessions = Vec::new();
             if let Ok(entries) = std::fs::read_dir(&sessions_dir) {
                 for entry in entries.flatten() {
                     let path = entry.path();
-                    if !path.is_dir() {
+                    let file_type = entry.file_type().ok();
+                    if !file_type.is_some_and(|file_type| file_type.is_dir()) {
                         continue;
                     }
-                    let id = path
+                    let Some(id) = path
                         .file_name()
                         .and_then(|n| n.to_str())
-                        .unwrap_or("unknown");
-                    if let Some(ref ws) = workspace {
-                        if !id.contains(ws) {
-                            continue;
-                        }
-                    }
+                        .and_then(|id| validated_session_id(id).ok())
+                    else {
+                        continue;
+                    };
                     let journal_path = path.join("journal.jsonl");
                     let entries = read_session_entries(&journal_path)?;
                     let receipts = session_receipts(&entries);
-                    let meta = entry.metadata().ok();
-                    let age = meta.as_ref().map(|m| {
-                        m.modified()
-                            .ok()
-                            .and_then(|t| t.elapsed().ok())
-                            .map(|d| format!("{}d", d.as_secs() / 86400))
-                            .unwrap_or_else(|| "?".to_string())
+                    let metadata = read_session_metadata(&path)?;
+                    let session_workspace = metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.workspace.clone());
+                    if let Some(ref requested_workspace) = workspace {
+                        let matches =
+                            session_workspace
+                                .as_deref()
+                                .is_some_and(|session_workspace| {
+                                    session_workspace.eq_ignore_ascii_case(requested_workspace)
+                                });
+                        if !matches {
+                            continue;
+                        }
+                    }
+                    let (created_at_ms, updated_at_ms) =
+                        logical_session_timestamps(metadata.as_ref(), &entries);
+                    let age = updated_at_ms.map(|timestamp| {
+                        format!("{}d", unix_now_ms().saturating_sub(timestamp) / 86_400_000)
                     });
+                    let provider = metadata
+                        .as_ref()
+                        .map(|metadata| metadata.provider.clone())
+                        .filter(|provider| !provider.is_empty())
+                        .or_else(|| receipt_inventory.provider_for(&receipts, &id))
+                        .unwrap_or_else(|| "unknown".to_string());
+                    let model = metadata
+                        .as_ref()
+                        .map(|metadata| metadata.model.clone())
+                        .filter(|model| !model.is_empty())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    let source = metadata
+                        .as_ref()
+                        .map(|metadata| metadata.source.clone())
+                        .filter(|source| !source.is_empty())
+                        .unwrap_or_else(|| "unknown".to_string());
                     let size = estimate_dir_size(&path);
                     sessions.push(json!({
                         "id": id,
                         "age": age,
+                        "created_at_ms": created_at_ms,
+                        "updated_at_ms": updated_at_ms,
+                        "provider": provider,
+                        "model": model,
+                        "source": source,
+                        "workspace": session_workspace,
+                        "cost_cents": session_cost_cents(
+                            &entries,
+                            &receipts,
+                            &receipt_inventory,
+                            &id,
+                        ),
                         "turns": session_turns(&entries),
                         "entries": entries.len(),
                         "receipts": receipts.len(),
                         "last_receipt_id": receipts.last(),
+                        "receipt_status": receipt_inventory.status_for(&receipts, &id),
                         "size_bytes": size,
                         "size_human": human_size(size),
                     }));
@@ -788,10 +838,11 @@ fn run_session(args: SessionArgs) -> Result<(), CliError> {
             );
         }
         SessionAction::Resume { id } => {
+            let id = validated_session_id(&id)?;
             let journal_path = session_journal_path(&sessions_dir, &id);
             let entries = require_session_entries(&journal_path, &id)?;
             println!("resuming session {id}...");
-            println!("session context restored from {}", journal_path.display());
+            println!("session context restored from journals/sessions/{id}/journal.jsonl");
             println!("messages:");
             for entry in &entries {
                 match entry {
@@ -819,64 +870,525 @@ fn run_session(args: SessionArgs) -> Result<(), CliError> {
                     } => println!("INVALIDATED entry {target_entry_id}: {reason}"),
                 }
             }
-            println!("run `ardur chat --session-id {id}` to continue with this context");
+            println!("continuing session {id} in chat...");
+            run_chat(ChatArgs {
+                session_id: Some(id),
+                ..ChatArgs::default()
+            })?;
         }
         SessionAction::Export { id, format, output } => {
+            let id = validated_session_id(&id)?;
             let journal_path = session_journal_path(&sessions_dir, &id);
             let entries = require_session_entries(&journal_path, &id)?;
-            let receipts = session_receipts(&entries);
+            let redacted_entries = redact_session_entries(&entries);
+            let receipts = session_receipts(&redacted_entries);
+            let receipt_inventory = load_session_receipt_inventory(&root);
+            let receipt_status = receipt_inventory.status_for(&receipts, &id);
+            let receipt_evidence = receipt_inventory
+                .evidence_for(&receipts, &id)
+                .unwrap_or_default();
             let content = match format.as_str() {
                 "json" => serde_json::to_string_pretty(&json!({
                     "session_id": id,
-                    "journal_path": journal_path.display().to_string(),
-                    "entries": entries,
+                    "journal_path": format!("journals/sessions/{id}/journal.jsonl"),
+                    "entries": redacted_entries,
                     "receipts": receipts,
+                    "receipt_status": receipt_status,
+                    "receipt_evidence": receipt_evidence,
                     "exported_at": std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_secs())
                         .unwrap_or(0),
                 }))
                 .expect("export serializes"),
-                "markdown" | "md" => {
-                    render_session_markdown(&id, &journal_path, &entries, &receipts)
-                }
+                "markdown" | "md" => render_session_markdown(
+                    &id,
+                    &redacted_entries,
+                    &receipts,
+                    receipt_status,
+                    &receipt_evidence,
+                ),
+                "jsonl" => render_session_jsonl(&redacted_entries)?,
                 other => {
                     return Err(CliError::State(format!(
-                        "unsupported export format `{other}` (expected markdown or json)"
+                        "unsupported export format `{other}` (expected markdown, json, or jsonl)"
                     )));
                 }
             };
             if let Some(path) = output {
-                std::fs::write(&path, content)?;
+                write_private_session_export(&path, content.as_bytes())?;
                 println!("exported session {id} to {}", path.display());
             } else {
                 println!("{content}");
             }
         }
-        SessionAction::Prune { older_than } => {
-            let cutoff =
-                std::time::SystemTime::now() - std::time::Duration::from_secs(older_than * 86400);
-            let mut removed = 0;
-            if let Ok(entries) = std::fs::read_dir(&sessions_dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.is_dir() {
-                        if let Ok(meta) = entry.metadata() {
-                            if let Ok(modified) = meta.modified() {
-                                if modified < cutoff {
-                                    std::fs::remove_dir_all(&path)?;
-                                    removed += 1;
-                                }
-                            }
-                        }
+        SessionAction::Prune {
+            older_than,
+            confirm,
+        } => {
+            let age = std::time::Duration::from_secs(older_than.saturating_mul(86_400));
+            let cutoff = std::time::SystemTime::now()
+                .checked_sub(age)
+                .ok_or_else(|| {
+                    CliError::State("prune age is outside the supported time range".to_string())
+                })?;
+            let candidates = session_prune_candidates(&sessions_dir, cutoff)?;
+            if !confirm {
+                println!(
+                    "dry run: {} session(s) older than {older_than} days would be pruned",
+                    candidates.len()
+                );
+                for candidate in &candidates {
+                    if let Some(id) = candidate.file_name().and_then(|name| name.to_str()) {
+                        println!("- {id}");
                     }
                 }
+                println!("rerun with --confirm to permanently delete these sessions");
+                return Ok(());
             }
-            println!("pruned {removed} sessions older than {older_than} days");
+            for candidate in &candidates {
+                remove_directory_tree_no_follow(candidate)?;
+            }
+            println!(
+                "pruned {} session(s) older than {older_than} days",
+                candidates.len()
+            );
         }
     }
 
     Ok(())
+}
+
+#[derive(Clone, serde::Serialize)]
+struct SessionReceiptEvidence {
+    receipt_id: String,
+    jws_compact: String,
+    body: serde_json::Value,
+}
+
+#[derive(Default)]
+struct SessionReceiptInventory {
+    corrupt: bool,
+    receipt_ids: HashSet<String>,
+    provider_by_receipt: HashMap<String, String>,
+    cost_cents_by_receipt: HashMap<String, u64>,
+    evidence_by_receipt: HashMap<String, SessionReceiptEvidence>,
+    session_id_by_receipt: HashMap<String, Option<uuid::Uuid>>,
+}
+
+impl SessionReceiptInventory {
+    fn status_for(&self, receipt_ids: &[String], session_id: &str) -> &'static str {
+        if receipt_ids.is_empty() {
+            return "none";
+        }
+        if self.corrupt {
+            return "corrupt";
+        }
+        let session_uuid = uuid::Uuid::parse_str(session_id).ok();
+        if receipt_ids.iter().all(|receipt_id| {
+            self.receipt_ids.contains(receipt_id)
+                && self
+                    .session_id_by_receipt
+                    .get(receipt_id)
+                    .is_some_and(|sid| *sid == session_uuid)
+        }) {
+            "chain-linked"
+        } else {
+            "missing"
+        }
+    }
+
+    fn provider_for(&self, receipt_ids: &[String], session_id: &str) -> Option<String> {
+        if self.corrupt {
+            return None;
+        }
+        let session_uuid = uuid::Uuid::parse_str(session_id).ok();
+        receipt_ids.iter().rev().find_map(|receipt_id| {
+            if self
+                .session_id_by_receipt
+                .get(receipt_id)
+                .is_some_and(|sid| *sid == session_uuid)
+            {
+                self.provider_by_receipt.get(receipt_id).cloned()
+            } else {
+                None
+            }
+        })
+    }
+
+    fn cost_cents_for(&self, receipt_ids: &[String], session_id: &str) -> Option<u64> {
+        if self.corrupt || receipt_ids.is_empty() {
+            return None;
+        }
+        let session_uuid = uuid::Uuid::parse_str(session_id).ok();
+        receipt_ids.iter().try_fold(0_u64, |total, receipt_id| {
+            if self
+                .session_id_by_receipt
+                .get(receipt_id)
+                .is_some_and(|sid| *sid == session_uuid)
+            {
+                self.cost_cents_by_receipt
+                    .get(receipt_id)
+                    .map(|cost| total.saturating_add(*cost))
+            } else {
+                None
+            }
+        })
+    }
+
+    fn evidence_for(
+        &self,
+        receipt_ids: &[String],
+        session_id: &str,
+    ) -> Option<Vec<SessionReceiptEvidence>> {
+        if self.corrupt {
+            return None;
+        }
+        let session_uuid = uuid::Uuid::parse_str(session_id).ok();
+        receipt_ids
+            .iter()
+            .map(|receipt_id| {
+                if self
+                    .session_id_by_receipt
+                    .get(receipt_id)
+                    .is_some_and(|sid| *sid == session_uuid)
+                {
+                    self.evidence_by_receipt.get(receipt_id).cloned()
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+}
+
+fn load_authenticated_receipt_chain(
+    root: &Path,
+) -> Result<Vec<ardur_fused_runtime::PersistedReceipt>, CliError> {
+    let receipt_log = root.join("receipts").join("chain.jsonl");
+    let chain = ardur_fused_runtime::load_persisted_chain(&receipt_log)
+        .map_err(|error| CliError::State(format!("loading receipt chain: {error}")))?;
+    if chain.is_empty() {
+        return Ok(chain);
+    }
+
+    let key_path = root.join("keys").join("receipt.pem");
+    let key_pem = read_string_no_follow(&key_path).map_err(|error| {
+        CliError::State(format!(
+            "loading expected receipt verification key {}: {error}",
+            key_path.display()
+        ))
+    })?;
+    let signing_key = ardur_receipt::Es256SigningKey::from_pkcs8_pem(&key_pem)
+        .map_err(|error| CliError::State(format!("parsing receipt verification key: {error}")))?;
+    let jwks = ardur_receipt::Jwks::from_public_key(&signing_key.public_key());
+    ardur_fused_runtime::verify_persisted_chain_with_jwks(&chain, &jwks)
+        .map_err(|error| CliError::State(format!("authenticating receipt chain: {error}")))?;
+
+    let mut receipt_ids = HashSet::new();
+    for (index, receipt) in chain.iter().enumerate() {
+        if !receipt_ids.insert(receipt.body.receipt_id) {
+            return Err(CliError::State(format!(
+                "duplicate receipt id {} at chain index {index}",
+                receipt.body.receipt_id
+            )));
+        }
+    }
+    Ok(chain)
+}
+
+fn load_session_receipt_inventory(root: &Path) -> SessionReceiptInventory {
+    let chain = match load_authenticated_receipt_chain(root) {
+        Ok(chain) => chain,
+        Err(_) => {
+            return SessionReceiptInventory {
+                corrupt: true,
+                ..SessionReceiptInventory::default()
+            };
+        }
+    };
+    if chain.is_empty() {
+        return SessionReceiptInventory::default();
+    }
+    let mut inventory = SessionReceiptInventory::default();
+    for receipt in chain {
+        let receipt_id = receipt.body.receipt_id.to_string();
+        if !inventory.receipt_ids.insert(receipt_id.clone()) {
+            inventory.corrupt = true;
+            inventory.provider_by_receipt.clear();
+            inventory.cost_cents_by_receipt.clear();
+            inventory.evidence_by_receipt.clear();
+            break;
+        }
+        inventory
+            .cost_cents_by_receipt
+            .insert(receipt_id.clone(), receipt.body.cost.cents);
+        inventory
+            .session_id_by_receipt
+            .insert(receipt_id.clone(), receipt.body.session_id);
+        inventory.evidence_by_receipt.insert(
+            receipt_id.clone(),
+            SessionReceiptEvidence {
+                receipt_id: receipt_id.clone(),
+                jws_compact: receipt.jws_compact,
+                body: serde_json::to_value(&receipt.body).expect("receipt body serializes"),
+            },
+        );
+        if let Some(provider) = receipt.body.provider {
+            inventory.provider_by_receipt.insert(receipt_id, provider);
+        }
+    }
+    inventory
+}
+
+fn validated_session_id(id: &str) -> Result<String, CliError> {
+    uuid::Uuid::parse_str(id)
+        .map(|id| id.to_string())
+        .map_err(|_| CliError::State(format!("session id `{id}` must be a valid UUID")))
+}
+
+fn read_session_metadata(session_dir: &Path) -> Result<Option<SessionMetadata>, CliError> {
+    let path = session_dir.join("metadata.json");
+    match read_string_no_follow(&path) {
+        Ok(raw) => serde_json::from_str(&raw).map(Some).map_err(|error| {
+            CliError::State(format!(
+                "failed to parse session metadata {}: {error}",
+                path.display()
+            ))
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(CliError::Io(error)),
+    }
+}
+
+fn unix_now_ms() -> u64 {
+    system_time_ms(std::time::SystemTime::now())
+}
+
+fn system_time_ms(time: std::time::SystemTime) -> u64 {
+    time.duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
+fn session_timestamps(entries: &[JournalEntry]) -> (Option<u64>, Option<u64>) {
+    let mut timestamps = entries.iter().map(journal_entry_timestamp);
+    let Some(first) = timestamps.next() else {
+        return (None, None);
+    };
+    let (mut earliest, mut latest) = (first, first);
+    for timestamp in timestamps {
+        earliest = earliest.min(timestamp);
+        latest = latest.max(timestamp);
+    }
+    (Some(earliest), Some(latest))
+}
+
+fn logical_session_timestamps(
+    metadata: Option<&SessionMetadata>,
+    entries: &[JournalEntry],
+) -> (Option<u64>, Option<u64>) {
+    let (journal_created_at, journal_updated_at) = session_timestamps(entries);
+    let metadata_created_at = metadata
+        .map(|metadata| metadata.created_at_ms)
+        .filter(|timestamp| *timestamp > 0);
+    let metadata_updated_at = metadata
+        .map(|metadata| metadata.updated_at_ms)
+        .filter(|timestamp| *timestamp > 0);
+    (
+        [metadata_created_at, journal_created_at]
+            .into_iter()
+            .flatten()
+            .min(),
+        [metadata_updated_at, journal_updated_at]
+            .into_iter()
+            .flatten()
+            .max(),
+    )
+}
+
+fn journal_entry_timestamp(entry: &JournalEntry) -> u64 {
+    match entry {
+        JournalEntry::UserMessage { at, .. }
+        | JournalEntry::AssistantMessage { at, .. }
+        | JournalEntry::ToolInvocation { at, .. }
+        | JournalEntry::CostFinalized { at, .. }
+        | JournalEntry::Checkpoint { at, .. }
+        | JournalEntry::Invalidation { at, .. } => *at,
+    }
+}
+
+fn session_cost_cents(
+    entries: &[JournalEntry],
+    receipt_ids: &[String],
+    inventory: &SessionReceiptInventory,
+    session_id: &str,
+) -> Option<u64> {
+    if let Some(receipt_total) = inventory.cost_cents_for(receipt_ids, session_id) {
+        return Some(receipt_total);
+    }
+    if !receipt_ids.is_empty() {
+        return None;
+    }
+
+    let mut saw_legacy_cost = false;
+    let legacy_total = entries.iter().fold(0_u64, |total, entry| match entry {
+        JournalEntry::CostFinalized { actual, .. } => {
+            saw_legacy_cost = true;
+            total.saturating_add(actual.cents)
+        }
+        _ => total,
+    });
+    saw_legacy_cost.then_some(legacy_total)
+}
+
+#[cfg(test)]
+mod session_cost_tests {
+    use super::*;
+
+    #[test]
+    fn receipt_cost_fills_the_runtime_journal_cost_gap_without_double_counting() {
+        let receipt_id = uuid::Uuid::new_v4();
+        let receipt_ids = vec![receipt_id.to_string()];
+        let entries = vec![JournalEntry::AssistantMessage {
+            content: "done".to_string(),
+            at: 1,
+            receipt_id: ardur_runtime::ReceiptId(receipt_id),
+        }];
+        let mut inventory = SessionReceiptInventory::default();
+        inventory.receipt_ids.insert(receipt_id.to_string());
+        inventory
+            .cost_cents_by_receipt
+            .insert(receipt_id.to_string(), 17);
+        inventory
+            .session_id_by_receipt
+            .insert(receipt_id.to_string(), Some(uuid::Uuid::nil()));
+
+        assert_eq!(
+            session_cost_cents(
+                &entries,
+                &receipt_ids,
+                &inventory,
+                "00000000-0000-0000-0000-000000000000"
+            ),
+            Some(17)
+        );
+    }
+
+    #[test]
+    fn unavailable_receipt_cost_is_reported_as_unknown() {
+        let receipt_id = uuid::Uuid::new_v4();
+        let entries = vec![
+            JournalEntry::AssistantMessage {
+                content: "done".to_string(),
+                at: 1,
+                receipt_id: ardur_runtime::ReceiptId(receipt_id),
+            },
+            JournalEntry::CostFinalized {
+                reservation_id: ardur_session_journals::ReservationId::new(),
+                actual: ardur_cost_gate::CostTuple {
+                    cents: 99,
+                    ..ardur_cost_gate::CostTuple::ZERO
+                },
+                refunded: ardur_cost_gate::CostDelta {
+                    tokens_in: 0,
+                    tokens_out: 0,
+                    cents: 0,
+                    wall_ms: 0,
+                    attention_score: 0,
+                },
+                at: 2,
+            },
+        ];
+        let inventory = SessionReceiptInventory {
+            corrupt: true,
+            ..SessionReceiptInventory::default()
+        };
+
+        assert_eq!(
+            session_cost_cents(
+                &entries,
+                &[receipt_id.to_string()],
+                &inventory,
+                "00000000-0000-0000-0000-000000000000"
+            ),
+            None
+        );
+    }
+}
+
+fn redact_session_entries(entries: &[JournalEntry]) -> Vec<JournalEntry> {
+    let patterns = default_secret_patterns();
+    let mut redacted = entries.to_vec();
+    for entry in &mut redacted {
+        match entry {
+            JournalEntry::UserMessage { content, .. }
+            | JournalEntry::AssistantMessage { content, .. } => {
+                *content = redact_text(content, &patterns);
+            }
+            JournalEntry::Checkpoint { summary, .. } => {
+                *summary = redact_text(summary, &patterns);
+            }
+            JournalEntry::Invalidation { reason, .. } => {
+                *reason = redact_text(reason, &patterns);
+            }
+            JournalEntry::ToolInvocation { .. } | JournalEntry::CostFinalized { .. } => {}
+        }
+    }
+    redacted
+}
+
+fn write_private_session_export(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
+    write_private_file_no_follow(path, bytes).map_err(CliError::Io)
+}
+
+fn render_session_jsonl(entries: &[JournalEntry]) -> Result<String, CliError> {
+    let mut output = String::new();
+    for entry in entries {
+        let line = serde_json::to_string(entry)
+            .map_err(|error| CliError::State(format!("serializing session JSONL: {error}")))?;
+        output.push_str(&line);
+        output.push('\n');
+    }
+    Ok(output)
+}
+
+fn session_prune_candidates(
+    sessions_dir: &Path,
+    cutoff: std::time::SystemTime,
+) -> Result<Vec<PathBuf>, CliError> {
+    let names = match list_directory_names_no_follow(sessions_dir) {
+        Ok(names) => names,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(CliError::Io(error)),
+    };
+    let cutoff_ms = system_time_ms(cutoff);
+    let mut candidates = Vec::new();
+    for name in names {
+        let Some(id) = name.to_str() else {
+            continue;
+        };
+        if validated_session_id(id).is_err() {
+            continue;
+        }
+        let path = sessions_dir.join(id);
+        let Ok(directory_modified) = directory_modified_no_follow(&path) else {
+            // Regular files, symlinks, and concurrently removed entries are
+            // never prune candidates.
+            continue;
+        };
+        let journal_path = path.join("journal.jsonl");
+        let metadata = read_session_metadata(&path)?;
+        let journal_entries = read_session_entries(&journal_path)?;
+        let (_, logical_updated_ms) =
+            logical_session_timestamps(metadata.as_ref(), &journal_entries);
+        let updated_ms = logical_updated_ms.unwrap_or_else(|| system_time_ms(directory_modified));
+        if updated_ms < cutoff_ms {
+            candidates.push(path);
+        }
+    }
+    candidates.sort();
+    Ok(candidates)
 }
 
 fn session_store_dir(root: &Path) -> PathBuf {
@@ -895,7 +1407,7 @@ fn require_session_entries(path: &Path, id: &str) -> Result<Vec<JournalEntry>, C
 }
 
 fn read_session_entries(path: &Path) -> Result<Vec<JournalEntry>, CliError> {
-    let contents = match std::fs::read_to_string(path) {
+    let contents = match read_string_no_follow(path) {
         Ok(contents) => contents,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(CliError::Io(e)),
@@ -926,28 +1438,34 @@ fn session_turns(entries: &[JournalEntry]) -> usize {
 
 fn session_receipts(entries: &[JournalEntry]) -> Vec<String> {
     let mut receipts = Vec::new();
+    let mut seen = HashSet::new();
     for entry in entries {
         match entry {
             JournalEntry::AssistantMessage { receipt_id, .. }
             | JournalEntry::ToolInvocation { receipt_id, .. } => {
-                receipts.push(receipt_id.0.to_string())
+                let receipt_id = receipt_id.0.to_string();
+                if seen.insert(receipt_id.clone()) {
+                    receipts.push(receipt_id);
+                }
             }
             _ => {}
         }
     }
-    receipts.sort();
-    receipts.dedup();
     receipts
 }
 
 fn render_session_markdown(
     id: &str,
-    journal_path: &Path,
     entries: &[JournalEntry],
     receipts: &[String],
+    receipt_status: &str,
+    receipt_evidence: &[SessionReceiptEvidence],
 ) -> String {
     let mut md = format!("# Session Export: {id}\n\n");
-    md.push_str(&format!("Journal: `{}`\n\n", journal_path.display()));
+    md.push_str(&format!(
+        "Journal: `journals/sessions/{id}/journal.jsonl`\n\n"
+    ));
+    md.push_str(&format!("Receipt status: `{receipt_status}`\n\n"));
     if receipts.is_empty() {
         md.push_str("Receipts: none\n\n");
     } else {
@@ -956,6 +1474,23 @@ fn render_session_markdown(
             md.push_str(&format!("- `{receipt}`\n"));
         }
         md.push('\n');
+    }
+    if !receipt_evidence.is_empty() {
+        md.push_str("## Signed receipt evidence\n\n");
+        for evidence in receipt_evidence {
+            md.push_str(&format!("### Receipt `{}`\n\n", evidence.receipt_id));
+            md.push_str("Canonical compact JWS:\n\n");
+            md.push_str(&format!("    {}\n\n", evidence.jws_compact));
+            md.push_str("Decoded receipt body:\n\n");
+            let body = serde_json::to_string_pretty(&evidence.body)
+                .expect("receipt evidence body serializes");
+            for line in body.lines() {
+                md.push_str("    ");
+                md.push_str(line);
+                md.push('\n');
+            }
+            md.push('\n');
+        }
     }
     md.push_str("## Transcript\n\n");
     for (i, entry) in entries.iter().enumerate() {
@@ -1017,27 +1552,24 @@ fn render_session_markdown(
 // ARD-142: Receipt Explorer
 // ---------------------------------------------------------------------------
 
-/// Read the receipt chain file and return parsed JSON lines.
+/// Load and authenticate the compact-JWS receipt chain, returning a flattened
+/// JSON representation suitable for the receipt and capability commands.
 fn read_receipt_chain(root: &Path) -> Result<Vec<serde_json::Value>, CliError> {
-    let chain_path = root.join("receipts").join("chain.jsonl");
-    let contents = match std::fs::read_to_string(&chain_path) {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(Vec::new());
-        }
-        Err(e) => return Err(CliError::Io(e)),
-    };
-    let mut receipts = Vec::new();
-    for line in contents.lines() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        match serde_json::from_str::<serde_json::Value>(line) {
-            Ok(v) => receipts.push(v),
-            Err(_) => continue,
-        }
-    }
-    Ok(receipts)
+    load_authenticated_receipt_chain(root)?
+        .into_iter()
+        .map(|receipt| {
+            let mut value = serde_json::to_value(&receipt.body)
+                .map_err(|error| CliError::State(format!("serializing receipt body: {error}")))?;
+            let object = value.as_object_mut().ok_or_else(|| {
+                CliError::State("serialized receipt body was not an object".to_string())
+            })?;
+            object.insert(
+                "jws_compact".to_string(),
+                serde_json::Value::String(receipt.jws_compact),
+            );
+            Ok(value)
+        })
+        .collect()
 }
 
 /// Run `ardur receipts` subcommands.
@@ -1052,9 +1584,9 @@ fn run_receipts(args: ReceiptsArgs) -> Result<(), CliError> {
                 .rev()
                 .filter(|r| {
                     if let Some(ref sess) = session {
-                        r.get("subject")
+                        r.get("session_id")
                             .and_then(|v| v.as_str())
-                            .is_some_and(|s| s.contains(sess))
+                            .is_some_and(|id| id.starts_with(sess))
                     } else {
                         true
                     }
@@ -1088,66 +1620,23 @@ fn run_receipts(args: ReceiptsArgs) -> Result<(), CliError> {
             }
         }
         ReceiptsAction::Verify { limit } => {
-            let chain_path = root.join("receipts").join("chain.jsonl");
-            if !chain_path.is_file() {
-                println!("no receipt chain found at {}", chain_path.display());
+            let receipts = load_authenticated_receipt_chain(&root)?;
+            if receipts.is_empty() {
+                println!(
+                    "no receipt chain found at {}",
+                    root.join("receipts").join("chain.jsonl").display()
+                );
                 return Ok(());
             }
-            let contents = std::fs::read_to_string(&chain_path)?;
-            let lines: Vec<&str> = contents.lines().filter(|l| !l.trim().is_empty()).collect();
             let check_count = if limit == 0 {
-                lines.len()
+                receipts.len()
             } else {
-                limit.min(lines.len())
+                limit.min(receipts.len())
             };
-            let mut prev_hash: Option<String> = None;
-            let mut errors = 0;
-            for (i, line) in lines.iter().take(check_count).enumerate() {
-                let receipt: serde_json::Value = match serde_json::from_str(line) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        eprintln!("  line {}: parse error: {e}", i + 1);
-                        errors += 1;
-                        continue;
-                    }
-                };
-                let parent = receipt.get("parent_hash").and_then(|v| v.as_str());
-                if i == 0 {
-                    // Genesis receipt may or may not have parent_hash
-                } else if let Some(ph) = parent {
-                    if let Some(ref prev) = prev_hash {
-                        if ph != prev {
-                            eprintln!(
-                                "  line {}: parent_hash mismatch (expected {prev}, got {ph})",
-                                i + 1
-                            );
-                            errors += 1;
-                        }
-                    }
-                } else {
-                    eprintln!(
-                        "  line {}: missing parent_hash in non-genesis receipt",
-                        i + 1
-                    );
-                    errors += 1;
-                }
-                prev_hash = receipt
-                    .get("jws_compact")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
-                    .or_else(|| {
-                        receipt
-                            .get("receipt_id")
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string())
-                    });
-            }
-            if errors == 0 {
-                println!("verified {check_count} receipts: chain integrity OK");
-            } else {
-                println!("verified {check_count} receipts: {errors} error(s) found");
-                return Err(CliError::State("chain verification failed".to_string()));
-            }
+            println!(
+                "authenticated complete chain of {} receipts: hash chain and ES256 signatures OK; --limit selected first {check_count} for reporting",
+                receipts.len()
+            );
         }
     }
     Ok(())
@@ -1838,9 +2327,9 @@ struct RedactArgs {
 /// Default secret patterns: API keys, tokens, passwords, private keys, etc.
 fn default_secret_patterns() -> Vec<regex::Regex> {
     let patterns = [
-        // OpenAI / Anthropic API keys
-        r"(?i)sk-[a-z0-9]{48}",
-        r"(?i)sk-[a-z0-9]{20,47}",
+        // OpenAI / Anthropic / OpenRouter API keys, including segmented
+        // prefixes such as `sk-ant-...` and `sk-or-...`.
+        r"(?i)\bsk-[a-z0-9_-]{16,}",
         // Generic secret-looking tokens
         r"(?i)bearer\s+[a-z0-9_\-\.]{20,}",
         r"(?i)token[a-z0-9_\-]*[:=]\s*[a-z0-9_\-\.]{8,}",

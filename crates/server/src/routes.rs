@@ -502,10 +502,12 @@ fn fused_event_json(event: FusedEvent) -> serde_json::Value {
         FusedEvent::Receipt {
             receipt_id,
             chain_hash,
+            cost_cents,
         } => json!({
             "type": "receipt",
             "receipt_id": receipt_id,
             "chain_hash": chain_hash,
+            "cost_cents": cost_cents,
         }),
         FusedEvent::Finish(reason) => json!({
             "type": "finish",

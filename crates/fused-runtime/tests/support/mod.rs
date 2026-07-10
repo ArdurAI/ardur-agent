@@ -6,8 +6,8 @@
 
 #![allow(dead_code)] // each test file uses a different subset.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, LazyLock};
 
 use ardur_cap_token::{
     BiscuitCapTokenIssuer, CapScope, CapTokenIssuer, HolderId as CapHolderId, KeyPair, PublicKey,
@@ -63,10 +63,13 @@ pub fn cap_root() -> PublicKey {
     cap_issuer().public_key()
 }
 
-/// A fresh receipt signing key (determinism across calls is unnecessary for the
-/// in-process tests — the chain links are re-derived from the JWS bytes).
+static RECEIPT_KEY: LazyLock<Es256SigningKey> = LazyLock::new(Es256SigningKey::generate);
+
+/// The process-stable receipt signing key. Restart tests rebuild runtimes over
+/// persisted receipt logs, so every builder in one test process must use the
+/// same expected signer just as production reloads the persisted private key.
 pub fn receipt_key() -> Es256SigningKey {
-    Es256SigningKey::generate()
+    RECEIPT_KEY.clone()
 }
 
 /// A permissive Cedar bundle — one unconditional `permit` — so the

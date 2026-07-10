@@ -59,6 +59,10 @@ serde_json = { workspace = true }
 # Decoding persisted JWS payloads back into receipt bodies for cross-restart
 # chain verification (`SignedReceipt::from_parts` is crate-private to receipt).
 base64 = { workspace = true }
+# O_NOFOLLOW for race-resistant persisted receipt-chain opens on Unix.
+libc = { workspace = true }
+# Descriptor-relative, no-follow traversal for persisted receipt logs on Unix.
+rustix = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 # §6.0 — per-tool-call timeout (`tokio::time::timeout`) in the tool-execution
 # loop. Driven by the caller's runtime (the server worker, tests' #[tokio::test]).

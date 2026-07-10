@@ -16,6 +16,7 @@ fn sample_body(verb: &str) -> ReceiptBody {
         subject: HolderId("spiffe://ardur/user/alice".to_string()),
         cap_token_id: TokenId("jti-0001".to_string()),
         payload_digest: Sha256Digest::of(b"event-payload"),
+        session_id: None,
         cost: CostTuple {
             tokens_in: 100,
             tokens_out: 50,

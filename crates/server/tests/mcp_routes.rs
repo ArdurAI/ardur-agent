@@ -31,7 +31,7 @@ fn init_request(authorization: Option<&str>) -> Request<Body> {
 async fn bearer_auth_rejects_unknown_token() {
     let dir = TempDir::new().unwrap();
     let config = test_config_with_mcp(&dir, None, vec![BEARER.to_string()]);
-    let router = boot_router(&config);
+    let router = boot_router(&config).await;
 
     // No Authorization header at all → 401.
     let (status, _) = oneshot(router.clone(), init_request(None)).await;
@@ -46,7 +46,7 @@ async fn bearer_auth_rejects_unknown_token() {
 async fn bearer_auth_accepts_configured_token() {
     let dir = TempDir::new().unwrap();
     let config = test_config_with_mcp(&dir, None, vec![BEARER.to_string()]);
-    let router = boot_router(&config);
+    let router = boot_router(&config).await;
 
     let (status, _) = oneshot(router, init_request(Some(&format!("Bearer {BEARER}")))).await;
     // The configured token clears the gate and reaches the MCP transport, which
@@ -59,7 +59,7 @@ async fn bearer_auth_accepts_configured_token() {
 async fn mcp_routes_absent_when_disabled() {
     let dir = TempDir::new().unwrap();
     let config = test_config(&dir, None); // MCP disabled
-    let router = boot_router(&config);
+    let router = boot_router(&config).await;
 
     let (status, _) = oneshot(router, init_request(Some(&format!("Bearer {BEARER}")))).await;
     assert_eq!(status, StatusCode::NOT_FOUND);

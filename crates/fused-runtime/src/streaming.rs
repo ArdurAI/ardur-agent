@@ -141,12 +141,15 @@ pub enum FusedEvent {
     /// A receipt was minted (stage 7) for the round just completed. `chain_hash`
     /// is the lowercase-hex SHA-256 of the receipt's compact JWS — the value the
     /// next receipt's `parent_hash` chains onto, so a verifier can confirm the
-    /// linkage off this event alone.
+    /// linkage off this event alone. `cost_cents` is the authoritative combined
+    /// provider-plus-tool cost recorded in that receipt.
     Receipt {
         /// The minted receipt's id.
         receipt_id: ReceiptId,
         /// Lowercase-hex SHA-256 of the receipt's compact JWS (the chain tail).
         chain_hash: String,
+        /// Combined provider and tool cost committed by this receipt.
+        cost_cents: u64,
     },
     /// Generation finished; carries the terminal [`FinishReason`] of the final
     /// provider round. The last `Ok` event a clean turn emits.

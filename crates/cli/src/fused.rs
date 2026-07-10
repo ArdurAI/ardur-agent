@@ -44,7 +44,7 @@ use ardur_memory::{
     RecordId, UnixTsMillis,
 };
 use ardur_provider_runtime::{
-    AnthropicProvider, CompletionRequest, InstrumentedProvider, ModelId, Provider, ProviderError,
+    AnthropicProvider, InstrumentedProvider, ModelId, Provider, ProviderError,
 };
 use ardur_provider_selector as provider_selector;
 use ardur_runtime::{CapTokenRef, ChatMessage, ChatRuntime, SessionId, SubmitRequest};
@@ -54,7 +54,7 @@ use crate::config::Config;
 use crate::engine::TurnOutcome;
 use crate::error::CliError;
 use crate::state::StateDirs;
-use crate::stream::{StreamOutcome, drive_turn};
+use crate::stream::{StreamOutcome, drive_fused_turn};
 
 /// The audience the session cap-token is scoped to (matches the runtime's
 /// verifier caveat).
@@ -66,23 +66,13 @@ const CAP_TTL_SECS: u64 = 3_600;
 /// The default per-turn cents ceiling when `ARDUR_CLI_PER_TURN_CENTS` is unset,
 /// capped at the session budget so a tiny budget still affords a turn.
 const DEFAULT_PER_TURN_CENTS: u64 = 100;
-/// The output-token ceiling on a streamed turn's request, matching the fused
-/// runtime's own default (`FusedRuntimeBuilder`'s `max_tokens`).
-const STREAM_MAX_TOKENS: u32 = 1024;
-
 /// A FusedRuntime-backed chat substrate for one interactive session.
 pub struct FusedEngine {
     runtime: ardur_fused_runtime::FusedRuntime,
-    /// The selected (instrumented) backend, retained so [`stream_turn`] can call
-    /// [`Provider::stream`] directly at the CLI layer (the §2.1b streaming path
-    /// bypasses the fused pipeline — see [`crate::stream`]).
-    ///
-    /// [`stream_turn`]: FusedEngine::stream_turn
-    /// [`Provider::stream`]: ardur_provider_runtime::Provider::stream
+    /// The selected (instrumented) backend, retained for streaming capability
+    /// discovery and rate-card rendering. Streamed turns themselves run through
+    /// [`ardur_fused_runtime::FusedRuntime::stream`].
     provider: Arc<dyn Provider>,
-    /// The model streamed requests are built against (the same the fused runtime
-    /// dispatches against).
-    model: ModelId,
     cap_token: CapTokenRef,
     holder: GateHolderId,
     policies: CedarPolicyBundle,
@@ -98,15 +88,19 @@ impl FusedEngine {
     /// Resolves the provider, loads/mints persistent keys and Cedar policies,
     /// mints the session cap-token, and builds the fused runtime over
     /// file-backed receipts + journals.
-    pub fn new(config: &Config, dirs: &StateDirs, budget_cents: u64) -> Result<Self, CliError> {
-        Self::new_for_session(config, dirs, budget_cents, None)
+    pub async fn new(
+        config: &Config,
+        dirs: &StateDirs,
+        budget_cents: u64,
+    ) -> Result<Self, CliError> {
+        Self::new_for_session(config, dirs, budget_cents, None).await
     }
 
     /// Wire an engine over a specific session id, or mint a fresh one when absent.
     ///
     /// Supplying `session_id` reopens that session's file-backed journal so new
     /// turns append to the existing transcript instead of starting a new log.
-    pub fn new_for_session(
+    pub async fn new_for_session(
         config: &Config,
         dirs: &StateDirs,
         budget_cents: u64,
@@ -143,8 +137,8 @@ impl FusedEngine {
         // an OTLP backend when `ARDUR_OTEL_ENABLED=true`, and otherwise route to the
         // CLI's console subscriber.
         let provider = InstrumentedProvider::wrap(provider);
-        // Keep a handle to the same instrumented provider the runtime owns so the
-        // streaming REPL path can drive `Provider::stream` directly.
+        // Keep a handle to the same instrumented provider the runtime owns for
+        // streaming capability discovery and rate-card rendering.
         let provider_handle = Arc::clone(&provider);
 
         let issuer = dirs.load_or_create_issuer()?;
@@ -201,7 +195,7 @@ impl FusedEngine {
         // for the persistent store that replaces this).
         let memory = Arc::new(InMemoryMemoryRuntime::new());
 
-        let runtime = FusedRuntimeBuilder::new(
+        let (runtime, reconciliation) = FusedRuntimeBuilder::new(
             cap_root,
             policies.clone(),
             provider,
@@ -224,13 +218,27 @@ impl FusedEngine {
         .with_memory(memory.clone())
         .with_journal(Arc::new(journal))
         .receipt_log(dirs.receipt_log())
-        .build()
-        .map_err(|e| CliError::State(format!("building the fused runtime: {e}")))?;
+        .build_reconciled()
+        .await
+        .map_err(|e| CliError::State(format!("building/reconciling the fused runtime: {e}")))?;
+        if reconciliation.orphan_receipt_count() > 0 {
+            tracing::warn!(
+                repaired = reconciliation.orphan_receipt_count(),
+                action = ?reconciliation.action,
+                "reconciled orphan receipts during CLI startup"
+            );
+        }
+
+        dirs.record_session_metadata(
+            &session_id.0.to_string(),
+            &provider_handle.id().0,
+            &model.0,
+            "cli",
+        )?;
 
         Ok(Self {
             runtime,
             provider: provider_handle,
-            model,
             cap_token,
             holder,
             policies,
@@ -378,42 +386,30 @@ impl FusedEngine {
         }
     }
 
-    /// Run one chat turn by streaming the provider **directly**, rendering tokens
-    /// progressively to `out`.
+    /// Run one progressive chat turn through the fused runtime's full ten-stage
+    /// pipeline, rendering content events to `out` as they arrive.
     ///
-    /// This is the §2.1b interactive path: it calls
-    /// [`Provider::stream`](ardur_provider_runtime::Provider::stream) at the CLI
-    /// layer, **bypassing** the fused runtime's ten-stage pipeline (cap-token
-    /// verify, Cedar authorization, cost admission, signed receipt, durable
-    /// journal) that [`run_turn`](Self::run_turn) routes through. The displayed
-    /// budget is decremented locally from the streamed turn's usage cost so the
-    /// prompt stays sensible; a subsequent fused turn re-syncs the balance from
-    /// the gate ledger. Threading streaming *through* the fused runtime is the
-    /// proposed follow-up.
-    ///
-    /// The REPL only routes here once it has confirmed streaming is enabled
-    /// (`--no-stream` absent) *and* [`supports_streaming`](Self::supports_streaming),
-    /// so this always drives the real streaming path; a non-streaming-capable
-    /// backend keeps the full-pipeline [`run_turn`](Self::run_turn) instead.
+    /// The same cap-token, Cedar policy, cost gate, receipt chain, memory plane,
+    /// and durable session journal used by [`run_turn`](Self::run_turn) remain in
+    /// force. Cancelling an unfinished stream leaves no receipt or journal entry.
     pub async fn stream_turn<W: std::io::Write>(
         &self,
         messages: &[ChatMessage],
         out: &mut W,
         ctx: &crate::stream::RenderCtx<'_>,
     ) -> std::io::Result<StreamOutcome> {
-        let req = CompletionRequest::new(messages.to_vec(), self.model.clone(), STREAM_MAX_TOKENS)
-            .streaming();
-        let outcome = drive_turn(self.provider.as_ref(), req, true, out, ctx).await?;
+        let outcome = {
+            let stream = self.runtime.stream(SubmitRequest {
+                messages: messages.to_vec(),
+                cap_token: self.cap_token.clone(),
+                session_id: self.session_id,
+                requested_provider: None,
+            });
+            drive_fused_turn(stream, out, ctx).await?
+        };
 
-        // Decrement the displayed balance by this turn's usage cost. The gate
-        // ledger is untouched on this bypass path (documented trade-off above).
-        if let Some(usage) = outcome.usage {
-            let used = self.provider.rate_card().price(usage).cents;
-            self.remaining
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |bal| {
-                    Some(bal.saturating_sub(used))
-                })
-                .ok();
+        if let Some(balance) = self.runtime.remaining_budget(&self.holder).await {
+            self.remaining.store(balance.cents, Ordering::SeqCst);
         }
         Ok(outcome)
     }

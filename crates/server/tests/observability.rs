@@ -12,7 +12,7 @@ const ADMIN_TOKEN: &str = "server-admin-token-000000000000";
 async fn health_returns_ok_with_dependency_checks() {
     let dir = tempfile::tempdir().expect("tempdir");
     let config = support::test_config_with_admin(&dir, None, vec![ADMIN_TOKEN.to_string()]);
-    let router = support::boot_router(&config);
+    let router = support::boot_router(&config).await;
 
     let request = Request::builder()
         .method("GET")
@@ -34,7 +34,7 @@ async fn health_returns_ok_with_dependency_checks() {
 async fn metrics_are_prometheus_parseable_and_do_not_leak_tokens() {
     let dir = tempfile::tempdir().expect("tempdir");
     let config = support::test_config_with_admin(&dir, None, vec![ADMIN_TOKEN.to_string()]);
-    let router = support::boot_router(&config);
+    let router = support::boot_router(&config).await;
 
     // Metrics are now bearer-gated — a request without a token is rejected.
     let unauthed = Request::builder()
@@ -79,7 +79,7 @@ async fn metrics_are_prometheus_parseable_and_do_not_leak_tokens() {
 async fn admin_runtime_requires_auth_and_returns_redacted_state() {
     let dir = tempfile::tempdir().expect("tempdir");
     let config = support::test_config_with_admin(&dir, None, vec![ADMIN_TOKEN.to_string()]);
-    let router = support::boot_router(&config);
+    let router = support::boot_router(&config).await;
 
     let missing = Request::builder()
         .method("GET")
@@ -137,7 +137,7 @@ async fn admin_runtime_requires_auth_and_returns_redacted_state() {
 async fn admin_runtime_fails_closed_when_no_admin_tokens_configured() {
     let dir = tempfile::tempdir().expect("tempdir");
     let config = support::test_config_with_admin(&dir, None, Vec::new());
-    let router = support::boot_router(&config);
+    let router = support::boot_router(&config).await;
 
     let request = Request::builder()
         .method("GET")

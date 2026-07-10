@@ -39,6 +39,9 @@ uuid = { workspace = true, features = ["v4"] }
 # SHA-256 backs `Sha256Digest::of` — the content digests a `ToolInvocation`
 # entry records for its input/output payloads.
 sha2 = { workspace = true }
+# Descriptor-relative no-follow traversal protects append-only journals from
+# parent and final-component symlink races.
+rustix = { workspace = true }
 
 [dev-dependencies]
 # The async trait methods need a runtime to poll them; the concurrency test

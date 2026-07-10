@@ -377,6 +377,68 @@ async fn memory_write_revocation_reverification_fires_error_hook() {
     );
 }
 
+/// Non-streaming memory authorization samples the clock at the side-effect,
+/// not at turn admission, so a token that expires during provider work cannot
+/// authorize a late memory write.
+#[tokio::test]
+async fn memory_write_expiry_is_rechecked_after_provider_work() {
+    let provider = Arc::new(PausingProvider::new());
+    let memory = Arc::new(InMemoryMemoryRuntime::new());
+    let recorder = Arc::new(RecordingHook::new("rec"));
+    let mut registry = HookRegistry::new();
+    registry.register(recorder.clone());
+    let clock = Arc::new(ManualClock::new(NOW_MS));
+
+    let runtime = Arc::new(
+        runtime_builder(provider.clone())
+            .clock(clock.clone())
+            .with_memory(memory.clone())
+            .registry(Arc::new(registry))
+            .build()
+            .expect("runtime builds"),
+    );
+    let token = mint_token(NOW_UNIX + 1, 1_000_000);
+    let session_id = SessionId::new();
+
+    let submit_runtime = Arc::clone(&runtime);
+    let submit = tokio::spawn(async move {
+        submit_runtime
+            .submit(request_for("expire before memory", &token, session_id))
+            .await
+    });
+
+    provider.wait_started().await;
+    clock.advance(2_000);
+    provider.resume();
+
+    let outcome = submit
+        .await
+        .expect("submit task joins")
+        .expect("memory-write expiry remains non-fatal");
+    assert_eq!(outcome.response.content, "expire before memory");
+    assert!(
+        memory
+            .current_as_of(
+                &MemHolderId(HOLDER.to_string()),
+                UnixTsMillis(NOW_MS + 2_001)
+            )
+            .is_empty(),
+        "expired memory.write authorization must not write a fact"
+    );
+    let events = recorder.events();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            HookEvent::OnError {
+                phase: LifecyclePhase::MemoryWrite,
+                message,
+                ..
+            } if message.contains("expired")
+        )),
+        "expired memory.write should fire an on_error event; events: {events:?}"
+    );
+}
+
 /// Stage 2: a deny-all Cedar bundle blocks the turn with `PolicyDenied`.
 #[tokio::test]
 async fn policy_deny_blocks_turn() {
