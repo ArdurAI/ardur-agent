@@ -67,8 +67,9 @@ fn token_create_lists_and_revokes() {
 
 #[test]
 fn redact_plain_text_masks_default_patterns() {
-    // Use a high-entropy secret pattern that the default regexes definitely catch.
-    let input = "My key is sk-abcdefghijklmnopqrstuvwxyz1234567890abc and pass is secret123";
+    let anthropic = format!("sk-ant-api03-{}", "a".repeat(32));
+    let openrouter = format!("sk-or-v1-{}", "b".repeat(32));
+    let input = format!("My keys are {anthropic} and {openrouter}; pass is secret123");
     let output = Command::cargo_bin("ardur")
         .expect("the `ardur` binary builds")
         .args(["redact"])
@@ -84,8 +85,12 @@ fn redact_plain_text_masks_default_patterns() {
         "should redact secrets: {stdout}"
     );
     assert!(
-        !stdout.contains("sk-abcdefghijklmnopqrstuvwxyz1234567890abc"),
-        "secret leaked: {stdout}"
+        !stdout.contains(&anthropic),
+        "Anthropic key leaked: {stdout}"
+    );
+    assert!(
+        !stdout.contains(&openrouter),
+        "OpenRouter key leaked: {stdout}"
     );
     assert!(!stdout.contains("secret123"), "password leaked: {stdout}");
 }

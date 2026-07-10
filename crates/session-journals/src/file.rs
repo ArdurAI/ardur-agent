@@ -1,7 +1,9 @@
 //! [`FileSessionJournal`] — an append-only JSONL backend.
 
-use std::fs::{self, File, OpenOptions};
-use std::io::Write as _;
+#[cfg(not(unix))]
+use std::fs::OpenOptions;
+use std::fs::{self, File};
+use std::io::{Read as _, Seek as _, Write as _};
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
@@ -36,6 +38,136 @@ pub struct FileSessionJournal {
     state: Mutex<FileState>,
 }
 
+#[cfg(not(unix))]
+fn ensure_directory_not_symlink(path: &Path) -> Result<(), JournalError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(JournalError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("refusing symlinked journal directory {}", path.display()),
+            )));
+        }
+        Ok(metadata) if !metadata.is_dir() => {
+            return Err(JournalError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("journal path is not a directory: {}", path.display()),
+            )));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir(path)?;
+        }
+        Err(error) => return Err(JournalError::Io(error)),
+    }
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(JournalError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("unsafe journal directory {}", path.display()),
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn open_or_create_directory_at(parent: &File, name: &str) -> Result<File, JournalError> {
+    use rustix::fs::{Mode, OFlags, mkdirat, openat};
+
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let open = || openat(parent, name, flags, Mode::empty());
+    let descriptor = match open() {
+        Ok(descriptor) => descriptor,
+        Err(error) if error == rustix::io::Errno::NOENT => {
+            match mkdirat(parent, name, Mode::from_bits_truncate(0o700)) {
+                Ok(()) => {}
+                Err(error) if error == rustix::io::Errno::EXIST => {}
+                Err(error) => {
+                    return Err(JournalError::Io(std::io::Error::from_raw_os_error(
+                        error.raw_os_error(),
+                    )));
+                }
+            }
+            open().map_err(|error| {
+                JournalError::Io(std::io::Error::from_raw_os_error(error.raw_os_error()))
+            })?
+        }
+        Err(error) => {
+            return Err(JournalError::Io(std::io::Error::from_raw_os_error(
+                error.raw_os_error(),
+            )));
+        }
+    };
+    Ok(File::from(descriptor))
+}
+
+#[cfg(unix)]
+fn open_journal_descriptor(base_dir: &Path, session_id: SessionId) -> Result<File, JournalError> {
+    use rustix::fs::{Mode, OFlags, openat};
+
+    let trusted_root = base_dir.parent().ok_or_else(|| {
+        JournalError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "journal base has no trusted parent",
+        ))
+    })?;
+    let base_name = base_dir.file_name().ok_or_else(|| {
+        JournalError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "journal base has no file name",
+        ))
+    })?;
+    fs::create_dir_all(trusted_root)?;
+    let trusted = {
+        use rustix::fs::{CWD, Mode, OFlags, openat};
+        let fd = openat(
+            CWD,
+            trusted_root,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|error| {
+            JournalError::Io(std::io::Error::from_raw_os_error(error.raw_os_error()))
+        })?;
+        File::from(fd)
+    };
+    let base = open_or_create_directory_at(
+        &trusted,
+        base_name.to_str().ok_or_else(|| {
+            JournalError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "journal base name is not UTF-8",
+            ))
+        })?,
+    )?;
+    let sessions = open_or_create_directory_at(&base, "sessions")?;
+    let session = open_or_create_directory_at(&sessions, &session_id.0.to_string())?;
+    let descriptor = openat(
+        &session,
+        "journal.jsonl",
+        OFlags::RDWR | OFlags::APPEND | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::from_bits_truncate(0o600),
+    )
+    .map_err(|error| JournalError::Io(std::io::Error::from_raw_os_error(error.raw_os_error())))?;
+    let file = File::from(descriptor);
+    if !file.metadata()?.is_file() {
+        return Err(JournalError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "session journal is not a regular file",
+        )));
+    }
+    use std::os::unix::fs::PermissionsExt as _;
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    Ok(file)
+}
+
+fn read_open_file(handle: &File) -> Result<String, JournalError> {
+    let mut reader = handle.try_clone()?;
+    reader.seek(std::io::SeekFrom::Start(0))?;
+    let mut contents = String::new();
+    reader.read_to_string(&mut contents)?;
+    Ok(contents)
+}
+
 impl FileSessionJournal {
     /// Open (creating if absent) the journal for `session_id` under `base_dir`.
     ///
@@ -49,16 +181,38 @@ impl FileSessionJournal {
     /// be created/opened, or [`JournalError::Serde`] if an existing line could
     /// not be counted because the file was malformed.
     pub fn new(base_dir: impl AsRef<Path>, session_id: SessionId) -> Result<Self, JournalError> {
+        let base_dir = base_dir.as_ref();
         let path = base_dir
-            .as_ref()
             .join("sessions")
             .join(session_id.0.to_string())
             .join("journal.jsonl");
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let count = Self::recover_existing(&path)?;
-        let handle = OpenOptions::new().create(true).append(true).open(&path)?;
+        #[cfg(unix)]
+        let mut handle = open_journal_descriptor(base_dir, session_id)?;
+        #[cfg(not(unix))]
+        let mut handle = {
+            fs::create_dir_all(base_dir)?;
+            let sessions_dir = base_dir.join("sessions");
+            ensure_directory_not_symlink(&sessions_dir)?;
+            let session_dir = sessions_dir.join(session_id.0.to_string());
+            ensure_directory_not_symlink(&session_dir)?;
+            if fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+                return Err(JournalError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("refusing symlinked session journal {}", path.display()),
+                )));
+            }
+            let mut options = OpenOptions::new();
+            options.create(true).read(true).append(true);
+            let handle = options.open(&path)?;
+            if !handle.metadata()?.file_type().is_file() {
+                return Err(JournalError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("session journal is not a regular file: {}", path.display()),
+                )));
+            }
+            handle
+        };
+        let count = Self::recover_existing(&mut handle)?;
         Ok(Self {
             session_id,
             path,
@@ -74,22 +228,16 @@ impl FileSessionJournal {
 
     /// Read existing entries, repairing a single malformed unterminated tail
     /// left by a crash before the append handle is opened (0 if absent).
-    fn recover_existing(path: &Path) -> Result<u64, JournalError> {
-        let contents = match fs::read_to_string(path) {
-            Ok(contents) => contents,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-            Err(e) => return Err(JournalError::Io(e)),
-        };
+    fn recover_existing(handle: &mut File) -> Result<u64, JournalError> {
+        let contents = read_open_file(handle)?;
         let (entries, torn_tail_start) = Self::parse_entries(&contents)?;
         if let Some(offset) = torn_tail_start {
             tracing::warn!(
-                path = %path.display(),
                 truncate_at = offset,
                 "dropping torn trailing session-journal line"
             );
-            let file = OpenOptions::new().write(true).open(path)?;
-            file.set_len(offset as u64)?;
-            file.sync_all()?;
+            handle.set_len(offset as u64)?;
+            handle.sync_all()?;
         }
         Ok(entries.len() as u64)
     }
@@ -124,11 +272,7 @@ impl FileSessionJournal {
     /// a partially written line.
     fn read_all(&self) -> Result<Vec<JournalEntry>, JournalError> {
         let mut state = self.state.lock();
-        let contents = match fs::read_to_string(&self.path) {
-            Ok(c) => c,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(e) => return Err(JournalError::Io(e)),
-        };
+        let contents = read_open_file(&state.handle)?;
         let (entries, torn_tail_start) = Self::parse_entries(&contents)?;
         if let Some(offset) = torn_tail_start {
             tracing::warn!(
@@ -179,11 +323,7 @@ impl SessionJournal for FileSessionJournal {
         }
         state.handle.flush()?;
         state.handle.sync_all()?;
-        let contents = match fs::read_to_string(&self.path) {
-            Ok(contents) => contents,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-            Err(e) => return Err(JournalError::Io(e)),
-        };
+        let contents = read_open_file(&state.handle)?;
         let mut lines = contents
             .lines()
             .filter(|line| !line.is_empty())

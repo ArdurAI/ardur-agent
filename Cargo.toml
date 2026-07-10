@@ -94,6 +94,11 @@ hex = "0.4"
 # §4.1) — keeps them out of Debug/log output behind `SecretString`.
 secrecy = "0.10"
 base64 = "0.22"
+# Race-resistant Unix opens for private state and exported session bundles.
+libc = "0.2"
+# Descriptor-relative directory traversal for journal paths; prevents parent
+# symlink substitution between validation and open.
+rustix = { version = "1.1", features = ["fs"] }
 regex = "1"
 once_cell = "1"
 # HTTP client for the live provider backends (crates/provider-runtime, §3.1).

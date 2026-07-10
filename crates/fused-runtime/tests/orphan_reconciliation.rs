@@ -138,6 +138,37 @@ async fn reconcile_no_orphans_is_noop() {
 }
 
 #[tokio::test]
+async fn reconciliation_ignores_receipts_owned_by_other_session_journals() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let receipt_log = root.path().join("receipts.jsonl");
+    let first_session = SessionId::new();
+    let second_session = SessionId::new();
+    run_clean_turns(root.path(), &receipt_log, first_session, &["first"]).await;
+
+    let (runtime, second_journal, _p) = restart_over(
+        root.path(),
+        &receipt_log,
+        second_session,
+        ReconciliationStrategy::AppendSyntheticJournal,
+    );
+    let report = runtime
+        .reconcile_receipts(false)
+        .await
+        .expect("cross-session reconciliation succeeds");
+    assert_eq!(report.receipt_count, 0);
+    assert_eq!(report.orphan_receipt_count(), 0);
+    assert_eq!(report.action, ReconciliationAction::NoOrphans);
+    assert!(
+        second_journal
+            .replay(second_session)
+            .await
+            .expect("second journal replays")
+            .is_empty(),
+        "a new session must not inherit synthetic entries for another session's receipts"
+    );
+}
+
+#[tokio::test]
 async fn reconcile_one_orphan_appends_synthetic_journal_entry() {
     let root = tempfile::tempdir().expect("tempdir");
     let receipt_log = root.path().join("receipts.jsonl");
@@ -265,6 +296,44 @@ async fn reconcile_one_orphan_truncate_strategy_removes_receipt() {
             chain[0].jws_compact.as_bytes()
         )),
         "turn three chained onto the retained tail, not the removed orphan"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn reconcile_truncate_unique_temp_avoids_symlink_collision() {
+    use std::os::unix::fs::symlink;
+
+    let root = tempfile::tempdir().expect("tempdir");
+    let receipt_log = root.path().join("receipts.jsonl");
+    let session_id = SessionId::new();
+    run_clean_turns(root.path(), &receipt_log, session_id, &["one", "two"]).await;
+    drop_last_journal_lines(&journal_path(root.path(), session_id), 1);
+    let _original_chain = std::fs::read(&receipt_log).expect("original receipt log");
+
+    let victim = root.path().join("victim.txt");
+    std::fs::write(&victim, b"must-not-change").expect("victim created");
+    // The old predictable temp name is no longer used — unique UUID paths
+    // prevent symlink collisions. Reconciliation should succeed.
+    symlink(&victim, root.path().join(".receipts.jsonl.reconcile-tmp"))
+        .expect("malicious temp symlink at old predictable name");
+
+    let (runtime, _journal, _p) = restart_over(
+        root.path(),
+        &receipt_log,
+        session_id,
+        ReconciliationStrategy::TruncateOrphans,
+    );
+    // Reconciliation succeeds because the unique temp file name doesn't collide.
+    let report = runtime
+        .reconcile_receipts(false)
+        .await
+        .expect("reconciliation succeeds with unique temp path");
+    assert!(report.orphan_receipt_count() > 0, "orphan was reconciled");
+    assert_eq!(
+        std::fs::read(&victim).expect("victim readable"),
+        b"must-not-change",
+        "victim untouched"
     );
 }
 

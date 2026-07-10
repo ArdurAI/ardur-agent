@@ -58,6 +58,13 @@ pub trait CostAdmissionGate: Send + Sync {
         reservation: Reservation,
         actual: CostTuple,
     ) -> Result<RefundReceipt, AdmissionError>;
+
+    /// Roll back a successful finalization when no authoritative receipt was
+    /// persisted. Exactly one rollback is accepted for a finalized reservation.
+    async fn rollback_finalization(&self, receipt: RefundReceipt) -> Result<(), AdmissionError>;
+
+    /// Forget rollback state after the corresponding receipt became durable.
+    async fn commit_finalization(&self, reservation_id: Uuid);
 }
 
 /// Default reservation lifetime: how long a hold survives without a finalize.
@@ -66,6 +73,53 @@ const DEFAULT_TTL_MS: u64 = 30_000;
 struct ReservationRecord {
     handle: ReservationHandle,
     expires_at: UnixTsMillis,
+    /// `true` when a finalize call has claimed this reservation and is awaiting
+    /// the budget refund. The cancel guard must not release a finalizing
+    /// reservation — the finalize path owns the refund.
+    finalizing: bool,
+}
+
+struct FinalizedRecord {
+    handle: ReservationHandle,
+    rollback_credit: CostTuple,
+}
+
+fn rollback_credit(
+    reserved: CostTuple,
+    balance_before: CostTuple,
+    balance_after: CostTuple,
+) -> CostTuple {
+    fn dimension(reserved: u64, before: u64, after: u64) -> u64 {
+        if after >= before {
+            reserved.saturating_sub(after - before)
+        } else {
+            reserved.saturating_add(before - after)
+        }
+    }
+
+    CostTuple {
+        tokens_in: dimension(
+            reserved.tokens_in,
+            balance_before.tokens_in,
+            balance_after.tokens_in,
+        ),
+        tokens_out: dimension(
+            reserved.tokens_out,
+            balance_before.tokens_out,
+            balance_after.tokens_out,
+        ),
+        cents: dimension(reserved.cents, balance_before.cents, balance_after.cents),
+        wall_ms: dimension(
+            reserved.wall_ms,
+            balance_before.wall_ms,
+            balance_after.wall_ms,
+        ),
+        attention_score: dimension(
+            reserved.attention_score,
+            balance_before.attention_score,
+            balance_after.attention_score,
+        ),
+    }
 }
 
 /// In-memory [`CostAdmissionGate`] over any [`BudgetStore`]. Holds an active-
@@ -80,6 +134,7 @@ pub struct InMemoryCostAdmissionGate<B: BudgetStore> {
     ceiling: Option<CostEnvelope>,
     provision_cap: Option<CostTuple>,
     reservations: RwLock<HashMap<Uuid, ReservationRecord>>,
+    finalized: RwLock<HashMap<Uuid, FinalizedRecord>>,
 }
 
 impl<B: BudgetStore> InMemoryCostAdmissionGate<B> {
@@ -100,6 +155,7 @@ impl<B: BudgetStore> InMemoryCostAdmissionGate<B> {
             ceiling: None,
             provision_cap: None,
             reservations: RwLock::new(HashMap::new()),
+            finalized: RwLock::new(HashMap::new()),
         }
     }
 
@@ -115,8 +171,12 @@ impl<B: BudgetStore> InMemoryCostAdmissionGate<B> {
     /// reservation synchronously and refund it through whatever budget store the
     /// gate shares — without an await point, so it can run from `Drop`.
     pub fn take_reservation(&self, reservation_id: Uuid) -> Option<ReservationHandle> {
-        self.reservations
-            .write()
+        let mut reservations = self.reservations.write();
+        let record = reservations.get(&reservation_id)?;
+        if record.finalizing {
+            return None;
+        }
+        reservations
             .remove(&reservation_id)
             .map(|record| record.handle)
     }
@@ -278,6 +338,7 @@ impl<B: BudgetStore> CostAdmissionGate for InMemoryCostAdmissionGate<B> {
             ReservationRecord {
                 handle,
                 expires_at: reservation.expires_at,
+                finalizing: false,
             },
         );
         Ok(reservation)
@@ -300,19 +361,29 @@ impl<B: BudgetStore> CostAdmissionGate for InMemoryCostAdmissionGate<B> {
         let (handle, expired) = {
             let mut reservations = self.reservations.write();
             let record = reservations
-                .remove(&reservation.reservation_id)
+                .get_mut(&reservation.reservation_id)
                 .ok_or_else(|| {
                     AdmissionError::Internal(anyhow::anyhow!(
                         "no active reservation for {}",
                         reservation.reservation_id
                     ))
                 })?;
-            (record.handle, now > record.expires_at)
+            if record.finalizing {
+                return Err(AdmissionError::Internal(anyhow::anyhow!(
+                    "reservation {} is already being finalized",
+                    reservation.reservation_id
+                )));
+            }
+            record.finalizing = true;
+            (record.handle.clone(), now > record.expires_at)
         };
 
         let reserved = handle.reserved;
 
         if expired {
+            self.reservations
+                .write()
+                .remove(&reservation.reservation_id);
             self.budget
                 .refund(handle, CostDelta::full_credit(&reserved))
                 .await
@@ -329,10 +400,23 @@ impl<B: BudgetStore> CostAdmissionGate for InMemoryCostAdmissionGate<B> {
         // exceeds the reserved envelope, the delta will be negative (debiting the
         // overage from the holder's budget), which is the correct fail-closed behavior.
         let refunded = CostDelta::between(&reserved, &actual);
-        self.budget
+        let rollback_handle = handle.clone();
+        let (balance_before, balance_after) = self
+            .budget
             .refund(handle, refunded)
             .await
             .map_err(internal)?;
+        let rollback_credit = rollback_credit(reserved, balance_before, balance_after);
+        self.reservations
+            .write()
+            .remove(&reservation.reservation_id);
+        self.finalized.write().insert(
+            reservation.reservation_id,
+            FinalizedRecord {
+                handle: rollback_handle,
+                rollback_credit,
+            },
+        );
 
         Ok(RefundReceipt {
             reservation_id: reservation.reservation_id,
@@ -340,6 +424,31 @@ impl<B: BudgetStore> CostAdmissionGate for InMemoryCostAdmissionGate<B> {
             refunded,
             finalized_at: self.clock.now_ms(),
         })
+    }
+
+    async fn rollback_finalization(&self, receipt: RefundReceipt) -> Result<(), AdmissionError> {
+        let record = self
+            .finalized
+            .write()
+            .remove(&receipt.reservation_id)
+            .ok_or_else(|| {
+                AdmissionError::Internal(anyhow::anyhow!(
+                    "no rollback state for finalized reservation {}",
+                    receipt.reservation_id
+                ))
+            })?;
+        self.budget
+            .refund(
+                record.handle,
+                CostDelta::full_credit(&record.rollback_credit),
+            )
+            .await
+            .map(|_| ())
+            .map_err(internal)
+    }
+
+    async fn commit_finalization(&self, reservation_id: Uuid) {
+        self.finalized.write().remove(&reservation_id);
     }
 }
 
@@ -412,7 +521,7 @@ mod tests {
             &self,
             handle: ReservationHandle,
             delta: CostDelta,
-        ) -> Result<(), BudgetError> {
+        ) -> Result<(CostTuple, CostTuple), BudgetError> {
             let previous = self.refund_calls.fetch_add(1, Ordering::SeqCst);
             if previous == 0 {
                 self.first_refund_started.notify_waiters();
@@ -472,6 +581,52 @@ mod tests {
 
         let balance_after = gate.budget.current_balance(&holder).await.unwrap();
         assert_eq!(balance_after.cents, 80);
+    }
+
+    #[tokio::test]
+    async fn rollback_of_clamped_overrun_restores_without_inflation() {
+        let (gate, _clock, holder, token_id) = test_gate();
+        let initial = CostTuple {
+            tokens_in: 15,
+            tokens_out: 15,
+            cents: 15,
+            wall_ms: 15,
+            attention_score: 15,
+        };
+        gate.provision_for(&holder, initial).await.unwrap();
+        let reservation = gate
+            .admit(req(
+                CostEnvelope {
+                    tokens_in_max: 10,
+                    tokens_out_max: 10,
+                    cents_max: 10,
+                    wall_ms_max: 10,
+                    attention_score_max: 10,
+                },
+                token_id,
+            ))
+            .await
+            .unwrap();
+        let actual = CostTuple {
+            tokens_in: 20,
+            tokens_out: 20,
+            cents: 20,
+            wall_ms: 20,
+            attention_score: 20,
+        };
+        let receipt = gate.finalize(reservation, actual).await.unwrap();
+        assert_eq!(
+            gate.budget.current_balance(&holder).await.unwrap(),
+            CostTuple::ZERO,
+            "the overrun debit clamps each dimension at zero"
+        );
+
+        gate.rollback_finalization(receipt).await.unwrap();
+        assert_eq!(
+            gate.budget.current_balance(&holder).await.unwrap(),
+            initial,
+            "rollback restores exactly the applied charge, not the larger requested actual"
+        );
     }
 
     #[tokio::test]

@@ -79,6 +79,10 @@ pub const AUDIENCE: &str = "ardur";
 /// The capability the chat turn exercises. Matches the runtime's verifier caveat
 /// and the Cedar policy's bound.
 pub const TOOL: &str = "chat.submit";
+/// Stable UUIDv7-shaped journal identity for the server-wide receipt/audit log.
+/// A stable identity lets startup reconciliation compare receipts with the same
+/// journal across process restarts instead of treating the whole chain as new.
+const SERVER_JOURNAL_SESSION_UUID: u128 = 0x018f_f6f0_7d5a_7b87_b3d6_6ab7_ad0f_0000;
 
 /// The fixed cost-gate holder / cap-token subject every session token is issued
 /// under (see the module Phase-3 note on why this is not the per-Slack-user id).
@@ -212,6 +216,9 @@ pub struct AppState {
     /// wires it (only when `ARDUR_CHANNEL_TELEGRAM=true`). Same `OnceLock`-shared
     /// reply path as Matrix.
     telegram: Arc<OnceLock<Arc<TelegramChannel>>>,
+    /// The receipt JWKS used to authenticate the server's receipt chain before
+    /// reporting counts or tool names to admin/metrics endpoints.
+    receipt_jwks: ardur_receipt::Jwks,
 }
 
 /// The data [`build_router`](crate::build_router) needs to mount the §6.0 MCP
@@ -237,7 +244,7 @@ impl AppState {
     /// Any I/O failure creating the data directories or reading/writing the
     /// persisted keys, a malformed key file, a Cedar policy that fails to
     /// compile, or a receipt log that cannot be read back to resume the chain.
-    pub fn boot(
+    pub async fn boot(
         config: &Config,
         provider: Arc<dyn Provider>,
         tools: Arc<ToolRegistry>,
@@ -263,6 +270,7 @@ impl AppState {
         let issuer = load_or_mint_issuer(&keys_dir)?;
         let cap_root = issuer.public_key();
         let receipt_key = load_or_generate_receipt_key(&keys_dir)?;
+        let receipt_jwks = ardur_receipt::Jwks::from_public_key(&receipt_key.public_key());
 
         // 3. Policy: the operator's file if configured + present, else built-in.
         let policy = load_policy(
@@ -315,9 +323,9 @@ impl AppState {
             }
         };
 
-        // One journal per process boot. The fused runtime appends every turn's
-        // user + assistant messages here (fsynced per entry).
-        let boot_session = SessionId::new();
+        // One stable server-wide audit journal. Reusing its canonical UUID on
+        // every boot lets receipt reconciliation compare against prior entries.
+        let boot_session = SessionId(uuid::Uuid::from_u128(SERVER_JOURNAL_SESSION_UUID));
         let journal: Arc<dyn SessionJournal> = Arc::new(
             FileSessionJournal::new(&journals_dir, boot_session)
                 .map_err(|e| anyhow::anyhow!("opening session journal: {e}"))?,
@@ -329,7 +337,7 @@ impl AppState {
         //    — so receipts chain correctly across turns.
         let envelope = per_turn_envelope(config.cost_budget_cents);
         let budget = gateway_budget(config.cost_budget_cents);
-        let runtime = FusedRuntimeBuilder::new(
+        let (runtime, reconciliation) = FusedRuntimeBuilder::new(
             cap_root,
             policy,
             provider,
@@ -346,8 +354,16 @@ impl AppState {
         .with_journal(journal.clone())
         .with_tools(tools.clone())
         .receipt_log(&receipt_log)
-        .build()
-        .map_err(|e| anyhow::anyhow!("building fused runtime: {e}"))?;
+        .build_reconciled()
+        .await
+        .map_err(|e| anyhow::anyhow!("building/reconciling fused runtime: {e}"))?;
+        if reconciliation.orphan_receipt_count() > 0 {
+            tracing::warn!(
+                repaired = reconciliation.orphan_receipt_count(),
+                action = ?reconciliation.action,
+                "reconciled orphan receipts during server startup"
+            );
+        }
 
         // 6. The Slack adapter (base URL overridable so tests point at a mock).
         let mut slack = SlackAdapter::new(
@@ -379,6 +395,7 @@ impl AppState {
             cap_budget_remaining: config.cost_budget_cents,
             tool_allowlist: tool_allowlist.clone(),
             receipt_log,
+            receipt_jwks: receipt_jwks.clone(),
         };
         let (work_tx, worker_handle) = spawn_worker(processor);
 
@@ -414,6 +431,7 @@ impl AppState {
             matrix,
             discord,
             telegram,
+            receipt_jwks,
         }))
     }
 
@@ -451,7 +469,10 @@ impl AppState {
     #[must_use]
     pub fn receipt_count(&self) -> usize {
         load_persisted_chain(self.data_dir.join("receipts").join("chain.jsonl"))
-            .map(|chain| chain.len())
+            .and_then(|chain| {
+                ardur_fused_runtime::verify_persisted_chain_with_jwks(&chain, &self.receipt_jwks)
+                    .map(|()| chain.len())
+            })
             .unwrap_or(0)
     }
 
@@ -691,6 +712,9 @@ struct Processor {
     /// single-threaded, so the receipts appended across one `submit` belong to
     /// exactly that turn).
     receipt_log: PathBuf,
+    /// The JWKS derived from the configured receipt signing key, used to
+    /// authenticate the receipt chain before reading tool-call data.
+    receipt_jwks: ardur_receipt::Jwks,
 }
 
 /// Which channel backend a turn originated on — decided by the namespaced
@@ -958,26 +982,38 @@ impl Processor {
     /// log is absent or unreadable). Brackets a turn's receipts for
     /// [`tools_called_since`](Self::tools_called_since).
     fn receipt_count(&self) -> usize {
-        load_persisted_chain(&self.receipt_log)
-            .map(|chain| chain.len())
+        ardur_fused_runtime::load_persisted_chain(&self.receipt_log)
+            .and_then(|chain| {
+                ardur_fused_runtime::verify_persisted_chain_with_jwks(&chain, &self.receipt_jwks)
+                    .map(|()| chain.len())
+            })
             .unwrap_or(0)
     }
 
     /// The tool names recorded on every receipt appended after index `before` —
     /// the tools this turn's provider iterations invoked, in receipt order.
     fn tools_called_since(&self, before: usize) -> Vec<String> {
-        match load_persisted_chain(&self.receipt_log) {
-            Ok(chain) => chain
-                .into_iter()
-                .skip(before)
-                .flat_map(|receipt| {
-                    receipt
-                        .body
-                        .tool_calls
-                        .into_iter()
-                        .map(|call| call.tool_name)
-                })
-                .collect(),
+        match ardur_fused_runtime::load_persisted_chain(&self.receipt_log) {
+            Ok(chain) => {
+                if let Err(e) = ardur_fused_runtime::verify_persisted_chain_with_jwks(
+                    &chain,
+                    &self.receipt_jwks,
+                ) {
+                    tracing::warn!(error = %e, "receipt chain verification failed; discarding tool-call data");
+                    return Vec::new();
+                }
+                chain
+                    .into_iter()
+                    .skip(before)
+                    .flat_map(|receipt| {
+                        receipt
+                            .body
+                            .tool_calls
+                            .into_iter()
+                            .map(|call| call.tool_name)
+                    })
+                    .collect()
+            }
             Err(e) => {
                 tracing::warn!(error = %e, "reading receipt chain for tools_called");
                 Vec::new()
@@ -1277,17 +1313,20 @@ fn qdrant_config(config: &Config) -> QdrantMemoryConfig {
 
 fn load_or_mint_issuer(keys_dir: &Path) -> anyhow::Result<BiscuitCapTokenIssuer> {
     let path = keys_dir.join("issuer.key");
-    if path.exists() {
-        let hex = std::fs::read_to_string(&path)
-            .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?;
-        let private = PrivateKey::from_bytes_hex(hex.trim(), Algorithm::Ed25519)
-            .map_err(|e| anyhow::anyhow!("parsing issuer key {}: {e}", path.display()))?;
-        Ok(BiscuitCapTokenIssuer::new(KeyPair::from(&private)))
-    } else {
-        let keypair = KeyPair::new();
-        let hex = keypair.private().to_bytes_hex();
-        write_private(&path, &hex)?;
-        Ok(BiscuitCapTokenIssuer::new(keypair))
+    match read_private(keys_dir, "issuer.key") {
+        Ok(hex) => {
+            let private = PrivateKey::from_bytes_hex(hex.trim(), Algorithm::Ed25519)
+                .map_err(|e| anyhow::anyhow!("parsing issuer key {}: {e}", path.display()))?;
+            Ok(BiscuitCapTokenIssuer::new(KeyPair::from(&private)))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let keypair = KeyPair::new();
+            let hex = keypair.private().to_bytes_hex();
+            create_private(keys_dir, "issuer.key", &hex)
+                .map_err(|e| anyhow::anyhow!("writing {}: {e}", path.display()))?;
+            Ok(BiscuitCapTokenIssuer::new(keypair))
+        }
+        Err(error) => Err(anyhow::anyhow!("reading {}: {error}", path.display())),
     }
 }
 
@@ -1295,18 +1334,19 @@ fn load_or_mint_issuer(keys_dir: &Path) -> anyhow::Result<BiscuitCapTokenIssuer>
 /// persisting one (PKCS#8 PEM) on first boot.
 fn load_or_generate_receipt_key(keys_dir: &Path) -> anyhow::Result<Es256SigningKey> {
     let path = keys_dir.join("receipt.pem");
-    if path.exists() {
-        let pem = std::fs::read_to_string(&path)
-            .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?;
-        Es256SigningKey::from_pkcs8_pem(&pem)
-            .map_err(|e| anyhow::anyhow!("parsing receipt key {}: {e}", path.display()))
-    } else {
-        let key = Es256SigningKey::generate();
-        let pem = key
-            .to_pkcs8_pem()
-            .map_err(|e| anyhow::anyhow!("encoding receipt key: {e}"))?;
-        write_private(&path, &pem)?;
-        Ok(key)
+    match read_private(keys_dir, "receipt.pem") {
+        Ok(pem) => Es256SigningKey::from_pkcs8_pem(&pem)
+            .map_err(|e| anyhow::anyhow!("parsing receipt key {}: {e}", path.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let key = Es256SigningKey::generate();
+            let pem = key
+                .to_pkcs8_pem()
+                .map_err(|e| anyhow::anyhow!("encoding receipt key: {e}"))?;
+            create_private(keys_dir, "receipt.pem", &pem)
+                .map_err(|e| anyhow::anyhow!("writing {}: {e}", path.display()))?;
+            Ok(key)
+        }
+        Err(error) => Err(anyhow::anyhow!("reading {}: {error}", path.display())),
     }
 }
 
@@ -1328,24 +1368,131 @@ fn load_policy(path: Option<&Path>, dev_permissive: bool) -> anyhow::Result<Ceda
     CedarPolicyBundle::load(source).map_err(|e| anyhow::anyhow!("compiling cedar policy: {e}"))
 }
 
-/// Write a secret to `path` with owner-only permissions where the platform
-/// supports it (`0o600` on Unix).
-fn write_private(path: &Path, contents: &str) -> anyhow::Result<()> {
-    std::fs::write(path, contents)
-        .map_err(|e| anyhow::anyhow!("writing {}: {e}", path.display()))?;
+#[cfg(unix)]
+fn open_keys_directory(keys_dir: &Path) -> std::io::Result<std::fs::File> {
+    use rustix::fs::{Mode, OFlags, openat};
+
+    let trusted_root = keys_dir.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "keys directory has no parent",
+        )
+    })?;
+    let name = keys_dir.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "keys directory has no name",
+        )
+    })?;
+    let trusted = {
+        use rustix::fs::{CWD, Mode, OFlags, openat};
+        let fd = openat(
+            CWD,
+            trusted_root,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|error| std::io::Error::from_raw_os_error(error.raw_os_error()))?;
+        std::fs::File::from(fd)
+    };
+    let descriptor = openat(
+        &trusted,
+        name,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|error| std::io::Error::from_raw_os_error(error.raw_os_error()))?;
+    Ok(std::fs::File::from(descriptor))
+}
+
+fn read_private(keys_dir: &Path, name: &str) -> std::io::Result<String> {
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| anyhow::anyhow!("chmod {}: {e}", path.display()))?;
+    let mut file = {
+        use rustix::fs::{Mode, OFlags, openat};
+        let keys = open_keys_directory(keys_dir)?;
+        let descriptor = openat(
+            &keys,
+            name,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|error| std::io::Error::from_raw_os_error(error.raw_os_error()))?;
+        std::fs::File::from(descriptor)
+    };
+    #[cfg(not(unix))]
+    let mut file = std::fs::File::open(keys_dir.join(name))?;
+    if !file.metadata()?.file_type().is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "private key path is not a regular file",
+        ));
     }
-    Ok(())
+    let mut contents = String::new();
+    std::io::Read::read_to_string(&mut file, &mut contents)?;
+    Ok(contents)
+}
+
+fn create_private(keys_dir: &Path, name: &str, contents: &str) -> std::io::Result<()> {
+    #[cfg(unix)]
+    let mut file = {
+        use rustix::fs::{Mode, OFlags, openat};
+        let keys = open_keys_directory(keys_dir)?;
+        let descriptor = openat(
+            &keys,
+            name,
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::from_bits_truncate(0o600),
+        )
+        .map_err(|error| std::io::Error::from_raw_os_error(error.raw_os_error()))?;
+        std::fs::File::from(descriptor)
+    };
+    #[cfg(not(unix))]
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(keys_dir.join(name))?;
+    std::io::Write::write_all(&mut file, contents.as_bytes())?;
+    file.sync_all()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use ardur_session_journals::InMemorySessionJournal;
+
+    #[cfg(unix)]
+    #[test]
+    fn persisted_server_keys_reject_parent_and_final_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let trusted = tempfile::tempdir().expect("trusted state root");
+        let outside = tempfile::tempdir().expect("outside root");
+        let keys = trusted.path().join("keys");
+        symlink(outside.path(), &keys).expect("keys directory symlink");
+        assert!(
+            load_or_generate_receipt_key(&keys).is_err(),
+            "symlinked keys directory must fail closed"
+        );
+        assert!(!outside.path().join("receipt.pem").exists());
+
+        std::fs::remove_file(&keys).expect("remove keys symlink");
+        std::fs::create_dir(&keys).expect("real keys directory");
+        let receipt_target = outside.path().join("receipt.pem");
+        std::fs::write(&receipt_target, "attacker key").expect("receipt target");
+        symlink(&receipt_target, keys.join("receipt.pem")).expect("receipt key symlink");
+        assert!(
+            load_or_generate_receipt_key(&keys).is_err(),
+            "symlinked receipt key must fail closed"
+        );
+
+        let issuer_target = outside.path().join("issuer.key");
+        std::fs::write(&issuer_target, "00").expect("issuer target");
+        symlink(&issuer_target, keys.join("issuer.key")).expect("issuer key symlink");
+        assert!(
+            load_or_mint_issuer(&keys).is_err(),
+            "symlinked issuer key must fail closed"
+        );
+    }
 
     /// ARD-493: a panic inside a `catch_unwind`-wrapped turn future is caught,
     /// so the worker loop survives and later turns still run — the exact wrap
@@ -1412,6 +1559,7 @@ mod tests {
             matrix: Arc::new(OnceLock::new()),
             discord: Arc::new(OnceLock::new()),
             telegram: Arc::new(OnceLock::new()),
+            receipt_jwks: ardur_receipt::Jwks::new(),
         };
 
         assert!(state.worker_alive());

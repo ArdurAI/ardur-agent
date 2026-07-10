@@ -106,7 +106,9 @@ async fn server_routes_signed_slack_message_through_runtime_to_chat_post_message
     let provider: Arc<dyn Provider> =
         Arc::new(AnthropicProvider::stub(ModelId::new(&config.model)));
     let tools = Arc::new(ardur_server::example_registry("stub", "in-memory"));
-    let state = AppState::boot(&config, provider, tools).expect("the server boots");
+    let state = AppState::boot(&config, provider, tools)
+        .await
+        .expect("the server boots");
     let router = build_router(state);
 
     // A genuine, signed inbound user message.

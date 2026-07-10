@@ -69,7 +69,7 @@ async fn main() -> anyhow::Result<()> {
         .await,
     );
 
-    let state = AppState::boot(&config, provider, tools)?;
+    let state = AppState::boot(&config, provider, tools).await?;
     tracing::info!(
         data_dir = %state.data_dir().display(),
         bind = %config.bind_addr,

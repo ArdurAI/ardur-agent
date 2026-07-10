@@ -76,6 +76,9 @@ ardur-automation = { workspace = true }
 # loading the persisted issuer key needs `PrivateKey::from_bytes_hex`. Pulled
 # directly, as `crates/e2e-tests` does for the same reason.
 biscuit-auth = { workspace = true }
+# Descriptor-relative, no-follow access to persisted server key material on Unix.
+rustix = { workspace = true }
+uuid = { workspace = true }
 
 # HTTP server + the Slack bot-token / signing-secret custody type.
 axum = { workspace = true }

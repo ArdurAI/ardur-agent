@@ -10,7 +10,7 @@ use axum::http::{Request, StatusCode};
 async fn healthz_returns_ok_json() {
     let dir = tempfile::tempdir().expect("tempdir");
     let config = support::test_config(&dir, None);
-    let router = support::boot_router(&config);
+    let router = support::boot_router(&config).await;
 
     let request = Request::builder()
         .method("GET")

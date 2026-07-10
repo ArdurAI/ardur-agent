@@ -112,16 +112,18 @@ pub fn test_config_with_admin(
 
 /// Boot an [`AppState`] over the deterministic stub provider (no network).
 #[must_use]
-pub fn boot_stub(config: &Config) -> Arc<AppState> {
+pub async fn boot_stub(config: &Config) -> Arc<AppState> {
     let provider: Arc<dyn Provider> =
         Arc::new(AnthropicProvider::stub(ModelId::new(&config.model)));
     let tools = Arc::new(example_registry("stub", "in-memory"));
-    AppState::boot(config, provider, tools).expect("AppState boots")
+    AppState::boot(config, provider, tools)
+        .await
+        .expect("AppState boots")
 }
 
 /// Boot the stub-backed router for `config`.
-pub fn boot_router(config: &Config) -> Router {
-    build_router(boot_stub(config))
+pub async fn boot_router(config: &Config) -> Router {
+    build_router(boot_stub(config).await)
 }
 
 /// Drive a single request through `router` via `oneshot`, returning the status

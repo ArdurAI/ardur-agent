@@ -38,7 +38,7 @@ async fn signed_message_runs_through_runtime_and_posts_reply() {
 
     let dir = tempfile::tempdir().expect("tempdir");
     let config = support::test_config(&dir, Some(server.uri()));
-    let router = support::boot_router(&config);
+    let router = support::boot_router(&config).await;
 
     // A genuine, signed inbound user message.
     let ts = support::now_unix_string();

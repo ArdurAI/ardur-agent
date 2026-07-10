@@ -34,7 +34,7 @@ use ardur_session_journals::SessionJournal;
 use ardur_tool_registry::ToolRegistry;
 use parking_lot::Mutex;
 
-use crate::receipts::{ReceiptChainError, load_persisted_chain, verify_persisted_chain};
+use crate::receipts::{ReceiptChainError, load_persisted_chain, verify_persisted_chain_with_jwks};
 use crate::reconcile::{ReconciliationError, ReconciliationReport, ReconciliationStrategy};
 use crate::runtime::{COMPLETION_VERB, FusedRuntime};
 use crate::shared::{SharedBudget, SharedDenyList};
@@ -452,7 +452,9 @@ impl FusedRuntimeBuilder {
         let chain_tail = match &self.receipt_log {
             Some(path) => {
                 let chain = load_persisted_chain(path)?;
-                verify_persisted_chain(&chain)?;
+                let receipt_jwks =
+                    ardur_receipt::Jwks::from_public_key(&self.receipt_key.public_key());
+                verify_persisted_chain_with_jwks(&chain, &receipt_jwks)?;
                 chain
                     .last()
                     .map(|r| ardur_receipt::Sha256Digest::of(r.jws_compact.as_bytes()))

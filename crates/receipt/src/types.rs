@@ -218,6 +218,11 @@ pub struct ReceiptBody {
     /// Opaque digest of the event-specific payload (the payload itself is not
     /// carried in the body — only its hash, for tamper-evidence).
     pub payload_digest: Sha256Digest,
+    /// Durable journal identity that owns this receipt. Additive for backward
+    /// compatibility; legacy receipts without this field cannot be assigned to
+    /// a per-session reconciliation sweep.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<Uuid>,
     /// Cost incurred by the action.
     pub cost: CostTuple,
     /// The tool calls this turn made, if any (§6.0). Additive: `#[serde(default)]`

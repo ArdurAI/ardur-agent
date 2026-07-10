@@ -102,7 +102,7 @@ impl BudgetStore for SharedBudget {
         &self,
         handle: ReservationHandle,
         delta: CostDelta,
-    ) -> Result<(), ardur_cost_gate::BudgetError> {
+    ) -> Result<(CostTuple, CostTuple), ardur_cost_gate::BudgetError> {
         self.0.refund(handle, delta).await
     }
 
