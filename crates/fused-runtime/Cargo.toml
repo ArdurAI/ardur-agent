@@ -47,6 +47,9 @@ ardur-injection-defense = { workspace = true }
 # §6.0 — the tool registry the tool-execution stage looks up and invokes (local
 # tools plus the remote MCP toolsets).
 ardur-tool-registry = { workspace = true }
+# §9.6 — OpenClaw hook compatibility: the registry extension trait that
+# translates and registers OpenClaw-format hooks into the lifecycle registry.
+ardur-hooks-openclaw-compat = { workspace = true }
 
 async-trait = { workspace = true }
 anyhow = { workspace = true }

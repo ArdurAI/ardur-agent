@@ -25,6 +25,7 @@ use ardur_cost_gate::{
     Clock, CostEnvelope, CostTuple as GateCostTuple, HolderId as GateHolderId,
     InMemoryCostAdmissionGate, SystemClock,
 };
+use ardur_hooks_openclaw_compat::{OpenClawHookConfig, OpenClawHookRegistryExt};
 use ardur_injection_defense::FilterRegistry;
 use ardur_lifecycle_hooks::HookRegistry;
 use ardur_memory::MemoryRuntime;
@@ -315,6 +316,22 @@ impl FusedRuntimeBuilder {
     pub fn registry(mut self, registry: Arc<HookRegistry>) -> Self {
         self.registry = registry;
         self
+    }
+
+    /// Register OpenClaw-format hooks from a parsed config into the lifecycle
+    /// hook registry (ARD-427). The hooks are translated via
+    /// [`OpenClawHookRegistryExt::register_openclaw_hooks`] with the safe
+    /// no-op runner — subprocess execution is not wired here.
+    ///
+    /// Returns the translation report on success, or a registration error.
+    pub fn with_openclaw_hooks(
+        mut self,
+        config: &OpenClawHookConfig,
+    ) -> Result<Self, ardur_hooks_openclaw_compat::OpenClawHookRegistrationError> {
+        Arc::get_mut(&mut self.registry)
+            .expect("registry is not shared before build")
+            .register_openclaw_hooks(config)?;
+        Ok(self)
     }
 
     /// Wire an injection-defense [`FilterRegistry`] into stage 4.5 (ARD-48): the

@@ -589,6 +589,7 @@ dependencies = [
  "ardur-cap-token",
  "ardur-cedar-policy",
  "ardur-cost-gate",
+ "ardur-hooks-openclaw-compat",
  "ardur-injection-defense",
  "ardur-lifecycle-hooks",
  "ardur-memory",
