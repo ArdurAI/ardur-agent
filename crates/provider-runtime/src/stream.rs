@@ -50,6 +50,12 @@ pub enum StreamEvent {
     /// Generation finished; carries the terminal [`FinishReason`] (with any
     /// assembled tool calls). This is the last event a well-formed stream emits.
     Finish(FinishReason),
+    /// The actual model name the provider served (when different from the
+    /// requested model — e.g. a fallback or version-resolved alias). Emitted
+    /// early in the stream by providers that include it, so the observability
+    /// layer can record `gen_ai.response.model` faithfully rather than
+    /// echoing the requested model.
+    ServedModel(String),
 }
 
 /// The stream type [`Provider::stream`](crate::Provider::stream) returns.
