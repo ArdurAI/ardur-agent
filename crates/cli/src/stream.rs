@@ -204,6 +204,10 @@ async fn render_stream<W: Write>(
                 write_finish_note(out, &reason, ctx.theme)?;
                 outcome.finish_reason = Some(reason);
             }
+            Ok(StreamEvent::ServedModel(_)) => {
+                // ARD-454: the actual model served is recorded by the
+                // instrument layer; the CLI stream renderer ignores it.
+            }
             Err(e) => {
                 if newline_pending {
                     writeln!(out)?;
