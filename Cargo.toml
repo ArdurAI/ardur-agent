@@ -217,7 +217,11 @@ futures = "0.3"
 # for the `RemoteMcpToolset` that consumes remote ones, and
 # `transport-streamable-http-server` for the axum-mounted Streamable-HTTP
 # service in `crates/server`. Pinned here so both crates share one version.
-rmcp = { version = "2", default-features = false, features = ["server", "client", "transport-streamable-http-server", "transport-streamable-http-client-reqwest"] }
+# Held at 2.0.0 (see dependabot.yml ignore + #237): 2.2.0 calls
+# `SseStream::from_bytes_stream`, which the `sse-stream` version in our lock
+# (0.2.3, exposing only `from_byte_stream`) doesn't have — E0599 on every
+# platform. Unpin once `sse-stream` ships the renamed method.
+rmcp = { version = "=2.0.0", default-features = false, features = ["server", "client", "transport-streamable-http-server", "transport-streamable-http-client-reqwest"] }
 # Docker daemon API for terminal Docker exec backend (ARD-315/ARD-324).
 bollard = "0.21"
 # SSH client library for terminal SSH remote backend (ARD-315/ARD-324). Disable
