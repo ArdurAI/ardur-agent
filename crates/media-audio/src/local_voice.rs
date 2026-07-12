@@ -6,8 +6,14 @@
 //! OS speech stack without sending audio/text to a network provider.
 
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
 use std::sync::{Arc, Mutex};
+
+// M0: these providers run inside `async fn`s on a Tokio worker. The external STT/
+// TTS command can run for up to `MAX_LOCAL_DURATION_SECONDS` (4h), so use the
+// async `tokio::process::Command` (and `tokio::fs` for the temp-file I/O) rather
+// than the blocking `std::process`/`std::fs` calls, which would park the worker
+// thread for the whole command duration and starve other tasks.
+use tokio::process::Command;
 
 use ardur_media_decode::AudioFormat;
 use async_trait::async_trait;
@@ -161,7 +167,7 @@ impl TranscriptionProvider for LocalSpeechToTextProvider {
         validate_authorized_scope(token, &request)?;
         self.capability_surface().check_file_request(&request)?;
 
-        let prepared = prepare_audio_input(&request.input)?;
+        let prepared = prepare_audio_input(&request.input).await?;
         if prepared.bytes.is_empty() {
             return Err(AudioError::InvalidRequest(
                 "audio bytes must be non-empty".to_string(),
@@ -177,6 +183,7 @@ impl TranscriptionProvider for LocalSpeechToTextProvider {
         let output = Command::new(&self.config.command)
             .args(args)
             .output()
+            .await
             .map_err(|e| AudioError::Provider(format!("running local STT command: {e}")))?;
         if !output.status.success() {
             return Err(AudioError::Provider(format!(
@@ -492,6 +499,7 @@ impl TextToSpeechProvider for LocalTextToSpeechProvider {
         let output = Command::new(&self.config.command)
             .args(args)
             .output()
+            .await
             .map_err(|e| AudioError::Provider(format!("running local TTS command: {e}")))?;
         if !output.status.success() {
             return Err(AudioError::Provider(format!(
@@ -502,9 +510,10 @@ impl TextToSpeechProvider for LocalTextToSpeechProvider {
         }
         let audio_bytes = match output_path {
             Some(path) => {
-                let bytes = std::fs::read(&path)
+                let bytes = tokio::fs::read(&path)
+                    .await
                     .map_err(|e| AudioError::Provider(format!("reading local TTS output: {e}")))?;
-                let _ = std::fs::remove_file(path);
+                let _ = tokio::fs::remove_file(path).await;
                 bytes
             }
             None => output.stdout,
@@ -693,7 +702,7 @@ impl Drop for PreparedAudioInput {
     }
 }
 
-fn prepare_audio_input(input: &AudioInput) -> Result<PreparedAudioInput, AudioError> {
+async fn prepare_audio_input(input: &AudioInput) -> Result<PreparedAudioInput, AudioError> {
     match input {
         AudioInput::InlineBytes { bytes, format } => {
             if bytes.len() > MAX_INLINE_AUDIO_BYTES {
@@ -702,7 +711,8 @@ fn prepare_audio_input(input: &AudioInput) -> Result<PreparedAudioInput, AudioEr
                 )));
             }
             let path = temp_audio_path("ardur-local-stt", extension_for_format(*format));
-            std::fs::write(&path, bytes)
+            tokio::fs::write(&path, bytes)
+                .await
                 .map_err(|e| AudioError::Provider(format!("writing temp audio: {e}")))?;
             Ok(PreparedAudioInput {
                 path,
@@ -712,7 +722,8 @@ fn prepare_audio_input(input: &AudioInput) -> Result<PreparedAudioInput, AudioEr
         }
         AudioInput::WorkspacePath { path, .. } => {
             ensure_workspace_relative_path(path)?;
-            let bytes = std::fs::read(path)
+            let bytes = tokio::fs::read(path)
+                .await
                 .map_err(|e| AudioError::Provider(format!("reading workspace audio: {e}")))?;
             Ok(PreparedAudioInput {
                 path: path.clone(),
