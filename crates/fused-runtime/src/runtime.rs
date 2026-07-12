@@ -296,7 +296,7 @@ impl FusedRuntime {
                 requested_provider: None,
             },
             &PerRequestProvisioning::default(),
-            self.clock.now_ms() / 1000,
+            self.clock.now_ms().get() / 1000,
             tool,
         )
     }
@@ -1341,7 +1341,7 @@ impl FusedRuntime {
                     if let Err(e) = journal
                         .append(JournalEntry::UserMessage {
                             content: prompt.to_string(),
-                            at: now_ms,
+                            at: ardur_cost_gate::UnixTsMillis(now_ms),
                         })
                         .await
                     {
@@ -1356,7 +1356,7 @@ impl FusedRuntime {
             if let Err(e) = journal
                 .append(JournalEntry::AssistantMessage {
                     content: response.content.clone(),
-                    at: now_ms,
+                    at: ardur_cost_gate::UnixTsMillis(now_ms),
                     receipt_id: ReceiptId(receipt.receipt_id),
                 })
                 .await
@@ -1500,7 +1500,7 @@ impl FusedRuntime {
                 // The original assistant text is lost (it was never journaled),
                 // so the content is an explicit recovery marker, not a fabricated
                 // response.
-                let now = self.clock.now_ms();
+                let now = self.clock.now_ms().get();
                 for &i in &orphan_indices {
                     let rid = chain[i].body.receipt_id;
                     journal
@@ -1511,7 +1511,7 @@ impl FusedRuntime {
                                  journal append (stage 10), so the original assistant content is \
                                  unrecoverable."
                             ),
-                            at: now,
+                            at: ardur_cost_gate::UnixTsMillis(now),
                             receipt_id: ReceiptId(rid),
                         })
                         .await?;
@@ -1620,7 +1620,7 @@ impl FusedRuntime {
         provisioning: PerRequestProvisioning,
     ) -> Result<SubmitResult, RuntimeError> {
         let session_id = req.session_id;
-        let turn_start_ms = self.clock.now_ms();
+        let turn_start_ms = self.clock.now_ms().get();
         let turn_start_unix = turn_start_ms / 1000;
 
         // ---- 1. cap-token: parse + verify against the root, audience, tool,
@@ -1694,7 +1694,7 @@ impl FusedRuntime {
             iteration += 1;
             // ARD-480: expiry-sensitive re-verification happens throughout the
             // tool loop, so use the clock at this iteration, not turn start.
-            let iteration_now_ms = self.clock.now_ms();
+            let iteration_now_ms = self.clock.now_ms().get();
 
             // Build this iteration's request from the current transcript + tools.
             let mut iter_request =
@@ -1786,7 +1786,7 @@ impl FusedRuntime {
                             .await;
                         return Err(err);
                     };
-                    let tool_auth_now_unix = self.clock.now_ms() / 1000;
+                    let tool_auth_now_unix = self.clock.now_ms().get() / 1000;
                     if let Err(err) = self.authorize_tool_invocation(
                         &req,
                         &provisioning,
@@ -1994,7 +1994,7 @@ impl FusedRuntime {
                     .audience
                     .clone()
                     .unwrap_or_else(|| self.audience.clone());
-                let memory_now_ms = self.clock.now_ms();
+                let memory_now_ms = self.clock.now_ms().get();
                 let memory_now_unix = memory_now_ms / 1000;
                 let memory_write_claims = CapToken::from_base64(&req.cap_token.0, &self.cap_root)
                     .and_then(|token| {
@@ -2146,7 +2146,7 @@ impl FusedRuntime {
     ) -> impl Stream<Item = Result<FusedEvent, RuntimeError>> + Send + '_ {
         async_stream::try_stream! {
             let session_id = req.session_id;
-            let now_ms = self.clock.now_ms();
+            let now_ms = self.clock.now_ms().get();
             let now_unix = now_ms / 1000;
 
             // ---- 1. cap-token.
@@ -2383,7 +2383,7 @@ impl FusedRuntime {
                             Err(err)?;
                             unreachable!()
                         };
-                        let invocation_now_unix = self.clock.now_ms() / 1000;
+                        let invocation_now_unix = self.clock.now_ms().get() / 1000;
                         if let Err(err) = self.authorize_tool_invocation(
                             &req,
                             &provisioning,
@@ -2612,7 +2612,7 @@ impl FusedRuntime {
                         .audience
                         .clone()
                         .unwrap_or_else(|| self.audience.clone());
-                    let memory_now_ms = self.clock.now_ms();
+                    let memory_now_ms = self.clock.now_ms().get();
                     let memory_now_unix = memory_now_ms / 1000;
                     let memory_write_claims = CapToken::from_base64(&req.cap_token.0, &self.cap_root)
                         .and_then(|token| {

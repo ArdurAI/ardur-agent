@@ -86,3 +86,33 @@ impl From<Uuid> for TokenId {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct UnixTsMillis(pub u64);
+
+impl UnixTsMillis {
+    /// Wrap a raw millisecond count.
+    pub const fn new(ms: u64) -> Self {
+        Self(ms)
+    }
+
+    /// The raw millisecond count.
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+
+    /// This instant advanced by `ms` milliseconds, saturating at [`u64::MAX`]
+    /// (e.g. a reservation's `expires_at = reserved_at + ttl`).
+    pub const fn saturating_add_ms(self, ms: u64) -> Self {
+        Self(self.0.saturating_add(ms))
+    }
+}
+
+impl From<u64> for UnixTsMillis {
+    fn from(ms: u64) -> Self {
+        Self(ms)
+    }
+}
+
+impl From<UnixTsMillis> for u64 {
+    fn from(ts: UnixTsMillis) -> Self {
+        ts.0
+    }
+}

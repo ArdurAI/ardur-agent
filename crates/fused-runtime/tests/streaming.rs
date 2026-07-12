@@ -31,7 +31,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use ardur_cost_gate::{CostEnvelope, CostTuple as GateCostTuple, ManualClock};
+use ardur_cost_gate::{CostEnvelope, CostTuple as GateCostTuple, ManualClock, UnixTsMillis};
 use ardur_fused_runtime::{FusedEvent, StageKind, load_persisted_chain, verify_persisted_chain};
 use ardur_injection_defense::{FilterRegistry, PatternBasedFilter};
 use ardur_lifecycle_hooks::HookRegistry;
@@ -764,7 +764,7 @@ async fn fused_stream_dropped_refunds_reservation() {
 
 #[tokio::test]
 async fn fused_stream_finalize_failure_commits_neither_receipt_nor_journal() {
-    let clock = Arc::new(ManualClock::new(support::NOW_MS));
+    let clock = Arc::new(ManualClock::new(UnixTsMillis(support::NOW_MS)));
     let provider = Arc::new(ExpiringStreamProvider {
         clock: clock.clone(),
         rate_card: RateCard::anthropic_2026_q2_v1(),

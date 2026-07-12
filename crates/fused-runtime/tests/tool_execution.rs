@@ -29,7 +29,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use ardur_cedar_policy::{CedarPolicyBundle, PolicyBundle, PolicySource};
-use ardur_cost_gate::{CostEnvelope, ManualClock};
+use ardur_cost_gate::{CostEnvelope, ManualClock, UnixTsMillis};
 use ardur_fused_runtime::{load_persisted_chain, verify_persisted_chain};
 use ardur_injection_defense::{FilterRegistry, PatternBasedFilter};
 use ardur_lifecycle_hooks::HookRegistry;
@@ -449,7 +449,7 @@ async fn single_round_trip() {
 #[tokio::test]
 async fn tool_cap_token_expiry_is_rechecked_at_tool_invocation_time() {
     let invocations = Arc::new(AtomicUsize::new(0));
-    let clock = Arc::new(ManualClock::new(support::NOW_MS));
+    let clock = Arc::new(ManualClock::new(UnixTsMillis(support::NOW_MS)));
     let provider = Arc::new(ClockAdvancingProvider::new(
         vec![tool_call("call_1", "echo", json!({}))],
         stop("default"),

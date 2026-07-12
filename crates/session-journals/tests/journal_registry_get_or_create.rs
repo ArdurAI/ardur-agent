@@ -25,7 +25,7 @@ async fn get_or_create_returns_the_same_journal() {
     first
         .append(JournalEntry::UserMessage {
             content: "via first handle".into(),
-            at: 7,
+            at: ardur_session_journals::UnixTsMillis(7),
         })
         .await
         .expect("append");

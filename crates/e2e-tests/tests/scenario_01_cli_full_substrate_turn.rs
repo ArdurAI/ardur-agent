@@ -134,8 +134,8 @@ async fn single_turn_through_full_substrate() {
     // A manual clock keeps reservation expiry deterministic (no wall-clock race).
     let gate = InMemoryCostAdmissionGate::with_clock(
         budget,
-        // `ardur_cost_gate::UnixTsMillis` is a bare `u64` alias.
-        Arc::new(ManualClock::new(NOW_MS)),
+        // `ardur_cost_gate::UnixTsMillis` is the workspace-canonical newtype.
+        Arc::new(ManualClock::new(ardur_cost_gate::UnixTsMillis(NOW_MS))),
     );
     // Bind the cost-gate token id to the holder, reusing the verified cap-token's
     // id so the two crates name the same authority.
@@ -276,14 +276,14 @@ async fn single_turn_through_full_substrate() {
     journal
         .append(JournalEntry::UserMessage {
             content: PROMPT.to_string(),
-            at: NOW_MS,
+            at: ardur_cost_gate::UnixTsMillis(NOW_MS),
         })
         .await
         .expect("the user message is journaled");
     journal
         .append(JournalEntry::AssistantMessage {
             content: outcome.response.clone(),
-            at: NOW_MS + 1,
+            at: ardur_cost_gate::UnixTsMillis(NOW_MS + 1),
             receipt_id,
         })
         .await
@@ -293,7 +293,7 @@ async fn single_turn_through_full_substrate() {
             reservation_id: ReservationId::from_uuid(refund.reservation_id),
             actual: refund.actual,
             refunded: refund.refunded,
-            at: NOW_MS + 2,
+            at: ardur_cost_gate::UnixTsMillis(NOW_MS + 2),
         })
         .await
         .expect("the cost settlement is journaled");

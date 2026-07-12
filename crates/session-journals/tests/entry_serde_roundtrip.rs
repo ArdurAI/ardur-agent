@@ -3,6 +3,7 @@
 
 use ardur_session_journals::{
     CostDelta, CostTuple, JournalEntry, ReceiptId, ReservationId, Sha256Digest, ToolId,
+    UnixTsMillis,
 };
 use uuid::Uuid;
 
@@ -18,18 +19,18 @@ fn every_variant_roundtrips() {
     let variants = vec![
         JournalEntry::UserMessage {
             content: "hello".into(),
-            at: 1,
+            at: UnixTsMillis(1),
         },
         JournalEntry::AssistantMessage {
             content: "hi there".into(),
-            at: 2,
+            at: UnixTsMillis(2),
             receipt_id: ReceiptId::new(),
         },
         JournalEntry::ToolInvocation {
             tool_id: ToolId::new("fs.read"),
             input_digest: Sha256Digest::of(b"the input payload"),
             output_digest: Sha256Digest::of(b"the output payload"),
-            at: 3,
+            at: UnixTsMillis(3),
             receipt_id: ReceiptId::new(),
         },
         JournalEntry::CostFinalized {
@@ -48,17 +49,17 @@ fn every_variant_roundtrips() {
                 wall_ms: -50,
                 attention_score: 0,
             },
-            at: 4,
+            at: UnixTsMillis(4),
         },
         JournalEntry::Checkpoint {
             checkpoint_id: Uuid::new_v4(),
             summary: "state at turn 3".into(),
-            at: 5,
+            at: UnixTsMillis(5),
         },
         JournalEntry::Invalidation {
             target_entry_id: ardur_session_journals::EntryId::new(2),
             reason: "superseded by a retry".into(),
-            at: 6,
+            at: UnixTsMillis(6),
         },
     ];
 
