@@ -2400,6 +2400,26 @@ fn redact_json_value(value: &mut serde_json::Value, patterns: &[regex::Regex]) {
 }
 
 /// Run `ardur redact`.
+/// Ceiling on `ardur redact`'s input size (file or stdin), checked while
+/// reading rather than after. This command exists to sanitize pasted/piped
+/// content — logs, API responses, anything potentially untrusted — before
+/// it's shared, so silently truncating oversized input would be actively
+/// dangerous: the caller would believe the whole input was redacted when
+/// only a prefix was. Refuse outright instead of truncating.
+const MAX_REDACT_INPUT_BYTES: u64 = 25 * 1024 * 1024; // 25 MiB
+
+fn read_bounded(reader: impl std::io::Read, max: u64, source: &str) -> Result<String, CliError> {
+    let mut buf = Vec::new();
+    std::io::Read::read_to_end(&mut reader.take(max + 1), &mut buf)?;
+    if buf.len() as u64 > max {
+        return Err(CliError::State(format!(
+            "{source} exceeds the {max}-byte redact input cap; split the input and retry"
+        )));
+    }
+    String::from_utf8(buf)
+        .map_err(|e| CliError::State(format!("{source} is not valid UTF-8: {e}")))
+}
+
 fn run_redact(args: RedactArgs) -> Result<(), CliError> {
     let mut patterns = default_secret_patterns();
     for p in args.patterns {
@@ -2409,12 +2429,15 @@ fn run_redact(args: RedactArgs) -> Result<(), CliError> {
     }
 
     let input = match args.input {
-        Some(path) => std::fs::read_to_string(&path)?,
-        None => {
-            let mut buf = String::new();
-            std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
-            buf
+        Some(path) => {
+            let file = std::fs::File::open(&path)?;
+            read_bounded(
+                file,
+                MAX_REDACT_INPUT_BYTES,
+                &format!("input file {}", path.display()),
+            )?
         }
+        None => read_bounded(std::io::stdin(), MAX_REDACT_INPUT_BYTES, "stdin")?,
     };
 
     let output = if args.json {
