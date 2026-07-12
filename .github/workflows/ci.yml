@@ -74,7 +74,9 @@ jobs:
           category: "/language:rust"
 
   gauntlet:
-    name: ${{ matrix.os }} / stable
+    # The toolchain is pinned to 1.96.1 below, so name the job for the pin
+    # rather than "stable" (which it is not) — ARD-M11.
+    name: ${{ matrix.os }} / 1.96.1
     runs-on: ${{ matrix.os }}
     strategy:
       # Don't let a macOS-only failure mask a Linux pass (and vice-versa).
@@ -105,4 +107,9 @@ jobs:
         run: cargo check --workspace --all-targets
 
       - name: cargo test
-        run: cargo test --workspace
+        # `--all-features` exercises feature-gated code (provider selection,
+        # channel adapters, otel, hybrid memory, …) that a bare
+        # `cargo test --workspace` never compiles or runs, so a regression behind
+        # a feature flag can't slip through green (ARD-M12). No `--all-targets`,
+        # so doctests still run.
+        run: cargo test --workspace --all-features
