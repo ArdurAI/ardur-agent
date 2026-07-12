@@ -106,7 +106,7 @@ once_cell = "1"
 # dependency; `json` pulls the serde request/response helpers.
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
 ignore = "0.4"
-cargo-lock = "10.1"
+cargo-lock = "11.0"
 # URL parsing + host classification for the §6.2 built-in `http.fetch` tool
 # (crates/tool-registry): rejects relative/non-http(s) URLs and exposes the
 # host as a typed `Host` (domain vs IP literal) for the SSRF allowlist + IP
