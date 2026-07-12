@@ -74,8 +74,8 @@ fn every_variant_roundtrips() {
 #[test]
 fn sha256_digest_validates_hex() {
     let good = Sha256Digest::of(b"x");
-    assert_eq!(good.as_str().len(), 64);
-    assert!(Sha256Digest::from_hex(good.as_str()).is_ok());
+    assert_eq!(good.to_hex().len(), 64);
+    assert!(Sha256Digest::from_hex(&good.to_hex()).is_ok());
     assert!(Sha256Digest::from_hex("too short").is_err());
-    assert!(Sha256Digest::from_hex("Z".repeat(64)).is_err());
+    assert!(Sha256Digest::from_hex(&"Z".repeat(64)).is_err());
 }

@@ -193,7 +193,7 @@ mod tests {
                 tokens_out: 50,
                 cents: 2,
                 wall_ms: 1_200,
-                attention_score: 0.5,
+                attention_score: 500,
             },
             tool_calls: Vec::new(),
             provider: None,

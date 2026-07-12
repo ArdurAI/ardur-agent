@@ -8,6 +8,9 @@ repository.workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
+# The shared id/cost primitives (CostTuple, ProviderId, ReceiptId) live in the
+# workspace's leaf `core-types` crate so every crate speaks one type.
+ardur-core-types = { workspace = true }
 serde = { workspace = true }
 # `ToolCall::arguments` and the tool transcript carry raw JSON, so the runtime's
 # shared value types speak `serde_json::Value` directly.
