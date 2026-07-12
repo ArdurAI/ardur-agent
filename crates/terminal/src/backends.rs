@@ -188,11 +188,22 @@ impl ExecResult {
             return;
         }
         self.truncated = true;
-        let stdout_max = max.min(self.stdout.len());
+        let stdout_max = floor_char_boundary(&self.stdout, max.min(self.stdout.len()));
         self.stdout.truncate(stdout_max);
-        let remaining = max.saturating_sub(self.stdout.len());
+        let remaining = floor_char_boundary(&self.stderr, max.saturating_sub(self.stdout.len()));
         self.stderr.truncate(remaining);
     }
+}
+
+/// The largest byte offset `<= n` that lands on a UTF-8 character boundary in
+/// `s`. `String::truncate` panics if given an offset that splits a multi-byte
+/// character; callers that compute `n` from an arbitrary byte budget (like
+/// [`ExecResult::truncate`]) must floor it through this first.
+fn floor_char_boundary(s: &str, mut n: usize) -> usize {
+    while n > 0 && !s.is_char_boundary(n) {
+        n -= 1;
+    }
+    n
 }
 
 fn now_ms() -> u64 {
@@ -666,6 +677,40 @@ mod tests {
         let p = TerminalPolicy::allow_commands(["printf"]);
         assert!(p.check_command("printf hi").is_ok());
         assert!(p.check_command("ls -la").is_err());
+    }
+
+    /// H3: a multi-byte UTF-8 character straddling `max_output_bytes` must be
+    /// floored to the preceding char boundary rather than splitting it, which
+    /// would panic `String::truncate`/`&str` indexing.
+    #[test]
+    fn exec_result_truncate_does_not_split_multibyte_char() {
+        // "héllo" — 'é' is 2 bytes (0xC3 0xA9) at offsets 1..3, so a cap of 2
+        // bytes lands inside it.
+        let stdout = "héllo".to_string();
+        let result = ExecResult::new(
+            stdout,
+            String::new(),
+            0,
+            BackendKind::Local,
+            now_ms(),
+            2,
+        );
+        assert!(result.truncated);
+        // Floored to the boundary at offset 1 ("h"), not a panic or a split
+        // codepoint, and the result still round-trips as valid UTF-8.
+        assert_eq!(result.stdout, "h");
+
+        // Emoji (4-byte UTF-8) straddling the cap on the stderr side too.
+        let result2 = ExecResult::new(
+            String::new(),
+            "a🎉b".to_string(),
+            0,
+            BackendKind::Local,
+            now_ms(),
+            2,
+        );
+        assert!(result2.truncated);
+        assert_eq!(result2.stderr, "a");
     }
 
     #[tokio::test]

@@ -2658,9 +2658,151 @@ struct SearchArgs {
     limit: usize,
 }
 
+/// Maximum redirect hops `ardur fetch` follows before giving up. Each hop is
+/// re-validated against the allowlist and the SSRF IP blocklist below — this
+/// only bounds how long that loop can run.
+const FETCH_REDIRECT_LIMIT: usize = 5;
+
+/// Whether `host` denotes localhost — the bare name or any loopback IP
+/// literal. Mirrors `ardur_tool_registry::builtins::http::host_is_localhost`.
+fn fetch_host_is_localhost(host: &url::Host<&str>) -> bool {
+    match host {
+        url::Host::Domain(d) => d.eq_ignore_ascii_case("localhost"),
+        url::Host::Ipv4(ip) => ip.is_loopback(),
+        url::Host::Ipv6(ip) => ip.is_loopback(),
+    }
+}
+
+/// Whether `ip` is an internal/non-routable address `ardur fetch` must not be
+/// allowed to reach (the SSRF blocklist). Mirrors
+/// `ardur_tool_registry::builtins::http::is_internal_ip` — see that function's
+/// docs for the full range rationale (RFC 1918, link-local, CGNAT, 6to4,
+/// NAT64, IPv4-mapped/-compatible IPv6, and friends).
+fn fetch_is_internal_ip(ip: std::net::IpAddr) -> bool {
+    use std::net::{IpAddr, Ipv4Addr};
+    match ip {
+        IpAddr::V4(v4) => {
+            let octets = v4.octets();
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || octets[0] == 0
+                || (octets[0] == 198 && (octets[1] & 0xFE) == 18)
+                || (octets[0] == 100 && (octets[1] & 0xC0) == 64)
+                || (octets[0] == 192 && octets[1] == 0 && (octets[2] == 0 || octets[2] == 2))
+                || (octets[0] == 198 && octets[1] == 51 && octets[2] == 100)
+                || (octets[0] == 203 && octets[1] == 0 && octets[2] == 113)
+                || v4.is_multicast()
+                || v4.is_broadcast()
+                || octets[0] >= 240
+        }
+        IpAddr::V6(v6) => {
+            if v6.is_loopback() {
+                return true;
+            }
+            if let Some(mapped) = v6.to_ipv4_mapped() {
+                return fetch_is_internal_ip(IpAddr::V4(mapped));
+            }
+            let segs = v6.segments();
+            let v4_from_segments = |hi: u16, lo: u16| {
+                Ipv4Addr::new(
+                    (hi >> 8) as u8,
+                    (hi & 0xFF) as u8,
+                    (lo >> 8) as u8,
+                    (lo & 0xFF) as u8,
+                )
+            };
+            if segs[0] == 0
+                && segs[1] == 0
+                && segs[2] == 0
+                && segs[3] == 0
+                && segs[4] == 0
+                && segs[5] == 0
+            {
+                let v4 = v4_from_segments(segs[6], segs[7]);
+                return fetch_is_internal_ip(IpAddr::V4(v4));
+            }
+            if segs[0] == 0x0064
+                && segs[1] == 0xff9b
+                && segs[2] == 0
+                && segs[3] == 0
+                && segs[4] == 0
+                && segs[5] == 0
+            {
+                let v4 = v4_from_segments(segs[6], segs[7]);
+                return fetch_is_internal_ip(IpAddr::V4(v4));
+            }
+            if segs[0] == 0x2002 {
+                let v4 = v4_from_segments(segs[1], segs[2]);
+                return fetch_is_internal_ip(IpAddr::V4(v4));
+            }
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || (segs[0] & 0xffc0) == 0xfe80
+                || (segs[0] & 0xfe00) == 0xfc00
+        }
+    }
+}
+
+/// Check `host`/`host_str` against the allowlist (Gate A), resolve to socket
+/// addresses, and reject any that land on an internal/private address unless
+/// the target genuinely is localhost (Gate B). Returns the vetted addresses
+/// so the caller can pin the connection to them (closes the DNS-rebind
+/// window between this check and the actual connect).
+async fn fetch_check_and_resolve(
+    host: &url::Host<&str>,
+    host_str: &str,
+    port: u16,
+    allowlist: &[String],
+) -> Result<Vec<std::net::SocketAddr>, CliError> {
+    if !allowlist.iter().any(|h| h.eq_ignore_ascii_case(host_str)) {
+        return Err(CliError::State(format!(
+            "host `{host_str}` is not in the allowlist; add it to ~/.ardur/http_allowlist.txt or use --allow-host"
+        )));
+    }
+
+    let is_localhost = fetch_host_is_localhost(host);
+
+    let addrs: Vec<std::net::SocketAddr> = match host {
+        url::Host::Ipv4(ip) => vec![std::net::SocketAddr::new(std::net::IpAddr::V4(*ip), port)],
+        url::Host::Ipv6(ip) => vec![std::net::SocketAddr::new(std::net::IpAddr::V6(*ip), port)],
+        url::Host::Domain(d) => tokio::net::lookup_host((*d, port))
+            .await
+            .map_err(|e| CliError::State(format!("could not resolve `{d}`: {e}")))?
+            .collect(),
+    };
+
+    if addrs.is_empty() {
+        return Err(CliError::State(format!(
+            "host `{host_str}` resolved to no addresses"
+        )));
+    }
+
+    if !is_localhost {
+        for addr in &addrs {
+            if fetch_is_internal_ip(addr.ip()) {
+                return Err(CliError::State(format!(
+                    "host `{host_str}` resolves to a private/internal address ({}); refusing to fetch (SSRF defence)",
+                    addr.ip()
+                )));
+            }
+        }
+    }
+
+    Ok(addrs)
+}
+
 /// Run `ardur fetch`.
+///
+/// Hardened against SSRF: every hop (including redirect targets) is
+/// re-validated against the host allowlist and the internal-IP blocklist,
+/// the vetted addresses are pinned into the request so DNS cannot rebind
+/// between the check and the connect, redirects are followed manually
+/// (auto-redirect disabled) so each hop re-runs both gates, and the response
+/// body is read incrementally and stopped at `--max-bytes` rather than fully
+/// buffered first.
 fn run_fetch(args: FetchArgs) -> Result<(), CliError> {
-    let url = args.url;
     let root = StateDirs::resolve()?.root;
 
     // Read allowlist from config if present.
@@ -2677,10 +2819,12 @@ fn run_fetch(args: FetchArgs) -> Result<(), CliError> {
     }
     allowlist.extend(args.allow_hosts);
 
-    // Safety check: refuse non-HTTP(S) schemes.
-    if !url.starts_with("http://") && !url.starts_with("https://") {
+    // Safety check: refuse non-HTTP(S) schemes before anything else, matching
+    // the pre-hardening error message.
+    if !args.url.starts_with("http://") && !args.url.starts_with("https://") {
         return Err(CliError::State(format!(
-            "only http:// and https:// URLs are supported, got `{url}`"
+            "only http:// and https:// URLs are supported, got `{}`",
+            args.url
         )));
     }
 
@@ -2690,34 +2834,88 @@ fn run_fetch(args: FetchArgs) -> Result<(), CliError> {
         ));
     }
 
-    let host = url
-        .split('/')
-        .nth(2)
-        .unwrap_or("")
-        .split(':')
-        .next()
-        .unwrap_or("")
-        .to_lowercase();
-    if !allowlist.iter().any(|h| h.to_lowercase() == host) {
-        return Err(CliError::State(format!(
-            "host `{host}` is not in the allowlist; add it to {} or use --allow-host",
-            allowlist_path.display()
-        )));
-    }
+    let mut current = url::Url::parse(&args.url)
+        .map_err(|e| CliError::State(format!("invalid url `{}`: {e}", args.url)))?;
+
+    let max_bytes = args.max_bytes;
 
     let rt = tokio::runtime::Runtime::new()?;
-    let body = rt.block_on(async {
-        let client = reqwest::Client::new();
-        let response = client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| CliError::State(format!("request failed: {e}")))?;
-        let text = response
-            .text()
-            .await
-            .map_err(|e| CliError::State(format!("read failed: {e}")))?;
-        Ok::<String, CliError>(text.chars().take(args.max_bytes).collect())
+    let body: Vec<u8> = rt.block_on(async {
+        let mut redirects = 0usize;
+        loop {
+            // Re-checked on every hop (including redirect targets), since a
+            // 3xx Location can point at any scheme.
+            let scheme = current.scheme();
+            if scheme != "http" && scheme != "https" {
+                return Err(CliError::State(format!(
+                    "scheme `{scheme}` is not permitted; only http and https"
+                )));
+            }
+
+            let host = current
+                .host()
+                .ok_or_else(|| CliError::State(format!("url `{current}` has no host")))?;
+            let host_str = current
+                .host_str()
+                .ok_or_else(|| CliError::State(format!("url `{current}` has no host")))?
+                .to_string();
+            let port = current.port_or_known_default().ok_or_else(|| {
+                CliError::State(format!("url `{current}` has no port and no known default"))
+            })?;
+
+            let addrs = fetch_check_and_resolve(&host, &host_str, port, &allowlist).await?;
+
+            let client = reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .resolve_to_addrs(&host_str, &addrs)
+                .build()
+                .map_err(|e| CliError::State(format!("failed to build http client: {e}")))?;
+
+            let mut resp = client
+                .get(current.clone())
+                .send()
+                .await
+                .map_err(|e| CliError::State(format!("request to `{current}` failed: {e}")))?;
+
+            let status = resp.status();
+            if status.is_redirection() {
+                if let Some(location) = resp
+                    .headers()
+                    .get(reqwest::header::LOCATION)
+                    .and_then(|v| v.to_str().ok())
+                {
+                    redirects += 1;
+                    if redirects > FETCH_REDIRECT_LIMIT {
+                        return Err(CliError::State(format!(
+                            "too many redirects (exceeded limit of {FETCH_REDIRECT_LIMIT})"
+                        )));
+                    }
+                    current = current
+                        .join(location)
+                        .map_err(|e| CliError::State(format!("invalid redirect target `{location}`: {e}")))?;
+                    continue;
+                }
+            }
+
+            let mut body = Vec::new();
+            loop {
+                let chunk = resp
+                    .chunk()
+                    .await
+                    .map_err(|e| CliError::State(format!("reading body of `{current}` failed: {e}")))?;
+                let Some(chunk) = chunk else { break };
+                let remaining = max_bytes.saturating_sub(body.len());
+                if chunk.len() > remaining {
+                    body.extend_from_slice(&chunk[..remaining]);
+                    break;
+                }
+                body.extend_from_slice(&chunk);
+                if body.len() >= max_bytes {
+                    break;
+                }
+            }
+            return Ok(body);
+        }
     })?;
 
     match args.output {
@@ -2725,7 +2923,7 @@ fn run_fetch(args: FetchArgs) -> Result<(), CliError> {
             std::fs::write(&path, &body)?;
             println!("wrote {} bytes to {}", body.len(), path.display());
         }
-        None => println!("{body}"),
+        None => println!("{}", String::from_utf8_lossy(&body)),
     }
     Ok(())
 }
