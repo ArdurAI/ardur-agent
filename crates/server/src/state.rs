@@ -353,6 +353,10 @@ impl AppState {
         .with_memory(memory)
         .with_journal(journal.clone())
         .with_tools(tools.clone())
+        // ARD-H1: the server faces untrusted channel input, so install the
+        // built-in injection-defense signatures rather than shipping stage 4.5
+        // inert (an empty registry passes everything through).
+        .with_default_injection_filters()
         .receipt_log(&receipt_log)
         .build_reconciled()
         .await

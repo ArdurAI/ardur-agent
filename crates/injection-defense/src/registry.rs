@@ -22,10 +22,28 @@ pub struct FilterRegistry {
 
 impl FilterRegistry {
     /// An empty registry.
+    ///
+    /// An empty registry aggregates to [`Verdict::Allow`](crate::Verdict) — it
+    /// runs the stage but blocks nothing. Prefer [`with_builtin_defaults`] for
+    /// any shipped path so the injection stage is not silently inert.
+    ///
+    /// [`with_builtin_defaults`]: Self::with_builtin_defaults
     pub fn new() -> Self {
         Self {
             filters: RwLock::new(Vec::new()),
         }
+    }
+
+    /// A registry pre-loaded with the built-in [`PatternBasedFilter`] signature
+    /// set — the fail-closed default the shipped server and CLI install so
+    /// stage 4.5 actually scans the outbound prompt rather than passing
+    /// everything through (ARD-H1). Callers can `register` more filters on top.
+    ///
+    /// [`PatternBasedFilter`]: crate::PatternBasedFilter
+    pub fn with_builtin_defaults() -> Self {
+        let registry = Self::new();
+        registry.register(Arc::new(crate::PatternBasedFilter::new()));
+        registry
     }
 
     /// Register a filter. Returns `self` so registrations can be chained.
@@ -111,5 +129,19 @@ impl FilterRegistry {
 impl Default for FilterRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builtin_defaults_are_not_empty() {
+        // ARD-H1: the shipped default must actually install filters — an empty
+        // registry (`new`) would leave stage 4.5 inert.
+        let registry = FilterRegistry::with_builtin_defaults();
+        assert!(!registry.is_empty());
+        assert!(FilterRegistry::new().is_empty());
     }
 }
