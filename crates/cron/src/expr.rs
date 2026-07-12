@@ -14,6 +14,8 @@
 //! - steps: `*/2`, `1-10/2`
 //! - names: `JAN`, `FEB`, `SUN`, `MON`, etc.
 
+use chrono::{DateTime, Datelike, Timelike, Utc};
+
 use crate::CronError;
 
 /// A parsed cron expression.
@@ -36,12 +38,49 @@ pub struct CronExpr {
 pub struct Field {
     /// Sorted, deduplicated matching values.
     pub values: Vec<u8>,
+    /// Whether the field was a bare `*` wildcard. Distinguishes an unrestricted
+    /// field from one that happens to enumerate every value (`0-6` on weekday),
+    /// which the day-of-month / day-of-week OR rule in [`CronExpr::matches`]
+    /// depends on.
+    pub star: bool,
 }
 
 impl Field {
     /// Check if a value matches this field.
     pub fn contains(&self, value: u8) -> bool {
         self.values.binary_search(&value).is_ok()
+    }
+}
+
+impl CronExpr {
+    /// Whether `dt` (interpreted in UTC) matches this expression.
+    ///
+    /// Minute, hour, and month must all match. For day-of-month and day-of-week
+    /// this follows the standard (Vixie) cron rule: when **both** are restricted
+    /// (neither is a bare `*`), the expression fires when **either** matches;
+    /// when at least one is `*`, both must match (the `*` one always does). So
+    /// `0 0 13 * 5` fires on the 13th *or* any Friday, not only Friday-the-13th.
+    pub fn matches(&self, dt: &DateTime<Utc>) -> bool {
+        let minute = dt.minute() as u8;
+        let hour = dt.hour() as u8;
+        let day = dt.day() as u8;
+        let month = dt.month() as u8;
+        let weekday = dt.weekday().num_days_from_sunday() as u8;
+
+        if !(self.minute.contains(minute)
+            && self.hour.contains(hour)
+            && self.month.contains(month))
+        {
+            return false;
+        }
+
+        let day_matches = self.day.contains(day);
+        let weekday_matches = self.weekday.contains(weekday);
+        if !self.day.star && !self.weekday.star {
+            day_matches || weekday_matches
+        } else {
+            day_matches && weekday_matches
+        }
     }
 }
 
@@ -71,6 +110,10 @@ impl CronExpr {
 }
 
 fn parse_field(input: &str, min: u8, max: u8, allow_names: bool) -> Result<Field, CronError> {
+    // A bare `*` is unrestricted (relevant to the day-of-month/day-of-week OR
+    // rule); `*/n`, ranges, and lists are all restricted even if they enumerate
+    // every value.
+    let star = input.trim() == "*";
     let mut values = Vec::new();
     for part in input.split(',') {
         let (range_str, step) = if let Some(idx) = part.find('/') {
@@ -124,7 +167,7 @@ fn parse_field(input: &str, min: u8, max: u8, allow_names: bool) -> Result<Field
         values.sort_unstable();
         values.dedup();
     }
-    Ok(Field { values })
+    Ok(Field { values, star })
 }
 
 fn parse_value(s: &str, allow_names: bool, min: u8, max: u8) -> Result<u8, CronError> {

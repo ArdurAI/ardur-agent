@@ -18,9 +18,12 @@ thiserror = { workspace = true }
 serde = { workspace = true }
 # The issued claims travel as JSON in the (signed) authority-block context.
 serde_json = { workspace = true }
-# Verification decodes signed Biscuit protobuf blocks to summarize effective
-# attenuation claims for downstream Cedar/resource checks.
-prost = { workspace = true }
+# Verification projects effective attenuation claims for downstream Cedar/
+# resource checks by reading each block's Datalog source through biscuit's own
+# symbol table; expiry checks render dates as RFC 3339, which chrono parses back
+# to Unix seconds. (No direct `prost`: reading biscuit's own source avoids a
+# parallel protobuf reimplementation and the biscuit-coupled prost pin.)
+chrono = { workspace = true }
 # Workspace pins v7; cap-token ids are v4 (random) per §11.14 Phase 1, so opt v4
 # in on top of the shared pin (Cargo unifies the feature set).
 uuid = { workspace = true, features = ["v4"] }
@@ -32,3 +35,6 @@ parking_lot = { workspace = true }
 [dev-dependencies]
 # Throwaway deny-list files for persistence/propagation tests.
 tempfile = { workspace = true }
+# Fail-closed projection tests append raw, non-standard Biscuit blocks (checks
+# the attenuator would never emit) to assert the verifier rejects them.
+biscuit-auth = { workspace = true }

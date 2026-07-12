@@ -762,9 +762,20 @@ async fn fused_stream_dropped_refunds_reservation() {
     );
 }
 
+/// ARD-501: a streaming turn whose provider is slower than the reservation TTL
+/// must not be discarded. The lease is refreshed as provider events arrive, so
+/// the turn settles normally and commits its receipt and journal — the user saw
+/// the streamed content, so it is billed and recorded.
+///
+/// (Supersedes the earlier test that asserted the *pre-fix* behavior — a
+/// finalize failure with no durable commit when the clock jumped past the TTL
+/// mid-stream. The finalize-before-commit ordering is unchanged; this stream
+/// simply no longer fails to finalize.)
 #[tokio::test]
-async fn fused_stream_finalize_failure_commits_neither_receipt_nor_journal() {
+async fn fused_stream_slow_provider_survives_ttl_and_commits() {
     let clock = Arc::new(ManualClock::new(support::NOW_MS));
+    // This provider jumps the clock ~1000 s (far past the 30 s TTL) before its
+    // first event — a very slow generation.
     let provider = Arc::new(ExpiringStreamProvider {
         clock: clock.clone(),
         rate_card: RateCard::anthropic_2026_q2_v1(),
@@ -783,33 +794,35 @@ async fn fused_stream_finalize_failure_commits_neither_receipt_nor_journal() {
 
     let events = collect_stream(
         &runtime,
-        request_for("expire after provider", &valid_token(), session_id),
+        request_for("slow stream survives", &valid_token(), session_id),
     )
     .await;
 
-    assert!(has_failed_stage(&events, StageKind::CostGateFinalize));
-    assert!(matches!(
-        terminal_error(&events),
-        Some(RuntimeError::CostCeilingExceeded)
-    ));
     assert!(
-        !events
+        !has_failed_stage(&events, StageKind::CostGateFinalize),
+        "the refreshed reservation finalizes rather than expiring"
+    );
+    assert!(terminal_error(&events).is_none(), "the turn does not error");
+    assert!(
+        events
             .iter()
             .any(|event| matches!(event, Ok(FusedEvent::Receipt { .. }))),
-        "failed settlement must not emit a durable receipt"
+        "the completed turn emits its receipt"
     );
-    assert!(
+    assert_eq!(
         load_persisted_chain(&receipt_log)
-            .expect("empty receipt log loads")
-            .is_empty()
+            .expect("receipt log loads")
+            .len(),
+        1,
+        "the completed turn commits exactly one durable receipt"
     );
     assert!(
-        journal
+        !journal
             .replay(session_id)
             .await
             .expect("journal replays")
             .is_empty(),
-        "failed settlement must not retain user or assistant history"
+        "the completed turn commits its journal history"
     );
 }
 

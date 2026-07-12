@@ -1136,6 +1136,11 @@ impl FusedRuntime {
                     return Err(map_provider_error(&provider_err));
                 }
             };
+            // ARD-501: a slow completion can outlive the reservation TTL. Refresh
+            // the lease now the provider has returned so the finalize below (and
+            // the post-receipt hooks between here and it) does not discard a turn
+            // the caller has already received. No-op once finalized.
+            self.gate.touch_reservation(reservation.reservation_id);
 
             // The tool calls (if any) the model requested this round.
             let requested: Vec<ToolCall> = match &response.finish_reason {
@@ -1648,10 +1653,11 @@ impl FusedRuntime {
                 // moves the value out without moving the binding.
                 // ARD-488: release the reservation if this streaming round is
                 // cancelled (stream dropped / outer timeout) before it settles.
+                let reservation_id = reservation_handle.reservation_id;
                 let _cancel_guard = ReservationCancelGuard::new(
                     Arc::clone(&self.gate),
                     self.budget.clone(),
-                    reservation_handle.reservation_id,
+                    reservation_id,
                 );
                 let mut reservation = Some(reservation_handle);
 
@@ -1672,6 +1678,13 @@ impl FusedRuntime {
                 let mut finish_reason = FinishReason::Stop;
                 let mut stream_err: Option<ProviderError> = None;
                 while let Some(item) = provider_stream.next().await {
+                    // ARD-501: the reservation was admitted with a TTL sized for
+                    // a prompt turn; a long generation can outlive it. Refresh
+                    // the lease on every provider event so an actively-streaming
+                    // turn is never reclaimed as abandoned and discarded at
+                    // `finalize`. Cheap, lock-only, and a no-op once the
+                    // reservation is being finalized.
+                    self.gate.touch_reservation(reservation_id);
                     match item {
                         Ok(StreamEvent::ContentDelta(text)) => {
                             content.push_str(&text);
