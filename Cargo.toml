@@ -59,8 +59,16 @@ members = [
 
 [workspace.package]
 edition = "2024"
-# Edition 2024 stabilized in Rust 1.85, so the MSRV floor is 1.85 (R-2
-# reconciliation in §0.0 — the seed's 1.83 predated the edition-2024 bump).
+# Edition 2024 stabilized in Rust 1.85, but that is NOT a verified MSRV
+# floor for this workspace: `cargo +1.85.0 check --workspace` fails outright
+# against several transitive dependencies (matrix-sdk-common needs 1.93,
+# ruma 1.89, tonic 1.88, tantivy 1.86, ...) — confirmed 2026-07-12 (deep code
+# review finding M11). `rust-version` is left at the edition floor as a
+# lower bound only; nothing in CI gates against it (ci.yml's `gauntlet` job
+# installs 1.96.1). Raising it to the real floor is a larger, separate
+# change: clippy's MSRV-aware lints (e.g. let-chain collapsing) start firing
+# differently the moment `rust-version` moves, which touches unrelated code
+# across ~20 files — out of scope here.
 rust-version = "1.85"
 license = "Apache-2.0"
 repository = "https://github.com/ArdurAI/ardur-agent"
