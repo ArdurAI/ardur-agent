@@ -127,7 +127,28 @@ fn read_skills(root: &Path) -> Result<Vec<SkillRecord>, CliError> {
     Ok(records)
 }
 
+/// Ceiling on a manifest file's size, checked before reading. Manifests are
+/// small structured JSON documents; an oversized one is either malformed
+/// input or an attempt to make `install`/`validate` buffer a large file into
+/// memory before the parse (or shape/signature) checks can reject it.
+const MAX_MANIFEST_BYTES: u64 = 1024 * 1024; // 1 MiB
+/// Ceiling on a single artifact file's size, checked before reading it for
+/// the SHA-256 digest comparison in [`verify_artifacts`].
+const MAX_ARTIFACT_BYTES: u64 = 64 * 1024 * 1024; // 64 MiB
+
+fn check_file_size(path: &Path, max: u64, what: &str) -> Result<(), CliError> {
+    let len = std::fs::metadata(path)?.len();
+    if len > max {
+        return Err(CliError::State(format!(
+            "{what} {} is {len} bytes, exceeding the {max}-byte cap",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
 fn read_manifest(path: &Path) -> Result<CapabilityManifest, CliError> {
+    check_file_size(path, MAX_MANIFEST_BYTES, "manifest")?;
     let content = std::fs::read_to_string(path)?;
     serde_json::from_str(&content).map_err(|e| {
         CliError::State(format!(
@@ -239,6 +260,7 @@ fn verify_artifacts(manifest_path: &Path, manifest: &CapabilityManifest) -> Resu
     let base = manifest_path.parent().unwrap_or_else(|| Path::new("."));
     for artifact in &manifest.artifacts {
         let path = safe_artifact_path(base, &artifact.path)?;
+        check_file_size(&path, MAX_ARTIFACT_BYTES, "artifact")?;
         let bytes = std::fs::read(&path)
             .map_err(|e| CliError::State(format!("reading artifact {}: {e}", path.display())))?;
         let actual = hex::encode(Sha256::digest(&bytes));
@@ -291,11 +313,21 @@ fn validate_manifest(
     Ok(manifest)
 }
 
-fn install_record(source: &str) -> SkillRecord {
+fn install_record(source: &str) -> Result<SkillRecord, CliError> {
     let source_path = Path::new(source);
     if source_path.is_file() {
+        // A `source` that parses as manifest JSON is treated as one: shape
+        // and id are validated and, if either fails, installation is
+        // refused outright rather than silently falling back to the generic
+        // stub record below — a manifest that parses but carries a
+        // malformed/malicious `id` (e.g. a path-traversal or absolute-path
+        // attempt, since `id` is later joined into `<skills_dir>/{id}.json`)
+        // or an unsupported shape should not be quietly registered under a
+        // different, unrelated identity.
         if let Ok(manifest) = read_manifest(source_path) {
-            return SkillRecord {
+            validate_manifest_shape(&manifest)?;
+            sanitize_state_id(&manifest.id)?;
+            return Ok(SkillRecord {
                 skill_id: manifest.id,
                 name: manifest.name,
                 version: manifest.version,
@@ -304,11 +336,14 @@ fn install_record(source: &str) -> SkillRecord {
                 kind: manifest.kind,
                 capabilities: manifest.capabilities,
                 signature: manifest.signature.value,
-            };
+            });
         }
     }
 
-    SkillRecord {
+    // `source` isn't a local manifest file (a bare source string, a remote
+    // URL, ...); register a generic stub record under a fresh id. This path
+    // never touches `source` as a filename, so it carries no traversal risk.
+    Ok(SkillRecord {
         skill_id: uuid::Uuid::new_v4().to_string(),
         name: "installed-skill".to_string(),
         version: "0.0.1".to_string(),
@@ -317,7 +352,7 @@ fn install_record(source: &str) -> SkillRecord {
         kind: "skill".to_string(),
         capabilities: Vec::new(),
         signature: String::new(),
-    }
+    })
 }
 
 fn now_secs() -> u64 {
@@ -371,7 +406,7 @@ pub fn run_marketplace(args: MarketplaceArgs) -> Result<(), CliError> {
             }
         }
         MarketplaceAction::Install { source } => {
-            let record = install_record(&source);
+            let record = install_record(&source)?;
             let id = record.skill_id.clone();
             std::fs::write(
                 dir.join(format!("{id}.json")),
