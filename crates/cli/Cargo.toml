@@ -86,7 +86,7 @@ libc = { workspace = true }
 rustix = { workspace = true }
 # ARD-317: signed marketplace capability manifests use ES256/P-256 public keys.
 p256 = { workspace = true }
-rand = "0.8"
+rand = "0.10"
 # ARD-143: schedule / cron CLI.
 chrono = { workspace = true }
 ardur-cron = { workspace = true }
