@@ -132,6 +132,7 @@ impl HookedRuntime {
     }
 }
 
+#[async_trait::async_trait]
 impl ChatRuntime for HookedRuntime {
     async fn submit(&self, req: SubmitRequest) -> Result<SubmitResult, RuntimeError> {
         let session_id = req.session_id;

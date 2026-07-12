@@ -11,6 +11,9 @@ anyhow = { workspace = true }
 # The shared id/cost primitives (CostTuple, ProviderId, ReceiptId) live in the
 # workspace's leaf `core-types` crate so every crate speaks one type.
 ardur-core-types = { workspace = true }
+# `ChatRuntime::submit` is `#[async_trait]` so the trait is object-safe and its
+# future is `Send` (matching `Provider` / `CostAdmissionGate` / etc.).
+async-trait = { workspace = true }
 serde = { workspace = true }
 # `ToolCall::arguments` and the tool transcript carry raw JSON, so the runtime's
 # shared value types speak `serde_json::Value` directly.
