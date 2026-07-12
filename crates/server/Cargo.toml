@@ -33,6 +33,9 @@ path = "src/bin/ardur-server.rs"
 # runtime, then fronts it with the Slack adapter.
 ardur-acp = { workspace = true }
 ardur-fused-runtime = { workspace = true }
+# §11.16 injection defense — the built-in filter set the boot sequence installs
+# by default so stage 4.5 is not a silent no-op.
+ardur-injection-defense = { workspace = true }
 ardur-slack-adapter = { workspace = true }
 # The §4.X Matrix channel adapter — a second `MessagingGateway` backend the boot
 # sequence wires alongside Slack when `ARDUR_CHANNEL_MATRIX=true`.

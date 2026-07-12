@@ -36,6 +36,9 @@ ardur-cost-gate = { workspace = true }
 # Phase-2 fused runtime — the FusedRuntime the default chat path drives through
 # its full ten-stage pipeline.
 ardur-fused-runtime = { workspace = true }
+# §11.16 injection defense — the built-in filter set the boot sequence installs
+# by default so stage 4.5 is not a silent no-op.
+ardur-injection-defense = { workspace = true }
 # §11.0 Cedar — the policy bundle the fused runtime authorizes turns against.
 ardur-cedar-policy = { workspace = true }
 # §7.0 memory — the bi-temporal sink stage 9 records each turn into.

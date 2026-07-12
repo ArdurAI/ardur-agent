@@ -8,6 +8,7 @@ use parking_lot::RwLock;
 use crate::content::ScannableContent;
 use crate::error::FilterError;
 use crate::filter::InjectionFilter;
+use crate::pattern::PatternBasedFilter;
 use crate::result::{CombinedScanResult, ScanResult, Verdict};
 use crate::sanitize::REDACTION;
 
@@ -26,6 +27,18 @@ impl FilterRegistry {
         Self {
             filters: RwLock::new(Vec::new()),
         }
+    }
+
+    /// A registry pre-seeded with the built-in [`PatternBasedFilter`]. This is
+    /// the registry every production boot path (server, CLI) should install by
+    /// default — an empty [`FilterRegistry::new`] makes stage 4.5 a silent
+    /// no-op, so a caller that forgets to opt in ships with injection defense
+    /// disabled. Reach for `new` only when deliberately assembling a custom
+    /// filter set from scratch.
+    pub fn with_builtin_defaults() -> Self {
+        let registry = Self::new();
+        registry.register(Arc::new(PatternBasedFilter::new()));
+        registry
     }
 
     /// Register a filter. Returns `self` so registrations can be chained.

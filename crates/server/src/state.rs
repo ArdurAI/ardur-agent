@@ -50,6 +50,7 @@ use ardur_channel_matrix::MatrixChannel;
 use ardur_channel_telegram::TelegramChannel;
 use ardur_cost_gate::{CostEnvelope, CostTuple as GateCostTuple, HolderId as GateHolderId};
 use ardur_fused_runtime::{FusedEvent, FusedRuntime, FusedRuntimeBuilder, load_persisted_chain};
+use ardur_injection_defense::FilterRegistry;
 use ardur_memory::{InMemoryMemoryRuntime, MemoryRuntime};
 use ardur_memory_qdrant::{
     Bm25Index, Embedder, FastEmbedEmbedder, HybridMemoryRetriever, QdrantMemoryConfig,
@@ -353,6 +354,10 @@ impl AppState {
         .with_memory(memory)
         .with_journal(journal.clone())
         .with_tools(tools.clone())
+        // §11.16 — every server turn is scanned through the built-in
+        // pattern-based injection filter (stage 4.5); an empty registry would
+        // make that stage a silent no-op against inbound Slack/channel input.
+        .with_injection_filters(FilterRegistry::with_builtin_defaults())
         .receipt_log(&receipt_log)
         .build_reconciled()
         .await

@@ -31,7 +31,7 @@ use std::time::Duration;
 use ardur_cedar_policy::{CedarPolicyBundle, PolicyBundle, PolicySource};
 use ardur_cost_gate::{CostEnvelope, ManualClock};
 use ardur_fused_runtime::{load_persisted_chain, verify_persisted_chain};
-use ardur_injection_defense::{FilterRegistry, PatternBasedFilter};
+use ardur_injection_defense::FilterRegistry;
 use ardur_lifecycle_hooks::HookRegistry;
 use ardur_provider_runtime::{
     CompletionRequest, CompletionResponse, FinishReason, Provider, ProviderError, RateCard, Usage,
@@ -673,11 +673,12 @@ async fn injection_blocks() {
         )],
         stop("default"),
     ));
-    let filters = FilterRegistry::new();
-    filters.register(Arc::new(PatternBasedFilter::new()));
+    // The same constructor server/CLI boot install by default — proving the
+    // *production default*, not just a hand-assembled filter, blocks the
+    // indirect (ToolReturn) injection vector.
     let runtime = runtime_builder(provider.clone())
         .with_tools(echo_registry())
-        .with_injection_filters(filters)
+        .with_injection_filters(FilterRegistry::with_builtin_defaults())
         .build()
         .expect("runtime builds");
 

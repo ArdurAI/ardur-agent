@@ -39,6 +39,7 @@ use ardur_cap_token::{CapScope, CapTokenIssuer, HolderId as CapHolderId, Verifie
 use ardur_cedar_policy::CedarPolicyBundle;
 use ardur_cost_gate::{CostEnvelope, CostTuple as GateCostTuple, HolderId as GateHolderId};
 use ardur_fused_runtime::FusedRuntimeBuilder;
+use ardur_injection_defense::FilterRegistry;
 use ardur_memory::{
     HolderId as MemoryHolderId, InMemoryMemoryRuntime, MemoryCard, MemoryControlPlane, ReceiptId,
     RecordId, UnixTsMillis,
@@ -217,6 +218,10 @@ impl FusedEngine {
         .projected_envelope(envelope)
         .with_memory(memory.clone())
         .with_journal(Arc::new(journal))
+        // §11.16 — every CLI turn is scanned through the built-in pattern-based
+        // injection filter (stage 4.5); an empty registry would make that
+        // stage a silent no-op against untrusted REPL input.
+        .with_injection_filters(FilterRegistry::with_builtin_defaults())
         .receipt_log(dirs.receipt_log())
         .build_reconciled()
         .await

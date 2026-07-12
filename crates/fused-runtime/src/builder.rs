@@ -325,7 +325,12 @@ impl FusedRuntimeBuilder {
     /// `AllowWithSanitization` swaps the provider body for the redacted rewrite.
     ///
     /// Defaults to an **empty** registry, which makes stage 4.5 a no-op — so a
-    /// runtime that does not opt in behaves exactly as before this stage existed.
+    /// runtime that does not opt in behaves exactly as before this stage
+    /// existed. [`build`](Self::build) logs a `tracing::warn!` when the
+    /// registry is still empty at assembly time, since an empty registry
+    /// almost always means a caller forgot to opt in rather than a deliberate
+    /// choice. Production boot paths should pass
+    /// [`FilterRegistry::with_builtin_defaults`](ardur_injection_defense::FilterRegistry::with_builtin_defaults).
     #[must_use]
     pub fn with_injection_filters(mut self, filters: FilterRegistry) -> Self {
         self.injection_filters = filters;
@@ -447,6 +452,20 @@ impl FusedRuntimeBuilder {
     ///
     /// [`receipt_log`]: FusedRuntimeBuilder::receipt_log
     pub fn build(self) -> Result<FusedRuntime, ReceiptChainError> {
+        // An empty registry makes stage 4.5 a silent no-op (see
+        // `with_injection_filters`): every prompt and tool return passes
+        // unscanned. That's a legitimate choice for tests and offline tooling,
+        // but a caller that forgot to opt in gets no other signal, so make the
+        // gap loud at boot.
+        if self.injection_filters.is_empty() {
+            tracing::warn!(
+                "FusedRuntime built with an empty injection-defense FilterRegistry — \
+                 stage 4.5 will pass every prompt and tool output unscanned. \
+                 Call FusedRuntimeBuilder::with_injection_filters(FilterRegistry::with_builtin_defaults()) \
+                 unless this is intentional (tests, offline tooling)."
+            );
+        }
+
         // Seed the chain tail from the persisted log, if any, so a restart
         // continues the chain rather than starting a fresh genesis.
         let chain_tail = match &self.receipt_log {

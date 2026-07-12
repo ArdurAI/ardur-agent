@@ -51,7 +51,7 @@ use uuid::Uuid;
 use ardur_e2e_tests::fixtures;
 
 use ardur_fused_runtime::FusedRuntime;
-use ardur_injection_defense::{FilterRegistry, PatternBasedFilter};
+use ardur_injection_defense::FilterRegistry;
 use ardur_messaging_gateway::{
     ChannelId, ChannelRef, InProcessGateway, IncomingMessage, MessageBody, MessageTarget,
     MessagingGateway, OutgoingMessage,
@@ -63,13 +63,13 @@ use ardur_runtime::{
 /// The channel the scenario's gateway serves.
 const CHANNEL: &str = "in-process://e2e-08";
 
-/// A [`FilterRegistry`] holding the single built-in [`PatternBasedFilter`] —
-/// the whole of injection-defense's Phase-1 detection — ready to wire into the
-/// runtime's stage 4.5.
+/// The registry every production boot path (server, CLI) installs by
+/// default — see [`FilterRegistry::with_builtin_defaults`]. Using the same
+/// constructor here (rather than hand-assembling a registry) is the point:
+/// it proves the actual default a real boot wires, not just that *a* filter
+/// can block.
 fn defense_registry() -> FilterRegistry {
-    let registry = FilterRegistry::new();
-    registry.register(Arc::new(PatternBasedFilter::new()));
-    registry
+    FilterRegistry::with_builtin_defaults()
 }
 
 /// The text a filter scans, pulled out of an inbound gateway body.
