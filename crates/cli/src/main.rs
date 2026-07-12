@@ -10,6 +10,7 @@ mod device_mesh;
 mod marketplace;
 mod persona;
 mod project_surface;
+mod state_id;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -29,6 +30,7 @@ use persona::{PersonaArgs, run_persona};
 use project_surface::{ProjectArgs, run_project};
 use serde_json::json;
 use sha2::Digest;
+use state_id::sanitize_state_id;
 
 /// Ardur — a capability-secure, cost-metered agent runtime.
 #[derive(Parser)]
@@ -1863,6 +1865,7 @@ fn run_approvals(args: ApprovalsArgs) -> Result<(), CliError> {
             }
         }
         ApprovalsAction::Approve { id } => {
+            sanitize_state_id(&id)?;
             let path = approvals_dir.join(format!("{id}.json"));
             if !path.is_file() {
                 return Err(CliError::State(format!("approval `{id}` not found")));
@@ -1883,6 +1886,7 @@ fn run_approvals(args: ApprovalsArgs) -> Result<(), CliError> {
             println!("approved {id}");
         }
         ApprovalsAction::Deny { id, reason } => {
+            sanitize_state_id(&id)?;
             let path = approvals_dir.join(format!("{id}.json"));
             if !path.is_file() {
                 return Err(CliError::State(format!("approval `{id}` not found")));
@@ -2155,6 +2159,7 @@ fn run_schedule(args: ScheduleArgs) -> Result<(), CliError> {
             }
         }
         ScheduleAction::Delete { id } => {
+            sanitize_state_id(&id)?;
             let path = schedules_dir.join(format!("{id}.json"));
             if !path.is_file() {
                 return Err(CliError::State(format!("schedule `{id}` not found")));
@@ -2279,6 +2284,7 @@ fn run_token(args: TokenArgs) -> Result<(), CliError> {
             }
         }
         TokenAction::Revoke { id } => {
+            sanitize_state_id(&id)?;
             let path = tokens_dir.join(format!("{id}.json"));
             if !path.is_file() {
                 return Err(CliError::State(format!("token `{id}` not found")));
@@ -2606,6 +2612,7 @@ fn run_memory(args: MemoryArgs) -> Result<(), CliError> {
             }
         }
         MemoryAction::Forget { id, reason } => {
+            sanitize_state_id(&id)?;
             let memory_dir = root.join("memory");
             let tombstone_path = memory_dir.join(format!("{id}.tombstone.json"));
             let tombstone = json!({
@@ -3054,6 +3061,7 @@ fn run_channel(args: ChannelArgs) -> Result<(), CliError> {
             }
         }
         ChannelAction::Add { channel_type, name } => {
+            sanitize_state_id(&name)?;
             let path = dir.join(format!("{name}.json"));
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -3095,6 +3103,7 @@ fn run_channel(args: ChannelArgs) -> Result<(), CliError> {
             }
         }
         ChannelAction::Remove { name } => {
+            sanitize_state_id(&name)?;
             let path = dir.join(format!("{name}.json"));
             if !path.is_file() {
                 return Err(CliError::State(format!("channel `{name}` not found")));
@@ -3103,6 +3112,7 @@ fn run_channel(args: ChannelArgs) -> Result<(), CliError> {
             println!("removed channel {name}");
         }
         ChannelAction::Set { name, status } => {
+            sanitize_state_id(&name)?;
             let path = dir.join(format!("{name}.json"));
             if !path.is_file() {
                 return Err(CliError::State(format!("channel `{name}` not found")));

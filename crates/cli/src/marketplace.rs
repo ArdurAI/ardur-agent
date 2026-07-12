@@ -11,6 +11,7 @@ use p256::pkcs8::DecodePublicKey;
 use sha2::{Digest, Sha256};
 
 use crate::StateDirs;
+use crate::state_id::sanitize_state_id;
 
 /// Arguments to `ardur marketplace`.
 #[derive(Args)]
@@ -415,6 +416,7 @@ pub fn run_marketplace(args: MarketplaceArgs) -> Result<(), CliError> {
             }
         }
         MarketplaceAction::Remove { id } => {
+            sanitize_state_id(&id)?;
             let path = dir.join(format!("{id}.json"));
             if !path.is_file() {
                 return Err(CliError::State(format!("skill `{id}` not found")));

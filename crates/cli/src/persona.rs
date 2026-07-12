@@ -6,6 +6,7 @@ use ardur_cli::CliError;
 use clap::{Args, Subcommand};
 
 use crate::StateDirs;
+use crate::state_id::sanitize_state_id;
 
 /// Arguments to `ardur persona`.
 #[derive(Args)]
@@ -112,6 +113,7 @@ pub fn run_persona(args: PersonaArgs) -> Result<(), CliError> {
             }
         }
         PersonaAction::Set { name } => {
+            sanitize_state_id(&name)?;
             let records = read_personas(&root)?;
             let found = records.iter().any(|r| r.name == name);
             if !found {
@@ -120,6 +122,12 @@ pub fn run_persona(args: PersonaArgs) -> Result<(), CliError> {
             for r in records {
                 let mut r = r;
                 r.is_active = r.name == name;
+                // `r.name` comes from a JSON file on disk, not the `name`
+                // argument above — a hand-edited persona file could carry a
+                // `name` field that diverges from its own filename, so it
+                // needs its own traversal check before being reused to build
+                // a write path.
+                sanitize_state_id(&r.name)?;
                 let path = dir.join(format!("{}.json", r.name));
                 std::fs::write(
                     &path,
@@ -138,6 +146,7 @@ pub fn run_persona(args: PersonaArgs) -> Result<(), CliError> {
             println!("active persona set to {name}");
         }
         PersonaAction::Create { name, file } => {
+            sanitize_state_id(&name)?;
             let mut record = PersonaRecord {
                 name: name.clone(),
                 display_name: name.clone(),
@@ -176,6 +185,7 @@ pub fn run_persona(args: PersonaArgs) -> Result<(), CliError> {
             }
         }
         PersonaAction::Remove { name } => {
+            sanitize_state_id(&name)?;
             let path = dir.join(format!("{name}.json"));
             if !path.is_file() {
                 return Err(CliError::State(format!("persona `{name}` not found")));
