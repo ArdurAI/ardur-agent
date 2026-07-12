@@ -339,7 +339,7 @@ dependencies = [
  "biscuit-auth",
  "hex",
  "parking_lot",
- "prost 0.10.4",
+ "prost 0.14.4",
  "serde",
  "serde_json",
  "tempfile",

@@ -116,7 +116,7 @@ url = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Direct protobuf decoding for signed Biscuit block introspection in cap-token.
-prost = "0.10"
+prost = "0.14"
 # YAML frontmatter parsing for filesystem SKILL.md skills (crates/tool-registry,
 # §8.X). serde_yaml is archived upstream but remains the de-facto serde YAML
 # deserializer; the frontmatter parsed here is small, trusted, author-authored.
