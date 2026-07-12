@@ -2,7 +2,7 @@
 
 use std::path::{Component, Path, PathBuf};
 
-use ardur_cli::CliError;
+use ardur_cli::{CliError, read_string_no_follow, write_private_file_atomic_no_follow};
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use clap::{Args, Subcommand};
@@ -116,7 +116,7 @@ fn read_skills(root: &Path) -> Result<Vec<SkillRecord>, CliError> {
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for entry in entries.flatten() {
             if entry.path().extension().is_some_and(|e| e == "json") {
-                if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                if let Ok(content) = read_string_no_follow(&entry.path()) {
                     if let Ok(v) = serde_json::from_str::<SkillRecord>(&content) {
                         records.push(v);
                     }
@@ -408,10 +408,11 @@ pub fn run_marketplace(args: MarketplaceArgs) -> Result<(), CliError> {
         MarketplaceAction::Install { source } => {
             let record = install_record(&source)?;
             let id = record.skill_id.clone();
-            std::fs::write(
-                dir.join(format!("{id}.json")),
+            write_private_file_atomic_no_follow(
+                &dir.join(format!("{id}.json")),
                 serde_json::to_string_pretty(&record)
-                    .map_err(|e| CliError::State(e.to_string()))?,
+                    .map_err(|e| CliError::State(e.to_string()))?
+                    .as_bytes(),
             )?;
             println!("installed {} {id} from {source}", record.kind);
             if record.signature.is_empty() {
