@@ -2659,9 +2659,30 @@ struct SearchArgs {
 }
 
 /// Run `ardur fetch`.
+///
+/// Routes through the hardened built-in [`HttpFetchTool`](ardur_tool_registry::HttpFetchTool)
+/// rather than raw `reqwest` (R1): the tool enforces the `http(s)`/GET scheme,
+/// the host allowlist, the SSRF internal-IP guard, per-redirect-hop
+/// re-validation (auto-redirects disabled), and a byte cap applied while
+/// streaming — none of which the previous raw-`reqwest` path had.
 fn run_fetch(args: FetchArgs) -> Result<(), CliError> {
+    use std::collections::HashMap;
+
+    use ardur_tool_registry::{
+        CapTokenRef, HttpFetchTool, InvocationId, SessionId, Tool, ToolContext,
+    };
+
     let url = args.url;
     let root = StateDirs::resolve()?.root;
+
+    // Refuse non-HTTP(S) schemes early with a specific message (the tool also
+    // enforces this, but this keeps the error clear and independent of the
+    // allowlist state).
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Err(CliError::State(format!(
+            "only http:// and https:// URLs are supported, got `{url}`"
+        )));
+    }
 
     // Read allowlist from config if present.
     let mut allowlist: Vec<String> = Vec::new();
@@ -2677,48 +2698,41 @@ fn run_fetch(args: FetchArgs) -> Result<(), CliError> {
     }
     allowlist.extend(args.allow_hosts);
 
-    // Safety check: refuse non-HTTP(S) schemes.
-    if !url.starts_with("http://") && !url.starts_with("https://") {
-        return Err(CliError::State(format!(
-            "only http:// and https:// URLs are supported, got `{url}`"
-        )));
-    }
-
     if allowlist.is_empty() {
         return Err(CliError::State(
             "no HTTP allowlist configured. Add hosts to ~/.ardur/http_allowlist.txt or use --allow-host".to_string(),
         ));
     }
 
-    let host = url
-        .split('/')
-        .nth(2)
-        .unwrap_or("")
-        .split(':')
-        .next()
-        .unwrap_or("")
-        .to_lowercase();
-    if !allowlist.iter().any(|h| h.to_lowercase() == host) {
-        return Err(CliError::State(format!(
-            "host `{host}` is not in the allowlist; add it to {} or use --allow-host",
-            allowlist_path.display()
-        )));
-    }
+    // The tool enforces the scheme, the host allowlist, the SSRF IP guard, and
+    // a streamed `max_bytes` cap. Private/loopback addresses stay denied (no
+    // `with_private_ip_access`), so an allowlisted-but-hostile page cannot pivot
+    // to cloud metadata or the LAN via a redirect.
+    let tool = HttpFetchTool::new()
+        .with_allowlist(allowlist)
+        .with_max_bytes(args.max_bytes);
+    let ctx = ToolContext {
+        cap_token: CapTokenRef(String::new()),
+        session_id: SessionId::new(),
+        invocation_id: InvocationId::new(),
+        cwd: root,
+        env: HashMap::new(),
+        cost_budget_cents: u32::MAX,
+    };
 
     let rt = tokio::runtime::Runtime::new()?;
-    let body = rt.block_on(async {
-        let client = reqwest::Client::new();
-        let response = client
-            .get(&url)
-            .send()
+    let output = rt.block_on(async move {
+        tool.invoke(&ctx, serde_json::json!({ "url": url }))
             .await
-            .map_err(|e| CliError::State(format!("request failed: {e}")))?;
-        let text = response
-            .text()
-            .await
-            .map_err(|e| CliError::State(format!("read failed: {e}")))?;
-        Ok::<String, CliError>(text.chars().take(args.max_bytes).collect())
+            .map_err(|e| CliError::State(format!("fetch failed: {e}")))
     })?;
+
+    let body = output
+        .content
+        .get("body")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_string();
 
     match args.output {
         Some(path) => {

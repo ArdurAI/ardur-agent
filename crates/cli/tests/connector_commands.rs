@@ -71,6 +71,36 @@ fn fetch_rejects_bad_scheme() {
 }
 
 #[test]
+fn fetch_refuses_redirectless_metadata_ip_even_when_allowlisted() {
+    // R1: `ardur fetch` now routes through the hardened HttpFetchTool, so the
+    // SSRF internal-IP guard applies even to an explicitly `--allow-host`ed
+    // address. Fetching the cloud-metadata link-local IP is refused (and fast —
+    // an IP literal is rejected before any connection), where the old raw-reqwest
+    // path would have dialed it.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let assert = Command::cargo_bin("ardur")
+        .expect("the `ardur` binary builds")
+        .env("HOME", dir.path())
+        .args([
+            "fetch",
+            "http://169.254.169.254/latest/meta-data/",
+            "--allow-host",
+            "169.254.169.254",
+        ])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    assert!(
+        stderr.contains("denied"),
+        "the metadata IP must be SSRF-denied, not dialed: {stderr}"
+    );
+    assert!(
+        !stderr.contains("allowlist"),
+        "it clears the allowlist gate and is stopped by the IP guard: {stderr}"
+    );
+}
+
+#[test]
 fn search_stub_succeeds() {
     let assert = Command::cargo_bin("ardur")
         .expect("the `ardur` binary builds")

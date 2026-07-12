@@ -36,6 +36,10 @@ ardur-cost-gate = { workspace = true }
 # Phase-2 fused runtime — the FusedRuntime the default chat path drives through
 # its full ten-stage pipeline.
 ardur-fused-runtime = { workspace = true }
+# §6.2 built-in tools — `ardur fetch` runs through the hardened `HttpFetchTool`
+# (host allowlist + SSRF internal-IP guard + per-redirect-hop re-validation +
+# streamed byte cap) instead of raw reqwest.
+ardur-tool-registry = { workspace = true }
 # §11.0 Cedar — the policy bundle the fused runtime authorizes turns against.
 ardur-cedar-policy = { workspace = true }
 # §7.0 memory — the bi-temporal sink stage 9 records each turn into.
