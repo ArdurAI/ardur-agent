@@ -57,7 +57,7 @@ use std::time::Duration;
 
 use ardur_provider_runtime::{
     CompletionRequest, CompletionResponse, FinishReason, ModelId, Provider, ProviderError,
-    ProviderStream, RateCard, ToolCall, Usage,
+    ProviderStream, RateCard, ToolCall, Usage, parse_retry_after_ms,
 };
 use ardur_runtime::{ChatMessage, CostTuple, ProviderId, Role};
 use async_trait::async_trait;
@@ -537,17 +537,6 @@ fn role_str(role: Role) -> &'static str {
         Role::Assistant => "assistant",
         Role::Tool => "tool",
     }
-}
-
-/// Parse the `retry-after` header (whole seconds) into milliseconds, defaulting
-/// to `0` when absent or unparseable.
-fn parse_retry_after_ms(headers: &reqwest::header::HeaderMap) -> u64 {
-    headers
-        .get(reqwest::header::RETRY_AFTER)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.trim().parse::<u64>().ok())
-        .map(|secs| secs.saturating_mul(1000))
-        .unwrap_or(0)
 }
 
 /// Map a non-2xx OpenRouter response onto the crate's [`ProviderError`]

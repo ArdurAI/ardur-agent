@@ -873,6 +873,7 @@ dependencies = [
  "async-trait",
  "eventsource-stream",
  "futures",
+ "httpdate",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
