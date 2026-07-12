@@ -553,8 +553,7 @@ impl TaskFlowOrchestrator for InMemoryTaskFlowOrchestrator {
             .as_ref()
             .and_then(|dag| dag.root.as_step().cloned());
 
-        self.lock_states()
-            .insert(task_id, state);
+        self.lock_states().insert(task_id, state);
         Ok(TaskHandle { task_id })
     }
 
@@ -625,7 +624,10 @@ mod poison_tests {
         })
         .join();
         assert!(joined.is_err(), "the helper thread panicked as intended");
-        assert!(orchestrator.states.is_poisoned(), "the mutex is now poisoned");
+        assert!(
+            orchestrator.states.is_poisoned(),
+            "the mutex is now poisoned"
+        );
 
         // The recovery helper returns a usable guard instead of panicking.
         let task_id = TaskId::new();
