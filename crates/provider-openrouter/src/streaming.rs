@@ -372,7 +372,12 @@ fn handle_sse_line(line: &str, st: &mut StreamState) {
         st.finished = true;
         return;
     }
-    process_chunk(payload, &mut st.acc, &mut st.pending_finish, &mut st.pending);
+    process_chunk(
+        payload,
+        &mut st.acc,
+        &mut st.pending_finish,
+        &mut st.pending,
+    );
 }
 
 /// Pull every complete line (terminated by `\n`) out of the byte buffer and

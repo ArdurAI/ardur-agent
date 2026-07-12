@@ -67,9 +67,7 @@ impl CronExpr {
         let month = dt.month() as u8;
         let weekday = dt.weekday().num_days_from_sunday() as u8;
 
-        if !(self.minute.contains(minute)
-            && self.hour.contains(hour)
-            && self.month.contains(month))
+        if !(self.minute.contains(minute) && self.hour.contains(hour) && self.month.contains(month))
         {
             return false;
         }

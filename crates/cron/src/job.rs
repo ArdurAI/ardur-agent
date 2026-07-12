@@ -82,7 +82,9 @@ impl CronExpression {
     /// or [`validate`](Self::validate) at construction time instead of matching
     /// nothing silently).
     pub fn is_due(&self, now: DateTime<Utc>) -> bool {
-        self.compile().map(|expr| expr.matches(&now)).unwrap_or(false)
+        self.compile()
+            .map(|expr| expr.matches(&now))
+            .unwrap_or(false)
     }
 
     /// The next time strictly after `from` at which this expression is due.

@@ -2053,9 +2053,8 @@ fn cron_to_expression(cron: &str) -> Result<ardur_cron::CronExpression, CliError
             fields.len()
         )));
     }
-    let expr = ardur_cron::CronExpression::new(
-        fields[0], fields[1], fields[2], fields[3], fields[4],
-    );
+    let expr =
+        ardur_cron::CronExpression::new(fields[0], fields[1], fields[2], fields[3], fields[4]);
     expr.validate()
         .map_err(|e| CliError::State(format!("invalid cron: {e}")))?;
     Ok(expr)

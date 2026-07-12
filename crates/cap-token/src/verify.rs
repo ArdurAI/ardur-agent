@@ -281,8 +281,9 @@ fn strip_less_or_equal<'a>(rest: &'a str, var: &str) -> Option<&'a str> {
 
 /// A biscuit-printed `$name` variable token.
 fn is_variable(term: &str) -> bool {
-    term.strip_prefix('$')
-        .is_some_and(|name| !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_'))
+    term.strip_prefix('$').is_some_and(|name| {
+        !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_')
+    })
 }
 
 /// Parse a biscuit-printed string set literal (`{"a", "b"}`, or `{,}` for the
