@@ -188,11 +188,32 @@ impl ExecResult {
             return;
         }
         self.truncated = true;
-        let stdout_max = max.min(self.stdout.len());
-        self.stdout.truncate(stdout_max);
+        let stdout_cap = max.min(self.stdout.len());
+        truncate_to_char_boundary(&mut self.stdout, stdout_cap);
         let remaining = max.saturating_sub(self.stdout.len());
-        self.stderr.truncate(remaining);
+        truncate_to_char_boundary(&mut self.stderr, remaining);
     }
+}
+
+/// Truncate `s` to at most `max_bytes`, snapping the cut **down** to the nearest
+/// UTF-8 char boundary.
+///
+/// All backends build their output with [`String::from_utf8_lossy`], so a
+/// multi-byte character can straddle a raw byte limit. `String::truncate`
+/// **panics** when handed an index that is not a char boundary, so truncating at
+/// `max_output_bytes` directly is a reachable turn-abort DoS: any allowlisted
+/// command whose combined output crosses the cap on a multi-byte char would kill
+/// the tool call. Dropping the straddling character whole keeps the result valid
+/// UTF-8 and can only make the output shorter than the cap, never longer.
+fn truncate_to_char_boundary(s: &mut String, max_bytes: usize) {
+    if s.len() <= max_bytes {
+        return;
+    }
+    let mut boundary = max_bytes;
+    while boundary > 0 && !s.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    s.truncate(boundary);
 }
 
 fn now_ms() -> u64 {
@@ -585,6 +606,45 @@ impl TerminalBackend for ModalBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ARD-H3: truncating output at a raw byte offset that lands inside a
+    /// multi-byte UTF-8 character must not panic — it snaps down to the char
+    /// boundary, dropping the straddling character whole.
+    #[test]
+    fn truncate_to_char_boundary_snaps_down_without_panicking() {
+        // "é" is two bytes (0xC3 0xA9). Cutting at 3 bytes lands mid-character.
+        let mut s = "aé".to_string(); // bytes: 'a'(1) + 'é'(2) = 3
+        truncate_to_char_boundary(&mut s, 2);
+        assert_eq!(s, "a", "the straddling multi-byte char is dropped whole");
+        assert!(std::str::from_utf8(s.as_bytes()).is_ok());
+
+        // A boundary that already lands cleanly is untouched.
+        let mut clean = "abc".to_string();
+        truncate_to_char_boundary(&mut clean, 2);
+        assert_eq!(clean, "ab");
+
+        // A limit at or beyond the length is a no-op.
+        let mut short = "aé".to_string();
+        truncate_to_char_boundary(&mut short, 99);
+        assert_eq!(short, "aé");
+    }
+
+    /// The end-to-end `ExecResult::new` truncation path (the one that used to
+    /// panic) survives multi-byte output crossing the cap on a char boundary.
+    #[test]
+    fn exec_result_truncation_survives_multibyte_boundary() {
+        // 10 × "é" = 20 bytes of valid UTF-8; cap at 5 bytes lands mid-char.
+        let stdout = "é".repeat(10);
+        let result = ExecResult::new(stdout, String::new(), 0, BackendKind::Local, now_ms(), 5);
+        assert!(result.truncated);
+        assert!(result.stdout.len() <= 5);
+        assert!(
+            std::str::from_utf8(result.stdout.as_bytes()).is_ok(),
+            "truncated output is still valid UTF-8"
+        );
+        // 5 bytes floors to 2 whole "é" characters (4 bytes).
+        assert_eq!(result.stdout, "éé");
+    }
 
     /// ARD-476: the safe-charset allowlist admits ordinary commands, flags,
     /// paths, and `key=value` pairs (under a permissive policy, so only the
