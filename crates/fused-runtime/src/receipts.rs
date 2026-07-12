@@ -399,7 +399,7 @@ mod tests {
             verb: VerbObject::new("cost.admission.allow.v1").expect("valid verb"),
             issued_at: UnixTsMillis(1_700_000_000_000),
             subject: HolderId("spiffe://ardur/test".to_string()),
-            cap_token_id: TokenId("test-token".to_string()),
+            cap_token_id: TokenId(uuid::Uuid::from_u128(0x7e57)),
             payload_digest: Sha256Digest::of(b"payload"),
             session_id: None,
             cost: CostTuple {

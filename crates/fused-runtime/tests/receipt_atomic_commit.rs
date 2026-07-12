@@ -224,7 +224,7 @@ fn boot_refuses_broken_receipt_chain() {
         verb: VerbObject::new("llm.completion.minted.v1").expect("verb"),
         issued_at: ardur_receipt::UnixTsMillis(support::NOW_MS),
         subject: ardur_receipt::HolderId(support::HOLDER.to_string()),
-        cap_token_id: ardur_receipt::TokenId("cap".to_string()),
+        cap_token_id: ardur_receipt::TokenId(uuid::Uuid::from_u128(0x0ca9)),
         payload_digest: Sha256Digest::of(content),
         session_id: None,
         cost: ardur_receipt::CostTuple {
@@ -273,7 +273,7 @@ fn boot_refuses_hash_linked_receipt_with_wrong_es256_key() {
         verb: VerbObject::new("llm.completion.minted.v1").expect("verb"),
         issued_at: ardur_receipt::UnixTsMillis(support::NOW_MS),
         subject: ardur_receipt::HolderId(support::HOLDER.to_string()),
-        cap_token_id: ardur_receipt::TokenId("cap".to_string()),
+        cap_token_id: ardur_receipt::TokenId(uuid::Uuid::from_u128(0x0ca9)),
         payload_digest: Sha256Digest::of(b"complete"),
         session_id: None,
         cost: ardur_receipt::CostTuple {
@@ -322,7 +322,7 @@ async fn direct_reconciliation_reauthenticates_receipts_loaded_after_boot() {
         verb: VerbObject::new("llm.completion.minted.v1").expect("verb"),
         issued_at: ardur_receipt::UnixTsMillis(support::NOW_MS),
         subject: ardur_receipt::HolderId(support::HOLDER.to_string()),
-        cap_token_id: ardur_receipt::TokenId("cap".to_string()),
+        cap_token_id: ardur_receipt::TokenId(uuid::Uuid::from_u128(0x0ca9)),
         payload_digest: Sha256Digest::of(b"tampered-after-boot"),
         session_id: Some(session_id.0),
         cost: ardur_receipt::CostTuple {
@@ -363,7 +363,7 @@ fn load_persisted_chain_drops_and_truncates_torn_trailing_line() {
         verb: VerbObject::new("llm.completion.minted.v1").expect("verb"),
         issued_at: ardur_receipt::UnixTsMillis(support::NOW_MS),
         subject: ardur_receipt::HolderId(support::HOLDER.to_string()),
-        cap_token_id: ardur_receipt::TokenId("cap".to_string()),
+        cap_token_id: ardur_receipt::TokenId(uuid::Uuid::from_u128(0x0ca9)),
         payload_digest: Sha256Digest::of(b"complete"),
         session_id: None,
         cost: ardur_receipt::CostTuple {

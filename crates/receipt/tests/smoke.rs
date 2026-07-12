@@ -14,7 +14,7 @@ fn sample_body(verb: &str) -> ReceiptBody {
         verb: VerbObject::new(verb).expect("test verb is well-formed"),
         issued_at: UnixTsMillis(1_700_000_000_000),
         subject: HolderId("spiffe://ardur/user/alice".to_string()),
-        cap_token_id: TokenId("jti-0001".to_string()),
+        cap_token_id: TokenId(uuid::Uuid::from_u128(0x0001)),
         payload_digest: Sha256Digest::of(b"event-payload"),
         session_id: None,
         cost: CostTuple {

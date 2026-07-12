@@ -185,7 +185,7 @@ mod tests {
             verb: VerbObject::new("cost.admission.allow.v1").unwrap(),
             issued_at: UnixTsMillis(1_700_000_000_000),
             subject: HolderId("spiffe://ardur/user/alice".to_string()),
-            cap_token_id: TokenId("jti-0001".to_string()),
+            cap_token_id: TokenId(uuid::Uuid::from_u128(0x0001)),
             payload_digest: Sha256Digest::of(b"event-payload"),
             session_id: None,
             cost: CostTuple {
