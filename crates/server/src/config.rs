@@ -17,6 +17,7 @@ use std::fmt;
 use std::path::PathBuf;
 
 use ardur_provider_selector::{ProviderKind, SELECTOR_ENV};
+use ardur_tool_registry::{BuiltinOpts, HttpFetchOpts};
 
 /// How the process emits tracing events.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -151,6 +152,30 @@ pub struct Config {
     /// Optional Qdrant collection override (`QDRANT_COLLECTION`). Tests can set
     /// this field directly instead of mutating process-global environment.
     pub qdrant_collection: Option<String>,
+    /// **ARD-457.** Register the hardened §6.1 `shell.run` built-in tool
+    /// (`ARDUR_ENABLE_SHELL_TOOL`, default `false`). Fail-closed: enabling it
+    /// *requires* a non-empty [`shell_allowlist`](Self::shell_allowlist) — the
+    /// server never registers the unrestricted, dev-only shell — so an
+    /// enable-without-allowlist is rejected at [`from_env`](Self::from_env).
+    pub enable_shell_tool: bool,
+    /// The command allowlist for `shell.run` (`ARDUR_SHELL_ALLOWLIST`, CSV of
+    /// `|`-separated command prefixes, e.g. `git|cargo,ls`). Empty unless
+    /// [`enable_shell_tool`](Self::enable_shell_tool) is set (and then required
+    /// to be non-empty).
+    pub shell_allowlist: Vec<String>,
+    /// **ARD-457.** Register the §6.2 `http.fetch` built-in tool
+    /// (`ARDUR_ENABLE_HTTP_TOOL`, default `false`). SSRF defense stays on
+    /// (private/internal IPs are never reachable); an empty
+    /// [`http_allowlist`](Self::http_allowlist) confines it to localhost.
+    pub enable_http_tool: bool,
+    /// Host allowlist for `http.fetch` (`ARDUR_HTTP_ALLOWLIST`, CSV; exact,
+    /// `*.example.com`, or `*`). Empty leaves the tool able to reach only
+    /// localhost. Ignored unless [`enable_http_tool`](Self::enable_http_tool).
+    pub http_allowlist: Vec<String>,
+    /// **ARD-457.** Root directory confining the `file.read`/`file.write`/
+    /// `file.list` built-in tools (`ARDUR_FILE_TOOL_ROOT`). `Some(root)`
+    /// registers all three confined to it; `None` registers no file tool.
+    pub file_tool_root: Option<PathBuf>,
 }
 
 /// A required environment variable was unset or empty.
@@ -224,6 +249,11 @@ impl fmt::Debug for Config {
             .field("memory_backend", &self.memory_backend)
             .field("qdrant_url", &self.qdrant_url)
             .field("qdrant_collection", &self.qdrant_collection)
+            .field("enable_shell_tool", &self.enable_shell_tool)
+            .field("shell_allowlist", &self.shell_allowlist)
+            .field("enable_http_tool", &self.enable_http_tool)
+            .field("http_allowlist", &self.http_allowlist)
+            .field("file_tool_root", &self.file_tool_root)
             .finish()
     }
 }
@@ -360,6 +390,30 @@ impl Config {
                 (false, None, None, None)
             };
 
+        // ARD-457: the hardened §6.1 built-in tools are opt-in and fail-closed.
+        // Nothing registers unless the operator sets these; the default boot is
+        // behaviourally unchanged. Enabling the shell tool *requires* a non-empty
+        // allowlist — the unrestricted, dev-only shell is never registered on a
+        // server — so an enable-without-allowlist is rejected here rather than
+        // silently downgraded (mirrors the Matrix/Discord conditional-require).
+        let enable_shell_tool = optional("ARDUR_ENABLE_SHELL_TOOL")
+            .as_deref()
+            .is_some_and(is_truthy);
+        let shell_allowlist = parse_csv(optional("ARDUR_SHELL_ALLOWLIST").as_deref());
+        if enable_shell_tool && shell_allowlist.is_empty() {
+            return Err(ConfigError::Invalid {
+                var: "ARDUR_ENABLE_SHELL_TOOL",
+                reason: "enabling shell.run requires a non-empty ARDUR_SHELL_ALLOWLIST; \
+                         the unrestricted dev-only shell is never registered on a server"
+                    .to_string(),
+            });
+        }
+        let enable_http_tool = optional("ARDUR_ENABLE_HTTP_TOOL")
+            .as_deref()
+            .is_some_and(is_truthy);
+        let http_allowlist = parse_csv(optional("ARDUR_HTTP_ALLOWLIST").as_deref());
+        let file_tool_root = optional("ARDUR_FILE_TOOL_ROOT").map(PathBuf::from);
+
         Ok(Self {
             anthropic_api_key,
             slack_enabled,
@@ -414,7 +468,43 @@ impl Config {
             memory_backend,
             qdrant_url,
             qdrant_collection: optional("QDRANT_COLLECTION"),
+            enable_shell_tool,
+            shell_allowlist,
+            enable_http_tool,
+            http_allowlist,
+            file_tool_root,
         })
+    }
+
+    /// **ARD-457.** Map the operator's opt-ins to the [`BuiltinOpts`] that
+    /// [`register_builtins`](ardur_tool_registry::ToolRegistry::register_builtins)
+    /// consumes, preserving the fail-closed posture:
+    ///
+    /// - The shell tool is registered only with `Some(allowlist)` — never the
+    ///   unrestricted [`ShellTool::without_allowlist`](ardur_tool_registry::ShellTool::without_allowlist).
+    ///   [`from_env`](Self::from_env) already rejected an enable-without-allowlist,
+    ///   and even an (impossible) empty list is fail-closed (denies every command).
+    /// - `http.fetch` keeps SSRF defense on (`allow_private_ips: false`).
+    /// - The file tools register only when a root is configured.
+    ///
+    /// With no opt-ins set, every field is off and `register_builtins` is a no-op,
+    /// so the default boot registers no hardened tool.
+    #[must_use]
+    pub fn builtin_tool_opts(&self) -> BuiltinOpts {
+        BuiltinOpts {
+            enable_shell: self.enable_shell_tool,
+            // Always `Some` when the shell is enabled, so the unrestricted shell
+            // (`None`) is never constructed here.
+            shell_allowlist: self.enable_shell_tool.then(|| self.shell_allowlist.clone()),
+            file_root: self.file_tool_root.clone(),
+            http: self.enable_http_tool.then(|| HttpFetchOpts {
+                enable: true,
+                allowlist: self.http_allowlist.clone(),
+                // SSRF stays on and the ceilings keep their strict defaults.
+                ..HttpFetchOpts::default()
+            }),
+            enable_media: false,
+        }
     }
 }
 

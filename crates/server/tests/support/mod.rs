@@ -79,6 +79,11 @@ pub fn test_config(data_dir: &TempDir, slack_base: Option<String>) -> Config {
         memory_backend: MemoryBackend::InMemory,
         qdrant_url: None,
         qdrant_collection: None,
+        enable_shell_tool: false,
+        shell_allowlist: Vec::new(),
+        enable_http_tool: false,
+        http_allowlist: Vec::new(),
+        file_tool_root: None,
     }
 }
 
