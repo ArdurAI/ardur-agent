@@ -154,6 +154,19 @@ pub struct CompactOutcome {
     pub after_tokens_estimate: u64,
 }
 
+/// **§1.9.** The result of [`FusedRuntime::run_background_task`]. Exactly one
+/// of `result`/`error` is `Some` — a background task's own success/failure is
+/// a normal terminal outcome, not a [`RuntimeError`] (see the method's docs).
+#[derive(Clone, Debug)]
+pub struct BackgroundTaskOutcome {
+    /// The terminal receipt chained for this task (completed or failed).
+    pub receipt_id: ReceiptId,
+    /// The task's result, on success.
+    pub result: Option<String>,
+    /// The failure message, on failure.
+    pub error: Option<String>,
+}
+
 /// A [`ChatRuntime`] that fuses every Phase-1 substrate crate behind one
 /// ARD-488: releases a turn's cost reservation when the turn future is dropped
 /// before it settles (outer `tokio::time::timeout`, `select!` loss, client or
@@ -641,6 +654,118 @@ impl FusedRuntime {
         self.verify_cap_token_for_tool(cap_token, tool)?;
         let response = self.summarize(history, focus.as_deref()).await?;
         Ok(response.content)
+    }
+
+    /// **§1.9.** Run one agent background task: a single prompt dispatched
+    /// straight to the provider (like [`compact`](Self::compact), this
+    /// bypasses `submit`/`stream` — a background task's own transcript is
+    /// not the foreground conversation, per the blueprint's invariant that a
+    /// background task "can be inspected without injecting its full context
+    /// into the foreground chat").
+    ///
+    /// Unlike `compact`, a provider failure here is *not* an `Err` — the
+    /// blueprint's invariant 12 requires a terminal receipt whether the task
+    /// completes or fails, so a failed provider call still mints a
+    /// `task.background.failed.v1` receipt and returns `Ok` with the outcome's
+    /// `error` field set. Only a denied cap-token (never even attempted) or a
+    /// receipt-mint failure is a hard `Err`.
+    ///
+    /// KNOWN LIMITATION: same as `compact` — not yet cost-gate admission
+    /// controlled before dispatch.
+    ///
+    /// # Errors
+    /// Returns [`RuntimeError`] if the cap-token does not grant `tool` or a
+    /// receipt could not be minted.
+    pub async fn run_background_task(
+        &self,
+        session_id: SessionId,
+        cap_token: &CapTokenRef,
+        tool: &str,
+        prompt: &str,
+    ) -> Result<BackgroundTaskOutcome, RuntimeError> {
+        self.verify_cap_token_for_tool(cap_token, tool)?;
+        let req = CompletionRequest::new(
+            vec![ChatMessage::user(prompt)],
+            self.model.clone(),
+            self.max_tokens,
+        );
+        match self.provider.complete(req).await {
+            Ok(response) => {
+                let receipt = self
+                    .commit_control_receipt(
+                        session_id,
+                        cap_token,
+                        tool,
+                        "task.background.completed.v1",
+                        Sha256Digest::of(response.content.as_bytes()),
+                        runtime_cost_to_receipt(&response.cost),
+                    )
+                    .await?;
+                Ok(BackgroundTaskOutcome {
+                    receipt_id: ReceiptId(receipt.receipt_id),
+                    result: Some(response.content),
+                    error: None,
+                })
+            }
+            Err(e) => {
+                let message = e.to_string();
+                let receipt = self
+                    .commit_control_receipt(
+                        session_id,
+                        cap_token,
+                        tool,
+                        "task.background.failed.v1",
+                        Sha256Digest::of(message.as_bytes()),
+                        ardur_receipt::CostTuple {
+                            tokens_in: 0,
+                            tokens_out: 0,
+                            cents: 0,
+                            wall_ms: 0,
+                            attention_score: 0.0,
+                        },
+                    )
+                    .await?;
+                Ok(BackgroundTaskOutcome {
+                    receipt_id: ReceiptId(receipt.receipt_id),
+                    result: None,
+                    error: Some(message),
+                })
+            }
+        }
+    }
+
+    /// **§1.9.** Mint the terminal receipt for a background task cancelled by
+    /// explicit user action (invariant 12: a background task must leave a
+    /// terminal receipt whether it completes, fails, times out, is
+    /// cancelled, or becomes lost — this MVP does not yet implement
+    /// timeout/lost detection).
+    ///
+    /// # Errors
+    /// Returns [`RuntimeError`] if the cap-token does not grant `tool` or the
+    /// receipt could not be minted.
+    pub async fn cancel_background_task(
+        &self,
+        session_id: SessionId,
+        cap_token: &CapTokenRef,
+        tool: &str,
+    ) -> Result<ReceiptId, RuntimeError> {
+        let receipt = self
+            .commit_control_receipt(
+                session_id,
+                cap_token,
+                tool,
+                "task.background.cancelled.v1",
+                Sha256Digest::of(b"cancelled by user"),
+                ardur_receipt::CostTuple {
+                    tokens_in: 0,
+                    tokens_out: 0,
+                    cents: 0,
+                    wall_ms: 0,
+                    attention_score: 0.0,
+                },
+            )
+            .await?;
+        Ok(ReceiptId(receipt.receipt_id))
     }
 
     /// Revoke a capability token mid-session: add its revocation ids to the

@@ -67,6 +67,8 @@ const SESSION_CHECKPOINT_CAPABILITY: &str = "session.checkpoint";
 const SESSION_ROLLBACK_CAPABILITY: &str = "session.rollback";
 /// §1.7 — the capability `/compact` and `/compact preview` exercise.
 const CONTEXT_COMPACT_CAPABILITY: &str = "context.compact";
+/// §1.9 — the capability `/background`/`/bg`/`/btw` and `/task cancel` exercise.
+const BACKGROUND_TASK_CAPABILITY: &str = "task.background";
 /// The session cap-token's lifetime, in seconds (one hour from process start).
 const CAP_TTL_SECS: u64 = 3_600;
 /// The default per-turn cents ceiling when `ARDUR_CLI_PER_TURN_CENTS` is unset,
@@ -176,6 +178,7 @@ impl FusedEngine {
                         SESSION_CHECKPOINT_CAPABILITY.to_string(),
                         SESSION_ROLLBACK_CAPABILITY.to_string(),
                         CONTEXT_COMPACT_CAPABILITY.to_string(),
+                        BACKGROUND_TASK_CAPABILITY.to_string(),
                     ],
                 },
             )
@@ -498,6 +501,50 @@ impl FusedEngine {
             .preview_compact(&self.cap_token, CONTEXT_COMPACT_CAPABILITY, history, focus)
             .await
             .map_err(|e| CliError::State(format!("compact preview failed: {e}")))
+    }
+
+    /// This engine's session id, so a caller (the §1.9 task registry) can
+    /// tag a spawned background task's record with its owning session
+    /// without needing its own copy threaded through separately.
+    #[must_use]
+    pub fn session_id(&self) -> SessionId {
+        self.session_id
+    }
+
+    /// **§1.9.** Run one agent background task's prompt to completion (or
+    /// failure) and mint its terminal receipt. See
+    /// [`ardur_fused_runtime::FusedRuntime::run_background_task`] for why a
+    /// provider failure is `Ok` with `error` set rather than an `Err`.
+    ///
+    /// # Errors
+    /// Returns [`CliError`] if the session cap-token does not grant the
+    /// background-task capability or a receipt could not be minted.
+    pub async fn run_background_task(
+        &self,
+        prompt: &str,
+    ) -> Result<ardur_fused_runtime::BackgroundTaskOutcome, CliError> {
+        self.runtime
+            .run_background_task(
+                self.session_id,
+                &self.cap_token,
+                BACKGROUND_TASK_CAPABILITY,
+                prompt,
+            )
+            .await
+            .map_err(|e| CliError::State(format!("background task failed: {e}")))
+    }
+
+    /// **§1.9.** Mint the terminal receipt for a background task the user
+    /// explicitly cancelled.
+    ///
+    /// # Errors
+    /// Returns [`CliError`] if the session cap-token does not grant the
+    /// background-task capability or the receipt could not be minted.
+    pub async fn cancel_background_task(&self) -> Result<ardur_runtime::ReceiptId, CliError> {
+        self.runtime
+            .cancel_background_task(self.session_id, &self.cap_token, BACKGROUND_TASK_CAPABILITY)
+            .await
+            .map_err(|e| CliError::State(format!("cancelling background task failed: {e}")))
     }
 
     /// Run one progressive chat turn through the fused runtime's full ten-stage

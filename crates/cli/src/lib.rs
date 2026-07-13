@@ -32,6 +32,7 @@
 #![warn(missing_docs)]
 
 mod anim;
+mod background_task;
 mod commands;
 mod config;
 mod engine;
@@ -51,6 +52,7 @@ mod welcome;
 use std::collections::HashMap;
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use ardur_provider_runtime::{TelemetryConfig, init_genai_tracing, shutdown_genai_tracing};
 use ardur_runtime::{
@@ -130,8 +132,11 @@ pub struct ChatArgs {
 /// legacy [`ChatEngine`] echo runtime (selected by `--echo`). Both expose the
 /// budget handle and per-turn entry the REPL drives.
 enum ActiveEngine {
-    /// The FusedRuntime-backed substrate (default).
-    Fused(Box<FusedEngine>),
+    /// The FusedRuntime-backed substrate (default). `Arc`, not `Box`: §1.9
+    /// background tasks are `tokio::spawn`ed onto their own future holding a
+    /// clone of this handle, running concurrently with the foreground REPL
+    /// loop that owns the original.
+    Fused(Arc<FusedEngine>),
     /// The legacy `InMemoryRuntime` echo substrate (`--echo`).
     Echo(Box<ChatEngine>),
 }
@@ -230,6 +235,29 @@ impl ActiveEngine {
             ActiveEngine::Fused(e) => e.preview_compact(history, focus).await,
             ActiveEngine::Echo(_) => Err(CliError::State(
                 "compact is unavailable in --echo mode (no durable journal)".to_string(),
+            )),
+        }
+    }
+
+    /// **§1.9.** A cloned handle to the fused engine, for spawning a
+    /// background task onto its own future — `--echo` mode has no journal or
+    /// receipts, so background tasks are unavailable there.
+    fn fused_engine_for_background_task(&self) -> Result<Arc<FusedEngine>, CliError> {
+        match self {
+            ActiveEngine::Fused(e) => Ok(Arc::clone(e)),
+            ActiveEngine::Echo(_) => Err(CliError::State(
+                "background tasks are unavailable in --echo mode (no durable journal)".to_string(),
+            )),
+        }
+    }
+
+    /// **§1.9.** A borrowed handle to the fused engine, for minting a
+    /// background task's cancellation receipt.
+    fn fused_engine_ref(&self) -> Result<&FusedEngine, CliError> {
+        match self {
+            ActiveEngine::Fused(e) => Ok(e),
+            ActiveEngine::Echo(_) => Err(CliError::State(
+                "background tasks are unavailable in --echo mode (no durable journal)".to_string(),
             )),
         }
     }
@@ -461,7 +489,7 @@ async fn run_chat_loop(config: Config, args: &ChatArgs) -> Result<(), CliError> 
                 "running in offline mode (stub provider) — set ANTHROPIC_API_KEY for real LLM calls."
             );
         }
-        ActiveEngine::Fused(Box::new(fused))
+        ActiveEngine::Fused(Arc::new(fused))
     };
 
     let mut bus = InMemoryCommandBus::new();
@@ -470,6 +498,7 @@ async fn run_chat_loop(config: Config, args: &ChatArgs) -> Result<(), CliError> 
         "budget",
         Box::new(BudgetCommand::new(engine.budget_handle())),
     );
+    let tasks = background_task::TaskRegistry::new();
 
     // The brand splash shows once, on the first interactive launch only.
     if stdin_tty && stdout_tty {
@@ -492,9 +521,9 @@ async fn run_chat_loop(config: Config, args: &ChatArgs) -> Result<(), CliError> 
     // A tty drives the rich line-editor; piped/redirected stdin reads lines
     // directly so `echo "hi" | ardur chat` (and the integration tests) work.
     if stdin_tty {
-        run_interactive(&engine, &bus, &mut state, &mut history, stream_enabled).await?;
+        run_interactive(&engine, &bus, &tasks, &mut state, &mut history, stream_enabled).await?;
     } else {
-        run_piped(&engine, &bus, &mut state, &mut history, stream_enabled).await;
+        run_piped(&engine, &bus, &tasks, &mut state, &mut history, stream_enabled).await;
     }
     Ok(())
 }
@@ -503,6 +532,7 @@ async fn run_chat_loop(config: Config, args: &ChatArgs) -> Result<(), CliError> 
 async fn run_interactive(
     engine: &ActiveEngine,
     bus: &InMemoryCommandBus,
+    tasks: &background_task::TaskRegistry,
     state: &mut ReplState,
     history: &mut Vec<ChatMessage>,
     stream_enabled: bool,
@@ -521,7 +551,7 @@ async fn run_interactive(
                     continue;
                 }
                 let _ = editor.add_history_entry(line);
-                if handle_line(engine, bus, state, history, line, stream_enabled).await {
+                if handle_line(engine, bus, tasks, state, history, line, stream_enabled).await {
                     break;
                 }
             }
@@ -541,6 +571,7 @@ async fn run_interactive(
 async fn run_piped(
     engine: &ActiveEngine,
     bus: &InMemoryCommandBus,
+    tasks: &background_task::TaskRegistry,
     state: &mut ReplState,
     history: &mut Vec<ChatMessage>,
     stream_enabled: bool,
@@ -553,7 +584,7 @@ async fn run_piped(
         if line.is_empty() {
             continue;
         }
-        if handle_line(engine, bus, state, history, line, stream_enabled).await {
+        if handle_line(engine, bus, tasks, state, history, line, stream_enabled).await {
             break;
         }
     }
@@ -564,13 +595,14 @@ async fn run_piped(
 async fn handle_line(
     engine: &ActiveEngine,
     bus: &InMemoryCommandBus,
+    tasks: &background_task::TaskRegistry,
     state: &mut ReplState,
     history: &mut Vec<ChatMessage>,
     line: &str,
     stream_enabled: bool,
 ) -> bool {
     if let Some(rest) = line.strip_prefix('/') {
-        dispatch_slash(engine, bus, state, history, rest).await
+        dispatch_slash(engine, bus, tasks, state, history, rest).await
     } else {
         run_chat_message(engine, state, history, line, stream_enabled).await;
         false
@@ -578,14 +610,16 @@ async fn handle_line(
 }
 
 /// Dispatch a `/`-stripped command line. The §2.X-live commands (`/theme`,
-/// `/cost`, `/clear`) and the §1.8 session-control commands (`/checkpoint`,
-/// `/checkpoints`, `/rollback`) are handled here against the [`ReplState`]
-/// (and, for rollback, `history`); everything else (`/help`, `/budget`,
-/// `/quit`, `/exit`, unknown) routes through the bus.
+/// `/cost`, `/clear`), the §1.8 session-control commands (`/checkpoint`,
+/// `/checkpoints`, `/rollback`), and the §1.9 background-task commands
+/// (`/background`, `/bg`, `/btw`, `/tasks`, `/task ...`) are handled here
+/// against the [`ReplState`] (and, for rollback, `history`); everything else
+/// (`/help`, `/budget`, `/quit`, `/exit`, unknown) routes through the bus.
 /// Returns `true` if the command was `/quit` or `/exit`.
 async fn dispatch_slash(
     engine: &ActiveEngine,
     bus: &InMemoryCommandBus,
+    tasks: &background_task::TaskRegistry,
     state: &mut ReplState,
     history: &mut Vec<ChatMessage>,
     rest: &str,
@@ -670,6 +704,18 @@ async fn dispatch_slash(
         }
         "compact" | "compress" => {
             dispatch_compact(engine, state, history, args).await;
+            false
+        }
+        "background" | "bg" | "btw" => {
+            dispatch_background_start(engine, tasks, state, args);
+            false
+        }
+        "tasks" => {
+            dispatch_tasks_list(tasks, state);
+            false
+        }
+        "task" => {
+            dispatch_task_sub(engine, tasks, state, args).await;
             false
         }
         _ => {
@@ -808,6 +854,110 @@ async fn dispatch_compact(
                 Err(e) => println!("{}", state.theme.paint(Role::Error, &format!("{e}"))),
             }
         }
+    }
+}
+
+/// **§1.9.** `/background <prompt>` (aliases `/bg`, `/btw`): spawn `prompt`
+/// as a new background task and print its id immediately — the task runs
+/// concurrently; `/tasks`/`/task status <id>` poll its progress.
+fn dispatch_background_start(
+    engine: &ActiveEngine,
+    tasks: &background_task::TaskRegistry,
+    state: &mut ReplState,
+    args: &str,
+) {
+    if args.is_empty() {
+        println!("usage: /background <prompt> (aliases: /bg, /btw)");
+        return;
+    }
+    match engine.fused_engine_for_background_task() {
+        Ok(fused) => {
+            let id = tasks.spawn(fused, args.to_string());
+            println!(
+                "{}",
+                state
+                    .theme
+                    .paint(Role::Dim, &format!("started background task {id}"))
+            );
+        }
+        Err(e) => println!("{}", state.theme.paint(Role::Error, &format!("{e}"))),
+    }
+}
+
+/// **§1.9.** `/tasks`: list every background task started this process, most
+/// recent activity is not ordered (the blueprint's `--active`/`--status`/
+/// `--runtime` filters are deferred).
+fn dispatch_tasks_list(tasks: &background_task::TaskRegistry, state: &mut ReplState) {
+    let mut all = tasks.list();
+    if all.is_empty() {
+        println!("{}", state.theme.paint(Role::Dim, "no background tasks"));
+        return;
+    }
+    all.sort_by_key(|t| t.id.0);
+    for task in all {
+        println!("{} [{}] {}", task.id, task.status, task.prompt);
+    }
+}
+
+/// **§1.9.** `/task status|log|result|cancel <task_id>`.
+async fn dispatch_task_sub(
+    engine: &ActiveEngine,
+    tasks: &background_task::TaskRegistry,
+    state: &mut ReplState,
+    args: &str,
+) {
+    let (sub, rest) = args.split_once(char::is_whitespace).unwrap_or((args, ""));
+    let rest = rest.trim();
+    let Ok(id) = rest
+        .parse::<uuid::Uuid>()
+        .map(background_task::TaskId)
+    else {
+        println!("usage: /task status|log|result|cancel <task-id>");
+        return;
+    };
+    match sub {
+        "status" | "log" => match tasks.get(id) {
+            Some(task) => println!(
+                "{} [{}] owner-session={} {}{}{}",
+                task.id,
+                task.status,
+                task.owner_session_id.0,
+                task.prompt,
+                task.result
+                    .as_ref()
+                    .map(|r| format!("\nresult: {r}"))
+                    .unwrap_or_default(),
+                task.error
+                    .as_ref()
+                    .map(|e| format!("\nerror: {e}"))
+                    .unwrap_or_default(),
+            ),
+            None => println!("task {id} not found"),
+        },
+        "result" => match tasks.get(id) {
+            Some(task) => match (task.result, task.error) {
+                (Some(result), _) => println!("{result}"),
+                (None, Some(error)) => {
+                    println!("{}", state.theme.paint(Role::Error, &format!("failed: {error}")));
+                }
+                (None, None) => println!(
+                    "{}",
+                    state.theme.paint(Role::Dim, &format!("task {id} is still {}", task.status))
+                ),
+            },
+            None => println!("task {id} not found"),
+        },
+        "cancel" => match engine.fused_engine_ref() {
+            Ok(fused) => match tasks.cancel(fused, id).await {
+                Ok(()) => println!(
+                    "{}",
+                    state.theme.paint(Role::Dim, &format!("cancelled task {id}"))
+                ),
+                Err(e) => println!("{}", state.theme.paint(Role::Error, &format!("{e}"))),
+            },
+            Err(e) => println!("{}", state.theme.paint(Role::Error, &format!("{e}"))),
+        },
+        _ => println!("usage: /task status|log|result|cancel <task-id>"),
     }
 }
 
