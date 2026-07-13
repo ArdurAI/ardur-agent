@@ -77,9 +77,10 @@ async fn server_routes_signed_slack_message_through_runtime_to_chat_post_message
     let data_dir = tempfile::tempdir().expect("tempdir");
     let config = Config {
         anthropic_api_key: String::new(),
-        slack_bot_token: BOT_TOKEN.to_string(),
-        slack_signing_secret: SIGNING_SECRET.to_string(),
-        slack_app_id: APP_ID.to_string(),
+        slack_enabled: true,
+        slack_bot_token: Some(BOT_TOKEN.to_string()),
+        slack_signing_secret: Some(SIGNING_SECRET.to_string()),
+        slack_app_id: Some(APP_ID.to_string()),
         slack_allowed_senders: vec!["U0DEPLOY".to_string()],
         data_dir: data_dir.path().to_path_buf(),
         bind_addr: "127.0.0.1:0".to_string(),

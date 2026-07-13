@@ -147,7 +147,8 @@ fn from_env_ollama_does_not_require_anthropic_key() {
     assert_eq!(config.bind_addr, "127.0.0.1:3000");
     assert!(config.chat_bearer_tokens.is_empty());
     assert!(!config.dev_permissive_policy);
-    assert_eq!(config.slack_app_id, "A0TEST");
+    assert!(config.slack_enabled);
+    assert_eq!(config.slack_app_id.as_deref(), Some("A0TEST"));
 }
 
 #[test]
@@ -417,14 +418,37 @@ fn from_env_telegram_enabled_with_token_loads() {
 
 #[test]
 #[serial]
-fn from_env_still_requires_slack_credentials() {
+fn from_env_http_only_loads_without_slack() {
     let _guard = env_lock();
     let _env = CleanEnv::new(); // no slack creds, ollama selected
     set("ARDUR_PROVIDER", "ollama");
 
-    let err = Config::from_env().expect_err("slack credentials are always required");
+    // Slack is now auto-detected: with `SLACK_BOT_TOKEN` unset, the server boots
+    // HTTP-only for `/chat` rather than refusing to start.
+    let config = Config::from_env().expect("http-only boot loads without Slack credentials");
     assert!(
-        err.to_string().contains("SLACK_"),
-        "error should name a missing Slack variable, got: {err}"
+        !config.slack_enabled,
+        "Slack is disabled when SLACK_BOT_TOKEN is unset"
+    );
+    assert!(config.slack_bot_token.is_none());
+    assert!(config.slack_signing_secret.is_none());
+    assert!(config.slack_app_id.is_none());
+}
+
+#[test]
+#[serial]
+fn from_env_partial_slack_creds_fails() {
+    let _guard = env_lock();
+    let _env = CleanEnv::new();
+    set("ARDUR_PROVIDER", "ollama");
+    // Bot token present triggers the Slack requirement, but the signing secret is
+    // deliberately left unset — a partial config must fail closed.
+    set("SLACK_BOT_TOKEN", "xoxb-test");
+    set("SLACK_APP_ID", "A0TEST"); // SLACK_SIGNING_SECRET deliberately unset
+
+    let err = Config::from_env().expect_err("partial Slack config must fail closed");
+    assert!(
+        err.to_string().contains("SLACK_SIGNING_SECRET"),
+        "error should name the missing Slack signing secret, got: {err}"
     );
 }

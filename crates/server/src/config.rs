@@ -1,6 +1,8 @@
 //! [`Config`] — the server's startup configuration, read from the environment.
 //!
-//! Every knob has an env var; the Slack credentials are always required, the
+//! Every knob has an env var; the Slack channel is auto-detected (present
+//! `SLACK_BOT_TOKEN` → all three Slack credentials required, absent → Slack
+//! disabled and the server boots HTTP-only for `/chat`), the
 //! [`anthropic_api_key`] is required only when the Anthropic backend is selected
 //! (the `ARDUR_PROVIDER` default), and the rest default. [`Config::from_env`] is
 //! the production path; tests build a [`Config`] by hand (with a tempdir
@@ -49,13 +51,21 @@ pub struct Config {
     /// live Anthropic provider reads the key from the environment itself, so this
     /// field is informational — tests inject a stub provider and leave it empty.
     pub anthropic_api_key: String,
-    /// Slack bot token (`SLACK_BOT_TOKEN`) for `chat.postMessage`.
-    pub slack_bot_token: String,
-    /// Slack signing secret (`SLACK_SIGNING_SECRET`) for inbound HMAC verification.
-    pub slack_signing_secret: String,
+    /// Whether the Slack channel is enabled (auto-detected: `true` when
+    /// `SLACK_BOT_TOKEN` is present). When `false`, the server boots HTTP-only —
+    /// `/chat` works, but the `/slack/events` route is not mounted and no Slack
+    /// adapter is built. Derived from the three `slack_*` credentials being
+    /// `Some`.
+    pub slack_enabled: bool,
+    /// Slack bot token (`SLACK_BOT_TOKEN`) for `chat.postMessage`. `None` when
+    /// Slack is disabled (HTTP-only boot).
+    pub slack_bot_token: Option<String>,
+    /// Slack signing secret (`SLACK_SIGNING_SECRET`) for inbound HMAC
+    /// verification. `None` when Slack is disabled.
+    pub slack_signing_secret: Option<String>,
     /// Slack app id (`SLACK_APP_ID`) — namespaces channel ids and drops the
-    /// bot's own messages (loop-prevention).
-    pub slack_app_id: String,
+    /// bot's own messages (loop-prevention). `None` when Slack is disabled.
+    pub slack_app_id: Option<String>,
     /// Inbound Slack sender allowlist (`SLACK_ALLOWED_SENDERS`, CSV). Deny-
     /// by-default (ARD-475): empty drops every sender, so the operator must
     /// list the Slack user ids permitted to command the bot.
@@ -173,10 +183,14 @@ impl fmt::Debug for Config {
                 "anthropic_api_key",
                 &redacted_present(&self.anthropic_api_key),
             )
-            .field("slack_bot_token", &redacted_present(&self.slack_bot_token))
+            .field("slack_enabled", &self.slack_enabled)
+            .field(
+                "slack_bot_token",
+                &redacted_present_opt(self.slack_bot_token.as_deref()),
+            )
             .field(
                 "slack_signing_secret",
-                &redacted_present(&self.slack_signing_secret),
+                &redacted_present_opt(self.slack_signing_secret.as_deref()),
             )
             .field("slack_app_id", &self.slack_app_id)
             .field("slack_allowed_senders", &self.slack_allowed_senders)
@@ -222,6 +236,15 @@ fn redacted_present(value: &str) -> &'static str {
     }
 }
 
+/// Redact an optional secret: `<redacted>` when present and non-empty, `<unset>`
+/// otherwise (mirrors [`redacted_present`] for `Option<&str>` fields).
+fn redacted_present_opt(value: Option<&str>) -> &'static str {
+    match value {
+        Some(v) if !v.is_empty() => "<redacted>",
+        _ => "<unset>",
+    }
+}
+
 fn redacted_count(count: usize) -> String {
     format!("<redacted:{count}>")
 }
@@ -242,10 +265,17 @@ impl Config {
     /// `ARDUR_MEMORY=hybrid` selects the §7.0c dense+sparse retriever over that
     /// same store (the default `in_memory` backend needs no Qdrant).
     ///
+    /// The Slack channel is auto-detected: when `SLACK_BOT_TOKEN` is present, all
+    /// three Slack credentials (`SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`,
+    /// `SLACK_APP_ID`) are required — a partial configuration fails closed. When
+    /// `SLACK_BOT_TOKEN` is absent, Slack is disabled and the server boots
+    /// HTTP-only (`/chat` still works; `/slack/events` is not mounted). This
+    /// mirrors the opt-in shape of the Matrix/Discord/Telegram channels.
+    ///
     /// # Errors
     /// [`MissingEnvVar`] naming the first required variable that is unset or
-    /// empty (`SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`, `SLACK_APP_ID`,
-    /// `ANTHROPIC_API_KEY` when the Anthropic backend is selected, and
+    /// empty (`SLACK_SIGNING_SECRET` or `SLACK_APP_ID` when `SLACK_BOT_TOKEN` is
+    /// present, `ANTHROPIC_API_KEY` when the Anthropic backend is selected, and
     /// `QDRANT_URL` when the Qdrant memory backend is selected).
     pub fn from_env() -> Result<Self, ConfigError> {
         // The Anthropic key gates only the Anthropic backend; under any other
@@ -313,11 +343,29 @@ impl Config {
             require("TELEGRAM_BOT_TOKEN")?;
         }
 
+        // The Slack channel is auto-detected on `SLACK_BOT_TOKEN`, mirroring the
+        // opt-in shape of the channels above: present → all three credentials are
+        // required (a partial config fails closed), absent → Slack disabled and
+        // the server boots HTTP-only for `/chat`. Slack is the sole channel that
+        // used to be unconditionally required; now nothing forces it.
+        let (slack_enabled, slack_bot_token, slack_signing_secret, slack_app_id) =
+            if optional("SLACK_BOT_TOKEN").is_some() {
+                (
+                    true,
+                    Some(require("SLACK_BOT_TOKEN")?),
+                    Some(require("SLACK_SIGNING_SECRET")?),
+                    Some(require("SLACK_APP_ID")?),
+                )
+            } else {
+                (false, None, None, None)
+            };
+
         Ok(Self {
             anthropic_api_key,
-            slack_bot_token: require("SLACK_BOT_TOKEN")?,
-            slack_signing_secret: require("SLACK_SIGNING_SECRET")?,
-            slack_app_id: require("SLACK_APP_ID")?,
+            slack_enabled,
+            slack_bot_token,
+            slack_signing_secret,
+            slack_app_id,
             slack_allowed_senders: parse_csv(optional("SLACK_ALLOWED_SENDERS").as_deref()),
             data_dir: optional("ARDUR_DATA_DIR")
                 .map_or_else(|| PathBuf::from("./data"), PathBuf::from),
