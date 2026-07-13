@@ -273,6 +273,38 @@ async fn journal_endpoint_returns_entries() {
 }
 
 #[tokio::test]
+async fn journal_endpoint_redacts_secret_shaped_content() {
+    let fx = Fixture::new();
+    write_journal(
+        &fx.journal_dir,
+        "sess-secret",
+        &[
+            user_msg(
+                "here's my key sk-abcdefghijklmnopqrstuvwxyz, don't share it",
+                UnixTsMillis::from(1u64),
+            ),
+            assistant_msg("got it, noted safely", UnixTsMillis::from(2u64)),
+        ],
+    );
+
+    let res = fx.server().get("/api/sessions/sess-secret/journal").await;
+    res.assert_status_ok();
+    let page: Value = res.json();
+    let entries = page["entries"].as_array().unwrap();
+    let user_content = entries[0]["content"].as_str().unwrap();
+    assert!(
+        user_content.contains("<REDACTED>"),
+        "secret-shaped content should be redacted: {user_content}"
+    );
+    assert!(
+        !user_content.contains("sk-abcdefghijklmnopqrstuvwxyz"),
+        "the raw key must not appear in the response: {user_content}"
+    );
+    // Ordinary content is untouched.
+    assert_eq!(entries[1]["content"], "got it, noted safely");
+}
+
+#[tokio::test]
 async fn journal_endpoint_paginates() {
     let fx = Fixture::new();
     let entries: Vec<JournalEntry> = (0..5)

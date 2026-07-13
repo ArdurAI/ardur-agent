@@ -20,7 +20,9 @@ use ardur_cli::{
     list_directory_names_no_follow, read_string_no_follow, remove_directory_tree_no_follow,
     run_chat, write_private_file_atomic_no_follow, write_private_file_no_follow,
 };
-use ardur_session_journals::JournalEntry;
+use ardur_session_journals::{
+    JournalEntry, default_secret_patterns, redact_entries_default, redact_text,
+};
 use audit::{AuditArgs, run_audit};
 use clap::{Args, Parser, Subcommand};
 use device_mesh::{NodesArgs, run_nodes};
@@ -918,7 +920,7 @@ fn run_session(args: SessionArgs) -> Result<(), CliError> {
             let id = validated_session_id(&id)?;
             let journal_path = session_journal_path(&sessions_dir, &id);
             let entries = require_session_entries(&journal_path, &id)?;
-            let redacted_entries = redact_session_entries(&entries);
+            let redacted_entries = redact_entries_default(&entries);
             let receipts = session_receipts(&redacted_entries);
             let receipt_inventory = load_session_receipt_inventory(&root);
             let receipt_status = receipt_inventory.status_for(&receipts, &id);
@@ -1354,29 +1356,6 @@ mod session_cost_tests {
             None
         );
     }
-}
-
-fn redact_session_entries(entries: &[JournalEntry]) -> Vec<JournalEntry> {
-    let patterns = default_secret_patterns();
-    let mut redacted = entries.to_vec();
-    for entry in &mut redacted {
-        match entry {
-            JournalEntry::UserMessage { content, .. }
-            | JournalEntry::AssistantMessage { content, .. } => {
-                *content = redact_text(content, &patterns);
-            }
-            JournalEntry::Checkpoint { summary, .. } => {
-                *summary = redact_text(summary, &patterns);
-            }
-            JournalEntry::Invalidation { reason, .. } => {
-                *reason = redact_text(reason, &patterns);
-            }
-            JournalEntry::ToolInvocation { .. }
-            | JournalEntry::CostFinalized { .. }
-            | JournalEntry::Rollback { .. } => {}
-        }
-    }
-    redacted
 }
 
 fn write_private_session_export(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
@@ -2537,41 +2516,6 @@ struct RedactArgs {
     /// If set, treat input as JSON and redact string values recursively.
     #[arg(long)]
     json: bool,
-}
-
-/// Default secret patterns: API keys, tokens, passwords, private keys, etc.
-fn default_secret_patterns() -> Vec<regex::Regex> {
-    let patterns = [
-        // OpenAI / Anthropic / OpenRouter API keys, including segmented
-        // prefixes such as `sk-ant-...` and `sk-or-...`.
-        r"(?i)\bsk-[a-z0-9_-]{16,}",
-        // Generic secret-looking tokens
-        r"(?i)bearer\s+[a-z0-9_\-\.]{20,}",
-        r"(?i)token[a-z0-9_\-]*[:=]\s*[a-z0-9_\-\.]{8,}",
-        r"(?i)api[_\-]?key[a-z0-9_\-]*[:=]\s*[a-z0-9_\-\.]{8,}",
-        // Natural-language password/secret leakage
-        r"(?i)pass(?:word)?\s*(?:is|=|:)\s*\S+",
-        r"(?i)secret(?:\s+is|=|:)\s*\S+",
-        // AWS-style access keys
-        r"AKIA[0-9A-Z]{16}",
-        // Private keys / certs
-        r"-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----[\s\S]*?-----END",
-        // GitHub tokens
-        r"gh[pousr]_[A-Za-z0-9_]{36,}",
-    ];
-    patterns
-        .iter()
-        .filter_map(|p| regex::Regex::new(p).ok())
-        .collect()
-}
-
-/// Redact secrets in a plain string.
-fn redact_text(text: &str, patterns: &[regex::Regex]) -> String {
-    let mut out = text.to_string();
-    for re in patterns {
-        out = re.replace_all(&out, "<REDACTED>").to_string();
-    }
-    out
 }
 
 /// Recursively redact string values in a JSON object.

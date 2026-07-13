@@ -1043,6 +1043,7 @@ dependencies = [
  "ardur-tool-registry",
  "async-trait",
  "parking_lot",
+ "regex",
  "rustix",
  "serde",
  "serde_json",
