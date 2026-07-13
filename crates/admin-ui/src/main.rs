@@ -11,6 +11,7 @@ use ardur_admin::auth::{BasicAuth, BearerAuth};
 use ardur_admin::build_router;
 use ardur_admin::config::{Cli, parse_bearer_tokens, resolve_bind_addr, validate_bind};
 use ardur_admin::state::{AppState, MemorySource};
+use ardur_cedar_policy::{CedarPolicyBundle, PolicyBundle, PolicySource};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -53,6 +54,16 @@ async fn main() -> anyhow::Result<()> {
     if !bearer_tokens.is_empty() {
         tracing::info!(count = bearer_tokens.len(), "Bearer auth enabled");
         state = state.with_bearer_auth(BearerAuth::from_tokens(bearer_tokens));
+    }
+    if let Some(path) = &cli.policy_bundle {
+        let policies = CedarPolicyBundle::load(PolicySource::File(path.clone()))
+            .map_err(|e| anyhow::anyhow!("compiling cedar policy at {}: {e}", path.display()))?;
+        tracing::info!(
+            path = %path.display(),
+            policy_count = policies.policy_count(),
+            "Trust Center policy debugger enabled"
+        );
+        state = state.with_policies(policies);
     }
 
     let app = build_router(state.shared());

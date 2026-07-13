@@ -16,6 +16,7 @@ fn minimal_cli() -> Cli {
         receipt_store: PathBuf::from("/tmp/receipts"),
         qdrant_url: None,
         qdrant_collection: "ardur_memory".to_string(),
+        policy_bundle: None,
         port: 8090,
         basic_auth: None,
         bearer_tokens: None,

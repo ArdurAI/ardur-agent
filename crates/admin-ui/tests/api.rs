@@ -579,6 +579,35 @@ async fn dashboard_html_renders() {
     assert!(html.contains("Cost by provider"));
     assert!(html.contains("Recent sessions"));
     assert!(html.contains("Recent receipts"));
+    assert!(html.contains("Trust Center"));
+    assert!(html.contains("Receipt chain"));
+    assert!(html.contains("Capability wallet"));
+    assert!(
+        html.contains("Policy debugger not configured"),
+        "no --policy-bundle was configured for this fixture, so the debugger form should not render"
+    );
+}
+
+#[tokio::test]
+async fn dashboard_html_renders_policy_debugger_form_when_configured() {
+    use ardur_cedar_policy::{CedarPolicyBundle, PolicyBundle, PolicySource};
+
+    let fx = Fixture::new();
+    let policies = CedarPolicyBundle::load(PolicySource::Embedded(
+        "permit(principal, action, resource);".to_string(),
+    ))
+    .unwrap();
+    let state = AppState::new(&fx.journal_dir, &fx.receipt_store).with_policies(policies);
+    let server = TestServer::new(build_router(state.shared()));
+
+    let res = server.get("/").await;
+    res.assert_status_ok();
+    let html = res.text();
+    assert!(
+        html.contains("hx-get=\"/api/trust/policy/debug\""),
+        "policy debugger form should render when policies are configured"
+    );
+    assert!(!html.contains("Policy debugger not configured"));
 }
 
 #[tokio::test]
@@ -657,6 +686,36 @@ async fn trust_center_wallet_receipts_and_policy_debugger() {
         debug["reason"].as_str().unwrap().contains("allowed"),
         "policy debugger explains why: {debug}"
     );
+}
+
+#[tokio::test]
+async fn policy_bundle_loads_from_file_like_the_binarys_policy_bundle_flag() {
+    // Exercises the exact `PolicySource::File` path `main.rs`'s
+    // `--policy-bundle <path>` flag uses (as opposed to the `Embedded` source
+    // the other trust-center test uses), so a real on-disk `.cedar` file is
+    // covered, not just an inline string.
+    use ardur_cedar_policy::{CedarPolicyBundle, PolicyBundle, PolicySource};
+
+    let fx = Fixture::new();
+    let policy_path = fx.journal_dir.join("policy.cedar");
+    fs::write(
+        &policy_path,
+        r#"permit(principal, action == Action::"Submit", resource);"#,
+    )
+    .unwrap();
+
+    let policies = CedarPolicyBundle::load(PolicySource::File(policy_path)).unwrap();
+    assert_eq!(policies.policy_count(), 1);
+
+    let state = AppState::new(&fx.journal_dir, &fx.receipt_store).with_policies(policies);
+    let server = TestServer::new(build_router(state.shared()));
+    let debug: Value = server
+        .get(
+            "/api/trust/policy/debug?principal=User::%22alice%22&action=Action::%22Submit%22&resource=Session::%22s1%22",
+        )
+        .await
+        .json();
+    assert_eq!(debug["decision"], "Allow");
 }
 
 #[tokio::test]

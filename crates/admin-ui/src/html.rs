@@ -9,6 +9,7 @@ use maud::{DOCTYPE, Markup, PreEscaped, html};
 use crate::costs::CostsReport;
 use crate::journal::SessionSummary;
 use crate::receipts::ReceiptSummary;
+use crate::trust::{ReceiptVerification, WalletResponse};
 
 /// HTMX 1.9 from a CDN (the dashboard's only client-side dependency).
 const HTMX_CDN: &str = "https://unpkg.com/htmx.org@1.9.12";
@@ -115,6 +116,71 @@ fn receipts_feed(receipts: &[ReceiptSummary]) -> Markup {
     }
 }
 
+/// The capability-wallet card list.
+fn wallet_grants(wallet: &WalletResponse) -> Markup {
+    html! {
+        div.feed {
+            @if wallet.grants.is_empty() {
+                div.empty { "No active capability grants tracked." }
+            } @else {
+                @for g in &wallet.grants {
+                    div.receipt {
+                        span.r-provider { (g.subject) }
+                        span.r-tokens { (g.audience) }
+                        @if !g.tools.is_empty() {
+                            span.r-tools { (g.tools.join(", ")) }
+                        }
+                        span.r-cost { (g.budget_remaining) " ¢ remaining" }
+                        span.r-id { "expires " (g.expires_unix) }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The receipt-chain verification status line.
+fn chain_status(v: &ReceiptVerification) -> Markup {
+    html! {
+        @if v.chain_valid {
+            div.chain-ok { "✓ " (v.receipt_count) " receipts, chain valid" }
+        } @else {
+            div.chain-bad {
+                "✗ broken at receipt index " (v.error_index.unwrap_or(0))
+                @if let Some(reason) = &v.reason {
+                    ": " (reason)
+                }
+            }
+        }
+    }
+}
+
+/// The Cedar policy debugger — a form posting to `/api/trust/policy/debug`
+/// via HTMX, rendering the raw JSON decision into a result pane. When no
+/// policy bundle is configured (`--policy-bundle` was not passed), shows a
+/// note instead of the form.
+fn policy_debugger(policies_configured: bool) -> Markup {
+    html! {
+        @if policies_configured {
+            form
+                hx-get="/api/trust/policy/debug"
+                hx-target="#policy-result"
+                hx-swap="innerHTML"
+            {
+                div.debugger-row {
+                    input type="text" name="principal" placeholder="Principal, e.g. User::\"alice\"" required;
+                    input type="text" name="action" placeholder="Action, e.g. Action::\"Submit\"" required;
+                    input type="text" name="resource" placeholder="Resource, e.g. Session::\"s1\"" required;
+                    button type="submit" { "Evaluate" }
+                }
+            }
+            pre #policy-result {}
+        } @else {
+            div.empty { "Policy debugger not configured — start ardur-admin with --policy-bundle <path> to enable it." }
+        }
+    }
+}
+
 /// The inner, refreshable dashboard fragment.
 fn dashboard_fragment(
     report: &CostsReport,
@@ -153,11 +219,40 @@ fn dashboard_fragment(
     }
 }
 
+/// The Trust Center section. Deliberately rendered as a **sibling** of the
+/// auto-refreshing `#dashboard` fragment, not nested inside it: the policy
+/// debugger is an interactive form, and `#dashboard`'s `hx-trigger="every
+/// 5s"` poll replaces its entire subtree on each refresh — nesting the form
+/// there would silently wipe whatever an operator was mid-typing every five
+/// seconds. The receipt-chain status and capability wallet are static
+/// snapshots-at-page-load here rather than live-refreshing, which is the
+/// right tradeoff for a form that shares the section.
+fn trust_center(
+    wallet: &WalletResponse,
+    chain: &ReceiptVerification,
+    policies_configured: bool,
+) -> Markup {
+    html! {
+        section {
+            h2 { "Trust Center" }
+            h3 { "Receipt chain" }
+            (chain_status(chain))
+            h3 { "Capability wallet" }
+            (wallet_grants(wallet))
+            h3 { "Policy debugger" }
+            (policy_debugger(policies_configured))
+        }
+    }
+}
+
 /// The full page.
 pub fn dashboard(
     report: &CostsReport,
     sessions: &[SessionSummary],
     receipts: &[ReceiptSummary],
+    wallet: &WalletResponse,
+    chain: &ReceiptVerification,
+    policies_configured: bool,
 ) -> Markup {
     html! {
         (DOCTYPE)
@@ -176,6 +271,7 @@ pub fn dashboard(
                 }
                 main {
                     (dashboard_fragment(report, sessions, receipts))
+                    (trust_center(wallet, chain, policies_configured))
                 }
             }
         }
@@ -212,4 +308,11 @@ code { font-family: ui-monospace, monospace; }
 .r-cost { color: #4a90d9; }
 .r-id { margin-left: auto; color: #8888; font-family: ui-monospace, monospace; }
 .empty { color: #8888; font-style: italic; padding: .5rem 0; }
+h3 { font-size: .85rem; margin: 1rem 0 .5rem; color: #8888; }
+.chain-ok { color: #2e9e5b; font-size: .9rem; }
+.chain-bad { color: #d94a4a; font-size: .9rem; }
+.debugger-row { display: flex; flex-wrap: wrap; gap: .5rem; }
+.debugger-row input { flex: 1 1 160px; padding: .4rem .5rem; border: 1px solid #8884; border-radius: 6px; background: transparent; color: inherit; }
+.debugger-row button { padding: .4rem 1rem; border: 1px solid #4a90d9; border-radius: 6px; background: #4a90d9; color: white; cursor: pointer; }
+#policy-result:not(:empty) { display: block; margin-top: .75rem; padding: .75rem; border: 1px solid #8883; border-radius: 8px; font-size: .8rem; white-space: pre-wrap; word-break: break-all; }
 "#;
