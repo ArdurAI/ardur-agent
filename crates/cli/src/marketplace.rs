@@ -1,4 +1,20 @@
-//! Marketplace / skill registry CLI surface.
+//! Marketplace / skill + plugin registry CLI surface.
+//!
+//! Eight lifecycle verbs over locally-signed capability manifests: `browse`,
+//! `search`, `install`, `inspect`, `update`, `audit`, `uninstall`, `publish`
+//! (plus the pre-existing `validate` / `verify` helpers). Every verb operates
+//! on the same on-disk state: one JSON [`SkillRecord`] per installed
+//! skill/plugin under `${ArdurHome}/skills/`, and — for `kind = "skill"`
+//! manifests that bundle a `SKILL.md` artifact — a mirrored copy under
+//! `${ArdurHome}/skills_catalog/<id>/SKILL.md` where
+//! [`ardur_tool_registry`]'s filesystem loader picks it up.
+//!
+//! There is no remote catalog fetch yet (installs read a local manifest
+//! file); `install`/`update` are signature-verified by default (ES256) and
+//! refuse to proceed on an unsigned manifest unless the caller passes
+//! `--allow-unsigned` and accepts the printed warning. Manifest, capability,
+//! artifact, and runtime-claim counts are all bounded so a malicious manifest
+//! cannot exhaust memory or disk during validation.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -6,11 +22,26 @@ use ardur_cli::CliError;
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use clap::{Args, Subcommand};
-use p256::ecdsa::{Signature, VerifyingKey, signature::Verifier};
-use p256::pkcs8::DecodePublicKey;
+use p256::ecdsa::{Signature, SigningKey, VerifyingKey, signature::Signer, signature::Verifier};
+use p256::pkcs8::{DecodePrivateKey, DecodePublicKey};
 use sha2::{Digest, Sha256};
 
 use crate::StateDirs;
+
+/// Manifest byte-size ceiling (256 KiB) — refused before parsing.
+const MAX_MANIFEST_BYTES: u64 = 256 * 1024;
+/// Maximum declared capability strings per manifest.
+const MAX_CAPABILITIES: usize = 32;
+/// Maximum bundled artifacts per manifest.
+const MAX_ARTIFACTS: usize = 64;
+/// Per-artifact byte-size ceiling (10 MiB).
+const MAX_ARTIFACT_BYTES: u64 = 10 * 1024 * 1024;
+/// Maximum declared runtime claims per plugin manifest.
+const MAX_RUNTIME_CLAIMS: usize = 16;
+/// Capability names (post `cap.` strip) whose grant is treated as high-risk
+/// in `audit` output — mirrors [`ardur_tool_registry::Capability`]'s
+/// dangerous variants.
+const HIGH_RISK_CAPABILITIES: &[&str] = &["shell_exec", "process_spawn", "network_out", "fs_write"];
 
 /// Arguments to `ardur marketplace`.
 #[derive(Args)]
@@ -22,17 +53,90 @@ pub struct MarketplaceArgs {
 /// Subcommands for `ardur marketplace`.
 #[derive(Subcommand)]
 pub enum MarketplaceAction {
-    /// List installed skills.
-    List,
-    /// Search the marketplace index for skills.
+    /// Browse installed skills and plugins.
+    #[command(alias = "list")]
+    Browse,
+    /// Search installed skills/plugins by name, id, or capability.
     Search {
         /// Query string.
         query: String,
     },
-    /// Install a skill from a local path or remote URL.
+    /// Install a skill or plugin from a local signed manifest.
     Install {
-        /// Skill URL, manifest path, or local artifact path.
+        /// Path to a manifest JSON file. Remote/URL sources are not yet
+        /// implemented — publish or copy the manifest locally first.
         source: String,
+        /// P-256 public key PEM verifying the manifest's ES256 signature.
+        /// Required unless `--allow-unsigned` is passed.
+        #[arg(long, value_name = "PUBLIC_KEY_PEM")]
+        key: Option<PathBuf>,
+        /// Explicitly accept an unsigned or unverifiable manifest. Refused by
+        /// default — installs are signature-verified unless you opt out.
+        #[arg(long)]
+        allow_unsigned: bool,
+    },
+    /// Show an installed skill/plugin's manifest, signature state, and
+    /// declared capabilities/claims.
+    #[command(alias = "show")]
+    Inspect {
+        /// Skill or plugin id.
+        id: String,
+    },
+    /// Update an installed skill/plugin to a new manifest version.
+    Update {
+        /// Skill or plugin id (must match the new manifest's `id`).
+        id: String,
+        /// Path to the new manifest JSON file.
+        manifest: PathBuf,
+        /// P-256 public key PEM verifying the new manifest's signature.
+        #[arg(long, value_name = "PUBLIC_KEY_PEM")]
+        key: Option<PathBuf>,
+        /// Explicitly accept an unsigned or unverifiable manifest.
+        #[arg(long)]
+        allow_unsigned: bool,
+        /// Allow a same-version reinstall or a version downgrade.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Audit one (or, with no id, every) installed skill/plugin for
+    /// unsigned installs, high-risk capabilities, and source-manifest drift.
+    Audit {
+        /// Skill or plugin id; audits every installed entry if omitted.
+        id: Option<String>,
+    },
+    /// Remove an installed skill/plugin.
+    #[command(alias = "remove")]
+    Uninstall {
+        /// Skill or plugin id.
+        id: String,
+    },
+    /// Sign a local skill directory's manifest, producing an installable
+    /// signed manifest bundle.
+    Publish {
+        /// Directory containing the skill's `SKILL.md`.
+        skill_dir: PathBuf,
+        /// Manifest id (e.g. `skill.my-helper`).
+        id: String,
+        /// Human-readable name.
+        name: String,
+        /// Version string (e.g. `0.1.0`).
+        version: String,
+        /// Declared capability string; repeatable.
+        #[arg(long = "capability")]
+        capabilities: Vec<String>,
+        /// Declared runtime claim as `<name>:<tool|channel|provider>`;
+        /// repeatable. Only meaningful for plugin manifests (`--kind plugin`).
+        #[arg(long = "claim")]
+        claims: Vec<String>,
+        /// Manifest kind: `skill` (default) or `plugin`.
+        #[arg(long, default_value = "skill")]
+        kind: String,
+        /// P-256 private key PEM (PKCS#8) to sign the manifest with.
+        #[arg(long, value_name = "PRIVATE_KEY_PEM")]
+        key: PathBuf,
+        /// Output path for the signed manifest JSON.
+        #[arg(long, default_value = "manifest.json")]
+        out: PathBuf,
     },
     /// Validate a signed skill/plugin capability manifest.
     Validate {
@@ -42,17 +146,7 @@ pub enum MarketplaceAction {
         #[arg(long, value_name = "PUBLIC_KEY_PEM")]
         key: PathBuf,
     },
-    /// Show details of an installed skill.
-    Show {
-        /// Skill id.
-        id: String,
-    },
-    /// Remove an installed skill.
-    Remove {
-        /// Skill id.
-        id: String,
-    },
-    /// Verify signatures of installed skills.
+    /// Verify signatures of installed skills/plugins.
     Verify {
         /// Optional P-256 public key PEM for installed local manifests.
         #[arg(long, value_name = "PUBLIC_KEY_PEM")]
@@ -73,6 +167,25 @@ struct SkillRecord {
     capabilities: Vec<String>,
     #[serde(default)]
     signature: String,
+    /// Whether the signature was cryptographically checked at install/update
+    /// time (`--key` was supplied). Records from before this field existed
+    /// default to `false` — audit surfaces them as unverified, which is
+    /// correct: their signature (if any) was never actually checked.
+    #[serde(default)]
+    verified: bool,
+    /// Declared plugin runtime claims (empty for `kind = "skill"`).
+    #[serde(default)]
+    runtime_claims: Vec<RuntimeClaimRecord>,
+}
+
+/// A plugin's declared intent to extend one `Tool`/`Channel`/`Provider`
+/// trait-family registration once activated by `ardur-plugin-runtime`.
+/// Declaring a claim here does not activate it — activation happens at
+/// process boot, outside this CLI's scope.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct RuntimeClaimRecord {
+    name: String,
+    family: String,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -87,9 +200,11 @@ struct CapabilityManifest {
     #[serde(default)]
     artifacts: Vec<ManifestArtifact>,
     signature: ManifestSignature,
+    #[serde(default)]
+    runtime_claims: Vec<RuntimeClaimRecord>,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct ManifestArtifact {
     path: String,
     sha256: String,
@@ -107,6 +222,12 @@ fn default_skill_kind() -> String {
 
 fn skills_dir(root: &Path) -> PathBuf {
     root.join("skills")
+}
+
+/// The directory the filesystem `SKILL.md` loader (`ardur_tool_registry`)
+/// scans: one subdirectory per installed skill, each containing `SKILL.md`.
+fn skill_catalog_dir(root: &Path) -> PathBuf {
+    root.join("skills_catalog")
 }
 
 fn read_skills(root: &Path) -> Result<Vec<SkillRecord>, CliError> {
@@ -127,6 +248,14 @@ fn read_skills(root: &Path) -> Result<Vec<SkillRecord>, CliError> {
 }
 
 fn read_manifest(path: &Path) -> Result<CapabilityManifest, CliError> {
+    let meta = std::fs::metadata(path)?;
+    if meta.len() > MAX_MANIFEST_BYTES {
+        return Err(CliError::State(format!(
+            "manifest {} is {} bytes, exceeding the {MAX_MANIFEST_BYTES}-byte ceiling",
+            path.display(),
+            meta.len()
+        )));
+    }
     let content = std::fs::read_to_string(path)?;
     serde_json::from_str(&content).map_err(|e| {
         CliError::State(format!(
@@ -154,6 +283,10 @@ fn canonical_manifest_payload(manifest: &CapabilityManifest) -> Result<Vec<u8>, 
             "artifacts",
             serde_json::to_string(&manifest.artifacts_as_json()),
         ),
+        (
+            "runtime_claims",
+            serde_json::to_string(&manifest.runtime_claims_as_json()),
+        ),
     ];
 
     let mut out = Vec::new();
@@ -175,6 +308,18 @@ impl CapabilityManifest {
                 serde_json::json!({
                     "path": artifact.path,
                     "sha256": artifact.sha256,
+                })
+            })
+            .collect()
+    }
+
+    fn runtime_claims_as_json(&self) -> Vec<serde_json::Value> {
+        self.runtime_claims
+            .iter()
+            .map(|claim| {
+                serde_json::json!({
+                    "name": claim.name,
+                    "family": claim.family,
                 })
             })
             .collect()
@@ -214,6 +359,86 @@ fn validate_manifest_shape(manifest: &CapabilityManifest) -> Result<(), CliError
     if manifest.signature.value.trim().is_empty() {
         return Err(CliError::State("manifest signature is empty".to_string()));
     }
+    validate_capabilities_bound(manifest)?;
+    validate_artifacts_bound(manifest)?;
+    validate_runtime_claims(manifest)?;
+    Ok(())
+}
+
+fn validate_capabilities_bound(manifest: &CapabilityManifest) -> Result<(), CliError> {
+    if manifest.capabilities.len() > MAX_CAPABILITIES {
+        return Err(CliError::State(format!(
+            "manifest declares {} capabilities, exceeding the {MAX_CAPABILITIES} ceiling",
+            manifest.capabilities.len()
+        )));
+    }
+    if let Some(bad) = manifest
+        .capabilities
+        .iter()
+        .find(|c| c.trim().is_empty() || c.len() > 128)
+    {
+        return Err(CliError::State(format!(
+            "capability `{bad}` must be 1-128 non-blank characters"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_artifacts_bound(manifest: &CapabilityManifest) -> Result<(), CliError> {
+    if manifest.artifacts.len() > MAX_ARTIFACTS {
+        return Err(CliError::State(format!(
+            "manifest declares {} artifacts, exceeding the {MAX_ARTIFACTS} ceiling",
+            manifest.artifacts.len()
+        )));
+    }
+    Ok(())
+}
+
+/// Closure-invariant check over a plugin manifest's declared runtime claims:
+/// bounded count, known trait family, bounded/charset-safe claim name, and no
+/// duplicate `(family, name)` pair. Non-plugin manifests must declare none.
+fn validate_runtime_claims(manifest: &CapabilityManifest) -> Result<(), CliError> {
+    if manifest.kind != "plugin" {
+        if !manifest.runtime_claims.is_empty() {
+            return Err(CliError::State(
+                "runtime_claims are only valid on kind=\"plugin\" manifests".to_string(),
+            ));
+        }
+        return Ok(());
+    }
+    if manifest.runtime_claims.len() > MAX_RUNTIME_CLAIMS {
+        return Err(CliError::State(format!(
+            "manifest declares {} runtime claims, exceeding the {MAX_RUNTIME_CLAIMS} ceiling",
+            manifest.runtime_claims.len()
+        )));
+    }
+    let mut seen = std::collections::HashSet::new();
+    for claim in &manifest.runtime_claims {
+        if !matches!(claim.family.as_str(), "tool" | "channel" | "provider") {
+            return Err(CliError::State(format!(
+                "runtime claim `{}` names unknown trait family `{}` (expected tool, channel, or provider)",
+                claim.name, claim.family
+            )));
+        }
+        let name_ok = !claim.name.is_empty()
+            && claim.name.len() <= 64
+            && claim
+                .name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+        if !name_ok {
+            return Err(CliError::State(format!(
+                "runtime claim name `{}` must be 1-64 characters of [a-zA-Z0-9_-]",
+                claim.name
+            )));
+        }
+        if !seen.insert((claim.family.clone(), claim.name.clone())) {
+            return Err(CliError::State(format!(
+                "duplicate runtime claim `{}` in family `{}`",
+                claim.name, claim.family
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -238,6 +463,15 @@ fn verify_artifacts(manifest_path: &Path, manifest: &CapabilityManifest) -> Resu
     let base = manifest_path.parent().unwrap_or_else(|| Path::new("."));
     for artifact in &manifest.artifacts {
         let path = safe_artifact_path(base, &artifact.path)?;
+        let meta = std::fs::metadata(&path)
+            .map_err(|e| CliError::State(format!("reading artifact {}: {e}", path.display())))?;
+        if meta.len() > MAX_ARTIFACT_BYTES {
+            return Err(CliError::State(format!(
+                "artifact `{}` is {} bytes, exceeding the {MAX_ARTIFACT_BYTES}-byte ceiling",
+                artifact.path,
+                meta.len()
+            )));
+        }
         let bytes = std::fs::read(&path)
             .map_err(|e| CliError::State(format!("reading artifact {}: {e}", path.display())))?;
         let actual = hex::encode(Sha256::digest(&bytes));
@@ -279,6 +513,8 @@ fn verify_manifest_signature(
         .map_err(|e| CliError::State(format!("manifest signature verification failed: {e}")))
 }
 
+/// Full verification: shape + bounds, artifact digests, then signature. Used
+/// by `validate`, and by `install`/`update` whenever `--key` is supplied.
 fn validate_manifest(
     manifest_path: &Path,
     key_path: &Path,
@@ -290,33 +526,107 @@ fn validate_manifest(
     Ok(manifest)
 }
 
-fn install_record(source: &str) -> SkillRecord {
-    let source_path = Path::new(source);
-    if source_path.is_file() {
-        if let Ok(manifest) = read_manifest(source_path) {
-            return SkillRecord {
-                skill_id: manifest.id,
-                name: manifest.name,
-                version: manifest.version,
-                source: source.to_string(),
-                installed_at: now_secs(),
-                kind: manifest.kind,
-                capabilities: manifest.capabilities,
-                signature: manifest.signature.value,
-            };
-        }
-    }
+/// Shape + bounds + artifact-digest checks only, no signature check. Used by
+/// `install --allow-unsigned` / `update --allow-unsigned` — the caller has
+/// explicitly accepted the risk of an unverified manifest.
+fn validate_manifest_unsigned(manifest_path: &Path) -> Result<CapabilityManifest, CliError> {
+    let manifest = read_manifest(manifest_path)?;
+    validate_manifest_shape(&manifest)?;
+    verify_artifacts(manifest_path, &manifest)?;
+    Ok(manifest)
+}
 
-    SkillRecord {
-        skill_id: uuid::Uuid::new_v4().to_string(),
-        name: "installed-skill".to_string(),
-        version: "0.0.1".to_string(),
-        source: source.to_string(),
-        installed_at: now_secs(),
-        kind: "skill".to_string(),
-        capabilities: Vec::new(),
-        signature: String::new(),
+/// Resolve a manifest per the install/update `--key`/`--allow-unsigned`
+/// contract: signature-verified by default; unsigned only on explicit opt-in.
+fn resolve_install_manifest(
+    path: &Path,
+    key: Option<&PathBuf>,
+    allow_unsigned: bool,
+) -> Result<(CapabilityManifest, bool), CliError> {
+    if !path.is_file() {
+        return Err(CliError::State(format!(
+            "cannot install from `{}`: remote/URL sources are not implemented; \
+             install from a local signed manifest file (see `ardur marketplace publish`)",
+            path.display()
+        )));
     }
+    match key {
+        Some(key_path) => Ok((validate_manifest(path, key_path)?, true)),
+        None if allow_unsigned => {
+            let manifest = validate_manifest_unsigned(path)?;
+            eprintln!(
+                "warning: installing `{}` without signature verification (--allow-unsigned); \
+                 this manifest is NOT cryptographically trusted",
+                manifest.id
+            );
+            Ok((manifest, false))
+        }
+        None => Err(CliError::State(
+            "refusing to install an unsigned manifest by default; pass `--key <public-key.pem>` \
+             to verify its signature, or `--allow-unsigned` to explicitly accept the risk"
+                .to_string(),
+        )),
+    }
+}
+
+/// If `manifest` is a `kind = "skill"` manifest bundling a `SKILL.md`
+/// artifact, copy the (already digest-verified) artifact into the local
+/// skill catalog directory so the filesystem `SKILL.md` loader picks it up.
+/// Returns the destination path when a copy happened.
+fn sync_skill_markdown(
+    root: &Path,
+    manifest_path: &Path,
+    manifest: &CapabilityManifest,
+) -> Result<Option<PathBuf>, CliError> {
+    if manifest.kind != "skill" {
+        return Ok(None);
+    }
+    let base = manifest_path.parent().unwrap_or_else(|| Path::new("."));
+    let Some(artifact) = manifest
+        .artifacts
+        .iter()
+        .find(|a| Path::new(&a.path).file_name().and_then(|f| f.to_str()) == Some("SKILL.md"))
+    else {
+        return Ok(None);
+    };
+    let src = safe_artifact_path(base, &artifact.path)?;
+    let dest_dir = skill_catalog_dir(root).join(&manifest.id);
+    std::fs::create_dir_all(&dest_dir)?;
+    let dest = dest_dir.join("SKILL.md");
+    std::fs::copy(&src, &dest)?;
+    Ok(Some(dest))
+}
+
+fn remove_skill_markdown(root: &Path, id: &str) -> Result<(), CliError> {
+    let dest_dir = skill_catalog_dir(root).join(id);
+    if dest_dir.is_dir() {
+        std::fs::remove_dir_all(&dest_dir)?;
+    }
+    Ok(())
+}
+
+/// `"cap.shell_exec"` → `"shell_exec"`; bare strings pass through unchanged.
+fn strip_capability_prefix(capability: &str) -> &str {
+    capability.strip_prefix("cap.").unwrap_or(capability)
+}
+
+fn capability_risk(capability: &str) -> &'static str {
+    if HIGH_RISK_CAPABILITIES.contains(&strip_capability_prefix(capability)) {
+        "high-risk"
+    } else {
+        "standard"
+    }
+}
+
+/// Parse a `major.minor.patch` (patch/minor optional, default 0) numeric
+/// version for ordering. Non-numeric versions return `None` — the caller
+/// falls back to a simple inequality check when this fails.
+fn parse_numeric_version(v: &str) -> Option<(u64, u64, u64)> {
+    let mut parts = v.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next().map(str::parse).transpose().ok()??;
+    let patch = parts.next().map(str::parse).transpose().ok()??;
+    Some((major, minor, patch))
 }
 
 fn now_secs() -> u64 {
@@ -326,6 +636,33 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
+fn record_from_manifest(
+    manifest: &CapabilityManifest,
+    source: &str,
+    verified: bool,
+) -> SkillRecord {
+    SkillRecord {
+        skill_id: manifest.id.clone(),
+        name: manifest.name.clone(),
+        version: manifest.version.clone(),
+        source: source.to_string(),
+        installed_at: now_secs(),
+        kind: manifest.kind.clone(),
+        capabilities: manifest.capabilities.clone(),
+        signature: manifest.signature.value.clone(),
+        verified,
+        runtime_claims: manifest.runtime_claims.clone(),
+    }
+}
+
+fn write_record(dir: &Path, record: &SkillRecord) -> Result<(), CliError> {
+    std::fs::write(
+        dir.join(format!("{}.json", record.skill_id)),
+        serde_json::to_string_pretty(record).map_err(|e| CliError::State(e.to_string()))?,
+    )?;
+    Ok(())
+}
+
 /// Run `ardur marketplace` subcommands.
 pub fn run_marketplace(args: MarketplaceArgs) -> Result<(), CliError> {
     let root = StateDirs::resolve()?.root;
@@ -333,16 +670,20 @@ pub fn run_marketplace(args: MarketplaceArgs) -> Result<(), CliError> {
     std::fs::create_dir_all(&dir)?;
 
     match args.action {
-        MarketplaceAction::List => {
+        MarketplaceAction::Browse => {
             let records = read_skills(&root)?;
             if records.is_empty() {
-                println!("no skills installed");
+                println!("no skills or plugins installed");
             } else {
-                println!("ID                  KIND      NAME                VERSION");
+                println!("ID                  KIND      NAME                VERSION  SIGNED");
                 for r in &records {
                     println!(
-                        "{: <20} {: <8} {: <20} {}",
-                        r.skill_id, r.kind, r.name, r.version
+                        "{: <20} {: <8} {: <20} {: <8} {}",
+                        r.skill_id,
+                        r.kind,
+                        r.name,
+                        r.version,
+                        if r.verified { "yes" } else { "no" }
                     );
                 }
             }
@@ -361,7 +702,7 @@ pub fn run_marketplace(args: MarketplaceArgs) -> Result<(), CliError> {
                 })
                 .collect();
             if filtered.is_empty() {
-                println!("no installed skills match '{query}'");
+                println!("no installed skills/plugins match '{query}'");
                 println!("note: remote marketplace search is a Phase 2 wiring task");
             } else {
                 for r in filtered {
@@ -369,22 +710,309 @@ pub fn run_marketplace(args: MarketplaceArgs) -> Result<(), CliError> {
                 }
             }
         }
-        MarketplaceAction::Install { source } => {
-            let record = install_record(&source);
-            let id = record.skill_id.clone();
-            std::fs::write(
-                dir.join(format!("{id}.json")),
-                serde_json::to_string_pretty(&record)
-                    .map_err(|e| CliError::State(e.to_string()))?,
-            )?;
-            println!("installed {} {id} from {source}", record.kind);
-            if record.signature.is_empty() {
-                println!("warning: installed record has no manifest signature");
-            } else {
+        MarketplaceAction::Install {
+            source,
+            key,
+            allow_unsigned,
+        } => {
+            let path = Path::new(&source);
+            let (manifest, verified) =
+                resolve_install_manifest(path, key.as_ref(), allow_unsigned)?;
+            let record = record_from_manifest(&manifest, &source, verified);
+            write_record(&dir, &record)?;
+            let synced = sync_skill_markdown(&root, path, &manifest)?;
+
+            println!(
+                "installed {} {} version {} ({})",
+                record.kind,
+                record.skill_id,
+                record.version,
+                if verified {
+                    "signature verified"
+                } else {
+                    "UNVERIFIED"
+                }
+            );
+            match synced {
+                Some(p) => println!("skill catalog updated: {}", p.display()),
+                None if manifest.kind == "skill" => println!(
+                    "note: no SKILL.md artifact found; skill not wired into the local tool loader"
+                ),
+                None => {}
+            }
+            if !manifest.runtime_claims.is_empty() {
                 println!(
-                    "signature recorded; run `ardur marketplace validate {source} --key <public-key.pem>` before trusting it"
+                    "{} runtime claim(s) declared; activation happens at process boot via ardur-plugin-runtime",
+                    manifest.runtime_claims.len()
                 );
             }
+        }
+        MarketplaceAction::Inspect { id } => {
+            let records = read_skills(&root)?;
+            let r = records
+                .iter()
+                .find(|r| r.skill_id == id)
+                .ok_or_else(|| CliError::State(format!("skill `{id}` not found")))?;
+            println!("id:        {}", r.skill_id);
+            println!("kind:      {}", r.kind);
+            println!("name:      {}", r.name);
+            println!("version:   {}", r.version);
+            println!("source:    {}", r.source);
+            println!(
+                "signature: {}",
+                if r.signature.is_empty() {
+                    "absent".to_string()
+                } else if r.verified {
+                    "present, verified at install/update time".to_string()
+                } else {
+                    "present, NOT verified (installed with --allow-unsigned)".to_string()
+                }
+            );
+            println!("capabilities ({}):", r.capabilities.len());
+            for c in &r.capabilities {
+                println!("  - {c} [{}]", capability_risk(c));
+            }
+            if !r.runtime_claims.is_empty() {
+                println!("runtime claims ({}):", r.runtime_claims.len());
+                for c in &r.runtime_claims {
+                    println!("  - {} ({})", c.name, c.family);
+                }
+            }
+            let catalog_path = skill_catalog_dir(&root).join(&r.skill_id).join("SKILL.md");
+            println!("loaded into local tool catalog: {}", catalog_path.is_file());
+        }
+        MarketplaceAction::Update {
+            id,
+            manifest,
+            key,
+            allow_unsigned,
+            force,
+        } => {
+            let existing_path = dir.join(format!("{id}.json"));
+            let existing: SkillRecord = serde_json::from_str(
+                &std::fs::read_to_string(&existing_path)
+                    .map_err(|_| CliError::State(format!("skill `{id}` not found")))?,
+            )
+            .map_err(|e| CliError::State(e.to_string()))?;
+
+            let (new_manifest, verified) =
+                resolve_install_manifest(&manifest, key.as_ref(), allow_unsigned)?;
+
+            if new_manifest.id != existing.skill_id {
+                return Err(CliError::State(format!(
+                    "manifest id `{}` does not match installed skill `{}`; uninstall and install fresh instead",
+                    new_manifest.id, existing.skill_id
+                )));
+            }
+            if new_manifest.version == existing.version && !force {
+                return Err(CliError::State(format!(
+                    "manifest version `{}` is unchanged; pass --force to reinstall the same version",
+                    new_manifest.version
+                )));
+            }
+            if let (Some(old_v), Some(new_v)) = (
+                parse_numeric_version(&existing.version),
+                parse_numeric_version(&new_manifest.version),
+            ) {
+                if new_v < old_v && !force {
+                    return Err(CliError::State(format!(
+                        "refusing downgrade from {} to {}; pass --force to override",
+                        existing.version, new_manifest.version
+                    )));
+                }
+            }
+
+            let added: Vec<&String> = new_manifest
+                .capabilities
+                .iter()
+                .filter(|c| !existing.capabilities.contains(c))
+                .collect();
+            let removed: Vec<&String> = existing
+                .capabilities
+                .iter()
+                .filter(|c| !new_manifest.capabilities.contains(c))
+                .collect();
+
+            let record = record_from_manifest(&new_manifest, &manifest.to_string_lossy(), verified);
+            write_record(&dir, &record)?;
+            sync_skill_markdown(&root, &manifest, &new_manifest)?;
+
+            println!(
+                "updated {} {} -> {} ({})",
+                id,
+                existing.version,
+                new_manifest.version,
+                if verified {
+                    "signature verified"
+                } else {
+                    "UNVERIFIED"
+                }
+            );
+            if !added.is_empty() {
+                println!("capabilities added: {added:?}");
+            }
+            if !removed.is_empty() {
+                println!("capabilities removed: {removed:?}");
+            }
+        }
+        MarketplaceAction::Audit { id } => {
+            let records = read_skills(&root)?;
+            let targets: Vec<&SkillRecord> = match &id {
+                Some(id) => records.iter().filter(|r| &r.skill_id == id).collect(),
+                None => records.iter().collect(),
+            };
+            if targets.is_empty() {
+                return Err(CliError::State(match &id {
+                    Some(id) => format!("skill `{id}` not found"),
+                    None => "no skills or plugins installed".to_string(),
+                }));
+            }
+
+            let mut unverified_count = 0;
+            let mut high_risk_count = 0;
+            for r in &targets {
+                println!("== {} ({}) v{} ==", r.skill_id, r.kind, r.version);
+                if !r.verified {
+                    println!("  [flag] not signature-verified at install/update time");
+                    unverified_count += 1;
+                }
+                let high_risk: Vec<&String> = r
+                    .capabilities
+                    .iter()
+                    .filter(|c| capability_risk(c) == "high-risk")
+                    .collect();
+                if !high_risk.is_empty() {
+                    println!("  [flag] high-risk capabilities: {high_risk:?}");
+                    high_risk_count += 1;
+                }
+                let source_path = Path::new(&r.source);
+                if source_path.is_file() {
+                    match read_manifest(source_path) {
+                        Ok(current) if current.signature.value != r.signature => {
+                            println!(
+                                "  [flag] source manifest signature changed since install; re-run `update`"
+                            );
+                        }
+                        Err(e) => println!("  [flag] source manifest no longer parses: {e}"),
+                        _ => {}
+                    }
+                } else {
+                    println!(
+                        "  [note] source manifest no longer present on disk at {}",
+                        r.source
+                    );
+                }
+            }
+            println!(
+                "audit summary: {} checked, {unverified_count} unverified, {high_risk_count} with high-risk capabilities",
+                targets.len()
+            );
+        }
+        MarketplaceAction::Uninstall { id } => {
+            let path = dir.join(format!("{id}.json"));
+            if !path.is_file() {
+                return Err(CliError::State(format!("skill `{id}` not found")));
+            }
+            std::fs::remove_file(&path)?;
+            remove_skill_markdown(&root, &id)?;
+            println!("removed skill {id}");
+        }
+        MarketplaceAction::Publish {
+            skill_dir,
+            id,
+            name,
+            version,
+            capabilities,
+            claims,
+            kind,
+            key,
+            out,
+        } => {
+            if !matches!(kind.as_str(), "skill" | "plugin") {
+                return Err(CliError::State(format!(
+                    "unsupported --kind `{kind}` (expected skill or plugin)"
+                )));
+            }
+            if capabilities.len() > MAX_CAPABILITIES {
+                return Err(CliError::State(format!(
+                    "{} capabilities exceeds the {MAX_CAPABILITIES} ceiling",
+                    capabilities.len()
+                )));
+            }
+            let runtime_claims = parse_claim_args(&claims, &kind)?;
+
+            let skill_md = skill_dir.join("SKILL.md");
+            let bytes = std::fs::read(&skill_md)
+                .map_err(|e| CliError::State(format!("reading {}: {e}", skill_md.display())))?;
+            if bytes.len() as u64 > MAX_ARTIFACT_BYTES {
+                return Err(CliError::State(format!(
+                    "{} is {} bytes, exceeding the {MAX_ARTIFACT_BYTES}-byte ceiling",
+                    skill_md.display(),
+                    bytes.len()
+                )));
+            }
+            let digest = hex::encode(Sha256::digest(&bytes));
+            let artifacts = vec![ManifestArtifact {
+                path: "SKILL.md".to_string(),
+                sha256: digest,
+            }];
+
+            let unsigned = CapabilityManifest {
+                schema_version: 1,
+                kind: kind.clone(),
+                id: id.clone(),
+                name: name.clone(),
+                version: version.clone(),
+                capabilities: capabilities.clone(),
+                artifacts: artifacts.clone(),
+                signature: ManifestSignature {
+                    alg: "ES256".to_string(),
+                    value: String::new(),
+                },
+                runtime_claims: runtime_claims.clone(),
+            };
+            validate_manifest_shape_for_publish(&unsigned)?;
+
+            let payload = canonical_manifest_payload(&unsigned)?;
+            let key_pem = std::fs::read_to_string(&key)?;
+            let signing_key = SigningKey::from_pkcs8_pem(&key_pem).map_err(|e| {
+                CliError::State(format!("loading P-256 private key {}: {e}", key.display()))
+            })?;
+            let signature: Signature = signing_key.sign(&payload);
+
+            let manifest_json = serde_json::json!({
+                "schema_version": 1,
+                "kind": kind,
+                "id": id,
+                "name": name,
+                "version": version,
+                "capabilities": capabilities,
+                "artifacts": artifacts.iter().map(|a| serde_json::json!({"path": a.path, "sha256": a.sha256})).collect::<Vec<_>>(),
+                "runtime_claims": runtime_claims.iter().map(|c| serde_json::json!({"name": c.name, "family": c.family})).collect::<Vec<_>>(),
+                "signature": {
+                    "alg": "ES256",
+                    "value": URL_SAFE_NO_PAD.encode(signature.to_der().as_bytes()),
+                },
+            });
+
+            if let Some(parent) = out.parent().filter(|p| !p.as_os_str().is_empty()) {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(
+                &out,
+                serde_json::to_string_pretty(&manifest_json)
+                    .map_err(|e| CliError::State(e.to_string()))?,
+            )?;
+            let out_dir = out.parent().filter(|p| !p.as_os_str().is_empty());
+            if let Some(out_dir) = out_dir {
+                std::fs::copy(&skill_md, out_dir.join("SKILL.md"))?;
+            }
+            println!("published manifest written to {}", out.display());
+            println!(
+                "hand this file (and its sibling SKILL.md) plus your public key to an installer: \
+                 `ardur marketplace install {} --key <public-key.pem>`",
+                out.display()
+            );
         }
         MarketplaceAction::Validate { manifest, key } => {
             let manifest = validate_manifest(&manifest, &key)?;
@@ -393,34 +1021,11 @@ pub fn run_marketplace(args: MarketplaceArgs) -> Result<(), CliError> {
                 manifest.id, manifest.kind, manifest.version
             );
             println!(
-                "{} capabilities, {} artifacts",
+                "{} capabilities, {} artifacts, {} runtime claims",
                 manifest.capabilities.len(),
-                manifest.artifacts.len()
+                manifest.artifacts.len(),
+                manifest.runtime_claims.len()
             );
-        }
-        MarketplaceAction::Show { id } => {
-            let records = read_skills(&root)?;
-            let found = records.iter().find(|r| r.skill_id == id);
-            match found {
-                Some(r) => {
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(r)
-                            .map_err(|e| CliError::State(e.to_string()))?
-                    );
-                }
-                None => {
-                    return Err(CliError::State(format!("skill `{id}` not found")));
-                }
-            }
-        }
-        MarketplaceAction::Remove { id } => {
-            let path = dir.join(format!("{id}.json"));
-            if !path.is_file() {
-                return Err(CliError::State(format!("skill `{id}` not found")));
-            }
-            std::fs::remove_file(&path)?;
-            println!("removed skill {id}");
         }
         MarketplaceAction::Verify { key } => {
             let records = read_skills(&root)?;
@@ -450,4 +1055,68 @@ pub fn run_marketplace(args: MarketplaceArgs) -> Result<(), CliError> {
         }
     }
     Ok(())
+}
+
+/// `validate_manifest_shape` minus the signature-value-non-empty check (the
+/// manifest being built for `publish` has no signature yet).
+fn validate_manifest_shape_for_publish(manifest: &CapabilityManifest) -> Result<(), CliError> {
+    if !matches!(manifest.kind.as_str(), "skill" | "plugin") {
+        return Err(CliError::State(format!(
+            "unsupported manifest kind `{}` (expected skill or plugin)",
+            manifest.kind
+        )));
+    }
+    for (field, value) in [
+        ("id", manifest.id.as_str()),
+        ("name", manifest.name.as_str()),
+        ("version", manifest.version.as_str()),
+    ] {
+        if value.trim().is_empty() {
+            return Err(CliError::State(format!(
+                "manifest field `{field}` must not be empty"
+            )));
+        }
+    }
+    validate_capabilities_bound(manifest)?;
+    validate_artifacts_bound(manifest)?;
+    validate_runtime_claims(manifest)?;
+    Ok(())
+}
+
+/// Parse `--claim <name>:<family>` arguments into [`RuntimeClaimRecord`]s,
+/// running the same closure-invariant check `validate_runtime_claims` applies
+/// at install time so a publisher cannot sign a manifest their own installer
+/// would refuse.
+fn parse_claim_args(claims: &[String], kind: &str) -> Result<Vec<RuntimeClaimRecord>, CliError> {
+    if !claims.is_empty() && kind != "plugin" {
+        return Err(CliError::State(
+            "--claim requires --kind plugin".to_string(),
+        ));
+    }
+    let mut parsed = Vec::with_capacity(claims.len());
+    for raw in claims {
+        let (name, family) = raw
+            .split_once(':')
+            .ok_or_else(|| CliError::State(format!("--claim `{raw}` must be `<name>:<family>`")))?;
+        parsed.push(RuntimeClaimRecord {
+            name: name.to_string(),
+            family: family.to_string(),
+        });
+    }
+    let probe = CapabilityManifest {
+        schema_version: 1,
+        kind: kind.to_string(),
+        id: "probe".to_string(),
+        name: "probe".to_string(),
+        version: "0.0.0".to_string(),
+        capabilities: vec![],
+        artifacts: vec![],
+        signature: ManifestSignature {
+            alg: "ES256".to_string(),
+            value: "x".to_string(),
+        },
+        runtime_claims: parsed.clone(),
+    };
+    validate_runtime_claims(&probe)?;
+    Ok(parsed)
 }
