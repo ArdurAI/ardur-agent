@@ -69,6 +69,10 @@ const SESSION_ROLLBACK_CAPABILITY: &str = "session.rollback";
 const CONTEXT_COMPACT_CAPABILITY: &str = "context.compact";
 /// §1.9 — the capability `/background`/`/bg`/`/btw` and `/task cancel` exercise.
 const BACKGROUND_TASK_CAPABILITY: &str = "task.background";
+/// §1.10 — the capability `/steer`/`/tell` exercise.
+const STEER_CAPABILITY: &str = "input.steer";
+/// §1.10 — the capability `/interrupt` exercises.
+const INTERRUPT_CAPABILITY: &str = "input.interrupt";
 /// The session cap-token's lifetime, in seconds (one hour from process start).
 const CAP_TTL_SECS: u64 = 3_600;
 /// The default per-turn cents ceiling when `ARDUR_CLI_PER_TURN_CENTS` is unset,
@@ -179,6 +183,8 @@ impl FusedEngine {
                         SESSION_ROLLBACK_CAPABILITY.to_string(),
                         CONTEXT_COMPACT_CAPABILITY.to_string(),
                         BACKGROUND_TASK_CAPABILITY.to_string(),
+                        STEER_CAPABILITY.to_string(),
+                        INTERRUPT_CAPABILITY.to_string(),
                     ],
                 },
             )
@@ -545,6 +551,48 @@ impl FusedEngine {
             .cancel_background_task(self.session_id, &self.cap_token, BACKGROUND_TASK_CAPABILITY)
             .await
             .map_err(|e| CliError::State(format!("cancelling background task failed: {e}")))
+    }
+
+    /// **§1.10.** Mint the receipt for a steering directive accepted against
+    /// `target_task_id`. See
+    /// [`ardur_fused_runtime::FusedRuntime::accept_steer_directive`] for why
+    /// this records evidence of the request without yet changing the
+    /// target's in-flight behavior.
+    ///
+    /// # Errors
+    /// Returns [`CliError`] if the session cap-token does not grant the
+    /// steer capability or the receipt could not be minted.
+    pub async fn accept_steer_directive(
+        &self,
+        target_task_id: uuid::Uuid,
+        message: &str,
+    ) -> Result<ardur_runtime::ReceiptId, CliError> {
+        self.runtime
+            .accept_steer_directive(
+                self.session_id,
+                &self.cap_token,
+                STEER_CAPABILITY,
+                target_task_id,
+                message,
+            )
+            .await
+            .map_err(|e| CliError::State(format!("steer failed: {e}")))
+    }
+
+    /// **§1.10.** Mint the receipt for an accepted interrupt against
+    /// `target_task_id`.
+    ///
+    /// # Errors
+    /// Returns [`CliError`] if the session cap-token does not grant the
+    /// interrupt capability or the receipt could not be minted.
+    pub async fn accept_interrupt(
+        &self,
+        target_task_id: uuid::Uuid,
+    ) -> Result<ardur_runtime::ReceiptId, CliError> {
+        self.runtime
+            .accept_interrupt(self.session_id, &self.cap_token, INTERRUPT_CAPABILITY, target_task_id)
+            .await
+            .map_err(|e| CliError::State(format!("interrupt failed: {e}")))
     }
 
     /// Run one progressive chat turn through the fused runtime's full ten-stage

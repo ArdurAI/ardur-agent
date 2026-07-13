@@ -768,6 +768,88 @@ impl FusedRuntime {
         Ok(ReceiptId(receipt.receipt_id))
     }
 
+    /// **§1.10.** Mint the receipt for a steering directive accepted against
+    /// a target background task (verb `input.steer.accepted.v1`).
+    ///
+    /// KNOWN LIMITATION: this MVP's background-task runtime
+    /// ([`run_background_task`](Self::run_background_task)) is a single
+    /// one-shot provider call with no iterative loop to check a steering
+    /// queue between iterations — the same way `/compact`'s summarizer or a
+    /// chat turn's provider round is a single call. So a steer directive is
+    /// durably recorded and receipted (real evidence a steering request was
+    /// made and accepted) but does **not** yet change the target task's
+    /// in-flight behavior. It becomes actionable once a task type actually
+    /// loops (task flows, §1.9's deferred scope). Surfaced, not hidden: the
+    /// CLI's `/steer` response says this explicitly.
+    ///
+    /// # Errors
+    /// Returns [`RuntimeError`] if the cap-token does not grant `tool` or
+    /// the receipt could not be minted.
+    pub async fn accept_steer_directive(
+        &self,
+        session_id: SessionId,
+        cap_token: &CapTokenRef,
+        tool: &str,
+        target_task_id: uuid::Uuid,
+        message: &str,
+    ) -> Result<ReceiptId, RuntimeError> {
+        let receipt = self
+            .commit_control_receipt(
+                session_id,
+                cap_token,
+                tool,
+                "input.steer.accepted.v1",
+                Sha256Digest::of(format!("{target_task_id}:{message}").as_bytes()),
+                ardur_receipt::CostTuple {
+                    tokens_in: 0,
+                    tokens_out: 0,
+                    cents: 0,
+                    wall_ms: 0,
+                    attention_score: 0.0,
+                },
+            )
+            .await?;
+        Ok(ReceiptId(receipt.receipt_id))
+    }
+
+    /// **§1.10.** Mint the receipt for an accepted interrupt against a
+    /// target background task (verb `input.interrupt.accepted.v1`) —
+    /// distinct from [`cancel_background_task`](Self::cancel_background_task)'s
+    /// `task.background.cancelled.v1` even though both end the same task:
+    /// the blueprint models "the user interrupted the active run" and "the
+    /// user cancelled a background task" as different intents worth
+    /// distinguishing in the receipt trail, even when today's MVP resolves
+    /// both the same mechanical way (abort the task).
+    ///
+    /// # Errors
+    /// Returns [`RuntimeError`] if the cap-token does not grant `tool` or
+    /// the receipt could not be minted.
+    pub async fn accept_interrupt(
+        &self,
+        session_id: SessionId,
+        cap_token: &CapTokenRef,
+        tool: &str,
+        target_task_id: uuid::Uuid,
+    ) -> Result<ReceiptId, RuntimeError> {
+        let receipt = self
+            .commit_control_receipt(
+                session_id,
+                cap_token,
+                tool,
+                "input.interrupt.accepted.v1",
+                Sha256Digest::of(target_task_id.as_bytes()),
+                ardur_receipt::CostTuple {
+                    tokens_in: 0,
+                    tokens_out: 0,
+                    cents: 0,
+                    wall_ms: 0,
+                    attention_score: 0.0,
+                },
+            )
+            .await?;
+        Ok(ReceiptId(receipt.receipt_id))
+    }
+
     /// Revoke a capability token mid-session: add its revocation ids to the
     /// shared deny-list (so the next turn carrying it fails at stage 1 with
     /// [`RuntimeError::CapDenied`]) and fire `on_revoke` across the registry.

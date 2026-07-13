@@ -109,6 +109,21 @@ pub struct BackgroundTask {
     pub error: Option<String>,
     /// The terminal receipt (completed/failed/cancelled), once minted.
     pub receipt_id: Option<ReceiptId>,
+    /// **§1.10.** Steering directives accepted against this task, in
+    /// request order. Durably receipted evidence that a steering request
+    /// was made and accepted — see
+    /// [`ardur_fused_runtime::FusedRuntime::accept_steer_directive`] for why
+    /// they don't yet change this MVP's one-shot task's in-flight behavior.
+    pub steer_directives: Vec<SteerDirective>,
+}
+
+/// **§1.10.** One steering directive accepted against a task.
+#[derive(Clone, Debug)]
+pub struct SteerDirective {
+    /// The steering message.
+    pub message: String,
+    /// The receipt minted for accepting it.
+    pub receipt_id: ReceiptId,
 }
 
 impl BackgroundTask {
@@ -121,6 +136,7 @@ impl BackgroundTask {
             result: None,
             error: None,
             receipt_id: None,
+            steer_directives: Vec::new(),
         }
     }
 
@@ -143,6 +159,13 @@ impl BackgroundTask {
     fn cancel(&mut self, receipt_id: ReceiptId) {
         self.status = TaskStatus::Cancelled;
         self.receipt_id = Some(receipt_id);
+    }
+
+    fn steer(&mut self, message: String, receipt_id: ReceiptId) {
+        self.steer_directives.push(SteerDirective {
+            message,
+            receipt_id,
+        });
     }
 }
 
@@ -287,4 +310,116 @@ impl TaskRegistry {
             .cancel(receipt_id);
         Ok(())
     }
+
+    /// **§1.10.** Accept a steering directive against an active task: mints
+    /// `input.steer.accepted.v1` and durably records it on the task. See
+    /// [`ardur_fused_runtime::FusedRuntime::accept_steer_directive`] for the
+    /// documented limitation that this doesn't yet change the target's
+    /// in-flight behavior.
+    ///
+    /// # Errors
+    /// Returns [`CliError`] if `id` is unknown, the task is already
+    /// terminal, or minting the receipt fails.
+    pub async fn steer(
+        &self,
+        engine: &FusedEngine,
+        id: TaskId,
+        message: String,
+    ) -> Result<(), CliError> {
+        {
+            let tasks = self.tasks.lock().expect("task registry mutex");
+            let entry = tasks
+                .get(&id)
+                .ok_or_else(|| CliError::State(format!("task {id} not found")))?;
+            let active = entry
+                .record
+                .lock()
+                .expect("background task record mutex")
+                .status
+                .is_active();
+            if !active {
+                return Err(CliError::State(format!(
+                    "task {id} is already terminal; steering has nothing to reach"
+                )));
+            }
+        }
+        let receipt_id = engine.accept_steer_directive(id.0, &message).await?;
+        let tasks = self.tasks.lock().expect("task registry mutex");
+        let entry = tasks
+            .get(&id)
+            .ok_or_else(|| CliError::State(format!("task {id} not found")))?;
+        entry
+            .record
+            .lock()
+            .expect("background task record mutex")
+            .steer(message, receipt_id);
+        Ok(())
+    }
+
+    /// **§1.10.** Interrupt an active task: mint `input.interrupt.accepted.v1`,
+    /// abort its spawned future, and mark it cancelled — mechanically the
+    /// same effect as [`cancel`](Self::cancel), but a distinct receipted
+    /// intent (see [`ardur_fused_runtime::FusedRuntime::accept_interrupt`]).
+    ///
+    /// # Errors
+    /// Returns [`CliError`] if `id` is unknown, the task is already
+    /// terminal, or minting the receipt fails.
+    pub async fn interrupt(&self, engine: &FusedEngine, id: TaskId) -> Result<(), CliError> {
+        {
+            let tasks = self.tasks.lock().expect("task registry mutex");
+            let entry = tasks
+                .get(&id)
+                .ok_or_else(|| CliError::State(format!("task {id} not found")))?;
+            let active = entry
+                .record
+                .lock()
+                .expect("background task record mutex")
+                .status
+                .is_active();
+            if !active {
+                return Err(CliError::State(format!("task {id} is already terminal")));
+            }
+        }
+        let receipt_id = engine.accept_interrupt(id.0).await?;
+        let tasks = self.tasks.lock().expect("task registry mutex");
+        let entry = tasks
+            .get(&id)
+            .ok_or_else(|| CliError::State(format!("task {id} not found")))?;
+        entry.join.abort();
+        entry
+            .record
+            .lock()
+            .expect("background task record mutex")
+            .cancel(receipt_id);
+        Ok(())
+    }
+
+    /// **§1.10.** `/queue`'s summary: how many tasks are active, how many
+    /// are terminal, and how many steering directives are pending delivery
+    /// (accepted but, per this MVP's one-shot task runtime, not yet
+    /// deliverable — see [`steer`](Self::steer)).
+    #[must_use]
+    pub fn queue_summary(&self) -> QueueSummary {
+        let all = self.list();
+        let active = all.iter().filter(|t| t.status.is_active()).count();
+        let terminal = all.len() - active;
+        let pending_directives = all.iter().map(|t| t.steer_directives.len()).sum();
+        QueueSummary {
+            active_tasks: active,
+            terminal_tasks: terminal,
+            pending_steer_directives: pending_directives,
+        }
+    }
+}
+
+/// **§1.10.** `/queue` and `/status`'s task-queue summary.
+#[derive(Clone, Copy, Debug)]
+pub struct QueueSummary {
+    /// Tasks currently queued or running.
+    pub active_tasks: usize,
+    /// Tasks that have reached a terminal state.
+    pub terminal_tasks: usize,
+    /// Steering directives accepted but not yet deliverable (see
+    /// [`TaskRegistry::steer`]'s docs on this MVP's limitation).
+    pub pending_steer_directives: usize,
 }
