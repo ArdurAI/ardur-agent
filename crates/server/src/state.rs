@@ -260,7 +260,14 @@ impl AppState {
         let journals_dir = data_dir.join("journals");
         let receipts_dir = data_dir.join("receipts");
         let keys_dir = data_dir.join("keys");
-        for dir in [&memory_dir, &journals_dir, &receipts_dir, &keys_dir] {
+        let approvals_dir = data_dir.join("approvals");
+        for dir in [
+            &memory_dir,
+            &journals_dir,
+            &receipts_dir,
+            &keys_dir,
+            &approvals_dir,
+        ] {
             std::fs::create_dir_all(dir)
                 .map_err(|e| anyhow::anyhow!("creating {}: {e}", dir.display()))?;
         }
@@ -633,6 +640,16 @@ impl AppState {
     #[must_use]
     pub fn data_dir(&self) -> &Path {
         &self.data_dir
+    }
+
+    /// The on-disk approval-card store (`<data_dir>/approvals`).
+    ///
+    /// This is the same directory the CLI's `ardur approvals` subcommand
+    /// reads/writes (`<state_root>/approvals/<id>.json`), so the HTTP decide
+    /// endpoints and the CLI operate over a single source of truth.
+    #[must_use]
+    pub fn approvals_dir(&self) -> PathBuf {
+        self.data_dir.join("approvals")
     }
 
     /// Signal the background worker to drain, then join its OS thread.
