@@ -204,6 +204,35 @@ impl ActiveEngine {
             )),
         }
     }
+
+    /// **§1.7.** Summarize and install a compaction checkpoint, when the
+    /// active substrate has a journal and a real provider.
+    async fn compact(
+        &self,
+        history: &[ChatMessage],
+        focus: Option<String>,
+    ) -> Result<ardur_fused_runtime::CompactOutcome, CliError> {
+        match self {
+            ActiveEngine::Fused(e) => e.compact(history, focus).await,
+            ActiveEngine::Echo(_) => Err(CliError::State(
+                "compact is unavailable in --echo mode (no durable journal)".to_string(),
+            )),
+        }
+    }
+
+    /// **§1.7.** Preview a compaction candidate without installing it.
+    async fn preview_compact(
+        &self,
+        history: &[ChatMessage],
+        focus: Option<String>,
+    ) -> Result<String, CliError> {
+        match self {
+            ActiveEngine::Fused(e) => e.preview_compact(history, focus).await,
+            ActiveEngine::Echo(_) => Err(CliError::State(
+                "compact is unavailable in --echo mode (no durable journal)".to_string(),
+            )),
+        }
+    }
 }
 
 /// The mutable per-session presentation state the REPL threads through every
@@ -639,6 +668,10 @@ async fn dispatch_slash(
             }
             false
         }
+        "compact" | "compress" => {
+            dispatch_compact(engine, state, history, args).await;
+            false
+        }
         _ => {
             let ctx = CommandContext {
                 command: command.to_string(),
@@ -657,6 +690,122 @@ async fn dispatch_slash(
                 Err(e) => println!("command error: {e}"),
             }
             matches!(command, commands::QUIT_COMMAND | commands::EXIT_COMMAND)
+        }
+    }
+}
+
+/// A rough (~4 chars/token) token-count estimate over `history`'s content —
+/// not a real tokenizer, just enough for `/compact status`'s before/after
+/// sizing. Mirrors `ardur_fused_runtime`'s internal estimator; kept local
+/// since it's a trivial, purely-local read over data the REPL already holds
+/// (no need to round-trip through the runtime for it).
+fn estimate_tokens(history: &[ChatMessage]) -> u64 {
+    let chars: usize = history.iter().map(|m| m.content.len()).sum();
+    (chars as u64).div_ceil(4)
+}
+
+/// **§1.7.** Dispatch a `/compact`/`/compress`-stripped argument string:
+/// `/compact [focus text]` (summarize + install), `/compact preview [focus]`
+/// (summarize without installing), `/compact status` (a rough context-size
+/// estimate), `/compact history` (list compaction checkpoints — currently
+/// the same list `/checkpoints` shows, since a compaction checkpoint and a
+/// manual checkpoint are the same underlying journal record), `/compact get
+/// <id>` (show one checkpoint's full summary text), and `/compact restore
+/// <id>` (roll back to it — the same operation `/rollback` performs).
+async fn dispatch_compact(
+    engine: &ActiveEngine,
+    state: &mut ReplState,
+    history: &mut Vec<ChatMessage>,
+    args: &str,
+) {
+    let (sub, rest) = args.split_once(char::is_whitespace).unwrap_or((args, ""));
+    let rest = rest.trim();
+    match sub {
+        "status" => {
+            let tokens = estimate_tokens(history);
+            println!(
+                "{}",
+                state.theme.paint(
+                    Role::Dim,
+                    &format!(
+                        "{} messages, ~{tokens} tokens (rough estimate, not a real tokenizer)",
+                        history.len()
+                    )
+                )
+            );
+        }
+        "history" => {
+            match engine.list_checkpoints().await {
+                Ok(checkpoints) if checkpoints.is_empty() => {
+                    println!("{}", state.theme.paint(Role::Dim, "no checkpoints yet"));
+                }
+                Ok(checkpoints) => {
+                    for cp in checkpoints {
+                        println!("{} — {}", cp.checkpoint_id, cp.summary);
+                    }
+                }
+                Err(e) => println!("{}", state.theme.paint(Role::Error, &format!("{e}"))),
+            }
+        }
+        "get" => match uuid::Uuid::parse_str(rest) {
+            Ok(checkpoint_id) => match engine.list_checkpoints().await {
+                Ok(checkpoints) => match checkpoints.into_iter().find(|c| c.checkpoint_id == checkpoint_id) {
+                    Some(cp) => println!("{}", cp.summary),
+                    None => println!("checkpoint {checkpoint_id} not found"),
+                },
+                Err(e) => println!("{}", state.theme.paint(Role::Error, &format!("{e}"))),
+            },
+            Err(_) => println!("usage: /compact get <checkpoint-id>"),
+        },
+        "restore" => match uuid::Uuid::parse_str(rest) {
+            Ok(checkpoint_id) => match engine.rollback(checkpoint_id).await {
+                Ok((outcome, restored_history)) => {
+                    *history = restored_history;
+                    println!(
+                        "{}",
+                        state.theme.paint(
+                            Role::Dim,
+                            &format!(
+                                "restored checkpoint {} ({} messages)",
+                                outcome.target_checkpoint_id,
+                                history.len()
+                            )
+                        )
+                    );
+                }
+                Err(e) => println!("{}", state.theme.paint(Role::Error, &format!("{e}"))),
+            },
+            Err(_) => println!("usage: /compact restore <checkpoint-id>"),
+        },
+        "preview" => {
+            let focus = (!rest.is_empty()).then(|| rest.to_string());
+            match engine.preview_compact(history, focus).await {
+                Ok(summary) => println!("{summary}"),
+                Err(e) => println!("{}", state.theme.paint(Role::Error, &format!("{e}"))),
+            }
+        }
+        _ => {
+            // Anything else is focus text for a real compact-and-install —
+            // including the empty string, for a bare `/compact`.
+            let focus = (!args.is_empty()).then(|| args.to_string());
+            match engine.compact(history, focus).await {
+                Ok(outcome) => {
+                    *history = vec![ChatMessage::system(outcome.summary.clone())];
+                    println!(
+                        "{}",
+                        state.theme.paint(
+                            Role::Dim,
+                            &format!(
+                                "compacted: checkpoint {} (~{} -> ~{} tokens)",
+                                outcome.checkpoint_id,
+                                outcome.before_tokens_estimate,
+                                outcome.after_tokens_estimate
+                            )
+                        )
+                    );
+                }
+                Err(e) => println!("{}", state.theme.paint(Role::Error, &format!("{e}"))),
+            }
         }
     }
 }
