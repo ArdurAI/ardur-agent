@@ -40,8 +40,12 @@ If `ardur-server` is configured with data dir `/var/lib/ardur`, then
 | `--qdrant-collection <name>` | `ardur_memory` | Collection to scroll when `--qdrant-url` is set. |
 | `--port <num>` | `8090` | Dashboard port (distinct from ardur-server's typical `8080`). |
 | `--basic-auth <user:pass>` | *(unset)* | Optional HTTP Basic gate on every endpoint. |
+| `--bearer-tokens <token[,token...]>` | *(unset)* | Optional Bearer gate on every endpoint — accepts `Authorization: Bearer <token>` matching any configured token. Preferred over `--basic-auth` for anything reachable beyond loopback; also settable via `ARDUR_ADMIN_BEARER_TOKENS` so the token need not appear in shell history. |
 
-No environment variables are read; configuration is entirely via these flags.
+`--basic-auth` and `--bearer-tokens` may be configured together — a request
+satisfying *either* is authorized. The only other environment variable read is
+`ARDUR_ADMIN_BIND` (see `--bind-addr` below); all other configuration is via
+flags.
 
 ## Endpoints
 
@@ -57,6 +61,9 @@ All endpoints are `GET` — there are no write routes.
 | `GET` | `/api/receipts/{id}` | One receipt in full: decoded body + compact JWS. `404` if unknown. |
 | `GET` | `/api/costs` | Aggregate cost: total + today/7d/30d windows, by provider, by day, top-10 sessions. |
 | `GET` | `/api/memory/recent` | Last 20 memory records (when `--qdrant-url` is set; otherwise `{"enabled": false}`). |
+| `GET` | `/api/trust/wallet` | Active (non-expired) verified capability grants — the Trust Center capability wallet. |
+| `GET` | `/api/trust/receipts/verify` | Re-derives and checks the receipt chain's parent-hash linkage; reports the first broken link, if any. |
+| `GET` | `/api/trust/policy/debug?principal=&action=&resource=&attributes=` | Explains a hypothetical Cedar decision (Allow/Deny/Indeterminate + matched policy ids) against the loaded policy bundle. `503` if no bundle is configured. |
 
 ### The "provider" dimension
 
@@ -71,11 +78,14 @@ available grouping key is the receipt **verb** (`verb.object.state.vN`, e.g.
   route that writes, signs, or mutates a journal, receipt, or memory record, and
   the binary never opens any artifact for write. Receipt JWS payloads are
   decoded but **not** signature-verified (the admin-ui holds no keys).
-- **No auth by default.** Intended for a trusted local or private network. The
-  optional `--basic-auth user:pass` adds a single-credential HTTP Basic gate —
-  a light speed bump, **not** real authentication (no TLS termination, no user
-  store, no rate limiting). Put it behind a reverse proxy / network ACL if it is
-  reachable from anywhere untrusted.
+- **No auth by default.** Intended for a trusted local or private network.
+  `--bearer-tokens` adds a fail-closed, constant-time, length-bounded Bearer
+  gate — the same check `ardur-server` uses for its own admin routes
+  (`crates/server/src/routes.rs`'s `authorize_admin`) — and is the preferred
+  mechanism for anything reachable beyond loopback. `--basic-auth user:pass`
+  remains available as a lighter single-credential gate. Neither adds TLS
+  termination or rate limiting; put the dashboard behind a reverse proxy /
+  network ACL if it is reachable from anywhere untrusted.
 - **No secrets exposed.** The dashboard surfaces costs, message counts, tool
   names, and receipt metadata. Journal *message contents* are returned by
   `/api/sessions/{id}/journal`; treat the endpoint accordingly.

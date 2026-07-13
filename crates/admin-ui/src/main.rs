@@ -7,9 +7,9 @@ use std::net::SocketAddr;
 
 use clap::Parser;
 
-use ardur_admin::auth::BasicAuth;
+use ardur_admin::auth::{BasicAuth, BearerAuth};
 use ardur_admin::build_router;
-use ardur_admin::config::{Cli, resolve_bind_addr, validate_bind};
+use ardur_admin::config::{Cli, parse_bearer_tokens, resolve_bind_addr, validate_bind};
 use ardur_admin::state::{AppState, MemorySource};
 
 #[tokio::main]
@@ -48,6 +48,11 @@ async fn main() -> anyhow::Result<()> {
     if let Some(user_pass) = &cli.basic_auth {
         state = state.with_basic_auth(BasicAuth::from_user_pass(user_pass));
         tracing::info!("HTTP Basic auth enabled");
+    }
+    let bearer_tokens = parse_bearer_tokens(cli.bearer_tokens.as_deref());
+    if !bearer_tokens.is_empty() {
+        tracing::info!(count = bearer_tokens.len(), "Bearer auth enabled");
+        state = state.with_bearer_auth(BearerAuth::from_tokens(bearer_tokens));
     }
 
     let app = build_router(state.shared());
