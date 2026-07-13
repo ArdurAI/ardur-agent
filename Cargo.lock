@@ -524,6 +524,7 @@ dependencies = [
  "ardur-channel-telegram",
  "ardur-cli",
  "ardur-cost-gate",
+ "ardur-embeddings",
  "ardur-fused-runtime",
  "ardur-hooks-openclaw-compat",
  "ardur-injection-defense",
@@ -531,6 +532,7 @@ dependencies = [
  "ardur-media-audio",
  "ardur-media-decode",
  "ardur-memory",
+ "ardur-memory-eval",
  "ardur-memory-qdrant",
  "ardur-messaging-gateway",
  "ardur-multi-agent",
@@ -758,6 +760,23 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "uuid",
+]
+
+[[package]]
+name = "ardur-memory-eval"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "ardur-bm25-index",
+ "ardur-embeddings",
+ "ardur-fusion",
+ "async-trait",
+ "clap",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]
