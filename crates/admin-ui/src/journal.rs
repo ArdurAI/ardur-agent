@@ -66,7 +66,8 @@ fn entry_at(entry: &JournalEntry) -> u64 {
         | JournalEntry::ToolInvocation { at, .. }
         | JournalEntry::CostFinalized { at, .. }
         | JournalEntry::Checkpoint { at, .. }
-        | JournalEntry::Invalidation { at, .. } => *at,
+        | JournalEntry::Invalidation { at, .. }
+        | JournalEntry::Rollback { at, .. } => *at,
     }
 }
 

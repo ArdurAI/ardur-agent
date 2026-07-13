@@ -48,6 +48,7 @@ mod toolbox;
 mod util;
 mod welcome;
 
+use std::collections::HashMap;
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
@@ -167,6 +168,42 @@ impl ActiveEngine {
             ActiveEngine::Echo(_) => "memory explorer is unavailable in --echo mode".to_string(),
         }
     }
+
+    /// **§1.8.** Record a checkpoint, when the active substrate has a journal.
+    async fn checkpoint(
+        &self,
+        label: Option<String>,
+    ) -> Result<ardur_fused_runtime::CheckpointOutcome, CliError> {
+        match self {
+            ActiveEngine::Fused(e) => e.checkpoint(label).await,
+            ActiveEngine::Echo(_) => Err(CliError::State(
+                "checkpoints are unavailable in --echo mode (no durable journal)".to_string(),
+            )),
+        }
+    }
+
+    /// **§1.8.** List recorded checkpoints, when the active substrate has a journal.
+    async fn list_checkpoints(&self) -> Result<Vec<ardur_fused_runtime::CheckpointInfo>, CliError> {
+        match self {
+            ActiveEngine::Fused(e) => e.list_checkpoints().await,
+            ActiveEngine::Echo(_) => Err(CliError::State(
+                "checkpoints are unavailable in --echo mode (no durable journal)".to_string(),
+            )),
+        }
+    }
+
+    /// **§1.8.** Roll back to a checkpoint, when the active substrate has a journal.
+    async fn rollback(
+        &self,
+        checkpoint_id: uuid::Uuid,
+    ) -> Result<(ardur_fused_runtime::RollbackOutcome, Vec<ChatMessage>), CliError> {
+        match self {
+            ActiveEngine::Fused(e) => e.rollback(checkpoint_id).await,
+            ActiveEngine::Echo(_) => Err(CliError::State(
+                "rollback is unavailable in --echo mode (no durable journal)".to_string(),
+            )),
+        }
+    }
 }
 
 /// The mutable per-session presentation state the REPL threads through every
@@ -241,7 +278,7 @@ fn session_journal_path(dirs: &StateDirs, session_id: SessionId) -> PathBuf {
 
 fn load_history_from_journal(path: &Path) -> Result<Vec<ChatMessage>, CliError> {
     let contents = secure_io::read_string_no_follow(path)?;
-    let mut history = Vec::new();
+    let mut entries = Vec::new();
     for (line_no, line) in contents.lines().enumerate() {
         if line.trim().is_empty() {
             continue;
@@ -253,18 +290,64 @@ fn load_history_from_journal(path: &Path) -> Result<Vec<ChatMessage>, CliError> 
                 line_no + 1
             ))
         })?;
+        entries.push(entry);
+    }
+    Ok(journal_entries_to_history(&entries))
+}
+
+/// Reconstruct a session's live chat history from its full entry log.
+///
+/// Honors `Rollback` markers (§1.8): entries strictly after a rollback's
+/// target checkpoint, up to and including the `Rollback` entry itself, are
+/// excluded from the reconstruction — but never deleted from the log. The
+/// journal stays append-only; those entries remain readable there for audit,
+/// they are just not part of the live session view. Multiple rollbacks
+/// compose: each contributes its own exclusion range, so a later rollback to
+/// an earlier checkpoint correctly re-excises everything an earlier rollback
+/// had already excised.
+pub(crate) fn journal_entries_to_history(entries: &[JournalEntry]) -> Vec<ChatMessage> {
+    let mut checkpoint_positions: HashMap<uuid::Uuid, usize> = HashMap::new();
+    for (pos, entry) in entries.iter().enumerate() {
+        if let JournalEntry::Checkpoint { checkpoint_id, .. } = entry {
+            checkpoint_positions.insert(*checkpoint_id, pos);
+        }
+    }
+
+    let mut excluded = vec![false; entries.len()];
+    for (pos, entry) in entries.iter().enumerate() {
+        if let JournalEntry::Rollback {
+            target_checkpoint_id,
+            ..
+        } = entry
+        {
+            if let Some(&checkpoint_pos) = checkpoint_positions.get(target_checkpoint_id) {
+                for slot in excluded.iter_mut().take(pos + 1).skip(checkpoint_pos + 1) {
+                    *slot = true;
+                }
+            }
+        }
+    }
+
+    let mut history = Vec::new();
+    for (pos, entry) in entries.iter().enumerate() {
+        if excluded[pos] {
+            continue;
+        }
         match entry {
-            JournalEntry::UserMessage { content, .. } => history.push(ChatMessage::user(content)),
+            JournalEntry::UserMessage { content, .. } => {
+                history.push(ChatMessage::user(content.clone()));
+            }
             JournalEntry::AssistantMessage { content, .. } => {
-                history.push(ChatMessage::assistant(content));
+                history.push(ChatMessage::assistant(content.clone()));
             }
             JournalEntry::ToolInvocation { .. }
             | JournalEntry::CostFinalized { .. }
             | JournalEntry::Checkpoint { .. }
-            | JournalEntry::Invalidation { .. } => {}
+            | JournalEntry::Invalidation { .. }
+            | JournalEntry::Rollback { .. } => {}
         }
     }
-    Ok(history)
+    history
 }
 
 /// Resolve the effective per-session budget: the `--budget-cents` flag wins,
@@ -458,7 +541,7 @@ async fn handle_line(
     stream_enabled: bool,
 ) -> bool {
     if let Some(rest) = line.strip_prefix('/') {
-        dispatch_slash(engine, bus, state, rest)
+        dispatch_slash(engine, bus, state, history, rest).await
     } else {
         run_chat_message(engine, state, history, line, stream_enabled).await;
         false
@@ -466,13 +549,16 @@ async fn handle_line(
 }
 
 /// Dispatch a `/`-stripped command line. The §2.X-live commands (`/theme`,
-/// `/cost`, `/clear`) are handled here against the [`ReplState`]; everything else
-/// (`/help`, `/budget`, `/quit`, `/exit`, unknown) routes through the bus.
+/// `/cost`, `/clear`) and the §1.8 session-control commands (`/checkpoint`,
+/// `/checkpoints`, `/rollback`) are handled here against the [`ReplState`]
+/// (and, for rollback, `history`); everything else (`/help`, `/budget`,
+/// `/quit`, `/exit`, unknown) routes through the bus.
 /// Returns `true` if the command was `/quit` or `/exit`.
-fn dispatch_slash(
+async fn dispatch_slash(
     engine: &ActiveEngine,
     bus: &InMemoryCommandBus,
     state: &mut ReplState,
+    history: &mut Vec<ChatMessage>,
     rest: &str,
 ) -> bool {
     let (command, args) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
@@ -497,6 +583,60 @@ fn dispatch_slash(
             // Erase the screen and home the cursor.
             print!("\x1b[2J\x1b[H");
             let _ = std::io::stdout().flush();
+            false
+        }
+        "checkpoint" => {
+            let label = (!args.is_empty()).then(|| args.to_string());
+            match engine.checkpoint(label).await {
+                Ok(outcome) => println!(
+                    "{}",
+                    state.theme.paint(
+                        Role::Dim,
+                        &format!(
+                            "checkpoint {} created: {}",
+                            outcome.checkpoint_id, outcome.summary
+                        )
+                    )
+                ),
+                Err(e) => println!("{}", state.theme.paint(Role::Error, &format!("{e}"))),
+            }
+            false
+        }
+        "checkpoints" => {
+            match engine.list_checkpoints().await {
+                Ok(checkpoints) if checkpoints.is_empty() => {
+                    println!("{}", state.theme.paint(Role::Dim, "no checkpoints yet"));
+                }
+                Ok(checkpoints) => {
+                    for cp in checkpoints {
+                        println!("{} — {}", cp.checkpoint_id, cp.summary);
+                    }
+                }
+                Err(e) => println!("{}", state.theme.paint(Role::Error, &format!("{e}"))),
+            }
+            false
+        }
+        "rollback" => {
+            match uuid::Uuid::parse_str(args) {
+                Ok(checkpoint_id) => match engine.rollback(checkpoint_id).await {
+                    Ok((outcome, restored_history)) => {
+                        *history = restored_history;
+                        println!(
+                            "{}",
+                            state.theme.paint(
+                                Role::Dim,
+                                &format!(
+                                    "rolled back to checkpoint {} ({} messages restored)",
+                                    outcome.target_checkpoint_id,
+                                    history.len()
+                                )
+                            )
+                        );
+                    }
+                    Err(e) => println!("{}", state.theme.paint(Role::Error, &format!("{e}"))),
+                },
+                Err(_) => println!("usage: /rollback <checkpoint-id>"),
+            }
             false
         }
         _ => {
@@ -721,5 +861,107 @@ mod streamed_history_tests {
         let error = load_history_from_journal(&journal)
             .expect_err("session history must not follow a journal symlink");
         assert!(error.to_string().contains("symlink"), "{error}");
+    }
+}
+
+#[cfg(test)]
+mod journal_entries_to_history_tests {
+    use super::*;
+
+    fn user(content: &str) -> JournalEntry {
+        JournalEntry::UserMessage {
+            content: content.to_string(),
+            at: 0,
+        }
+    }
+
+    fn assistant(content: &str) -> JournalEntry {
+        JournalEntry::AssistantMessage {
+            content: content.to_string(),
+            at: 0,
+            receipt_id: ardur_runtime::ReceiptId(uuid::Uuid::new_v4()),
+        }
+    }
+
+    fn checkpoint(id: uuid::Uuid) -> JournalEntry {
+        JournalEntry::Checkpoint {
+            checkpoint_id: id,
+            summary: "cp".to_string(),
+            at: 0,
+        }
+    }
+
+    fn rollback(target: uuid::Uuid) -> JournalEntry {
+        JournalEntry::Rollback {
+            target_checkpoint_id: target,
+            receipt_id: ardur_runtime::ReceiptId(uuid::Uuid::new_v4()),
+            at: 0,
+        }
+    }
+
+    /// With no `Rollback` markers, every user/assistant message survives in
+    /// order and everything else (tool calls, cost, checkpoints) is dropped —
+    /// unchanged behavior from before §1.8.
+    #[test]
+    fn no_rollback_keeps_every_message_in_order() {
+        let entries = vec![user("hi"), assistant("hello"), user("bye")];
+        let history = journal_entries_to_history(&entries);
+        assert_eq!(history.len(), 3);
+        assert_eq!(history[0].content, "hi");
+        assert_eq!(history[1].content, "hello");
+        assert_eq!(history[2].content, "bye");
+    }
+
+    /// A rollback excludes exactly the messages between its target checkpoint
+    /// and the rollback marker (inclusive of the marker itself), while
+    /// messages before the checkpoint and after the marker both survive.
+    #[test]
+    fn rollback_excludes_only_the_rolled_back_range() {
+        let cp = uuid::Uuid::new_v4();
+        let entries = vec![
+            user("keep 1"),           // 0
+            checkpoint(cp),           // 1
+            user("rolled back"),      // 2 — excluded
+            assistant("also gone"),   // 3 — excluded
+            rollback(cp),             // 4 — excluded (marker itself)
+            user("keep 2"),           // 5 — after the marker, survives
+        ];
+        let history = journal_entries_to_history(&entries);
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].content, "keep 1");
+        assert_eq!(history[1].content, "keep 2");
+    }
+
+    /// Two sequential rollbacks each contribute their own exclusion range —
+    /// a later rollback to an earlier checkpoint re-excises everything an
+    /// earlier rollback had already excised, plus more.
+    #[test]
+    fn sequential_rollbacks_compose() {
+        let cp_a = uuid::Uuid::new_v4();
+        let cp_b = uuid::Uuid::new_v4();
+        let entries = vec![
+            checkpoint(cp_a),      // 0
+            user("branch A"),      // 1
+            checkpoint(cp_b),      // 2
+            user("branch B"),      // 3
+            rollback(cp_b),        // 4 — first rollback: excludes 3, 4
+            user("branch C"),      // 5 — new work after rollback 1
+            rollback(cp_a),        // 6 — second rollback: excludes 1..=6 (re-excising "branch A" too)
+        ];
+        let history = journal_entries_to_history(&entries);
+        // Every UserMessage after checkpoint A is excluded by the second
+        // rollback's range (positions 1..=6); nothing survives past position 0.
+        assert!(history.is_empty(), "{history:?}");
+    }
+
+    /// A `Rollback` entry naming a checkpoint id that isn't present in the
+    /// log (shouldn't happen via the runtime's own validated path, but the
+    /// pure reconstruction function must not panic on it) is simply a no-op
+    /// exclusion — every message still survives.
+    #[test]
+    fn rollback_to_missing_checkpoint_id_is_a_no_op() {
+        let entries = vec![user("a"), rollback(uuid::Uuid::new_v4()), user("b")];
+        let history = journal_entries_to_history(&entries);
+        assert_eq!(history.len(), 2);
     }
 }

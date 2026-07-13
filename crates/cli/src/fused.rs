@@ -61,6 +61,10 @@ use crate::stream::{StreamOutcome, drive_fused_turn};
 const AUDIENCE: &str = "cli";
 /// The tool/capability every chat turn exercises.
 const TOOL: &str = "chat.submit";
+/// §1.8 — the capability `/checkpoint` and `/rollback` exercise.
+const SESSION_CHECKPOINT_CAPABILITY: &str = "session.checkpoint";
+/// §1.8 — the capability `/rollback` exercises to roll back to a checkpoint.
+const SESSION_ROLLBACK_CAPABILITY: &str = "session.rollback";
 /// The session cap-token's lifetime, in seconds (one hour from process start).
 const CAP_TTL_SECS: u64 = 3_600;
 /// The default per-turn cents ceiling when `ARDUR_CLI_PER_TURN_CENTS` is unset,
@@ -167,6 +171,8 @@ impl FusedEngine {
                         TOOL.to_string(),
                         ardur_memory::MEMORY_READ_CAPABILITY.to_string(),
                         ardur_memory::MEMORY_WRITE_CAPABILITY.to_string(),
+                        SESSION_CHECKPOINT_CAPABILITY.to_string(),
+                        SESSION_ROLLBACK_CAPABILITY.to_string(),
                     ],
                 },
             )
@@ -387,6 +393,67 @@ impl FusedEngine {
                 "usage: /memory list [--json] | /memory show <id> | /memory forget <id>".to_string()
             }
         }
+    }
+
+    /// **§1.8.** Record a checkpoint over the session's current history.
+    ///
+    /// # Errors
+    /// Returns [`CliError`] if the session cap-token does not grant the
+    /// checkpoint capability, no journal is configured, or the journal
+    /// append fails.
+    pub async fn checkpoint(
+        &self,
+        label: Option<String>,
+    ) -> Result<ardur_fused_runtime::CheckpointOutcome, CliError> {
+        self.runtime
+            .checkpoint(
+                self.session_id,
+                &self.cap_token,
+                SESSION_CHECKPOINT_CAPABILITY,
+                label,
+            )
+            .await
+            .map_err(|e| CliError::State(format!("checkpoint failed: {e}")))
+    }
+
+    /// **§1.8.** List every checkpoint recorded in this session so far.
+    ///
+    /// # Errors
+    /// Returns [`CliError`] if no journal is configured or the replay fails.
+    pub async fn list_checkpoints(
+        &self,
+    ) -> Result<Vec<ardur_fused_runtime::CheckpointInfo>, CliError> {
+        self.runtime
+            .list_checkpoints(self.session_id)
+            .await
+            .map_err(|e| CliError::State(format!("listing checkpoints failed: {e}")))
+    }
+
+    /// **§1.8.** Roll back the session to a previously recorded checkpoint.
+    /// Returns the rollback outcome (the receipt + journal marker minted for
+    /// it) alongside the rebuilt in-memory chat history the caller should
+    /// replace its own `history: Vec<ChatMessage>` with.
+    ///
+    /// # Errors
+    /// Returns [`CliError`] if the session cap-token does not grant the
+    /// rollback capability, no journal is configured, `checkpoint_id` does
+    /// not name a checkpoint in this session, or the journal append fails.
+    pub async fn rollback(
+        &self,
+        checkpoint_id: uuid::Uuid,
+    ) -> Result<(ardur_fused_runtime::RollbackOutcome, Vec<ChatMessage>), CliError> {
+        let outcome = self
+            .runtime
+            .rollback_to_checkpoint(
+                self.session_id,
+                &self.cap_token,
+                SESSION_ROLLBACK_CAPABILITY,
+                checkpoint_id,
+            )
+            .await
+            .map_err(|e| CliError::State(format!("rollback failed: {e}")))?;
+        let history = crate::journal_entries_to_history(&outcome.retained_entries);
+        Ok((outcome, history))
     }
 
     /// Run one progressive chat turn through the fused runtime's full ten-stage

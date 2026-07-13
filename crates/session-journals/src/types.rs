@@ -157,4 +157,22 @@ pub enum JournalEntry {
         /// When it was recorded.
         at: UnixTsMillis,
     },
+
+    /// §1.8 — a session rolled back to an earlier [`JournalEntry::Checkpoint`].
+    ///
+    /// Append-only, like every other journal record: rollback never deletes or
+    /// rewrites the entries after the target checkpoint, it only records that a
+    /// rollback to `target_checkpoint_id` happened. A reader reconstructing
+    /// live session state stops replaying history at the most recent
+    /// `Rollback`'s target checkpoint rather than at the log's tail; the
+    /// entries between the checkpoint and the `Rollback` marker remain in the
+    /// log for audit, just not part of the reconstructed session.
+    Rollback {
+        /// The checkpoint that was rolled back to.
+        target_checkpoint_id: Uuid,
+        /// The §11.14 receipt this rollback folds into.
+        receipt_id: ReceiptId,
+        /// When it was recorded.
+        at: UnixTsMillis,
+    },
 }
