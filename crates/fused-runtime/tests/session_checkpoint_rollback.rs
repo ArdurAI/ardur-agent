@@ -154,7 +154,7 @@ async fn rollback_appends_a_marker_and_returns_retained_entries() {
         .append(JournalEntry::Checkpoint {
             checkpoint_id: uuid::Uuid::new_v4(),
             summary: "later work".to_string(),
-            at: 999,
+            at: ardur_session_journals::UnixTsMillis(999),
         })
         .await
         .expect("later entry appends");

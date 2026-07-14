@@ -436,7 +436,7 @@ async fn memory_write_expiry_is_rechecked_after_provider_work() {
     let recorder = Arc::new(RecordingHook::new("rec"));
     let mut registry = HookRegistry::new();
     registry.register(recorder.clone());
-    let clock = Arc::new(ManualClock::new(NOW_MS));
+    let clock = Arc::new(ManualClock::new(UnixTsMillis(NOW_MS)));
 
     let runtime = Arc::new(
         runtime_builder(provider.clone())
@@ -766,7 +766,7 @@ async fn concurrent_turns_serialize_receipt_chain() {
 #[tokio::test]
 async fn expired_reservation_does_not_commit_receipt_or_journal() {
     let provider = Arc::new(PausingProvider::new());
-    let clock = Arc::new(ManualClock::new(NOW_MS));
+    let clock = Arc::new(ManualClock::new(UnixTsMillis(NOW_MS)));
     let journal_dir = tempfile::tempdir().expect("journal dir");
     let session_id = SessionId::new();
     let journal =

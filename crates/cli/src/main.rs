@@ -1255,7 +1255,7 @@ fn journal_entry_timestamp(entry: &JournalEntry) -> u64 {
         | JournalEntry::CostFinalized { at, .. }
         | JournalEntry::Checkpoint { at, .. }
         | JournalEntry::Invalidation { at, .. }
-        | JournalEntry::Rollback { at, .. } => *at,
+        | JournalEntry::Rollback { at, .. } => at.get(),
     }
 }
 
@@ -1293,7 +1293,7 @@ mod session_cost_tests {
         let receipt_ids = vec![receipt_id.to_string()];
         let entries = vec![JournalEntry::AssistantMessage {
             content: "done".to_string(),
-            at: 1,
+            at: ardur_cost_gate::UnixTsMillis(1),
             receipt_id: ardur_runtime::ReceiptId(receipt_id),
         }];
         let mut inventory = SessionReceiptInventory::default();
@@ -1322,7 +1322,7 @@ mod session_cost_tests {
         let entries = vec![
             JournalEntry::AssistantMessage {
                 content: "done".to_string(),
-                at: 1,
+                at: ardur_cost_gate::UnixTsMillis(1),
                 receipt_id: ardur_runtime::ReceiptId(receipt_id),
             },
             JournalEntry::CostFinalized {
@@ -1338,7 +1338,7 @@ mod session_cost_tests {
                     wall_ms: 0,
                     attention_score: 0,
                 },
-                at: 2,
+                at: ardur_cost_gate::UnixTsMillis(2),
             },
         ];
         let inventory = SessionReceiptInventory {

@@ -1293,14 +1293,14 @@ mod journal_entries_to_history_tests {
     fn user(content: &str) -> JournalEntry {
         JournalEntry::UserMessage {
             content: content.to_string(),
-            at: 0,
+            at: ardur_session_journals::UnixTsMillis(0),
         }
     }
 
     fn assistant(content: &str) -> JournalEntry {
         JournalEntry::AssistantMessage {
             content: content.to_string(),
-            at: 0,
+            at: ardur_session_journals::UnixTsMillis(0),
             receipt_id: ardur_runtime::ReceiptId(uuid::Uuid::new_v4()),
         }
     }
@@ -1309,7 +1309,7 @@ mod journal_entries_to_history_tests {
         JournalEntry::Checkpoint {
             checkpoint_id: id,
             summary: "cp".to_string(),
-            at: 0,
+            at: ardur_session_journals::UnixTsMillis(0),
         }
     }
 
@@ -1317,7 +1317,7 @@ mod journal_entries_to_history_tests {
         JournalEntry::Rollback {
             target_checkpoint_id: target,
             receipt_id: ardur_runtime::ReceiptId(uuid::Uuid::new_v4()),
-            at: 0,
+            at: ardur_session_journals::UnixTsMillis(0),
         }
     }
 

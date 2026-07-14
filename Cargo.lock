@@ -723,6 +723,7 @@ dependencies = [
 name = "ardur-media-audio"
 version = "0.0.1"
 dependencies = [
+ "ardur-core-types",
  "ardur-media-decode",
  "ardur-receipt",
  "ardur-runtime",
@@ -802,6 +803,7 @@ name = "ardur-messaging-gateway"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "ardur-core-types",
  "ardur-runtime",
  "async-trait",
  "serde",

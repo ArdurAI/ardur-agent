@@ -16,19 +16,14 @@ use crate::HolderId;
 // type. `CostTuple::attention_score` is now a fixed-point milli-attention
 // integer shared with the runtime and receipt layers, so a completed turn's
 // attention flows into the budget without the old lossy `f64 as u64` cast.
+// Unix timestamp in **milliseconds** since the epoch (reservation timing:
+// `reserved_at`, `expires_at`, `finalized_at`). Re-exported from
+// `ardur-core-types` so the cost gate, receipt, and memory layers share one
+// unit-bearing newtype; it is `#[serde(transparent)]`, so the wire form is the
+// bare millisecond integer.
 pub use ardur_core_types::{
-    CostDelta, CostEnvelope, CostTuple, ModelId, ProviderId, Sha256Digest, TokenId,
+    CostDelta, CostEnvelope, CostTuple, ModelId, ProviderId, Sha256Digest, TokenId, UnixTsMillis,
 };
-
-/// Unix timestamp in **milliseconds** since the epoch. Reservation timing
-/// (`reserved_at`, `expires_at`, `finalized_at`) is millisecond-resolution so a
-/// short-lived reservation's expiry is expressible without sub-second loss.
-// NOTE §0.0 reconciliation: `ardur-core-types` owns a `UnixTsMillis(u64)`
-// newtype (the form `ardur-receipt` and `ardur-memory` use). The cost gate
-// keeps a bare `u64` alias here because its reservation-expiry arithmetic
-// operates on the raw millis; adopting the newtype is a mechanical follow-up
-// that does not change the wire form (the newtype is `#[serde(transparent)]`).
-pub type UnixTsMillis = u64;
 
 /// A request to admit a single metered call. Carries the cap-token it spends
 /// against, the projected [`CostEnvelope`], the provider/model it targets, and

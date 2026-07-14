@@ -470,7 +470,7 @@ async fn apply_approval_decision(
     let audit = JournalEntry::Checkpoint {
         checkpoint_id: uuid::Uuid::now_v7(),
         summary: format!("approval {id} {audit_verb} via HTTP admin endpoint"),
-        at: now_unix_millis(),
+        at: ardur_session_journals::UnixTsMillis(now_unix_millis()),
     };
     if let Err(e) = state.journal().append(audit).await {
         tracing::error!(error = %e, approval_id = %id, "failed to append approval audit entry");

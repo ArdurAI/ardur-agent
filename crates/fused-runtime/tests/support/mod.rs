@@ -13,7 +13,9 @@ use ardur_cap_token::{
     BiscuitCapTokenIssuer, CapScope, CapTokenIssuer, HolderId as CapHolderId, KeyPair, PublicKey,
 };
 use ardur_cedar_policy::{CedarPolicyBundle, PolicyBundle, PolicySource};
-use ardur_cost_gate::{Clock, CostTuple as GateCostTuple, HolderId as GateHolderId, ManualClock};
+use ardur_cost_gate::{
+    Clock, CostTuple as GateCostTuple, HolderId as GateHolderId, ManualClock, UnixTsMillis,
+};
 use ardur_fused_runtime::FusedRuntimeBuilder;
 use ardur_lifecycle_hooks::{
     HookDecision, HookError, HookId, LifecycleHook, PostReceiptCtx, PreSubmitCtx,
@@ -152,7 +154,7 @@ pub fn gate_holder_for(subject: &str) -> GateHolderId {
 
 /// A deterministic manual clock pinned at [`NOW_MS`].
 pub fn manual_clock() -> Arc<dyn Clock> {
-    Arc::new(ManualClock::new(NOW_MS))
+    Arc::new(ManualClock::new(UnixTsMillis(NOW_MS)))
 }
 
 /// A budget that comfortably covers the default envelope.
