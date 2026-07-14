@@ -17,14 +17,13 @@
 //! - [`VertexProvider`] — [`Provider::complete`] against a real
 //!   `generateContent` call, with tool-calling mapped onto Gemini's
 //!   `functionDeclarations`/`functionCall`/`functionResponse` shape.
-//! - `supports_streaming()` is `false`: Gemini's incremental path is a
-//!   separate `streamGenerateContent` endpoint — Phase 2 TODO. The trait
-//!   default [`Provider::stream`] wraps one `complete()` call in the
-//!   meantime.
+//! - `supports_streaming()` is `true`: [`Provider::stream`] calls
+//!   `streamGenerateContent?alt=sse` and decodes Gemini's SSE feed into the
+//!   shared [`StreamEvent`](ardur_provider_runtime::StreamEvent) protocol —
+//!   see [`streaming`].
 //!
 //! Phase 2 TODO (not this crate): local service-account JWT minting (needs an
-//! RSA crate — separate review); `streamGenerateContent`; `textembedding-gecko`
-//! embeddings.
+//! RSA crate — separate review); `textembedding-gecko` embeddings.
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
@@ -33,11 +32,13 @@ use std::fmt;
 
 use ardur_provider_runtime::{
     CompletionRequest, CompletionResponse, FinishReason, ModelId, Provider, ProviderError,
-    RateCard, ToolCall, Usage,
+    ProviderStream, RateCard, ToolCall, Usage,
 };
 use ardur_runtime::{ChatMessage, CostTuple, ProviderId, Role};
 use async_trait::async_trait;
 use serde::Deserialize;
+
+mod streaming;
 
 /// The registry key this backend answers to.
 const PROVIDER_ID: &str = "vertex";
@@ -132,6 +133,19 @@ impl VertexConfig {
             model
         )
     }
+
+    /// The `streamGenerateContent` URL for `model`, with `alt=sse` so Vertex
+    /// answers with a `text/event-stream` rather than a raw JSON-array
+    /// chunked response.
+    fn stream_generate_content_url(&self, model: &str) -> String {
+        format!(
+            "{}/v1/projects/{}/locations/{}/publishers/google/models/{}:streamGenerateContent?alt=sse",
+            self.base(),
+            self.project,
+            self.location,
+            model
+        )
+    }
 }
 
 fn nonempty_env(key: &str) -> Option<String> {
@@ -210,13 +224,42 @@ impl Provider for VertexProvider {
         Err(map_http_error(code, &body, &req.model))
     }
 
+    /// Stream the completion as shared [`StreamEvent`](ardur_provider_runtime::StreamEvent)s
+    /// via [`streaming::into_provider_events`], calling `streamGenerateContent?alt=sse`.
+    /// A connect failure or non-2xx status is the `Err` of the returned
+    /// `Result` (resolved before any event yields); a mid-stream transport
+    /// error is an `Err` item. Cancellation is by drop.
+    async fn stream(&self, req: CompletionRequest) -> Result<ProviderStream, ProviderError> {
+        if self.config.access_token.is_empty() {
+            return Err(ProviderError::Unauthorized);
+        }
+
+        let body = build_request_body(&req);
+        let resp = self
+            .client
+            .post(self.config.stream_generate_content_url(&req.model.0))
+            .bearer_auth(&self.config.access_token)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| ProviderError::NetworkFailure(e.to_string()))?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let code = status.as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(map_http_error(code, &body, &req.model));
+        }
+
+        Ok(Box::pin(streaming::into_provider_events(resp)))
+    }
+
     fn id(&self) -> ProviderId {
         ProviderId(PROVIDER_ID.to_string())
     }
 
     fn supports_streaming(&self) -> bool {
-        // Phase 2 TODO §3.4: `streamGenerateContent`, a distinct endpoint.
-        false
+        true
     }
 
     fn rate_card(&self) -> &RateCard {
@@ -588,7 +631,16 @@ mod tests {
     fn provider_id_is_vertex() {
         let provider = VertexProvider::new(config(), ModelId::new("gemini-1.5-pro"));
         assert_eq!(provider.id(), ProviderId("vertex".to_string()));
-        assert!(!provider.supports_streaming());
+        assert!(provider.supports_streaming());
+    }
+
+    #[test]
+    fn stream_generate_content_url_requests_sse() {
+        let cfg = config();
+        assert_eq!(
+            cfg.stream_generate_content_url("gemini-1.5-pro"),
+            "https://us-central1-aiplatform.googleapis.com/v1/projects/my-project/locations/us-central1/publishers/google/models/gemini-1.5-pro:streamGenerateContent?alt=sse"
+        );
     }
 
     #[test]

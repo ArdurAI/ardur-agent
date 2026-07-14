@@ -13,12 +13,12 @@
 //!
 //! - [`BedrockProvider`] — [`Provider::complete`] against a real Bedrock
 //!   `InvokeModel` call.
-//! - `supports_streaming()` is `false`: Bedrock's incremental path is a
-//!   separate API (`InvokeModelWithResponseStream`, an `application/vnd.amazon.eventstream`
-//!   framing, not SSE) — Phase 2 TODO. The trait default [`Provider::stream`]
-//!   wraps one `complete()` call in the meantime, matching the
-//!   non-incremental precedent `ardur-provider-codex`/`ardur-provider-claude-cli`
-//!   set.
+//! - `supports_streaming()` is `true`: [`Provider::stream`] calls
+//!   `InvokeModelWithResponseStream` and decodes its binary
+//!   `application/vnd.amazon.eventstream` framing (not SSE) into the shared
+//!   [`StreamEvent`](ardur_provider_runtime::StreamEvent) protocol — see
+//!   [`eventstream`] (the generic frame decoder) and [`streaming`] (the
+//!   Bedrock/Anthropic-event adapter).
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
@@ -26,13 +26,15 @@ use std::fmt;
 
 use ardur_provider_runtime::{
     CompletionRequest, CompletionResponse, FinishReason, ModelId, Provider, ProviderError,
-    RateCard, ToolCall, Usage,
+    ProviderStream, RateCard, ToolCall, Usage,
 };
 use ardur_runtime::{ChatMessage, CostTuple, ProviderId, Role};
 use async_trait::async_trait;
 use serde::Deserialize;
 
+mod eventstream;
 mod sigv4;
+mod streaming;
 
 /// The Anthropic-on-Bedrock request body's required version tag — distinct
 /// from Anthropic's direct-API `anthropic-version` header value.
@@ -141,6 +143,16 @@ impl BedrockConfig {
         let canonical_uri = format!("/model/{}/invoke", sigv4::uri_encode(model_id));
         (format!("{}{canonical_uri}", self.base()), canonical_uri)
     }
+
+    /// The `InvokeModelWithResponseStream` URL + SigV4 canonical URI for
+    /// `model_id`.
+    fn invoke_with_response_stream_url(&self, model_id: &str) -> (String, String) {
+        let canonical_uri = format!(
+            "/model/{}/invoke-with-response-stream",
+            sigv4::uri_encode(model_id)
+        );
+        (format!("{}{canonical_uri}", self.base()), canonical_uri)
+    }
 }
 
 fn nonempty_env(key: &str) -> Option<String> {
@@ -186,6 +198,42 @@ impl BedrockProvider {
     pub fn model_id(&self) -> &ModelId {
         &self.model_id
     }
+
+    /// Build a SigV4-signed `POST {url}` request carrying `body_bytes`,
+    /// shared by [`Provider::complete`] and [`Provider::stream`] — both sign
+    /// the same way, only the target URL and canonical URI (and, upstream,
+    /// how the response body is framed) differ.
+    fn signed_post(
+        &self,
+        url: &str,
+        canonical_uri: &str,
+        body_bytes: &[u8],
+    ) -> reqwest::RequestBuilder {
+        let credentials = sigv4::Credentials {
+            access_key_id: &self.config.access_key_id,
+            secret_access_key: &self.config.secret_access_key,
+            session_token: self.config.session_token.as_deref(),
+        };
+        let signed = sigv4::sign(
+            &credentials,
+            &self.config.region,
+            &self.config.host(),
+            canonical_uri,
+            body_bytes,
+            chrono::Utc::now(),
+        );
+
+        let mut request = self
+            .client
+            .post(url)
+            .header("content-type", "application/json")
+            .header("x-amz-date", &signed.amz_date)
+            .header("authorization", &signed.authorization);
+        if let Some(token) = &self.config.session_token {
+            request = request.header("x-amz-security-token", token);
+        }
+        request
+    }
 }
 
 #[async_trait]
@@ -200,31 +248,8 @@ impl Provider for BedrockProvider {
             .map_err(|e| ProviderError::InvalidRequest(format!("encoding request body: {e}")))?;
 
         let (url, canonical_uri) = self.config.invoke_url(&req.model.0);
-        let credentials = sigv4::Credentials {
-            access_key_id: &self.config.access_key_id,
-            secret_access_key: &self.config.secret_access_key,
-            session_token: self.config.session_token.as_deref(),
-        };
-        let signed = sigv4::sign(
-            &credentials,
-            &self.config.region,
-            &self.config.host(),
-            &canonical_uri,
-            &body_bytes,
-            chrono::Utc::now(),
-        );
-
-        let mut request = self
-            .client
-            .post(&url)
-            .header("content-type", "application/json")
-            .header("x-amz-date", &signed.amz_date)
-            .header("authorization", &signed.authorization);
-        if let Some(token) = &self.config.session_token {
-            request = request.header("x-amz-security-token", token);
-        }
-
-        let resp = request
+        let resp = self
+            .signed_post(&url, &canonical_uri, &body_bytes)
             .body(body_bytes)
             .send()
             .await
@@ -246,14 +271,45 @@ impl Provider for BedrockProvider {
         Err(map_http_error(code, &body, &req.model))
     }
 
+    /// Stream the completion as shared [`StreamEvent`](ardur_provider_runtime::StreamEvent)s
+    /// via [`streaming::into_provider_events`], calling
+    /// `InvokeModelWithResponseStream`. A connect failure or non-2xx status
+    /// is the `Err` of the returned `Result` (resolved before any event
+    /// yields); a mid-stream frame-decode error, transport error, or
+    /// Bedrock-reported exception is an `Err` item. Cancellation is by drop.
+    async fn stream(&self, req: CompletionRequest) -> Result<ProviderStream, ProviderError> {
+        if self.config.access_key_id.is_empty() || self.config.secret_access_key.is_empty() {
+            return Err(ProviderError::Unauthorized);
+        }
+
+        let body = build_request_body(&req);
+        let body_bytes = serde_json::to_vec(&body)
+            .map_err(|e| ProviderError::InvalidRequest(format!("encoding request body: {e}")))?;
+
+        let (url, canonical_uri) = self.config.invoke_with_response_stream_url(&req.model.0);
+        let resp = self
+            .signed_post(&url, &canonical_uri, &body_bytes)
+            .body(body_bytes)
+            .send()
+            .await
+            .map_err(|e| ProviderError::NetworkFailure(e.to_string()))?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let code = status.as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(map_http_error(code, &body, &req.model));
+        }
+
+        Ok(Box::pin(streaming::into_provider_events(resp)))
+    }
+
     fn id(&self) -> ProviderId {
         ProviderId(PROVIDER_ID.to_string())
     }
 
     fn supports_streaming(&self) -> bool {
-        // Phase 2 TODO §3.4: InvokeModelWithResponseStream (a distinct
-        // application/vnd.amazon.eventstream framing, not SSE).
-        false
+        true
     }
 
     fn rate_card(&self) -> &RateCard {
@@ -537,7 +593,7 @@ mod tests {
     fn provider_id_is_bedrock() {
         let provider = BedrockProvider::new(config(), ModelId::new(DEFAULT_MODEL_ID));
         assert_eq!(provider.id(), ProviderId("bedrock".to_string()));
-        assert!(!provider.supports_streaming());
+        assert!(provider.supports_streaming());
     }
 
     #[test]

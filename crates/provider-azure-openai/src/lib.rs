@@ -12,10 +12,11 @@
 //!
 //! - [`AzureOpenAiProvider`] — [`Provider::complete`] against a real Azure
 //!   deployment, and [`EmbeddingProvider::embed`] against `/embeddings`.
-//! - `supports_streaming()` is `false`: the trait default [`Provider::stream`]
-//!   wraps one `complete()` call, matching the non-incremental precedent
-//!   `ardur-provider-codex`/`ardur-provider-claude-cli` set. Phase 2 (TODO)
-//!   adds a real SSE decode — the wire framing is identical to OpenAI's.
+//! - `supports_streaming()` is `true`: [`Provider::stream`] decodes Azure's SSE
+//!   feed (byte-identical wire framing to OpenAI's) into the shared
+//!   [`StreamEvent`](ardur_provider_runtime::StreamEvent) protocol — see
+//!   [`streaming`] — with tool-call fragments remapped from index-keyed to
+//!   id-keyed events.
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
@@ -23,11 +24,13 @@ use std::fmt;
 
 use ardur_provider_runtime::{
     CompletionRequest, CompletionResponse, EmbeddingProvider, EmbeddingRequest, EmbeddingResponse,
-    FinishReason, ModelId, Provider, ProviderError, RateCard, ToolCall, Usage,
+    FinishReason, ModelId, Provider, ProviderError, ProviderStream, RateCard, ToolCall, Usage,
 };
 use ardur_runtime::{ChatMessage, CostTuple, ProviderId, Role};
 use async_trait::async_trait;
 use serde::Deserialize;
+
+mod streaming;
 
 /// The registry key this backend answers to.
 const PROVIDER_ID: &str = "azure-openai";
@@ -250,14 +253,48 @@ impl Provider for AzureOpenAiProvider {
         Err(map_http_error(code, retry_after_ms, &body, &req.model))
     }
 
+    /// Stream the completion as shared [`StreamEvent`](ardur_provider_runtime::StreamEvent)s
+    /// via [`streaming::into_provider_events`]. A connect failure or non-2xx
+    /// status is the `Err` of the returned `Result` (resolved before any event
+    /// yields); a mid-stream transport error is an `Err` item. Cancellation is
+    /// by drop.
+    async fn stream(&self, req: CompletionRequest) -> Result<ProviderStream, ProviderError> {
+        if self.config.api_key.is_empty() {
+            return Err(ProviderError::Unauthorized);
+        }
+
+        let mut body = build_request_body(&req);
+        body.as_object_mut()
+            .expect("build_request_body always returns a JSON object")
+            .insert("stream".to_string(), serde_json::Value::Bool(true));
+        body["stream_options"] = serde_json::json!({ "include_usage": true });
+
+        let resp = self
+            .client
+            .post(self.config.chat_url())
+            .header("api-key", &self.config.api_key)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| ProviderError::NetworkFailure(e.to_string()))?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let code = status.as_u16();
+            let retry_after_ms = parse_retry_after_ms(resp.headers());
+            let body = resp.text().await.unwrap_or_default();
+            return Err(map_http_error(code, retry_after_ms, &body, &req.model));
+        }
+
+        Ok(Box::pin(streaming::into_provider_events(resp)))
+    }
+
     fn id(&self) -> ProviderId {
         ProviderId(PROVIDER_ID.to_string())
     }
 
     fn supports_streaming(&self) -> bool {
-        // Phase 2 TODO §3.4: a real incremental SSE decode. Phase 1 relies on
-        // the trait default `stream()`, which wraps one `complete()` call.
-        false
+        true
     }
 
     fn rate_card(&self) -> &RateCard {
@@ -676,7 +713,7 @@ mod tests {
             Provider::id(&provider),
             ProviderId("azure-openai".to_string())
         );
-        assert!(!Provider::supports_streaming(&provider));
+        assert!(Provider::supports_streaming(&provider));
     }
 
     #[test]

@@ -4,9 +4,12 @@
 //! stands in for `{location}-aiplatform.googleapis.com`, so CI stays green
 //! with no credentials.
 
-use ardur_provider_runtime::{ChatMessage, CompletionRequest, FinishReason, ModelId, Provider};
+use ardur_provider_runtime::{
+    ChatMessage, CompletionRequest, FinishReason, ModelId, Provider, StreamEvent,
+};
 use ardur_provider_vertex::{VertexConfig, VertexProvider};
-use wiremock::matchers::{header, method, path};
+use futures::StreamExt;
+use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn provider_for(server: &MockServer) -> VertexProvider {
@@ -110,5 +113,61 @@ async fn unauthorized_upstream_maps_to_unauthorized() {
     assert!(matches!(
         err,
         ardur_provider_runtime::ProviderError::Unauthorized
+    ));
+}
+
+fn sse_body(payloads: &[&str]) -> String {
+    let mut body = String::new();
+    for p in payloads {
+        body.push_str("data: ");
+        body.push_str(p);
+        body.push_str("\n\n");
+    }
+    body
+}
+
+#[tokio::test]
+async fn stream_decodes_real_incremental_events() {
+    let server = MockServer::start().await;
+    let body = sse_body(&[
+        r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"pong"}]}}]}"#,
+        r#"{"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":1}}"#,
+    ]);
+    Mock::given(method("POST"))
+        .and(path(
+            "/v1/projects/my-project/locations/us-central1/publishers/google/models/gemini-1.5-pro:streamGenerateContent",
+        ))
+        .and(query_param("alt", "sse"))
+        .and(header("authorization", "Bearer test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(body.into_bytes(), "text/event-stream"))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let provider = provider_for(&server);
+    let req = CompletionRequest::new(
+        vec![ChatMessage::user("ping")],
+        ModelId::new("gemini-1.5-pro"),
+        32,
+    );
+    let events: Vec<StreamEvent> = provider
+        .stream(req)
+        .await
+        .expect("the streaming handshake succeeds")
+        .map(|r| r.expect("no stream error"))
+        .collect()
+        .await;
+
+    let text: String = events
+        .iter()
+        .filter_map(|e| match e {
+            StreamEvent::ContentDelta(t) => Some(t.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(text, "pong");
+    assert!(matches!(
+        events.last(),
+        Some(StreamEvent::Finish(FinishReason::Stop))
     ));
 }

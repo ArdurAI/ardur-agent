@@ -7,9 +7,10 @@
 use ardur_provider_azure_openai::{AzureOpenAiConfig, AzureOpenAiProvider};
 use ardur_provider_runtime::{
     ChatMessage, CompletionRequest, EmbeddingProvider, EmbeddingRequest, FinishReason, ModelId,
-    Provider, ProviderError,
+    Provider, ProviderError, StreamEvent,
 };
-use wiremock::matchers::{header, method, path};
+use futures::StreamExt;
+use wiremock::matchers::{body_partial_json, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn provider_for(server: &MockServer, model: &str) -> AzureOpenAiProvider {
@@ -102,4 +103,64 @@ async fn unauthorized_upstream_maps_to_unauthorized() {
         .await
         .expect_err("a 401 is an error");
     assert!(matches!(err, ProviderError::Unauthorized));
+}
+
+fn sse_body(payloads: &[&str]) -> String {
+    let mut body = String::new();
+    for p in payloads {
+        body.push_str("data: ");
+        body.push_str(p);
+        body.push_str("\n\n");
+    }
+    body.push_str("data: [DONE]\n\n");
+    body
+}
+
+#[tokio::test]
+async fn stream_decodes_real_incremental_events() {
+    let server = MockServer::start().await;
+    let body = sse_body(&[
+        r#"{"choices":[{"index":0,"delta":{"role":"assistant","content":""}}]}"#,
+        r#"{"choices":[{"index":0,"delta":{"content":"pong"}}]}"#,
+        r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#,
+        r#"{"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":1}}"#,
+    ]);
+    Mock::given(method("POST"))
+        .and(path(
+            "/openai/deployments/gpt-4o-deployment/chat/completions",
+        ))
+        .and(header("api-key", "azure-test-key"))
+        .and(body_partial_json(serde_json::json!({
+            "stream": true,
+            "stream_options": {"include_usage": true},
+        })))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(body.into_bytes(), "text/event-stream"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let provider = provider_for(&server, "gpt-4o");
+    let req = CompletionRequest::new(vec![ChatMessage::user("ping")], ModelId::new("gpt-4o"), 32);
+    let events: Vec<StreamEvent> = provider
+        .stream(req)
+        .await
+        .expect("the streaming handshake succeeds")
+        .map(|r| r.expect("no stream error"))
+        .collect()
+        .await;
+
+    let text: String = events
+        .iter()
+        .filter_map(|e| match e {
+            StreamEvent::ContentDelta(t) => Some(t.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(text, "pong");
+    assert!(matches!(
+        events.last(),
+        Some(StreamEvent::Finish(FinishReason::Stop))
+    ));
 }

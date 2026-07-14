@@ -19,9 +19,10 @@ repository.workspace = true
 ardur-provider-runtime = { workspace = true }
 ardur-runtime = { workspace = true }
 async-trait = { workspace = true }
-reqwest = { workspace = true }
+reqwest = { workspace = true, features = ["stream"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+futures = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
