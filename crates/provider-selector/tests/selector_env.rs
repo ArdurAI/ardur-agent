@@ -32,6 +32,14 @@ const TOUCHED: &[&str] = &[
     "OPENAI_COMPAT_TIMEOUT_SECS",
     "OLLAMA_API_KEY",
     "OLLAMA_BASE_URL",
+    "ARDUR_AZURE_OPENAI_API_KEY",
+    "ARDUR_AZURE_OPENAI_RESOURCE",
+    "ARDUR_AZURE_OPENAI_DEPLOYMENT",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_REGION",
+    "ARDUR_VERTEX_ACCESS_TOKEN",
+    "ARDUR_VERTEX_PROJECT",
 ];
 
 fn set_env(key: &str, value: &str) {
@@ -167,6 +175,43 @@ fn from_env_claude_cli_selects_claude_cli() {
 
     let provider = from_env(model()).expect("claude-cli is infallible");
     assert_eq!(provider.id().0, "claude-cli");
+}
+
+#[test]
+fn from_env_azure_openai_selects_azure_openai() {
+    let _guard = env_lock();
+    let env = CleanEnv::new();
+    env.set("ARDUR_PROVIDER", "azure-openai");
+    env.set("ARDUR_AZURE_OPENAI_API_KEY", "***");
+    env.set("ARDUR_AZURE_OPENAI_RESOURCE", "my-resource");
+    env.set("ARDUR_AZURE_OPENAI_DEPLOYMENT", "gpt-4o-deployment");
+
+    let provider = from_env(model()).expect("azure-openai builds with config present");
+    assert_eq!(provider.id().0, "azure-openai");
+}
+
+#[test]
+fn from_env_bedrock_selects_bedrock() {
+    let _guard = env_lock();
+    let env = CleanEnv::new();
+    env.set("ARDUR_PROVIDER", "bedrock");
+    env.set("AWS_ACCESS_KEY_ID", "AKIDEXAMPLE");
+    env.set("AWS_SECRET_ACCESS_KEY", "***");
+
+    let provider = from_env(model()).expect("bedrock builds with credentials present");
+    assert_eq!(provider.id().0, "bedrock");
+}
+
+#[test]
+fn from_env_vertex_selects_vertex() {
+    let _guard = env_lock();
+    let env = CleanEnv::new();
+    env.set("ARDUR_PROVIDER", "vertex");
+    env.set("ARDUR_VERTEX_ACCESS_TOKEN", "***");
+    env.set("ARDUR_VERTEX_PROJECT", "my-project");
+
+    let provider = from_env(model()).expect("vertex builds with config present");
+    assert_eq!(provider.id().0, "vertex");
 }
 
 #[test]

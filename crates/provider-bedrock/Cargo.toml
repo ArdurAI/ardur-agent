@@ -1,0 +1,33 @@
+# ardur-provider-bedrock — AWS Bedrock backend for Anthropic Claude models (§3.4).
+#
+# Implements the §3.0 Provider trait against Bedrock Runtime's `InvokeModel`
+# REST API, targeting the Anthropic Messages-shaped body Bedrock accepts for
+# `anthropic.claude-*` model ids. Authenticated with a hand-rolled AWS SigV4
+# signer: the workspace already pins `sha2` + `hmac` (used by the
+# receipt/slack-adapter crates), and SigV4 is HMAC-SHA256 over a canonical
+# request — this crate's only signing need is one signed POST, so pulling in
+# the much larger `aws-sdk-*`/`aws-sigv4` crate family is out of scope.
+
+[package]
+name = "ardur-provider-bedrock"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ardur-provider-runtime = { workspace = true }
+ardur-runtime = { workspace = true }
+async-trait = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+hmac = { workspace = true }
+hex = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+wiremock = { workspace = true }

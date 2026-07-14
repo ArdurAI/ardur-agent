@@ -1,0 +1,31 @@
+# ardur-provider-azure-openai — Azure OpenAI Service backend (§3.4).
+#
+# Implements the §3.0 Provider trait (and §3.4's EmbeddingProvider) against
+# Azure's OpenAI-compatible deployment API: same JSON body dialect as OpenAI
+# Chat Completions, but a resource/deployment-scoped URL and an `api-key`
+# header instead of `Authorization: Bearer`. Kept as its own crate (not a
+# thin wrapper around ardur-provider-openai-compat) so the dependency graph
+# stays a DAG rooted at ardur-provider-runtime, matching every other provider
+# crate.
+
+[package]
+name = "ardur-provider-azure-openai"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The §3.0 provider abstraction this backend implements.
+ardur-provider-runtime = { workspace = true }
+ardur-runtime = { workspace = true }
+async-trait = { workspace = true }
+reqwest = { workspace = true, features = ["stream"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+futures = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+wiremock = { workspace = true }

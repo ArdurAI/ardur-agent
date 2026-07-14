@@ -14,6 +14,9 @@
 //! | `ollama`         | `OllamaProvider` (local **or** cloud)| `ardur-provider-ollama`     |
 //! | `codex`          | `CodexProvider` (subprocess wrap)    | `ardur-provider-codex`      |
 //! | `claude-cli`     | `ClaudeCliProvider` (subprocess wrap)| `ardur-provider-claude-cli` |
+//! | `azure-openai`    | `AzureOpenAiProvider`                | `ardur-provider-azure-openai` |
+//! | `bedrock`         | `BedrockProvider`                    | `ardur-provider-bedrock`    |
+//! | `vertex`          | `VertexProvider`                     | `ardur-provider-vertex`     |
 //!
 //! (`claude-cli` also answers to the alias `claude-subscription`.)
 //!
@@ -23,10 +26,12 @@
 //! panic or silent fallback.
 //!
 //! The credentialed backends ([`ProviderKind::Anthropic`],
-//! [`ProviderKind::OpenRouter`], [`ProviderKind::OpenAiCompat`]) can still fail
-//! *after* a valid selection when their key is absent — that surfaces as
-//! `Err(ProviderError)`, distinct from the panic on an unknown selector. The
-//! credential-free backends
+//! [`ProviderKind::OpenRouter`], [`ProviderKind::OpenAiCompat`],
+//! [`ProviderKind::AzureOpenAi`], [`ProviderKind::Bedrock`],
+//! [`ProviderKind::Vertex`]) can still fail *after* a valid selection when
+//! their key/config is absent — that surfaces as `Err(ProviderError)`,
+//! distinct from the panic on an unknown selector. The credential-free
+//! backends
 //! ([`ProviderKind::Ollama`], [`ProviderKind::Codex`], [`ProviderKind::ClaudeCli`])
 //! never fail.
 //!
@@ -42,12 +47,15 @@
 use std::fmt;
 use std::sync::Arc;
 
+use ardur_provider_azure_openai::AzureOpenAiProvider;
+use ardur_provider_bedrock::BedrockProvider;
 use ardur_provider_claude_cli::ClaudeCliProvider;
 use ardur_provider_codex::CodexProvider;
 use ardur_provider_ollama::OllamaProvider;
 use ardur_provider_openai_compat::OpenAiCompatProvider;
 use ardur_provider_openrouter::OpenRouterProvider;
 use ardur_provider_runtime::AnthropicProvider;
+use ardur_provider_vertex::VertexProvider;
 
 // Re-exported so callers can name the `from_env`/`select` argument and return
 // types without also depending on `ardur-provider-runtime` directly. These also
@@ -76,6 +84,12 @@ pub enum ProviderKind {
     /// Claude Code CLI subscription, wrapped as a subprocess (§3.3c). Also
     /// selected by the alias `claude-subscription`.
     ClaudeCli,
+    /// Azure OpenAI Service (§3.4).
+    AzureOpenAi,
+    /// AWS Bedrock, targeting Anthropic Claude models (§3.4).
+    Bedrock,
+    /// Google Vertex AI, targeting Gemini models (§3.4).
+    Vertex,
 }
 
 impl ProviderKind {
@@ -84,7 +98,7 @@ impl ProviderKind {
 
     /// Every recognized selector spelling, in selection order — the canonical
     /// list surfaced in the unknown-value error.
-    pub const ALL: [ProviderKind; 7] = [
+    pub const ALL: [ProviderKind; 10] = [
         ProviderKind::Anthropic,
         ProviderKind::OpenRouter,
         ProviderKind::OpenAiCompat,
@@ -92,6 +106,9 @@ impl ProviderKind {
         ProviderKind::Codex,
         ProviderKind::ClaudeCli,
         ProviderKind::OpenAiCompat, // openai alias
+        ProviderKind::AzureOpenAi,
+        ProviderKind::Bedrock,
+        ProviderKind::Vertex,
     ];
 
     /// The canonical lowercase spelling — matches each backend's `id()`.
@@ -104,6 +121,9 @@ impl ProviderKind {
             ProviderKind::Ollama => "ollama",
             ProviderKind::Codex => "codex",
             ProviderKind::ClaudeCli => "claude-cli",
+            ProviderKind::AzureOpenAi => "azure-openai",
+            ProviderKind::Bedrock => "bedrock",
+            ProviderKind::Vertex => "vertex",
         }
     }
 
@@ -122,6 +142,9 @@ impl ProviderKind {
             "ollama" => Ok(ProviderKind::Ollama),
             "codex" => Ok(ProviderKind::Codex),
             "claude-cli" | "claude-subscription" => Ok(ProviderKind::ClaudeCli),
+            "azure-openai" | "azure_openai" | "azure" => Ok(ProviderKind::AzureOpenAi),
+            "bedrock" => Ok(ProviderKind::Bedrock),
+            "vertex" => Ok(ProviderKind::Vertex),
             _ => Err(UnknownProvider(raw.to_string())),
         }
     }
@@ -149,8 +172,11 @@ impl ProviderKind {
     ///
     /// Returns [`ProviderError`] when a credentialed backend's key is missing
     /// ([`ProviderKind::Anthropic`] / [`ProviderKind::OpenRouter`] /
-    /// [`ProviderKind::OpenAiCompat`] → [`ProviderError::Unauthorized`]).
-    /// The credential-free backends
+    /// [`ProviderKind::OpenAiCompat`] / [`ProviderKind::AzureOpenAi`] /
+    /// [`ProviderKind::Bedrock`] / [`ProviderKind::Vertex`] →
+    /// [`ProviderError::Unauthorized`], or [`ProviderError::InvalidRequest`]
+    /// when Azure/Bedrock/Vertex's non-key config, e.g. a resource or project
+    /// id, is missing). The credential-free backends
     /// ([`ProviderKind::Ollama`] / [`ProviderKind::Codex`] /
     /// [`ProviderKind::ClaudeCli`]) never fail.
     pub fn build(self, model: ModelId) -> Result<Arc<dyn Provider>, ProviderError> {
@@ -161,6 +187,9 @@ impl ProviderKind {
             ProviderKind::Ollama => Arc::new(OllamaProvider::from_env()),
             ProviderKind::Codex => Arc::new(CodexProvider::from_env(model)),
             ProviderKind::ClaudeCli => Arc::new(ClaudeCliProvider::from_env(model)),
+            ProviderKind::AzureOpenAi => Arc::new(AzureOpenAiProvider::from_env(model)?),
+            ProviderKind::Bedrock => Arc::new(BedrockProvider::from_env()?),
+            ProviderKind::Vertex => Arc::new(VertexProvider::from_env()?),
         };
         Ok(provider)
     }
@@ -184,7 +213,8 @@ impl fmt::Display for UnknownProvider {
         write!(
             f,
             "unknown {SELECTOR_ENV} value {:?}: supported values are \
-             anthropic (default), openrouter, openai-compat, ollama, codex, claude-cli",
+             anthropic (default), openrouter, openai-compat, ollama, codex, claude-cli, \
+             azure-openai, bedrock, vertex",
             self.0
         )
     }
@@ -327,6 +357,39 @@ mod tests {
         }
         let provider = select(Some("claude-cli"), model()).expect("claude-cli is infallible");
         assert_eq!(provider.id().0, "claude-cli");
+    }
+
+    #[test]
+    fn azure_openai_selects_azure_openai() {
+        for v in ["azure-openai", "Azure-OpenAI", "azure_openai", "azure"] {
+            assert_eq!(
+                ProviderKind::resolve(Some(v)).unwrap(),
+                ProviderKind::AzureOpenAi,
+                "{v:?} should select azure-openai"
+            );
+        }
+    }
+
+    #[test]
+    fn bedrock_selects_bedrock() {
+        for v in ["bedrock", "Bedrock", "BEDROCK"] {
+            assert_eq!(
+                ProviderKind::resolve(Some(v)).unwrap(),
+                ProviderKind::Bedrock,
+                "{v:?} should select bedrock"
+            );
+        }
+    }
+
+    #[test]
+    fn vertex_selects_vertex() {
+        for v in ["vertex", "Vertex", "VERTEX"] {
+            assert_eq!(
+                ProviderKind::resolve(Some(v)).unwrap(),
+                ProviderKind::Vertex,
+                "{v:?} should select vertex"
+            );
+        }
     }
 
     #[test]

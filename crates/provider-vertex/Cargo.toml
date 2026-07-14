@@ -1,0 +1,28 @@
+# ardur-provider-vertex — Google Vertex AI (Gemini) backend (§3.4).
+#
+# Implements the §3.0 Provider trait against Vertex's `generateContent` REST
+# endpoint for Gemini models. Standard Vertex auth is a service-account
+# OAuth2 flow (RS256-signed JWT assertion); the workspace has no RSA crate
+# (`p256` is ECDSA/P-256 only) and adding one is out of scope for this pass —
+# Phase 1 instead accepts an already-minted bearer token via
+# ARDUR_VERTEX_ACCESS_TOKEN (see plans/3.4-cloud-provider-catalog-embeddings-blueprint.md D4).
+
+[package]
+name = "ardur-provider-vertex"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ardur-provider-runtime = { workspace = true }
+ardur-runtime = { workspace = true }
+async-trait = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+wiremock = { workspace = true }

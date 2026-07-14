@@ -796,6 +796,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "ardur-provider-azure-openai"
+version = "0.0.1"
+dependencies = [
+ "ardur-provider-runtime",
+ "ardur-runtime",
+ "async-trait",
+ "futures",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+ "wiremock",
+]
+
+[[package]]
+name = "ardur-provider-bedrock"
+version = "0.0.1"
+dependencies = [
+ "ardur-provider-runtime",
+ "ardur-runtime",
+ "async-trait",
+ "chrono",
+ "hex",
+ "hmac 0.13.0",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tokio",
+ "wiremock",
+]
+
+[[package]]
 name = "ardur-provider-claude-cli"
 version = "0.0.1"
 dependencies = [
@@ -892,13 +925,30 @@ dependencies = [
 name = "ardur-provider-selector"
 version = "0.0.1"
 dependencies = [
+ "ardur-provider-azure-openai",
+ "ardur-provider-bedrock",
  "ardur-provider-claude-cli",
  "ardur-provider-codex",
  "ardur-provider-ollama",
  "ardur-provider-openai-compat",
  "ardur-provider-openrouter",
  "ardur-provider-runtime",
+ "ardur-provider-vertex",
  "serial_test",
+]
+
+[[package]]
+name = "ardur-provider-vertex"
+version = "0.0.1"
+dependencies = [
+ "ardur-provider-runtime",
+ "ardur-runtime",
+ "async-trait",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+ "wiremock",
 ]
 
 [[package]]

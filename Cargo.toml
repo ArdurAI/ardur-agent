@@ -32,6 +32,9 @@ members = [
     "crates/provider-ollama",
     "crates/provider-codex",
     "crates/provider-claude-cli",
+    "crates/provider-azure-openai",
+    "crates/provider-bedrock",
+    "crates/provider-vertex",
     "crates/provider-selector",
     "crates/cli",
     "crates/messaging-gateway",
@@ -263,6 +266,9 @@ ardur-provider-openai-compat = { path = "crates/provider-openai-compat" }
 ardur-provider-ollama = { path = "crates/provider-ollama" }
 ardur-provider-codex = { path = "crates/provider-codex" }
 ardur-provider-claude-cli = { path = "crates/provider-claude-cli" }
+ardur-provider-azure-openai = { path = "crates/provider-azure-openai" }
+ardur-provider-bedrock = { path = "crates/provider-bedrock" }
+ardur-provider-vertex = { path = "crates/provider-vertex" }
 ardur-provider-selector = { path = "crates/provider-selector" }
 ardur-messaging-gateway = { path = "crates/messaging-gateway" }
 ardur-tool-registry = { path = "crates/tool-registry" }

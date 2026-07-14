@@ -41,6 +41,12 @@ ardur-provider-codex = { workspace = true }
 # The Claude Code CLI subscription backend (§3.3c) — selected by
 # `ARDUR_PROVIDER=claude-cli` (alias `claude-subscription`).
 ardur-provider-claude-cli = { workspace = true }
+# The Azure OpenAI backend (§3.4) — selected by `ARDUR_PROVIDER=azure-openai`.
+ardur-provider-azure-openai = { workspace = true }
+# The AWS Bedrock backend (§3.4) — selected by `ARDUR_PROVIDER=bedrock`.
+ardur-provider-bedrock = { workspace = true }
+# The Google Vertex AI backend (§3.4) — selected by `ARDUR_PROVIDER=vertex`.
+ardur-provider-vertex = { workspace = true }
 
 [dev-dependencies]
 # Serial test execution for env-mutating integration tests (selector_env) —
