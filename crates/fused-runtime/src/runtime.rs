@@ -364,7 +364,7 @@ impl FusedRuntime {
                     tokens_out: 0,
                     cents: 0,
                     wall_ms: 0,
-                    attention_score: 0.0,
+                    attention_score: 0,
                 },
             )
             .await?;
@@ -469,7 +469,7 @@ impl FusedRuntime {
                     tokens_out: 0,
                     cents: 0,
                     wall_ms: 0,
-                    attention_score: 0.0,
+                    attention_score: 0,
                 },
             )
             .await?;
