@@ -9,6 +9,7 @@ use maud::{DOCTYPE, Markup, PreEscaped, html};
 use crate::costs::CostsReport;
 use crate::journal::SessionSummary;
 use crate::receipts::ReceiptSummary;
+use crate::security_events::{SecurityEvent, SecurityEventView};
 use crate::trust::{ChainOverview, WalletResponse};
 
 /// HTMX 1.9 from a CDN (the dashboard's only client-side dependency).
@@ -314,13 +315,92 @@ fn ledger_table(report: &CostsReport) -> Markup {
     }
 }
 
+/// The per-gate summary chips for the security-event panels.
+fn gate_chips(events: &SecurityEventView) -> Markup {
+    html! {
+        div.chips {
+            @if events.by_gate.is_empty() {
+                span.chip { "no events" }
+            } @else {
+                @for g in &events.by_gate {
+                    span.chip { (g.gate) " · " (g.count) }
+                }
+            }
+        }
+    }
+}
+
+/// The policy/gate decision table (non-injection denials), newest first.
+fn decisions_table(events: &[SecurityEvent]) -> Markup {
+    html! {
+        table {
+            thead {
+                tr { th { "When (UTC)" } th { "Gate" } th { "Decision" } th { "Reason" } }
+            }
+            tbody {
+                @if events.is_empty() {
+                    tr { td colspan="4" .empty { "No gate denials recorded." } }
+                } @else {
+                    @for e in events {
+                        tr {
+                            td { (utc_ms(e.at_ms)) }
+                            td { span.pill.bad { (e.gate) } }
+                            td { (e.decision.as_deref().unwrap_or("deny")) }
+                            td { (e.reason.as_deref().unwrap_or("—")) }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The injection-event table, newest first. Renders flag pattern/category/
+/// confidence — never matched text (the writer already stripped it).
+fn injection_table(events: &[SecurityEvent]) -> Markup {
+    html! {
+        table {
+            thead {
+                tr { th { "When (UTC)" } th { "Filter" } th { "Flags (pattern · class · conf)" } }
+            }
+            tbody {
+                @if events.is_empty() {
+                    tr { td colspan="3" .empty { "No injection blocks recorded." } }
+                } @else {
+                    @for e in events {
+                        tr {
+                            td { (utc_ms(e.at_ms)) }
+                            td { code { (e.filter_id.as_deref().unwrap_or("—")) } }
+                            td {
+                                @if e.flags.is_empty() {
+                                    "—"
+                                } @else {
+                                    @for f in &e.flags {
+                                        span.pill.bad {
+                                            (f.pattern_id) " · " (f.category) " · "
+                                            (format!("{:.2}", f.confidence))
+                                        }
+                                        " "
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// The Trust Center page: receipt-chain integrity + explorer, the cost ledger,
-/// the capability wallet, and the policy-debugger pointer. Every panel is a
-/// read-only projection of on-disk artifacts and boot-time configured state.
+/// the capability wallet, the policy-decision log, and the injection-event feed.
+/// Every panel is a read-only projection of on-disk artifacts and boot-time
+/// configured state.
 pub fn trust_center(
     overview: &ChainOverview,
     wallet: &WalletResponse,
     report: &CostsReport,
+    events: &SecurityEventView,
     policy_enabled: bool,
 ) -> Markup {
     html! {
@@ -367,12 +447,35 @@ pub fn trust_center(
                         h2 { "Policy decisions" }
                         @if policy_enabled {
                             p.note {
-                                "A Cedar policy bundle is loaded. Trace a decision via "
+                                "A Cedar policy bundle is loaded. Trace a hypothetical decision via "
                                 code { "GET /api/trust/policy/debug?principal=&action=&resource=" }
                                 " — allow/deny with the matched policy ids."
                             }
                         } @else {
                             p.note { "No Cedar policy bundle configured (policy debugger disabled)." }
+                        }
+                        @if events.enabled {
+                            (gate_chips(events))
+                            (decisions_table(&events.decisions))
+                        } @else {
+                            p.note {
+                                "Security-event log not configured — pass "
+                                code { "--security-events <data>/security-events.jsonl" }
+                                " to surface the recorded gate denials here."
+                            }
+                        }
+                    }
+
+                    section {
+                        h2 { "Injection events" }
+                        @if events.enabled {
+                            (injection_table(&events.injection))
+                        } @else {
+                            p.note {
+                                "Security-event log not configured — pass "
+                                code { "--security-events <data>/security-events.jsonl" }
+                                " to surface blocked injection attempts here."
+                            }
                         }
                     }
                 }
@@ -423,4 +526,6 @@ code { font-family: ui-monospace, monospace; }
 .pill.bad { background: #e74c3c22; color: #e74c3c; }
 .note { color: #8888; font-size: .9rem; }
 .note code { background: #8882; padding: .1rem .35rem; border-radius: 4px; }
+.chips { display: flex; flex-wrap: wrap; gap: .4rem; margin: .4rem 0 .8rem; }
+.chip { padding: .2rem .6rem; border-radius: 999px; background: #8882; font-size: .8rem; }
 "#;

@@ -49,6 +49,10 @@ async fn main() -> anyhow::Result<()> {
         state = state.with_basic_auth(BasicAuth::from_user_pass(user_pass));
         tracing::info!("HTTP Basic auth enabled");
     }
+    if let Some(path) = &cli.security_events {
+        state = state.with_security_events(path.clone());
+        tracing::info!(path = %path.display(), "security-event log enabled");
+    }
 
     let app = build_router(state.shared());
 

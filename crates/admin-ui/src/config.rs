@@ -41,6 +41,13 @@ pub struct Cli {
     #[arg(long, value_name = "PATH")]
     pub receipt_store: PathBuf,
 
+    /// Optional path to ardur-server's redacted security-event log
+    /// (`<data>/security-events.jsonl`). When set, the Trust Center surfaces the
+    /// policy-decision and injection-event panels; when unset, they report the
+    /// feature as disabled.
+    #[arg(long, value_name = "PATH")]
+    pub security_events: Option<PathBuf>,
+
     /// Optional Qdrant gRPC URL. When set, `/api/memory/recent` scrolls the
     /// memory collection read-only; when unset, that endpoint reports the
     /// feature as disabled.

@@ -25,6 +25,7 @@ pub mod journal;
 pub mod memory;
 pub mod receipts;
 pub mod routes;
+pub mod security_events;
 pub mod state;
 pub mod trust;
 

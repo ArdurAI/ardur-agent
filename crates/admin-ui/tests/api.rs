@@ -695,6 +695,70 @@ async fn trust_chain_api_reports_broken_link() {
     assert_eq!(links[1]["link_ok"], true);
 }
 
+/// Write a redacted security-event log with one injection block and one policy
+/// denial — exactly the shape ardur-server's writer produces.
+fn write_security_events(path: &Path) {
+    let injection = serde_json::json!({
+        "at_ms": 1_000u64,
+        "gate": "injection",
+        "decision": "deny",
+        "filter_id": "injection-defense",
+        "flags": [
+            { "pattern_id": "instruction_override", "category": "InstructionOverride", "confidence": 0.9 }
+        ]
+    });
+    let policy = serde_json::json!({
+        "at_ms": 2_000u64,
+        "gate": "policy",
+        "decision": "deny",
+        "reason": "cedar forbid rule matched"
+    });
+    let body = format!("{injection}\n{policy}\n");
+    fs::write(path, body).unwrap();
+}
+
+#[tokio::test]
+async fn trust_center_renders_injection_and_policy_events() {
+    let fx = Fixture::new();
+    let events_path = fx.receipt_store.join("security-events.jsonl");
+    write_security_events(&events_path);
+
+    let state =
+        AppState::new(&fx.journal_dir, &fx.receipt_store).with_security_events(&events_path);
+    let server = TestServer::new(build_router(state.shared()));
+
+    // JSON view splits injection from the policy/gate decision stream.
+    let view: Value = server.get("/api/trust/events").await.json();
+    assert_eq!(view["enabled"], true);
+    assert_eq!(view["total"], 2);
+    assert_eq!(view["injection"].as_array().unwrap().len(), 1);
+    assert_eq!(view["decisions"].as_array().unwrap().len(), 1);
+    assert_eq!(view["injection"][0]["flags"][0]["pattern_id"], "instruction_override");
+    assert_eq!(view["decisions"][0]["gate"], "policy");
+
+    // The HTML page renders both panels.
+    let html = server.get("/trust").await.text();
+    assert!(html.contains("Injection events"));
+    assert!(html.contains("instruction_override"));
+    assert!(html.contains("InstructionOverride"));
+    assert!(html.contains("cedar forbid rule matched"));
+    // The by-gate chips summarize counts.
+    assert!(html.contains("injection · 1"));
+    assert!(html.contains("policy · 1"));
+}
+
+#[tokio::test]
+async fn trust_events_disabled_when_no_log_configured() {
+    let fx = Fixture::new();
+    let view: Value = fx.server().get("/api/trust/events").await.json();
+    assert_eq!(view["enabled"], false);
+    assert_eq!(view["total"], 0);
+
+    // The page reflects the disabled state with the configuration hint.
+    let html = fx.server().get("/trust").await.text();
+    assert!(html.contains("Security-event log not configured"));
+}
+
 #[tokio::test]
 async fn read_only_no_write_endpoints() {
     let fx = Fixture::new();

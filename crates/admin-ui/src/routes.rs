@@ -18,6 +18,7 @@ use crate::costs::{self, CostsReport};
 use crate::journal::{self, JournalPage, SessionSummary};
 use crate::memory::{self, MemoryRecent};
 use crate::receipts::{self, ReceiptSummary};
+use crate::security_events;
 use crate::state::SharedState;
 use crate::{auth, html, trust};
 
@@ -72,10 +73,12 @@ async fn trust_center(State(state): State<SharedState>) -> Result<Markup, ApiErr
         chrono::Utc::now().timestamp().max(0) as u64,
     );
     let report = costs::report(&state.receipt_store, &state.journal_dir, now_ms())?;
+    let events = security_events::view(state.security_events.as_deref(), 100)?;
     Ok(html::trust_center(
         &overview,
         &wallet,
         &report,
+        &events,
         state.policies.is_some(),
     ))
 }
@@ -85,6 +88,18 @@ async fn trust_chain(
     State(state): State<SharedState>,
 ) -> Result<Json<trust::ChainOverview>, ApiError> {
     Ok(Json(trust::chain_overview(&state.receipt_store, 100)?))
+}
+
+/// `GET /api/trust/events` — the redacted security-event view (policy denials +
+/// injection blocks) as JSON. Reports `{"enabled": false}` when no log path is
+/// configured.
+async fn trust_events(
+    State(state): State<SharedState>,
+) -> Result<Json<security_events::SecurityEventView>, ApiError> {
+    Ok(Json(security_events::view(
+        state.security_events.as_deref(),
+        100,
+    )?))
 }
 
 /// `GET /api/sessions`
@@ -213,6 +228,7 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/api/memory/recent", get(memory_recent))
         .route("/api/trust/wallet", get(trust_wallet))
         .route("/api/trust/chain", get(trust_chain))
+        .route("/api/trust/events", get(trust_events))
         .route("/api/trust/receipts/verify", get(trust_receipts_verify))
         .route("/api/trust/policy/debug", get(trust_policy_debug))
         .layer(axum::middleware::from_fn_with_state(

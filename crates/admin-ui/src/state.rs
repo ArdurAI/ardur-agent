@@ -42,6 +42,10 @@ pub struct AppState {
     pub capabilities: Vec<VerifiedClaims>,
     /// Cedar policy bundle used by the policy debugger.
     pub policies: Option<CedarPolicyBundle>,
+    /// Path to ardur-server's redacted `security-events.jsonl`, when the
+    /// operator points at it. Feeds the Trust Center policy-decision and
+    /// injection-event panels.
+    pub security_events: Option<PathBuf>,
 }
 
 impl AppState {
@@ -55,7 +59,15 @@ impl AppState {
             basic_auth: None,
             capabilities: Vec::new(),
             policies: None,
+            security_events: None,
         }
+    }
+
+    /// Point the Trust Center at ardur-server's redacted security-event log.
+    #[must_use]
+    pub fn with_security_events(mut self, path: impl Into<PathBuf>) -> Self {
+        self.security_events = Some(path.into());
+        self
     }
 
     /// Attach a connected Qdrant memory source.
