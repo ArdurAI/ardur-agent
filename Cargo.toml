@@ -150,6 +150,9 @@ maud = { version = "0.27", features = ["axum"] }
 # router without binding a port, backing the endpoint integration tests
 # (crates/admin-ui dev-dependency, §13.X).
 axum-test = "21"
+# State-tree backup/restore archives (crates/cli backup command).
+tar = "0.4"
+flate2 = "1"
 # Tracing & observability.
 tracing = "0.1"
 # OpenTelemetry GenAI semantic-convention emission (crates/provider-runtime

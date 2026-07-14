@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 mod audit;
+mod backup;
 mod device_mesh;
 mod marketplace;
 mod persona;
@@ -22,6 +23,7 @@ use ardur_cli::{
 };
 use ardur_session_journals::JournalEntry;
 use audit::{AuditArgs, run_audit};
+use backup::{BackupArgs, run_backup};
 use clap::{Args, Parser, Subcommand};
 use device_mesh::{NodesArgs, run_nodes};
 use marketplace::{MarketplaceArgs, run_marketplace};
@@ -91,6 +93,8 @@ enum Commands {
     Project(ProjectArgs),
     /// Run supply-chain security audits (secrets, SBOM, vulns).
     Audit(AuditArgs),
+    /// Archive or restore the state tree (receipts, journals, keys, memory).
+    Backup(BackupArgs),
     /// Browse and install skills from the marketplace.
     Marketplace(MarketplaceArgs),
     /// Fetch a URL with the built-in allowlisted HTTP tool.
@@ -342,6 +346,7 @@ fn main() -> ExitCode {
         Commands::Persona(args) => run_persona(args),
         Commands::Project(args) => run_project(args),
         Commands::Audit(args) => run_audit(args),
+        Commands::Backup(args) => run_backup(args),
         Commands::Marketplace(args) => run_marketplace(args),
         Commands::Fetch(args) => run_fetch(args),
         Commands::Search(args) => run_search(args),
