@@ -698,7 +698,7 @@ impl FusedRuntime {
                         tool,
                         "task.background.completed.v1",
                         Sha256Digest::of(response.content.as_bytes()),
-                        runtime_cost_to_receipt(&response.cost),
+                        response.cost,
                     )
                     .await?;
                 Ok(BackgroundTaskOutcome {
@@ -721,7 +721,7 @@ impl FusedRuntime {
                             tokens_out: 0,
                             cents: 0,
                             wall_ms: 0,
-                            attention_score: 0.0,
+                            attention_score: 0,
                         },
                     )
                     .await?;
@@ -761,7 +761,7 @@ impl FusedRuntime {
                     tokens_out: 0,
                     cents: 0,
                     wall_ms: 0,
-                    attention_score: 0.0,
+                    attention_score: 0,
                 },
             )
             .await?;

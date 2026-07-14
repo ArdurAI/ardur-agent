@@ -194,8 +194,7 @@ async fn background_task_receipts_chain_with_turn_receipts() {
         .await
         .expect("the turn completes");
 
-    let chain =
-        ardur_fused_runtime::load_persisted_chain(receipt_log.path()).expect("chain loads");
+    let chain = ardur_fused_runtime::load_persisted_chain(receipt_log.path()).expect("chain loads");
     assert_eq!(chain.len(), 2);
     assert_eq!(chain[0].body.receipt_id, task.receipt_id.0);
     assert_eq!(chain[1].body.receipt_id, turn.receipt_id.0);

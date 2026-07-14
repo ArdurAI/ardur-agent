@@ -521,9 +521,25 @@ async fn run_chat_loop(config: Config, args: &ChatArgs) -> Result<(), CliError> 
     // A tty drives the rich line-editor; piped/redirected stdin reads lines
     // directly so `echo "hi" | ardur chat` (and the integration tests) work.
     if stdin_tty {
-        run_interactive(&engine, &bus, &tasks, &mut state, &mut history, stream_enabled).await?;
+        run_interactive(
+            &engine,
+            &bus,
+            &tasks,
+            &mut state,
+            &mut history,
+            stream_enabled,
+        )
+        .await?;
     } else {
-        run_piped(&engine, &bus, &tasks, &mut state, &mut history, stream_enabled).await;
+        run_piped(
+            &engine,
+            &bus,
+            &tasks,
+            &mut state,
+            &mut history,
+            stream_enabled,
+        )
+        .await;
     }
     Ok(())
 }
@@ -908,10 +924,7 @@ async fn dispatch_task_sub(
 ) {
     let (sub, rest) = args.split_once(char::is_whitespace).unwrap_or((args, ""));
     let rest = rest.trim();
-    let Ok(id) = rest
-        .parse::<uuid::Uuid>()
-        .map(background_task::TaskId)
-    else {
+    let Ok(id) = rest.parse::<uuid::Uuid>().map(background_task::TaskId) else {
         println!("usage: /task status|log|result|cancel <task-id>");
         return;
     };
@@ -938,11 +951,16 @@ async fn dispatch_task_sub(
             Some(task) => match (task.result, task.error) {
                 (Some(result), _) => println!("{result}"),
                 (None, Some(error)) => {
-                    println!("{}", state.theme.paint(Role::Error, &format!("failed: {error}")));
+                    println!(
+                        "{}",
+                        state.theme.paint(Role::Error, &format!("failed: {error}"))
+                    );
                 }
                 (None, None) => println!(
                     "{}",
-                    state.theme.paint(Role::Dim, &format!("task {id} is still {}", task.status))
+                    state
+                        .theme
+                        .paint(Role::Dim, &format!("task {id} is still {}", task.status))
                 ),
             },
             None => println!("task {id} not found"),
@@ -951,7 +969,9 @@ async fn dispatch_task_sub(
             Ok(fused) => match tasks.cancel(fused, id).await {
                 Ok(()) => println!(
                     "{}",
-                    state.theme.paint(Role::Dim, &format!("cancelled task {id}"))
+                    state
+                        .theme
+                        .paint(Role::Dim, &format!("cancelled task {id}"))
                 ),
                 Err(e) => println!("{}", state.theme.paint(Role::Error, &format!("{e}"))),
             },

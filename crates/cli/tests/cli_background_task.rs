@@ -41,7 +41,9 @@ fn background_task_starts_and_completes_over_the_offline_stub() {
 
     let output = offline_chat()
         .env("HOME", &home_path)
-        .write_stdin("/background summarize the open questions\nhello\nhello again\n/tasks\n/quit\n")
+        .write_stdin(
+            "/background summarize the open questions\nhello\nhello again\n/tasks\n/quit\n",
+        )
         .output()
         .expect("the chat process runs");
     assert!(output.status.success(), "exit: {:?}", output.status);
@@ -51,7 +53,9 @@ fn background_task_starts_and_completes_over_the_offline_stub() {
         "starting a task should be confirmed immediately: {stdout}"
     );
     assert!(
-        stdout.contains("[completed]") || stdout.contains("[running]") || stdout.contains("[queued]"),
+        stdout.contains("[completed]")
+            || stdout.contains("[running]")
+            || stdout.contains("[queued]"),
         "/tasks should list the task in a real status: {stdout}"
     );
 }
@@ -70,7 +74,10 @@ fn bg_and_btw_are_aliases_for_background() {
     assert!(output.status.success(), "exit: {:?}", output.status);
     let stdout = String::from_utf8_lossy(&output.stdout);
     let started_count = stdout.matches("started background task").count();
-    assert_eq!(started_count, 2, "both aliases should start a task: {stdout}");
+    assert_eq!(
+        started_count, 2,
+        "both aliases should start a task: {stdout}"
+    );
 }
 
 /// `/background` with no prompt is a clean usage error, not a crash or a

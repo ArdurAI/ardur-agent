@@ -221,7 +221,13 @@ impl TaskRegistry {
             .lock()
             .expect("task registry mutex")
             .values()
-            .map(|entry| entry.record.lock().expect("background task record mutex").clone())
+            .map(|entry| {
+                entry
+                    .record
+                    .lock()
+                    .expect("background task record mutex")
+                    .clone()
+            })
             .collect()
     }
 
@@ -232,7 +238,13 @@ impl TaskRegistry {
             .lock()
             .expect("task registry mutex")
             .get(&id)
-            .map(|entry| entry.record.lock().expect("background task record mutex").clone())
+            .map(|entry| {
+                entry
+                    .record
+                    .lock()
+                    .expect("background task record mutex")
+                    .clone()
+            })
     }
 
     /// **§1.9.** Cancel an active (queued or running) task: abort its
