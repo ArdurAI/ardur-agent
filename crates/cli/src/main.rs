@@ -1827,32 +1827,78 @@ fn run_policy(args: PolicyArgs) -> Result<(), CliError> {
 // ARD-139: Approval Cards
 // ---------------------------------------------------------------------------
 
+/// The subject/cap-token-id an `ardur approvals` decision's receipt is
+/// minted under. A local `approve`/`deny` invocation is a machine-operator
+/// admin action, not a cap-token-scoped turn — anyone with filesystem access
+/// to `~/.ardur` already has full control of this store, matching the CLI's
+/// existing local trust model — so there is no verified cap-token subject to
+/// carry here. The receipt still proves *that* a decision was made and
+/// signed by this installation's receipt key; it does not attest to *who*
+/// the human operator was.
+const LOCAL_OPERATOR_SUBJECT: &str = "local-operator";
+const LOCAL_OPERATOR_TOKEN_ID: &str = "cli-local";
+
+/// Mint a receipt for an approval decision made locally via `ardur
+/// approvals approve|deny`, chaining it onto the same receipt log a
+/// `FusedRuntime` over this data dir appends turn receipts to.
+fn mint_approval_decision_receipt(
+    dirs: &StateDirs,
+    verb: &str,
+    approval_id: &str,
+) -> Result<(), CliError> {
+    let receipt_key = dirs.load_or_create_receipt_key()?;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    ardur_fused_runtime::mint_control_receipt(
+        &dirs.receipt_log(),
+        &receipt_key,
+        ardur_receipt::VerbObject::new(verb).map_err(|e| CliError::State(e.to_string()))?,
+        ardur_receipt::Sha256Digest::of(approval_id.as_bytes()),
+        ardur_receipt::HolderId(LOCAL_OPERATOR_SUBJECT.to_string()),
+        ardur_receipt::TokenId(LOCAL_OPERATOR_TOKEN_ID.to_string()),
+        None,
+        ardur_receipt::CostTuple {
+            tokens_in: 0,
+            tokens_out: 0,
+            cents: 0,
+            wall_ms: 0,
+            attention_score: 0.0,
+        },
+        now_ms,
+    )
+    .map_err(|e| CliError::State(format!("approval receipt mint failed: {e}")))?;
+    Ok(())
+}
+
+fn approval_store_err(id: &str, e: ardur_approvals::ApprovalStoreError) -> CliError {
+    use ardur_approvals::ApprovalStoreError;
+    match e {
+        ApprovalStoreError::InvalidId => CliError::State(format!("invalid approval id `{id}`")),
+        ApprovalStoreError::NotFound => CliError::State(format!("approval `{id}` not found")),
+        ApprovalStoreError::AlreadyDecided => {
+            CliError::State(format!("approval `{id}` was already decided"))
+        }
+        other => CliError::State(other.to_string()),
+    }
+}
+
 /// Run `ardur approvals` subcommands.
 fn run_approvals(args: ApprovalsArgs) -> Result<(), CliError> {
-    let root = StateDirs::resolve()?.root;
-    let approvals_dir = root.join("approvals");
-    std::fs::create_dir_all(&approvals_dir)?;
+    let dirs = StateDirs::resolve()?;
+    // A decision mints a signed receipt, so `keys/` and `receipts/` must
+    // exist alongside `approvals/` even on a first-ever invocation.
+    dirs.create()?;
+    let store = ardur_approvals::ApprovalStore::new(dirs.root.join("approvals"));
 
     match args.action {
         ApprovalsAction::List => {
-            let mut pending = Vec::new();
-            if let Ok(entries) = std::fs::read_dir(&approvals_dir) {
-                for entry in entries.flatten() {
-                    if entry.path().extension().is_some_and(|e| e == "json") {
-                        if let Ok(content) = std::fs::read_to_string(entry.path()) {
-                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
-                                let status = v
-                                    .get("status")
-                                    .and_then(|s| s.as_str())
-                                    .unwrap_or("pending");
-                                if status == "pending" {
-                                    pending.push(v);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            let pending: Vec<_> = store
+                .list()?
+                .into_iter()
+                .filter(|c| c.status == ardur_approvals::ApprovalStatus::Pending)
+                .collect();
             if pending.is_empty() {
                 println!("no pending approvals");
             } else {
@@ -1863,44 +1909,31 @@ fn run_approvals(args: ApprovalsArgs) -> Result<(), CliError> {
             }
         }
         ApprovalsAction::Approve { id } => {
-            let path = approvals_dir.join(format!("{id}.json"));
-            if !path.is_file() {
-                return Err(CliError::State(format!("approval `{id}` not found")));
-            }
-            let mut approval: serde_json::Value =
-                serde_json::from_str(&std::fs::read_to_string(&path)?)
-                    .map_err(|e| CliError::State(e.to_string()))?;
-            approval["status"] = json!("approved");
-            approval["decided_at"] = json!(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0)
-            );
-            let json_str = serde_json::to_string_pretty(&approval)
-                .map_err(|e| CliError::State(e.to_string()))?;
-            std::fs::write(&path, json_str)?;
+            let decided_at = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            store
+                .decide(&id, ardur_approvals::Decision::Approve, decided_at)
+                .map_err(|e| approval_store_err(&id, e))?;
+            mint_approval_decision_receipt(&dirs, "approval.approve.accepted.v1", &id)?;
             println!("approved {id}");
         }
         ApprovalsAction::Deny { id, reason } => {
-            let path = approvals_dir.join(format!("{id}.json"));
-            if !path.is_file() {
-                return Err(CliError::State(format!("approval `{id}` not found")));
-            }
-            let mut approval: serde_json::Value =
-                serde_json::from_str(&std::fs::read_to_string(&path)?)
-                    .map_err(|e| CliError::State(e.to_string()))?;
-            approval["status"] = json!("denied");
-            approval["deny_reason"] = json!(reason.unwrap_or_default());
-            approval["decided_at"] = json!(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0)
-            );
-            let json_str = serde_json::to_string_pretty(&approval)
-                .map_err(|e| CliError::State(e.to_string()))?;
-            std::fs::write(&path, json_str)?;
+            let decided_at = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            store
+                .decide(
+                    &id,
+                    ardur_approvals::Decision::Reject {
+                        reason: reason.unwrap_or_default(),
+                    },
+                    decided_at,
+                )
+                .map_err(|e| approval_store_err(&id, e))?;
+            mint_approval_decision_receipt(&dirs, "approval.reject.accepted.v1", &id)?;
             println!("denied {id}");
         }
     }
