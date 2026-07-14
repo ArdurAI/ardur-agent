@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::body::{Body, Bytes};
-use axum::extract::{DefaultBodyLimit, State};
+use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
@@ -34,6 +34,7 @@ use ardur_acp::{
 };
 use ardur_fused_runtime::{FusedEvent, StageKind};
 use ardur_runtime::{RuntimeError, SessionId};
+use ardur_session_journals::JournalEntry;
 use ardur_slack_adapter::{SlackError, SlackEvent, SlackHeaders};
 
 use crate::openapi::{generate_python_client, generate_rust_client, openapi_spec};
@@ -58,6 +59,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/health", get(health))
         .route("/metrics", get(metrics))
         .route("/admin/runtime", get(admin_runtime))
+        .route("/approvals", get(approvals_list))
+        .route("/approvals/{id}/approve", post(approvals_approve))
+        .route("/approvals/{id}/reject", post(approvals_reject))
         .route("/openapi.json", get(openapi_json))
         .route("/openapi/clients/rust", get(openapi_rust_client))
         .route("/openapi/clients/python", get(openapi_python_client));
@@ -239,6 +243,265 @@ fn prometheus_label_value(raw: &str) -> String {
     raw.replace('\\', "\\\\")
         .replace('"', "\\\"")
         .replace('\n', "\\n")
+}
+
+// ---------------------------------------------------------------------------
+// Approval-gate decide endpoints (ARD-139 decide-half)
+//
+// These are the *decide* side of the approval loop: they let an admin (the
+// `web-client/` PWA, or any bearer-holding operator) approve or reject a pending
+// approval card and list outstanding cards. They are backed by the exact same
+// on-disk store the CLI's `ardur approvals` subcommand uses
+// (`<data_dir>/approvals/<id>.json`), so the HTTP surface and the CLI share a
+// single source of truth. Nothing server-side currently *produces* pending
+// cards — that is the propose-half, a separate follow-up.
+// ---------------------------------------------------------------------------
+
+/// Cap on the accepted approval-id length. Ids are opaque filenames-stems; a
+/// generous-but-bounded ceiling keeps a hostile path from ballooning a `PathBuf`.
+const MAX_APPROVAL_ID_LEN: usize = 128;
+
+/// Whether `id` is a safe approval identifier: non-empty, bounded, and drawn
+/// only from `[A-Za-z0-9_-]`. This is the traversal guard — because `.` and `/`
+/// are rejected, no `id` can escape the approvals directory (`..`, `a/b`,
+/// absolute paths, or NUL bytes are all refused) before it is ever joined onto a
+/// path.
+fn valid_approval_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_APPROVAL_ID_LEN
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// Current wall-clock seconds since the Unix epoch (matches the CLI store's
+/// `decided_at` unit).
+fn now_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Current wall-clock milliseconds since the Unix epoch (the journal `at` unit).
+fn now_unix_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
+/// The decision an operator is recording against a pending card.
+enum ApprovalDecision {
+    Approve,
+    Reject { reason: String },
+}
+
+/// `GET /approvals` — list every approval card in the store as a JSON array.
+///
+/// Each element is the stored record with its `id` (the filename stem) injected,
+/// so the response is self-describing. Admin-bearer gated; fails closed when no
+/// admin tokens are configured.
+async fn approvals_list(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Err(response) = authorize_admin(&state, &headers) {
+        return *response;
+    }
+
+    let dir = state.approvals_dir();
+    let mut cards = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_none_or(|e| e != "json") {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            // Only surface records whose id we would also accept on the decide
+            // path — anything else is not a card this API manages.
+            if !valid_approval_id(stem) {
+                continue;
+            }
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&content) {
+                    if let Some(object) = value.as_object_mut() {
+                        object.insert("id".to_string(), json!(stem));
+                    }
+                    cards.push(value);
+                }
+            }
+        }
+    }
+
+    (StatusCode::OK, Json(json!(cards))).into_response()
+}
+
+/// `POST /approvals/{id}/approve` — flip a pending card to `approved`.
+async fn approvals_approve(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(response) = authorize_admin(&state, &headers) {
+        return *response;
+    }
+    apply_approval_decision(&state, &id, ApprovalDecision::Approve).await
+}
+
+/// `POST /approvals/{id}/reject` — flip a pending card to `denied`.
+///
+/// The wire verb is `reject` (what the PWA calls) but the stored status is
+/// `denied`, reconciling with the CLI's vocabulary. An optional JSON body
+/// `{ "reason": "…" }` is recorded as `deny_reason`; the PWA sends no body, so an
+/// absent/empty/unparseable body simply yields an empty reason.
+async fn approvals_reject(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Err(response) = authorize_admin(&state, &headers) {
+        return *response;
+    }
+    let reason = parse_reject_reason(&body);
+    apply_approval_decision(&state, &id, ApprovalDecision::Reject { reason }).await
+}
+
+/// Extract an optional `reason` string from a reject body. Tolerant by design:
+/// the PWA sends no body at all, so anything that is not a JSON object carrying a
+/// string `reason` yields the empty reason rather than an error.
+fn parse_reject_reason(body: &Bytes) -> String {
+    if body.is_empty() {
+        return String::new();
+    }
+    serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .as_ref()
+        .and_then(|v| v.get("reason"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// Shared decide path for approve/reject: validate the id, load the card, refuse
+/// an already-decided card, mutate + durably persist, then best-effort audit.
+///
+/// Status codes: `400` for a malformed id, `404` for a missing card, `409` for a
+/// card that is already decided (which keeps repeated calls idempotent-safe — the
+/// mutation and the audit entry happen exactly once), `500` for a corrupt record
+/// or a failed write, `200` on success (body is the updated record).
+async fn apply_approval_decision(
+    state: &Arc<AppState>,
+    id: &str,
+    decision: ApprovalDecision,
+) -> Response {
+    if !valid_approval_id(id) {
+        return bad_request("malformed approval id".to_string());
+    }
+
+    let path = state.approvals_dir().join(format!("{id}.json"));
+    if !path.is_file() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "approval not found" })),
+        )
+            .into_response();
+    }
+
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(_) => return internal_error("failed to read approval record"),
+    };
+    let mut card: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(card) => card,
+        Err(_) => return internal_error("approval record is corrupt"),
+    };
+
+    let current_status = card
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("pending");
+    if current_status != "pending" {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": "approval already decided",
+                "status": current_status,
+            })),
+        )
+            .into_response();
+    }
+
+    let Some(object) = card.as_object_mut() else {
+        return internal_error("approval record is not an object");
+    };
+    let (new_status, audit_verb) = match &decision {
+        ApprovalDecision::Approve => ("approved", "approved"),
+        ApprovalDecision::Reject { reason } => {
+            object.insert("deny_reason".to_string(), json!(reason));
+            ("denied", "rejected")
+        }
+    };
+    object.insert("status".to_string(), json!(new_status));
+    object.insert("decided_at".to_string(), json!(now_unix_secs()));
+
+    let serialized = match serde_json::to_string_pretty(&card) {
+        Ok(serialized) => serialized,
+        Err(_) => return internal_error("failed to serialize approval record"),
+    };
+    if let Err(e) = write_atomically(&path, serialized.as_bytes()) {
+        tracing::error!(error = %e, approval_id = %id, "failed to persist approval decision");
+        return internal_error("failed to persist approval decision");
+    }
+
+    // Audit trail: append the decision to the session journal. The decision is
+    // already durable in the approvals store above (the source of truth), so a
+    // journal failure is logged but does not fail the request. NOTE: a *signed
+    // receipt* is deliberately not minted here — that is not reachable from a
+    // handler without a runtime refactor and is tracked as a separate follow-up.
+    let audit = JournalEntry::Checkpoint {
+        checkpoint_id: uuid::Uuid::now_v7(),
+        summary: format!("approval {id} {audit_verb} via HTTP admin endpoint"),
+        at: now_unix_millis(),
+    };
+    if let Err(e) = state.journal().append(audit).await {
+        tracing::error!(error = %e, approval_id = %id, "failed to append approval audit entry");
+    }
+
+    (StatusCode::OK, Json(card)).into_response()
+}
+
+/// Write `bytes` to `path` atomically: write a sibling temp file, fsync, then
+/// rename over the target so a crash mid-write cannot leave a torn record.
+fn write_atomically(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let tmp = dir.join(format!(
+        ".approval-{}.tmp",
+        uuid::Uuid::now_v7().as_simple()
+    ));
+    {
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+    }
+    match std::fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
+}
+
+/// A `500` with a JSON `{ "error": … }` body.
+fn internal_error(message: &str) -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({ "error": message })),
+    )
+        .into_response()
 }
 
 /// `GET /openapi/clients/python` — return generated Python client source.
