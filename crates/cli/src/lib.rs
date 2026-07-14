@@ -919,12 +919,12 @@ mod journal_entries_to_history_tests {
     fn rollback_excludes_only_the_rolled_back_range() {
         let cp = uuid::Uuid::new_v4();
         let entries = vec![
-            user("keep 1"),           // 0
-            checkpoint(cp),           // 1
-            user("rolled back"),      // 2 — excluded
-            assistant("also gone"),   // 3 — excluded
-            rollback(cp),             // 4 — excluded (marker itself)
-            user("keep 2"),           // 5 — after the marker, survives
+            user("keep 1"),         // 0
+            checkpoint(cp),         // 1
+            user("rolled back"),    // 2 — excluded
+            assistant("also gone"), // 3 — excluded
+            rollback(cp),           // 4 — excluded (marker itself)
+            user("keep 2"),         // 5 — after the marker, survives
         ];
         let history = journal_entries_to_history(&entries);
         assert_eq!(history.len(), 2);
@@ -940,13 +940,13 @@ mod journal_entries_to_history_tests {
         let cp_a = uuid::Uuid::new_v4();
         let cp_b = uuid::Uuid::new_v4();
         let entries = vec![
-            checkpoint(cp_a),      // 0
-            user("branch A"),      // 1
-            checkpoint(cp_b),      // 2
-            user("branch B"),      // 3
-            rollback(cp_b),        // 4 — first rollback: excludes 3, 4
-            user("branch C"),      // 5 — new work after rollback 1
-            rollback(cp_a),        // 6 — second rollback: excludes 1..=6 (re-excising "branch A" too)
+            checkpoint(cp_a), // 0
+            user("branch A"), // 1
+            checkpoint(cp_b), // 2
+            user("branch B"), // 3
+            rollback(cp_b),   // 4 — first rollback: excludes 3, 4
+            user("branch C"), // 5 — new work after rollback 1
+            rollback(cp_a),   // 6 — second rollback: excludes 1..=6 (re-excising "branch A" too)
         ];
         let history = journal_entries_to_history(&entries);
         // Every UserMessage after checkpoint A is excluded by the second

@@ -28,7 +28,11 @@ fn only_session_id(home: &std::path::Path) -> String {
         .filter_map(|e| e.ok())
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect();
-    assert_eq!(entries.len(), 1, "expected exactly one session: {entries:?}");
+    assert_eq!(
+        entries.len(),
+        1,
+        "expected exactly one session: {entries:?}"
+    );
     entries.remove(0)
 }
 
@@ -40,7 +44,9 @@ fn checkpoint_checkpoints_and_rollback_round_trip() {
     // First run: two turns with a checkpoint between them, then list.
     let first = offline_chat()
         .env("HOME", &home_path)
-        .write_stdin("hello\n/checkpoint before the second message\nsecond message\n/checkpoints\n/quit\n")
+        .write_stdin(
+            "hello\n/checkpoint before the second message\nsecond message\n/checkpoints\n/quit\n",
+        )
         .output()
         .expect("the chat process runs");
     assert!(first.status.success(), "exit: {:?}", first.status);

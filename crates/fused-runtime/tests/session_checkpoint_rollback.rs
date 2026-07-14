@@ -44,9 +44,7 @@ async fn build_runtime_with_journal(
 async fn checkpoint_records_a_journal_entry_and_receipt() {
     let dir = tempfile::tempdir().expect("journal dir");
     let session_id = SessionId::new();
-    let journal = Arc::new(
-        FileSessionJournal::new(dir.path(), session_id).expect("journal opens"),
-    );
+    let journal = Arc::new(FileSessionJournal::new(dir.path(), session_id).expect("journal opens"));
     let runtime = build_runtime_with_journal(journal.clone()).await;
     let cap_token = CapTokenRef(checkpoint_token());
 
@@ -76,9 +74,7 @@ async fn checkpoint_records_a_journal_entry_and_receipt() {
 async fn checkpoint_uses_the_caller_supplied_label() {
     let dir = tempfile::tempdir().expect("journal dir");
     let session_id = SessionId::new();
-    let journal = Arc::new(
-        FileSessionJournal::new(dir.path(), session_id).expect("journal opens"),
-    );
+    let journal = Arc::new(FileSessionJournal::new(dir.path(), session_id).expect("journal opens"));
     let runtime = build_runtime_with_journal(journal).await;
     let cap_token = CapTokenRef(checkpoint_token());
 
@@ -101,9 +97,7 @@ async fn checkpoint_uses_the_caller_supplied_label() {
 async fn list_checkpoints_returns_them_in_order() {
     let dir = tempfile::tempdir().expect("journal dir");
     let session_id = SessionId::new();
-    let journal = Arc::new(
-        FileSessionJournal::new(dir.path(), session_id).expect("journal opens"),
-    );
+    let journal = Arc::new(FileSessionJournal::new(dir.path(), session_id).expect("journal opens"));
     let runtime = build_runtime_with_journal(journal).await;
     let cap_token = CapTokenRef(checkpoint_token());
 
@@ -145,9 +139,7 @@ async fn list_checkpoints_returns_them_in_order() {
 async fn rollback_appends_a_marker_and_returns_retained_entries() {
     let dir = tempfile::tempdir().expect("journal dir");
     let session_id = SessionId::new();
-    let journal = Arc::new(
-        FileSessionJournal::new(dir.path(), session_id).expect("journal opens"),
-    );
+    let journal = Arc::new(FileSessionJournal::new(dir.path(), session_id).expect("journal opens"));
     let runtime = build_runtime_with_journal(journal.clone()).await;
     let cap_token = CapTokenRef(checkpoint_token());
 
@@ -203,9 +195,7 @@ async fn rollback_appends_a_marker_and_returns_retained_entries() {
 async fn rollback_to_unknown_checkpoint_is_rejected() {
     let dir = tempfile::tempdir().expect("journal dir");
     let session_id = SessionId::new();
-    let journal = Arc::new(
-        FileSessionJournal::new(dir.path(), session_id).expect("journal opens"),
-    );
+    let journal = Arc::new(FileSessionJournal::new(dir.path(), session_id).expect("journal opens"));
     let runtime = build_runtime_with_journal(journal.clone()).await;
     let cap_token = CapTokenRef(checkpoint_token());
 
@@ -232,9 +222,7 @@ async fn rollback_to_unknown_checkpoint_is_rejected() {
 async fn rollback_is_denied_without_the_rollback_capability() {
     let dir = tempfile::tempdir().expect("journal dir");
     let session_id = SessionId::new();
-    let journal = Arc::new(
-        FileSessionJournal::new(dir.path(), session_id).expect("journal opens"),
-    );
+    let journal = Arc::new(FileSessionJournal::new(dir.path(), session_id).expect("journal opens"));
     let runtime = build_runtime_with_journal(journal.clone()).await;
     let full_cap_token = CapTokenRef(checkpoint_token());
     let checkpoint_only = CapTokenRef(checkpoint_only_token());
@@ -265,9 +253,7 @@ async fn rollback_is_denied_without_the_rollback_capability() {
 async fn checkpoint_and_rollback_receipts_chain_together() {
     let dir = tempfile::tempdir().expect("journal dir");
     let session_id = SessionId::new();
-    let journal = Arc::new(
-        FileSessionJournal::new(dir.path(), session_id).expect("journal opens"),
-    );
+    let journal = Arc::new(FileSessionJournal::new(dir.path(), session_id).expect("journal opens"));
     let receipt_log = tempfile::NamedTempFile::new().expect("receipt log");
     let provider = Arc::new(support::EchoProvider::new());
     let runtime = support::runtime_builder_with_policy(provider, permissive_policy())
@@ -291,8 +277,7 @@ async fn checkpoint_and_rollback_receipts_chain_together() {
         .await
         .expect("rollback succeeds");
 
-    let chain = ardur_fused_runtime::load_persisted_chain(receipt_log.path())
-        .expect("chain loads");
+    let chain = ardur_fused_runtime::load_persisted_chain(receipt_log.path()).expect("chain loads");
     assert_eq!(chain.len(), 2);
     assert!(
         chain[0].body.parent_hash.is_none(),
