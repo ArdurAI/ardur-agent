@@ -17,3 +17,9 @@ rand = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 wiremock = { workspace = true }
 reqwest = { workspace = true }
+# tests/fail_closed_real_security_paths.rs wraps the REAL cap-token/cedar-policy
+# fail-closed paths (not a stand-in) to prove the resilience combinators
+# preserve their deny-on-fault guarantee end to end.
+ardur-cap-token = { workspace = true }
+ardur-cedar-policy = { workspace = true }
+serde_json = { workspace = true }
