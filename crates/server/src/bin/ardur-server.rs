@@ -59,12 +59,17 @@ async fn main() -> anyhow::Result<()> {
         MemoryBackend::Qdrant => "qdrant",
         MemoryBackend::Hybrid => "hybrid",
     };
+    // ARD-457: `builtin_tool_opts()` maps the operator's fail-closed opt-ins
+    // (`ARDUR_ENABLE_SHELL_TOOL` + allowlist, `ARDUR_ENABLE_HTTP_TOOL`,
+    // `ARDUR_FILE_TOOL_ROOT`) to the hardened built-ins registered below. With no
+    // opt-ins set it grants nothing, so the default boot is unchanged.
     let tools = Arc::new(
         assemble_tool_registry(
             provider_id.clone(),
             memory_label,
             &config.skills_dirs,
             &config.mcp_remote_servers,
+            config.builtin_tool_opts(),
         )
         .await,
     );

@@ -18,7 +18,7 @@ use std::process::ExitCode;
 use ardur_cli::{
     ChatArgs, CliError, Config, SessionMetadata, StateDirs, directory_modified_no_follow,
     list_directory_names_no_follow, read_string_no_follow, remove_directory_tree_no_follow,
-    run_chat, write_private_file_no_follow,
+    run_chat, write_private_file_atomic_no_follow, write_private_file_no_follow,
 };
 use ardur_session_journals::JournalEntry;
 use audit::{AuditArgs, run_audit};
@@ -69,6 +69,8 @@ enum Commands {
     Receipts(ReceiptsArgs),
     /// Browse capability tokens and grants.
     Caps(CapsArgs),
+    /// Grant a hardened built-in tool and record a signed grant receipt (ARD-457).
+    Grant(GrantArgs),
     /// Dry-run and inspect Cedar policy decisions.
     Policy(PolicyArgs),
     /// Manage pending approval requests.
@@ -259,6 +261,37 @@ enum CapsAction {
     },
 }
 
+/// Arguments to `ardur grant` (ARD-457).
+#[derive(Args)]
+struct GrantArgs {
+    #[command(subcommand)]
+    action: GrantAction,
+}
+
+/// Subcommands for `ardur grant`.
+#[derive(Subcommand)]
+enum GrantAction {
+    /// Record an operator grant allowing a hardened built-in tool, and emit a
+    /// signed `tool.grant.allow.v1` receipt into the local chain.
+    ///
+    /// The grant is appended to `~/.ardur/grants.json` as a durable operator
+    /// ledger, and an audit receipt is chained into `~/.ardur/receipts/` so the
+    /// decision is tamper-evident. (Server-side enforcement is via the
+    /// `ARDUR_ENABLE_SHELL_TOOL` / `ARDUR_ENABLE_HTTP_TOOL` / `ARDUR_FILE_TOOL_ROOT`
+    /// opt-ins; this records and audits the operator's intent.)
+    Allow {
+        /// The built-in tool id to grant: `shell.run`, `http.fetch`,
+        /// `file.read`, `file.write`, or `file.list`.
+        tool: String,
+        /// Optional scope note recorded with the grant (e.g. a shell allowlist
+        /// `"git|cargo"` or a file root path).
+        #[arg(long)]
+        scope: Option<String>,
+    },
+    /// List the operator grants recorded in `~/.ardur/grants.json`.
+    List,
+}
+
 /// Arguments to `ardur policy`.
 #[derive(Args)]
 struct PolicyArgs {
@@ -331,6 +364,7 @@ fn main() -> ExitCode {
         Commands::Session(args) => run_session(args),
         Commands::Receipts(args) => run_receipts(args),
         Commands::Caps(args) => run_caps(args),
+        Commands::Grant(args) => run_grant(args),
         Commands::Policy(args) => run_policy(args),
         Commands::Approvals(args) => run_approvals(args),
         Commands::Token(args) => run_token(args),
@@ -1738,6 +1772,169 @@ fn run_caps(args: CapsArgs) -> Result<(), CliError> {
         }
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// ARD-457: Operator tool-grant flow (`ardur grant`)
+// ---------------------------------------------------------------------------
+
+/// The `cap.*` capabilities each hardened built-in tool requires — the same
+/// snake-cased `Capability` labels the server derives its runtime cap-token
+/// allowlist from. Grants are recorded against these so the ledger and receipt
+/// name exactly what the operator authorized.
+fn tool_grant_capabilities(tool: &str) -> Option<Vec<&'static str>> {
+    match tool {
+        "shell.run" => Some(vec!["cap.shell_exec", "cap.process_spawn"]),
+        "http.fetch" => Some(vec!["cap.network_out"]),
+        "file.read" | "file.list" => Some(vec!["cap.fs_read"]),
+        "file.write" => Some(vec!["cap.fs_write"]),
+        _ => None,
+    }
+}
+
+/// The operator grant ledger file.
+fn grants_path(dirs: &StateDirs) -> PathBuf {
+    dirs.root.join("grants.json")
+}
+
+/// Read the recorded grants (a JSON array), returning an empty list when the
+/// ledger does not exist yet.
+fn read_grants(dirs: &StateDirs) -> Result<Vec<serde_json::Value>, CliError> {
+    match read_string_no_follow(&grants_path(dirs)) {
+        Ok(raw) if raw.trim().is_empty() => Ok(Vec::new()),
+        Ok(raw) => serde_json::from_str(&raw)
+            .map_err(|e| CliError::State(format!("parsing {}: {e}", grants_path(dirs).display()))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(CliError::Io(e)),
+    }
+}
+
+/// Run `ardur grant` subcommands.
+fn run_grant(args: GrantArgs) -> Result<(), CliError> {
+    let dirs = StateDirs::resolve()?;
+    match args.action {
+        GrantAction::Allow { tool, scope } => {
+            let caps = tool_grant_capabilities(&tool).ok_or_else(|| {
+                CliError::State(format!(
+                    "unknown tool `{tool}`; expected one of shell.run, http.fetch, file.read, file.write, file.list"
+                ))
+            })?;
+            // Materialize the state tree so `receipts/` and `keys/` exist before
+            // we chain a receipt into them.
+            dirs.create()?;
+
+            let subject = dirs.local_subject();
+            let granted_at_ms = unix_now_ms();
+            // The canonical grant payload the receipt commits to (by digest).
+            let payload = json!({
+                "tool": tool,
+                "capabilities": caps,
+                "scope": scope,
+                "subject": subject,
+                "granted_at_ms": granted_at_ms,
+            });
+            let receipt_id = append_grant_receipt(&dirs, &subject, granted_at_ms, &payload)?;
+
+            // Append the grant to the durable operator ledger.
+            let mut grants = read_grants(&dirs)?;
+            let mut record = payload;
+            record["receipt_id"] = json!(receipt_id.to_string());
+            grants.push(record);
+            let serialized = serde_json::to_vec_pretty(&grants).expect("grants ledger serializes");
+            write_private_file_atomic_no_follow(&grants_path(&dirs), &serialized)
+                .map_err(CliError::Io)?;
+
+            println!(
+                "granted `{tool}` ({}) — receipt {receipt_id}",
+                caps.join(", ")
+            );
+            Ok(())
+        }
+        GrantAction::List => {
+            let grants = read_grants(&dirs)?;
+            if grants.is_empty() {
+                println!("no grants recorded at {}", grants_path(&dirs).display());
+                return Ok(());
+            }
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!(grants)).expect("grants serialise")
+            );
+            Ok(())
+        }
+    }
+}
+
+/// Build, sign, and chain a `tool.grant.allow.v1` receipt committing to `payload`
+/// (by SHA-256 digest), returning the new receipt id. The receipt links onto the
+/// existing `~/.ardur/receipts/chain.jsonl` tail and is signed with the same
+/// ES256 key the chat runtime uses, so `ardur receipts verify` stays green.
+fn append_grant_receipt(
+    dirs: &StateDirs,
+    subject: &str,
+    issued_at_ms: u64,
+    payload: &serde_json::Value,
+) -> Result<uuid::Uuid, CliError> {
+    let signing_key = dirs.load_or_create_receipt_key()?;
+    let receipt_log = dirs.receipt_log();
+
+    // Link onto the current chain tail (genesis when the chain is empty). The
+    // parent hash is SHA-256 of the prior receipt's compact JWS — exactly what
+    // the chain verifier recomputes.
+    let chain = ardur_fused_runtime::load_persisted_chain(&receipt_log)
+        .map_err(|e| CliError::State(format!("loading receipt chain: {e}")))?;
+    let parent_hash = chain
+        .last()
+        .map(|tail| ardur_receipt::Sha256Digest::of(tail.jws_compact.as_bytes()));
+
+    let payload_bytes = serde_json::to_vec(payload).expect("grant receipt payload serializes");
+    let body = ardur_receipt::ReceiptBody {
+        receipt_id: uuid::Uuid::new_v4(),
+        parent_hash,
+        verb: ardur_receipt::VerbObject::new("tool.grant.allow.v1")
+            .map_err(|e| CliError::State(format!("invalid grant verb: {e}")))?,
+        issued_at: ardur_receipt::UnixTsMillis(issued_at_ms),
+        subject: ardur_receipt::HolderId(subject.to_string()),
+        // Operator grants are not made under a session cap-token; label the
+        // authority explicitly rather than borrowing a turn's token id.
+        cap_token_id: ardur_receipt::TokenId("operator-grant".to_string()),
+        payload_digest: ardur_receipt::Sha256Digest::of(&payload_bytes),
+        session_id: None,
+        // A grant costs nothing — it is an authorization record, not a turn.
+        cost: ardur_receipt::CostTuple {
+            tokens_in: 0,
+            tokens_out: 0,
+            cents: 0,
+            wall_ms: 0,
+            attention_score: 0,
+        },
+        tool_calls: Vec::new(),
+        provider: None,
+    };
+    let receipt_id = body.receipt_id;
+    let signed = ardur_receipt::ReceiptSigner::sign(body, &signing_key)
+        .map_err(|e| CliError::State(format!("signing grant receipt: {e}")))?;
+
+    append_receipt_line(&receipt_log, signed.jws_compact())?;
+    Ok(receipt_id)
+}
+
+/// Append one compact-JWS receipt line to the chain log, preserving the
+/// newline-delimited format `load_persisted_chain` reads. Rewrites the file
+/// atomically (the local chain is small) rather than opening in append mode, so
+/// a crash mid-write cannot leave a torn tail.
+fn append_receipt_line(receipt_log: &Path, jws_compact: &str) -> Result<(), CliError> {
+    let mut contents = match read_string_no_follow(receipt_log) {
+        Ok(existing) => existing,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(CliError::Io(e)),
+    };
+    if !contents.is_empty() && !contents.ends_with('\n') {
+        contents.push('\n');
+    }
+    contents.push_str(jws_compact);
+    contents.push('\n');
+    write_private_file_atomic_no_follow(receipt_log, contents.as_bytes()).map_err(CliError::Io)
 }
 
 // ---------------------------------------------------------------------------

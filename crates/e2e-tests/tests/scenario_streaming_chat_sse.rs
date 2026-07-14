@@ -26,6 +26,11 @@ const CHAT_TOKEN: &str = "e2e-streaming-chat-token";
 fn test_config(data_dir: &tempfile::TempDir) -> Config {
     Config {
         anthropic_api_key: String::new(),
+        enable_shell_tool: false,
+        shell_allowlist: Vec::new(),
+        enable_http_tool: false,
+        http_allowlist: Vec::new(),
+        file_tool_root: None,
         slack_enabled: true,
         slack_bot_token: Some("redacted-test-token".to_string()),
         slack_signing_secret: Some("streaming-e2e-signing-secret".to_string()),
