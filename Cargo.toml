@@ -55,6 +55,7 @@ members = [
     "crates/config",
     "crates/health",
     "crates/logs",
+    "crates/durability",
 ]
 
 [workspace.package]
@@ -279,5 +280,6 @@ ardur-browser = { path = "crates/browser" }
 ardur-terminal = { path = "crates/terminal" }
 ardur-web = { path = "crates/web" }
 ardur-config = { path = "crates/config" }
+ardur-durability = { path = "crates/durability" }
 ardur-health = { path = "crates/health" }
 ardur-logs = { path = "crates/logs" }
