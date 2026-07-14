@@ -868,6 +868,10 @@ fn run_session(args: SessionArgs) -> Result<(), CliError> {
                         reason,
                         ..
                     } => println!("INVALIDATED entry {target_entry_id}: {reason}"),
+                    JournalEntry::Rollback {
+                        target_checkpoint_id,
+                        ..
+                    } => println!("ROLLBACK to checkpoint {target_checkpoint_id}"),
                 }
             }
             println!("continuing session {id} in chat...");
@@ -1214,7 +1218,8 @@ fn journal_entry_timestamp(entry: &JournalEntry) -> u64 {
         | JournalEntry::ToolInvocation { at, .. }
         | JournalEntry::CostFinalized { at, .. }
         | JournalEntry::Checkpoint { at, .. }
-        | JournalEntry::Invalidation { at, .. } => *at,
+        | JournalEntry::Invalidation { at, .. }
+        | JournalEntry::Rollback { at, .. } => *at,
     }
 }
 
@@ -1332,7 +1337,9 @@ fn redact_session_entries(entries: &[JournalEntry]) -> Vec<JournalEntry> {
             JournalEntry::Invalidation { reason, .. } => {
                 *reason = redact_text(reason, &patterns);
             }
-            JournalEntry::ToolInvocation { .. } | JournalEntry::CostFinalized { .. } => {}
+            JournalEntry::ToolInvocation { .. }
+            | JournalEntry::CostFinalized { .. }
+            | JournalEntry::Rollback { .. } => {}
         }
     }
     redacted
@@ -1541,6 +1548,17 @@ fn render_session_markdown(
                     "### {}. Invalidation\n\nTarget entry: `{target_entry_id}`\nReason: {}\n\n",
                     i + 1,
                     reason
+                ));
+            }
+            JournalEntry::Rollback {
+                target_checkpoint_id,
+                receipt_id,
+                ..
+            } => {
+                md.push_str(&format!(
+                    "### {}. Rollback\n\nTarget checkpoint: `{target_checkpoint_id}`\nReceipt: `{}`\n\n",
+                    i + 1,
+                    receipt_id.0
                 ));
             }
         }

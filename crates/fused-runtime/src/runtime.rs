@@ -96,6 +96,46 @@ pub struct PerRequestProvisioning {
     pub subject: Option<GateHolderId>,
 }
 
+/// **§1.8.** The result of [`FusedRuntime::checkpoint`].
+#[derive(Clone, Debug)]
+pub struct CheckpointOutcome {
+    /// The newly minted checkpoint's stable id.
+    pub checkpoint_id: uuid::Uuid,
+    /// The journal position the checkpoint entry landed at.
+    pub entry_id: ardur_session_journals::EntryId,
+    /// The receipt chained for this checkpoint.
+    pub receipt_id: ReceiptId,
+    /// The (possibly caller-supplied, otherwise generated) checkpoint label.
+    pub summary: String,
+}
+
+/// **§1.8.** One checkpoint entry, as returned by [`FusedRuntime::list_checkpoints`].
+#[derive(Clone, Debug)]
+pub struct CheckpointInfo {
+    /// The checkpoint's stable id.
+    pub checkpoint_id: uuid::Uuid,
+    /// The journal position this checkpoint was recorded at.
+    pub entry_id: ardur_session_journals::EntryId,
+    /// The checkpoint's label.
+    pub summary: String,
+    /// When the checkpoint was recorded.
+    pub at: u64,
+}
+
+/// **§1.8.** The result of [`FusedRuntime::rollback_to_checkpoint`].
+#[derive(Clone, Debug)]
+pub struct RollbackOutcome {
+    /// The checkpoint that was rolled back to.
+    pub target_checkpoint_id: uuid::Uuid,
+    /// The journal position the `Rollback` marker landed at.
+    pub entry_id: ardur_session_journals::EntryId,
+    /// The receipt chained for this rollback.
+    pub receipt_id: ReceiptId,
+    /// The journal entries up to and including the target checkpoint — the
+    /// caller's new live-history view.
+    pub retained_entries: Vec<JournalEntry>,
+}
+
 /// A [`ChatRuntime`] that fuses every Phase-1 substrate crate behind one
 /// ARD-488: releases a turn's cost reservation when the turn future is dropped
 /// before it settles (outer `tokio::time::timeout`, `select!` loss, client or
@@ -228,6 +268,228 @@ impl FusedRuntime {
             self.clock.now_ms() / 1000,
             tool,
         )
+    }
+
+    /// Mint and durably chain a receipt for a session-control operation that
+    /// is not a turn: no provider call, no cost-gate reservation (`cost` is
+    /// the caller's actual spend, `CostTuple::default`-equivalent zero for a
+    /// purely local operation like a checkpoint). Reuses the exact durability
+    /// guarantees [`commit_receipt_and_journal`](Self::commit_receipt_and_journal)
+    /// gives turn receipts — the same `commit_lock`, the same `chain_tail`,
+    /// the same fsync'd receipt log — so a checkpoint/rollback/compaction
+    /// receipt sits in the *same* hash chain as ordinary turn receipts rather
+    /// than a parallel, weaker one.
+    async fn commit_control_receipt(
+        &self,
+        session_id: SessionId,
+        cap_token: &CapTokenRef,
+        tool: &str,
+        verb: &str,
+        payload_digest: Sha256Digest,
+        cost: ardur_receipt::CostTuple,
+    ) -> Result<ReceiptBody, RuntimeError> {
+        let claims = self.verify_cap_token_for_tool(cap_token, tool)?;
+        let verb = VerbObject::new(verb)
+            .map_err(|e| RuntimeError::Internal(anyhow::anyhow!("invalid receipt verb: {e}")))?;
+        let now_ms = self.clock.now_ms();
+
+        let _commit_guard = self.commit_lock.lock().await;
+        let parent_hash = *self.chain_tail.lock();
+        let body = ReceiptBody {
+            receipt_id: uuid::Uuid::new_v4(),
+            parent_hash,
+            verb,
+            issued_at: ardur_receipt::UnixTsMillis(now_ms),
+            subject: ardur_receipt::HolderId(claims.subject.0.clone()),
+            cap_token_id: ardur_receipt::TokenId(claims.token_id.to_string()),
+            payload_digest,
+            session_id: Some(session_id.0),
+            cost,
+            tool_calls: Vec::new(),
+            provider: None,
+        };
+        let signed = ReceiptSigner::sign(body, &self.receipt_key)
+            .map_err(|e| RuntimeError::Internal(anyhow::anyhow!("receipt mint failed: {e}")))?;
+        self.persist_receipt(signed.jws_compact())
+            .map_err(|e| RuntimeError::Internal(anyhow::anyhow!("receipt persist failed: {e}")))?;
+        *self.chain_tail.lock() = Some(Sha256Digest::of(signed.jws_compact().as_bytes()));
+        Ok(signed.body().clone())
+    }
+
+    /// The journal this runtime is wired to, or a typed error if none is
+    /// configured — every §1.7/§1.8/§1.9 session-control operation requires a
+    /// durable journal to record its state transition against.
+    fn journal_or_err(&self) -> Result<&Arc<dyn SessionJournal>, RuntimeError> {
+        self.journal.as_ref().ok_or_else(|| {
+            RuntimeError::Internal(anyhow::anyhow!(
+                "no session journal is configured for this runtime"
+            ))
+        })
+    }
+
+    /// **§1.8.** Record a checkpoint: a named resume point over the session's
+    /// current history, with a signed receipt chained onto the same receipt
+    /// chain turns use. Read-only — nothing about the session's live history
+    /// changes; a checkpoint is purely a marker later [`rollback_to_checkpoint`](Self::rollback_to_checkpoint)
+    /// or [`SessionJournal::replay_from`] can target.
+    ///
+    /// # Errors
+    /// Returns [`RuntimeError`] if the cap-token does not grant `tool`, if no
+    /// journal is configured, or if the journal append fails.
+    pub async fn checkpoint(
+        &self,
+        session_id: SessionId,
+        cap_token: &CapTokenRef,
+        tool: &str,
+        label: Option<String>,
+    ) -> Result<CheckpointOutcome, RuntimeError> {
+        let journal = self.journal_or_err()?;
+        let entry_count = journal
+            .replay(session_id)
+            .await
+            .map_err(|e| RuntimeError::Internal(anyhow::anyhow!("journal replay failed: {e}")))?
+            .len();
+        let checkpoint_id = uuid::Uuid::new_v4();
+        let summary = label.unwrap_or_else(|| format!("checkpoint at {entry_count} entries"));
+
+        let receipt = self
+            .commit_control_receipt(
+                session_id,
+                cap_token,
+                tool,
+                "session.checkpoint.created.v1",
+                Sha256Digest::of(summary.as_bytes()),
+                ardur_receipt::CostTuple {
+                    tokens_in: 0,
+                    tokens_out: 0,
+                    cents: 0,
+                    wall_ms: 0,
+                    attention_score: 0,
+                },
+            )
+            .await?;
+
+        let entry_id = journal
+            .append(JournalEntry::Checkpoint {
+                checkpoint_id,
+                summary: summary.clone(),
+                at: self.clock.now_ms(),
+            })
+            .await
+            .map_err(|e| RuntimeError::Internal(anyhow::anyhow!("journal append failed: {e}")))?;
+
+        Ok(CheckpointOutcome {
+            checkpoint_id,
+            entry_id,
+            receipt_id: ReceiptId(receipt.receipt_id),
+            summary,
+        })
+    }
+
+    /// **§1.8.** List every checkpoint recorded in this session's journal, in
+    /// creation order. Read-only: no receipt is minted for a query.
+    ///
+    /// # Errors
+    /// Returns [`RuntimeError`] if no journal is configured or the replay
+    /// fails.
+    pub async fn list_checkpoints(
+        &self,
+        session_id: SessionId,
+    ) -> Result<Vec<CheckpointInfo>, RuntimeError> {
+        let journal = self.journal_or_err()?;
+        let entries = journal
+            .replay(session_id)
+            .await
+            .map_err(|e| RuntimeError::Internal(anyhow::anyhow!("journal replay failed: {e}")))?;
+        Ok(entries
+            .iter()
+            .enumerate()
+            .filter_map(|(pos, entry)| match entry {
+                JournalEntry::Checkpoint {
+                    checkpoint_id,
+                    summary,
+                    at,
+                } => Some(CheckpointInfo {
+                    checkpoint_id: *checkpoint_id,
+                    entry_id: ardur_session_journals::EntryId::new(pos as u64),
+                    summary: summary.clone(),
+                    at: *at,
+                }),
+                _ => None,
+            })
+            .collect())
+    }
+
+    /// **§1.8.** Roll back to a previously recorded checkpoint: append a
+    /// [`JournalEntry::Rollback`] marker (the journal stays append-only —
+    /// nothing between the checkpoint and this marker is deleted or
+    /// rewritten, only excluded from the *live* reconstruction going
+    /// forward) and mint a chained receipt recording the rollback.
+    ///
+    /// Returns the full entry log up to and including the target checkpoint
+    /// so the caller can rebuild its in-memory session state without a
+    /// second journal round-trip.
+    ///
+    /// # Errors
+    /// Returns [`RuntimeError`] if the cap-token does not grant `tool`, no
+    /// journal is configured, `checkpoint_id` does not name a checkpoint in
+    /// this session's journal, or the journal append fails.
+    pub async fn rollback_to_checkpoint(
+        &self,
+        session_id: SessionId,
+        cap_token: &CapTokenRef,
+        tool: &str,
+        checkpoint_id: uuid::Uuid,
+    ) -> Result<RollbackOutcome, RuntimeError> {
+        let journal = self.journal_or_err()?;
+        let entries = journal
+            .replay(session_id)
+            .await
+            .map_err(|e| RuntimeError::Internal(anyhow::anyhow!("journal replay failed: {e}")))?;
+        let checkpoint_pos = entries
+            .iter()
+            .position(|entry| {
+                matches!(entry, JournalEntry::Checkpoint { checkpoint_id: id, .. } if *id == checkpoint_id)
+            })
+            .ok_or_else(|| {
+                RuntimeError::Internal(anyhow::anyhow!(
+                    "checkpoint {checkpoint_id} not found in this session's journal"
+                ))
+            })?;
+
+        let receipt = self
+            .commit_control_receipt(
+                session_id,
+                cap_token,
+                tool,
+                "session.rollback.completed.v1",
+                Sha256Digest::of(checkpoint_id.as_bytes()),
+                ardur_receipt::CostTuple {
+                    tokens_in: 0,
+                    tokens_out: 0,
+                    cents: 0,
+                    wall_ms: 0,
+                    attention_score: 0,
+                },
+            )
+            .await?;
+        let receipt_id = ReceiptId(receipt.receipt_id);
+
+        let entry_id = journal
+            .append(JournalEntry::Rollback {
+                target_checkpoint_id: checkpoint_id,
+                receipt_id,
+                at: self.clock.now_ms(),
+            })
+            .await
+            .map_err(|e| RuntimeError::Internal(anyhow::anyhow!("journal append failed: {e}")))?;
+
+        Ok(RollbackOutcome {
+            target_checkpoint_id: checkpoint_id,
+            entry_id,
+            receipt_id,
+            retained_entries: entries[..=checkpoint_pos].to_vec(),
+        })
     }
 
     /// Revoke a capability token mid-session: add its revocation ids to the
