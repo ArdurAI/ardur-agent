@@ -30,6 +30,11 @@ async fn spawn_server(bearer: &str) -> String {
     let data_dir = tempfile::tempdir().expect("tempdir");
     let config = Config {
         anthropic_api_key: String::new(),
+        enable_shell_tool: false,
+        shell_allowlist: Vec::new(),
+        enable_http_tool: false,
+        http_allowlist: Vec::new(),
+        file_tool_root: None,
         slack_enabled: true,
         slack_bot_token: Some("xoxb-e2e".to_string()),
         slack_signing_secret: Some("e2e-signing-secret-0000000000".to_string()),
