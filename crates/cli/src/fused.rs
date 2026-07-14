@@ -217,6 +217,9 @@ impl FusedEngine {
         .projected_envelope(envelope)
         .with_memory(memory.clone())
         .with_journal(Arc::new(journal))
+        // ARD-H1: install the built-in injection-defense signatures so `ardur
+        // chat` scans prompts too, rather than shipping stage 4.5 inert.
+        .with_default_injection_filters()
         .receipt_log(dirs.receipt_log())
         .build_reconciled()
         .await
