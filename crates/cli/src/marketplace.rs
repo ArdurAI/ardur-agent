@@ -29,6 +29,7 @@ use sha2::{Digest, Sha256};
 use crate::StateDirs;
 use crate::marketplace_advisory::AdvisoryDatabase;
 use crate::marketplace_policy;
+use crate::marketplace_search;
 use crate::state_id::sanitize_state_id;
 
 /// Manifest byte-size ceiling (256 KiB) — refused before parsing.
@@ -83,10 +84,19 @@ pub enum MarketplaceAction {
     /// Browse installed skills and plugins.
     #[command(alias = "list")]
     Browse,
-    /// Search installed skills/plugins by name, id, or capability.
+    /// Search installed skills/plugins. BM25 lexical search by default;
+    /// `--semantic` additionally ranks by cosine similarity over a
+    /// locally-computed embedding (downloads its model on first use).
     Search {
         /// Query string.
         query: String,
+        /// Maximum results to return.
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+        /// Rank by embedding cosine similarity instead of BM25 lexical
+        /// score. Downloads a local embedding model on first use.
+        #[arg(long)]
+        semantic: bool,
     },
     /// Install a skill or plugin from a local signed manifest.
     Install {
@@ -811,25 +821,44 @@ pub fn run_marketplace(args: MarketplaceArgs) -> Result<(), CliError> {
                 }
             }
         }
-        MarketplaceAction::Search { query } => {
-            let query = query.to_lowercase();
+        MarketplaceAction::Search {
+            query,
+            limit,
+            semantic,
+        } => {
             let records = read_skills(&root)?;
-            let filtered: Vec<&SkillRecord> = records
-                .iter()
-                .filter(|r| {
-                    r.name.to_lowercase().contains(&query)
-                        || r.skill_id.to_lowercase().contains(&query)
-                        || r.capabilities
-                            .iter()
-                            .any(|capability| capability.to_lowercase().contains(&query))
-                })
-                .collect();
-            if filtered.is_empty() {
-                println!("no installed skills/plugins match '{query}'");
+            if records.is_empty() {
+                println!("no skills or plugins installed");
                 println!("note: remote marketplace search is a Phase 2 wiring task");
             } else {
-                for r in filtered {
-                    println!("{} {} {}", r.skill_id, r.name, r.version);
+                let corpus: Vec<(String, String)> = records
+                    .iter()
+                    .map(|r| {
+                        (
+                            r.skill_id.clone(),
+                            format!("{} {} {}", r.name, r.skill_id, r.capabilities.join(" ")),
+                        )
+                    })
+                    .collect();
+                let hits = if semantic {
+                    marketplace_search::semantic_rerank(&corpus, &query, limit)?
+                } else {
+                    marketplace_search::bm25_search(&corpus, &query, limit)?
+                };
+                if hits.is_empty() {
+                    println!("no installed skills/plugins match '{query}'");
+                    println!("note: remote marketplace search is a Phase 2 wiring task");
+                } else {
+                    let by_id: std::collections::HashMap<&str, &SkillRecord> =
+                        records.iter().map(|r| (r.skill_id.as_str(), r)).collect();
+                    for hit in hits {
+                        if let Some(r) = by_id.get(hit.skill_id.as_str()) {
+                            println!(
+                                "{} {} {} [score {:.3}]",
+                                r.skill_id, r.name, r.version, hit.score
+                            );
+                        }
+                    }
                 }
             }
         }

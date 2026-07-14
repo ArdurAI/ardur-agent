@@ -1017,3 +1017,50 @@ fn marketplace_advisory_db_rejects_oversized_file() {
         .failure()
         .stderr(predicates::str::contains("exceeding"));
 }
+
+#[test]
+fn marketplace_search_bm25_ranks_relevant_skill_first() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (translate_manifest, translate_key, _) = signed_skill_manifest(
+        dir.path(),
+        "skill.translate",
+        "Translate Helper",
+        "0.1.0",
+        vec!["cap.fs_read".to_string()],
+    );
+    let (unrelated_manifest, unrelated_key, _) = signed_skill_manifest(
+        dir.path(),
+        "skill.weather",
+        "Weather Report",
+        "0.1.0",
+        vec!["cap.network_out".to_string()],
+    );
+
+    for (manifest, key) in [
+        (&translate_manifest, &translate_key),
+        (&unrelated_manifest, &unrelated_key),
+    ] {
+        Command::cargo_bin("ardur")
+            .expect("the `ardur` binary builds")
+            .env("HOME", dir.path())
+            .args(["marketplace", "install"])
+            .arg(manifest)
+            .arg("--key")
+            .arg(key)
+            .assert()
+            .success();
+    }
+
+    let out = Command::cargo_bin("ardur")
+        .expect("the `ardur` binary builds")
+        .env("HOME", dir.path())
+        .args(["marketplace", "search", "translate", "--limit", "5"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(out).expect("stdout utf8");
+    assert!(stdout.contains("skill.translate"), "{stdout}");
+    assert!(!stdout.contains("skill.weather"), "{stdout}");
+}

@@ -105,3 +105,20 @@ This is **not** a live OSV/NVD/RustSec feed — no network call, no background s
 ```
 
 A match refuses `install`/`update` by default; pass `--allow-known-vulnerable <advisory_id>` (repeatable) to explicitly accept a specific advisory and proceed anyway — accepted matches still print, so the override is visible. `audit` reports every match regardless of any override, for ongoing visibility into what's running despite an accepted risk. Matching is exact-version (no range syntax), keeping the format and its parser trivial to audit. Bounded: the database file is capped at 5 MiB / 10,000 entries, and each summary at 500 characters.
+
+## Search
+
+`marketplace search <query>` now runs a real BM25 lexical search (via `ardur-bm25-index`, zero external services) over the locally installed catalog's name/id/capabilities, ranked by relevance and capped by `--limit` (default 10):
+
+```sh
+ardur marketplace search translate
+ardur marketplace search translate --limit 20
+```
+
+Pass `--semantic` to rank by cosine similarity over a locally-computed embedding instead (`ardur-embeddings`' `FastEmbedEmbedder`, BGE-small-en-v1.5 by default, `EMBED_MODEL` overrides). This downloads its ONNX model on first use — kept opt-in so a plain `search` never triggers an unexpected download:
+
+```sh
+ardur marketplace search "extract structured data from email" --semantic
+```
+
+Both layers search only the **local** installed catalog — there is still no remote marketplace index to search.

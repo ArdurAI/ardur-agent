@@ -10,6 +10,7 @@ mod device_mesh;
 mod marketplace;
 mod marketplace_advisory;
 mod marketplace_policy;
+mod marketplace_search;
 mod persona;
 mod project_surface;
 mod state_id;
