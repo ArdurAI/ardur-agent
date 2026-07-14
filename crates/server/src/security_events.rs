@@ -109,25 +109,22 @@ impl SecurityEvent {
                     })
                     .collect(),
             }),
-            RuntimeError::PolicyDenied { reason } => {
-                Some(base(GATE_POLICY, Some(reason.clone())))
-            }
-            RuntimeError::CapDenied { reason } => {
-                Some(base(GATE_CAP_TOKEN, Some(reason.clone())))
-            }
-            RuntimeError::CapTokenMissing => {
-                Some(base(GATE_CAP_TOKEN, Some("missing capability token".into())))
-            }
-            RuntimeError::CapTokenExpired => {
-                Some(base(GATE_CAP_TOKEN, Some("expired capability token".into())))
-            }
+            RuntimeError::PolicyDenied { reason } => Some(base(GATE_POLICY, Some(reason.clone()))),
+            RuntimeError::CapDenied { reason } => Some(base(GATE_CAP_TOKEN, Some(reason.clone()))),
+            RuntimeError::CapTokenMissing => Some(base(
+                GATE_CAP_TOKEN,
+                Some("missing capability token".into()),
+            )),
+            RuntimeError::CapTokenExpired => Some(base(
+                GATE_CAP_TOKEN,
+                Some("expired capability token".into()),
+            )),
             RuntimeError::CostCeilingExceeded => {
                 Some(base(GATE_COST, Some("cost ceiling exceeded".into())))
             }
-            RuntimeError::VetoedByHook { hook_id, reason } => Some(base(
-                GATE_HOOK,
-                Some(format!("hook `{hook_id}`: {reason}")),
-            )),
+            RuntimeError::VetoedByHook { hook_id, reason } => {
+                Some(base(GATE_HOOK, Some(format!("hook `{hook_id}`: {reason}"))))
+            }
             RuntimeError::UnknownTool { tool } => {
                 Some(base(GATE_TOOL, Some(format!("unknown tool `{tool}`"))))
             }
