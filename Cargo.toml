@@ -22,6 +22,7 @@ members = [
     "crates/runtime",
     "crates/automation",
     "crates/cron",
+    "crates/cron-ui",
     "crates/standing-goals",
     "crates/cost-gate",
     "crates/provider-runtime",
@@ -253,6 +254,7 @@ ardur-runtime = { path = "crates/runtime" }
 ardur-acp = { path = "crates/acp" }
 ardur-automation = { path = "crates/automation" }
 ardur-cron = { path = "crates/cron" }
+ardur-cron-ui = { path = "crates/cron-ui" }
 ardur-standing-goals = { path = "crates/standing-goals" }
 ardur-cost-gate = { path = "crates/cost-gate" }
 ardur-provider-runtime = { path = "crates/provider-runtime" }
