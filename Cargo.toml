@@ -205,6 +205,8 @@ crossterm = { version = "0.29", default-features = false }
 # Black-box CLI assertions — drives the built `ardur` binary in integration
 # tests (crates/cli dev-dependency, §2.1).
 assert_cmd = "2"
+# `assert_cmd`'s stdout/stderr predicate matchers (crates/cli dev-dependency).
+predicates = "3"
 # Serial test execution for env-mutating integration tests — prevents races
 # on process-global environment variables (crates/server, crates/provider-selector
 # dev-dependency).

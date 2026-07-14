@@ -99,6 +99,7 @@ cargo-lock = { workspace = true }
 [dev-dependencies]
 # Integration tests are a separate crate; they re-declare the deps they name.
 assert_cmd = { workspace = true }
+predicates = { workspace = true }
 tokio = { workspace = true }
 ardur-runtime = { workspace = true }
 ardur-cost-gate = { workspace = true }
