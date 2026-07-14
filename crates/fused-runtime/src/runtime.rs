@@ -136,6 +136,24 @@ pub struct RollbackOutcome {
     pub retained_entries: Vec<JournalEntry>,
 }
 
+/// **§1.7.** The result of [`FusedRuntime::compact`].
+#[derive(Clone, Debug)]
+pub struct CompactOutcome {
+    /// The newly minted compaction checkpoint's stable id (restore it with
+    /// [`FusedRuntime::rollback_to_checkpoint`]).
+    pub checkpoint_id: uuid::Uuid,
+    /// The journal position the checkpoint entry landed at.
+    pub entry_id: ardur_session_journals::EntryId,
+    /// The receipt chained for this compaction.
+    pub receipt_id: ReceiptId,
+    /// The structured compaction summary text.
+    pub summary: String,
+    /// A rough (~4 chars/token) estimate of the pre-compaction history size.
+    pub before_tokens_estimate: u64,
+    /// A rough (~4 chars/token) estimate of the summary's size.
+    pub after_tokens_estimate: u64,
+}
+
 /// A [`ChatRuntime`] that fuses every Phase-1 substrate crate behind one
 /// ARD-488: releases a turn's cost reservation when the turn future is dropped
 /// before it settles (outer `tokio::time::timeout`, `select!` loss, client or
@@ -490,6 +508,139 @@ impl FusedRuntime {
             receipt_id,
             retained_entries: entries[..=checkpoint_pos].to_vec(),
         })
+    }
+
+    /// **§1.7.** Call the provider directly to summarize `history` into a
+    /// structured compaction summary. Bypasses the turn pipeline (`submit`/
+    /// `stream`) deliberately: this is a meta-operation *over* the
+    /// transcript, not a chat turn, so it must not itself become a journaled
+    /// `UserMessage`/`AssistantMessage` pair the way a real turn would — that
+    /// would pollute the conversation it is trying to summarize.
+    ///
+    /// A condensed practical subset of the blueprint's nine-heading summary
+    /// template: Active Task, Completed Actions, Open Items, Decisions,
+    /// Critical Exact Values, Next Best Step. The full template's
+    /// Mission/Policy/Memory-anchor sections need substrate (a live mission
+    /// object, capability-grant tracking, a memory index) this runtime does
+    /// not yet expose to a summarization call, so they are omitted rather
+    /// than filled with placeholders.
+    async fn summarize(
+        &self,
+        history: &[ChatMessage],
+        focus: Option<&str>,
+    ) -> Result<CompletionResponse, RuntimeError> {
+        let mut instruction = String::from(
+            "Summarize the conversation below for continuation by another AI \
+             agent. Use exactly this structure:\n\n\
+             ## Active Task\n[the most recent unfulfilled user request, exact wording where possible]\n\n\
+             ## Completed Actions\n[concrete actions taken, with outcomes, commands, file paths, test results]\n\n\
+             ## Open Items\n[pending tasks, blockers, unanswered questions]\n\n\
+             ## Decisions\n[decisions made and why]\n\n\
+             ## Critical Exact Values\n[paths, IDs, error strings, hashes, names, ports — redact any secrets]\n\n\
+             ## Next Best Step\n[one concise statement of what to do next]\n\n\
+             Be concise. Omit a section entirely if it has nothing to report.",
+        );
+        if let Some(focus) = focus {
+            instruction.push_str(&format!(
+                "\n\nPrioritize preserving detail related to: {focus}"
+            ));
+        }
+        let mut messages = vec![ChatMessage::system(instruction)];
+        messages.extend_from_slice(history);
+
+        let req = CompletionRequest::new(messages, self.model.clone(), self.max_tokens);
+        self.provider
+            .complete(req)
+            .await
+            .map_err(|e| map_provider_error(&e))
+    }
+
+    /// **§1.7.** Summarize `history` and install the result as a compaction
+    /// checkpoint: mints a control receipt recording the real token/cost the
+    /// summarization call incurred, and records the summary as a
+    /// [`JournalEntry::Checkpoint`] so the existing
+    /// [`rollback_to_checkpoint`](Self::rollback_to_checkpoint) machinery can
+    /// restore it later — a compaction checkpoint and a manual `/checkpoint`
+    /// are the same underlying journal record; only how the summary text was
+    /// produced differs.
+    ///
+    /// KNOWN LIMITATION: unlike a chat turn, this call does not yet reserve
+    /// against the cost-gate before dispatching — the minted receipt's
+    /// `cost` field reflects the real provider usage for audit, but the call
+    /// is not yet admission-controlled the way [`submit`](Self::submit) is.
+    /// Compaction is a threshold/user-triggered operation, not a per-turn
+    /// one, which bounds the exposure; tracked as a follow-up.
+    ///
+    /// # Errors
+    /// Returns [`RuntimeError`] if the cap-token does not grant `tool`, the
+    /// provider call fails, no journal is configured, or the journal append
+    /// fails.
+    pub async fn compact(
+        &self,
+        session_id: SessionId,
+        cap_token: &CapTokenRef,
+        tool: &str,
+        history: &[ChatMessage],
+        focus: Option<String>,
+    ) -> Result<CompactOutcome, RuntimeError> {
+        // Fail fast on a denied cap-token before spending on a provider call.
+        self.verify_cap_token_for_tool(cap_token, tool)?;
+        let journal = self.journal_or_err()?;
+
+        let before_tokens = estimate_tokens(history);
+        let response = self.summarize(history, focus.as_deref()).await?;
+        let after_tokens = estimate_tokens(std::slice::from_ref(&ChatMessage::assistant(
+            response.content.clone(),
+        )));
+
+        let receipt = self
+            .commit_control_receipt(
+                session_id,
+                cap_token,
+                tool,
+                "context.compact.applied.v1",
+                Sha256Digest::of(response.content.as_bytes()),
+                response.cost,
+            )
+            .await?;
+
+        let checkpoint_id = uuid::Uuid::new_v4();
+        let entry_id = journal
+            .append(JournalEntry::Checkpoint {
+                checkpoint_id,
+                summary: response.content.clone(),
+                at: self.clock.now_ms(),
+            })
+            .await
+            .map_err(|e| RuntimeError::Internal(anyhow::anyhow!("journal append failed: {e}")))?;
+
+        Ok(CompactOutcome {
+            checkpoint_id,
+            entry_id,
+            receipt_id: ReceiptId(receipt.receipt_id),
+            summary: response.content,
+            before_tokens_estimate: before_tokens,
+            after_tokens_estimate: after_tokens,
+        })
+    }
+
+    /// **§1.7.** Summarize `history` without installing it: no journal entry,
+    /// no receipt, no session state change — lets a caller preview a
+    /// compaction candidate before committing to it with [`compact`](Self::compact).
+    ///
+    /// # Errors
+    /// Returns [`RuntimeError`] if the cap-token does not grant `tool` or
+    /// the provider call fails.
+    pub async fn preview_compact(
+        &self,
+        cap_token: &CapTokenRef,
+        tool: &str,
+        history: &[ChatMessage],
+        focus: Option<String>,
+    ) -> Result<String, RuntimeError> {
+        self.verify_cap_token_for_tool(cap_token, tool)?;
+        let response = self.summarize(history, focus.as_deref()).await?;
+        Ok(response.content)
     }
 
     /// Revoke a capability token mid-session: add its revocation ids to the
@@ -2415,6 +2566,16 @@ fn cedar_attributes_from_claims(
         claims.budget_remaining.into(),
     );
     serde_json::Value::Object(map)
+}
+
+/// **§1.7.** A rough token-count estimate (~4 characters/token, the common
+/// English-text heuristic) over a message slice's content — not a real
+/// tokenizer. Good enough for `/compact status`-style before/after context
+/// sizing; not billed anywhere (the receipted cost always comes from the
+/// provider's actual reported [`Usage`](ardur_provider_runtime::Usage)).
+fn estimate_tokens(messages: &[ChatMessage]) -> u64 {
+    let chars: usize = messages.iter().map(|m| m.content.len()).sum();
+    (chars as u64).div_ceil(4)
 }
 
 /// Map a provider failure onto the runtime's error surface.

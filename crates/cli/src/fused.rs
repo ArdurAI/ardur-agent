@@ -65,6 +65,8 @@ const TOOL: &str = "chat.submit";
 const SESSION_CHECKPOINT_CAPABILITY: &str = "session.checkpoint";
 /// §1.8 — the capability `/rollback` exercises to roll back to a checkpoint.
 const SESSION_ROLLBACK_CAPABILITY: &str = "session.rollback";
+/// §1.7 — the capability `/compact` and `/compact preview` exercise.
+const CONTEXT_COMPACT_CAPABILITY: &str = "context.compact";
 /// The session cap-token's lifetime, in seconds (one hour from process start).
 const CAP_TTL_SECS: u64 = 3_600;
 /// The default per-turn cents ceiling when `ARDUR_CLI_PER_TURN_CENTS` is unset,
@@ -173,6 +175,7 @@ impl FusedEngine {
                         ardur_memory::MEMORY_WRITE_CAPABILITY.to_string(),
                         SESSION_CHECKPOINT_CAPABILITY.to_string(),
                         SESSION_ROLLBACK_CAPABILITY.to_string(),
+                        CONTEXT_COMPACT_CAPABILITY.to_string(),
                     ],
                 },
             )
@@ -454,6 +457,47 @@ impl FusedEngine {
             .map_err(|e| CliError::State(format!("rollback failed: {e}")))?;
         let history = crate::journal_entries_to_history(&outcome.retained_entries);
         Ok((outcome, history))
+    }
+
+    /// **§1.7.** Summarize `history` and install the result as a compaction
+    /// checkpoint (restorable later with [`rollback`](Self::rollback)).
+    ///
+    /// # Errors
+    /// Returns [`CliError`] if the session cap-token does not grant the
+    /// compact capability, the provider call fails, no journal is
+    /// configured, or the journal append fails.
+    pub async fn compact(
+        &self,
+        history: &[ChatMessage],
+        focus: Option<String>,
+    ) -> Result<ardur_fused_runtime::CompactOutcome, CliError> {
+        self.runtime
+            .compact(
+                self.session_id,
+                &self.cap_token,
+                CONTEXT_COMPACT_CAPABILITY,
+                history,
+                focus,
+            )
+            .await
+            .map_err(|e| CliError::State(format!("compact failed: {e}")))
+    }
+
+    /// **§1.7.** Preview a compaction candidate without installing it: no
+    /// journal entry, no receipt.
+    ///
+    /// # Errors
+    /// Returns [`CliError`] if the session cap-token does not grant the
+    /// compact capability or the provider call fails.
+    pub async fn preview_compact(
+        &self,
+        history: &[ChatMessage],
+        focus: Option<String>,
+    ) -> Result<String, CliError> {
+        self.runtime
+            .preview_compact(&self.cap_token, CONTEXT_COMPACT_CAPABILITY, history, focus)
+            .await
+            .map_err(|e| CliError::State(format!("compact preview failed: {e}")))
     }
 
     /// Run one progressive chat turn through the fused runtime's full ten-stage
