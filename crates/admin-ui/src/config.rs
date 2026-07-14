@@ -62,6 +62,20 @@ pub struct Cli {
     #[arg(long, value_name = "USER:PASS")]
     pub basic_auth: Option<String>,
 
+    /// Optional comma-separated Bearer token(s). When set, every endpoint
+    /// accepts `Authorization: Bearer <token>` matching any of them, checked
+    /// with the same fail-closed, constant-time, length-bounded comparison
+    /// `ardur-server` uses for its own admin bearer gate. Preferred over
+    /// `--basic-auth` for anything reachable beyond loopback. The
+    /// `ARDUR_ADMIN_BEARER_TOKENS` environment variable overrides the default
+    /// when the flag is absent, so the token need not appear in shell history.
+    #[arg(
+        long,
+        value_name = "TOKEN[,TOKEN...]",
+        env = "ARDUR_ADMIN_BEARER_TOKENS"
+    )]
+    pub bearer_tokens: Option<String>,
+
     /// The bind address. Defaults to `127.0.0.1` (loopback only). The
     /// `ARDUR_ADMIN_BIND` environment variable overrides the default when the
     /// flag is absent.
@@ -77,6 +91,20 @@ pub struct Cli {
     /// is a startup error.
     #[arg(long)]
     pub unsafe_bind: bool,
+}
+
+/// Parse a comma-separated token list, trimming whitespace and dropping empty
+/// entries. Mirrors `ardur-server`'s own `parse_csv` for `ARDUR_ADMIN_BEARER_TOKENS`
+/// so the two admin-bearer configs behave identically.
+#[must_use]
+pub fn parse_bearer_tokens(value: Option<&str>) -> Vec<String> {
+    value
+        .into_iter()
+        .flat_map(|v| v.split(','))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+        .collect()
 }
 
 /// Resolve the effective bind address from the CLI flag, env var, or default.
@@ -110,18 +138,21 @@ pub fn validate_bind(cli: &Cli, addr: &IpAddr) -> Result<(), String> {
     if cli.basic_auth.is_some() {
         return Ok(());
     }
+    if !parse_bearer_tokens(cli.bearer_tokens.as_deref()).is_empty() {
+        return Ok(());
+    }
     if cli.unsafe_bind {
         tracing::warn!(
-            "ardur-admin is binding to a non-loopback address ({addr}) without HTTP Basic auth. \
-             Anyone on the network can read journals, receipts, and memory. This is strongly \
-             discouraged."
+            "ardur-admin is binding to a non-loopback address ({addr}) without HTTP Basic or \
+             Bearer auth. Anyone on the network can read journals, receipts, and memory. This is \
+             strongly discouraged."
         );
         return Ok(());
     }
     Err(format!(
-        "refusing to bind to non-loopback address {addr} without --basic-auth. \
+        "refusing to bind to non-loopback address {addr} without --basic-auth or --bearer-tokens. \
          The admin dashboard exposes sessions, journals, receipts, costs, and memory. \
-         Re-run with --basic-auth USER:PASS to protect it, or pass --unsafe-bind to acknowledge \
-         the risk."
+         Re-run with --bearer-tokens TOKEN (preferred) or --basic-auth USER:PASS to protect it, \
+         or pass --unsafe-bind to acknowledge the risk."
     ))
 }

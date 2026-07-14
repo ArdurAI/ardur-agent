@@ -7,7 +7,7 @@ use ardur_cap_token::VerifiedClaims;
 use ardur_cedar_policy::CedarPolicyBundle;
 use qdrant_client::Qdrant;
 
-use crate::auth::BasicAuth;
+use crate::auth::{BasicAuth, BearerAuth};
 
 /// A connected, read-only Qdrant source for the optional memory endpoint.
 pub struct MemorySource {
@@ -38,6 +38,8 @@ pub struct AppState {
     pub memory: Option<MemorySource>,
     /// Required HTTP Basic credentials, if the operator configured a gate.
     pub basic_auth: Option<BasicAuth>,
+    /// Required Bearer token(s), if the operator configured a gate.
+    pub bearer_auth: Option<BearerAuth>,
     /// Verified active cap-token grants displayed by the capability wallet.
     pub capabilities: Vec<VerifiedClaims>,
     /// Cedar policy bundle used by the policy debugger.
@@ -53,6 +55,7 @@ impl AppState {
             receipt_store: receipt_store.into(),
             memory: None,
             basic_auth: None,
+            bearer_auth: None,
             capabilities: Vec::new(),
             policies: None,
         }
@@ -69,6 +72,13 @@ impl AppState {
     #[must_use]
     pub fn with_basic_auth(mut self, auth: BasicAuth) -> Self {
         self.basic_auth = Some(auth);
+        self
+    }
+
+    /// Require Bearer auth on every endpoint.
+    #[must_use]
+    pub fn with_bearer_auth(mut self, auth: BearerAuth) -> Self {
+        self.bearer_auth = Some(auth);
         self
     }
 

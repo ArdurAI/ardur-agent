@@ -8,6 +8,7 @@
 use std::fs;
 use std::path::Path;
 
+use ardur_admin::auth::{BasicAuth, BearerAuth};
 use ardur_admin::build_router;
 use ardur_admin::state::AppState;
 use ardur_session_journals::{
@@ -182,6 +183,19 @@ impl Fixture {
 
     fn server(&self) -> TestServer {
         let state = AppState::new(&self.journal_dir, &self.receipt_store);
+        TestServer::new(build_router(state.shared()))
+    }
+
+    fn server_with_bearer(&self, tokens: Vec<&str>) -> TestServer {
+        let state = AppState::new(&self.journal_dir, &self.receipt_store).with_bearer_auth(
+            BearerAuth::from_tokens(tokens.into_iter().map(str::to_string).collect()),
+        );
+        TestServer::new(build_router(state.shared()))
+    }
+
+    fn server_with_basic(&self, user_pass: &str) -> TestServer {
+        let state = AppState::new(&self.journal_dir, &self.receipt_store)
+            .with_basic_auth(BasicAuth::from_user_pass(user_pass));
         TestServer::new(build_router(state.shared()))
     }
 }
@@ -645,4 +659,68 @@ async fn read_only_no_write_endpoints() {
 /// A deterministic UUIDv4-shaped string for fixture receipt ids.
 fn uuid(n: u8) -> String {
     format!("{n:08x}-0000-4000-8000-000000000000")
+}
+
+#[tokio::test]
+async fn bearer_auth_rejects_missing_and_wrong_token() {
+    let fx = Fixture::new();
+    let server = fx.server_with_bearer(vec!["correct-token"]);
+
+    let res = server.get("/api/sessions").await;
+    assert_eq!(res.status_code().as_u16(), 401, "no header should be 401");
+
+    let res = server
+        .get("/api/sessions")
+        .add_header("Authorization", "Bearer wrong-token")
+        .await;
+    assert_eq!(res.status_code().as_u16(), 401, "wrong token should be 401");
+}
+
+#[tokio::test]
+async fn bearer_auth_accepts_correct_token() {
+    let fx = Fixture::new();
+    let server = fx.server_with_bearer(vec!["correct-token"]);
+
+    let res = server
+        .get("/api/sessions")
+        .add_header("Authorization", "Bearer correct-token")
+        .await;
+    res.assert_status_ok();
+}
+
+#[tokio::test]
+async fn bearer_auth_accepts_any_of_multiple_configured_tokens() {
+    let fx = Fixture::new();
+    let server = fx.server_with_bearer(vec!["token-a", "token-b"]);
+
+    for token in ["token-a", "token-b"] {
+        let res = server
+            .get("/healthz")
+            .add_header("Authorization", format!("Bearer {token}"))
+            .await;
+        res.assert_status_ok();
+    }
+}
+
+#[tokio::test]
+async fn basic_auth_still_works_standalone() {
+    let fx = Fixture::new();
+    let server = fx.server_with_basic("admin:secret");
+
+    let res = server.get("/healthz").await;
+    assert_eq!(res.status_code().as_u16(), 401, "no header should be 401");
+
+    let encoded = base64::engine::general_purpose::STANDARD.encode("admin:secret");
+    let res = server
+        .get("/healthz")
+        .add_header("Authorization", format!("Basic {encoded}"))
+        .await;
+    res.assert_status_ok();
+}
+
+#[tokio::test]
+async fn no_auth_configured_passes_through() {
+    let fx = Fixture::new();
+    let res = fx.server().get("/healthz").await;
+    res.assert_status_ok();
 }
