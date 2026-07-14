@@ -44,12 +44,25 @@
 //! call itself, so an auditor can walk from the parent's tool-call receipt to
 //! the child's termination receipt by matching that one id — the delegation
 //! chain is reconstructible without a separate registry.
+//!
+//! # Concurrency ceiling
+//!
+//! At most [`DEFAULT_MAX_CONCURRENCY`] `delegate_task` calls may be in flight
+//! at once per tool instance — the blueprint's own default budget envelope
+//! ("Hermes-defaults applied: `max_concurrency = 3`, `max_depth = 1`",
+//! `plans/5.0-multi-agent-foundation-blueprint.md:1714`). Depth is already
+//! structurally 1 via the recursion floor above; this is the concurrency
+//! half. A call beyond the ceiling is denied immediately (fail-fast) rather
+//! than queued, matching the blueprint's default `ConcurrencyOverflowPosture`.
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
+
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::json;
+use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 use ardur_cap_token::{AttenuationRule, CapToken, CapTokenError, PublicKey};
@@ -67,6 +80,17 @@ use ardur_tool_registry::{
 /// Conservative default lifetime spend ceiling for a delegated sub-agent, in US
 /// cents, applied when a `delegate_task` call omits `max_cost_cents`.
 pub const DEFAULT_MAX_COST_CENTS: u32 = 100;
+
+/// Default cap on `delegate_task` calls in flight at once for a single tool
+/// instance (one per process). §5.0/§5.1's own "Included" scope names this
+/// exact default: Hermes's `_DEFAULT_MAX_CONCURRENT_CHILDREN = 3`
+/// (`delegate_tool.py:127`), reaffirmed as the blueprint's default budget
+/// envelope ("Hermes-defaults applied: `max_concurrency = 3`,
+/// `max_depth = 1`" — `plans/5.0-multi-agent-foundation-blueprint.md:1714`).
+/// Depth is already structurally 1 in this crate (a child's token carries
+/// only `chat.submit`, so it cannot itself delegate); this is the
+/// concurrency half of that same default.
+pub const DEFAULT_MAX_CONCURRENCY: usize = 3;
 
 /// The capability label gating `delegate_task`. Included automatically in a
 /// session's cap-token allowlist once this tool is registered (every
@@ -109,6 +133,14 @@ pub struct DelegateTaskTool {
     /// The audience session cap-tokens are scoped to (e.g. `"ardur"`). Must
     /// match the audience the caller's token was issued for.
     audience: String,
+    /// Admission gate for the blueprint's `max_concurrency` default: at most
+    /// this many `delegate_task` calls may be in flight (spawned but not yet
+    /// terminated) at once across every caller sharing this tool instance.
+    /// `FailFast` posture — a call beyond the ceiling is denied immediately
+    /// rather than queued, matching the blueprint's default
+    /// `ConcurrencyOverflowPosture`.
+    concurrency: Arc<Semaphore>,
+    max_concurrency: usize,
 }
 
 impl DelegateTaskTool {
@@ -116,9 +148,21 @@ impl DelegateTaskTool {
     pub const ID: &'static str = "delegate_task";
 
     /// Build a `delegate_task` tool that attenuates and verifies against
-    /// `root`, checking spawned children's turns against `audience`.
+    /// `root`, checking spawned children's turns against `audience`, with the
+    /// default concurrency ceiling ([`DEFAULT_MAX_CONCURRENCY`]).
     #[must_use]
     pub fn new(root: PublicKey, audience: impl Into<String>) -> Self {
+        Self::with_max_concurrency(root, audience, DEFAULT_MAX_CONCURRENCY)
+    }
+
+    /// Build a `delegate_task` tool with an explicit concurrency ceiling in
+    /// place of [`DEFAULT_MAX_CONCURRENCY`].
+    #[must_use]
+    pub fn with_max_concurrency(
+        root: PublicKey,
+        audience: impl Into<String>,
+        max_concurrency: usize,
+    ) -> Self {
         let schema = ToolSchema {
             description: "Spawn a bounded child agent under a cap-token attenuated from this \
                 agent's own authority, and return its answer once it completes. The child cannot \
@@ -164,6 +208,8 @@ impl DelegateTaskTool {
             capabilities: vec![Capability::Custom(DELEGATE_CAPABILITY.to_string())],
             root,
             audience: audience.into(),
+            concurrency: Arc::new(Semaphore::new(max_concurrency)),
+            max_concurrency,
         }
     }
 }
@@ -190,6 +236,22 @@ impl Tool for DelegateTaskTool {
                 "`goal` must not be empty".to_string(),
             ));
         }
+
+        // Fail-fast concurrency admission (the blueprint's default
+        // `ConcurrencyOverflowPosture`): a call beyond the ceiling is denied
+        // immediately rather than queued. Held for the whole spawn/ask/
+        // terminate sequence below, released on drop when `invoke` returns.
+        let _permit =
+            self.concurrency
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| ToolError::Denied {
+                    reason: format!(
+                        "delegate_task concurrency ceiling ({}) reached; wait for an in-flight \
+                     delegation to complete before spawning another",
+                        self.max_concurrency
+                    ),
+                })?;
 
         let request = DelegationWorkerRequest {
             root: self.root,

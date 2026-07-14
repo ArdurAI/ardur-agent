@@ -92,6 +92,57 @@ async fn delegate_task_honors_max_cost_cents_override() {
 }
 
 #[tokio::test]
+async fn delegate_task_denies_at_the_concurrency_ceiling() {
+    // A zero ceiling makes admission deterministically fail on the very first
+    // call, with no dependence on real-time scheduling — the blueprint's
+    // default budget envelope names `max_concurrency = 3`; this proves the
+    // gate itself is enforced (and fails fast, spawning nothing) rather than
+    // racing real concurrent calls against wall-clock timing.
+    let (token, root) = parent_token(&["chat.submit"], 10_000);
+    let tool = DelegateTaskTool::with_max_concurrency(root, AUDIENCE, 0);
+    let ctx = ctx_with(token, InvocationId::new());
+
+    let err = tool
+        .invoke(&ctx, json!({ "goal": "should never spawn" }))
+        .await
+        .expect_err("a call at the concurrency ceiling must be denied");
+
+    match err {
+        ToolError::Denied { reason } => {
+            assert!(reason.contains("concurrency ceiling (0)"), "got: {reason}");
+        }
+        other => panic!("expected Denied, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn delegate_task_releases_its_permit_after_completing() {
+    // A ceiling of exactly one: the first call must succeed and, on
+    // returning, must release its permit so a second, later call is not
+    // permanently locked out.
+    let (token, root) = parent_token(&["chat.submit"], 10_000);
+    let tool = DelegateTaskTool::with_max_concurrency(root, AUDIENCE, 1);
+
+    let first = tool
+        .invoke(
+            &ctx_with(token.clone(), InvocationId::new()),
+            json!({ "goal": "first" }),
+        )
+        .await
+        .expect("first call should complete");
+    assert_eq!(first.content["outcome"], "completed");
+
+    let second = tool
+        .invoke(
+            &ctx_with(token, InvocationId::new()),
+            json!({ "goal": "second" }),
+        )
+        .await
+        .expect("second call should complete once the first released its permit");
+    assert_eq!(second.content["outcome"], "completed");
+}
+
+#[tokio::test]
 async fn delegate_task_rejects_empty_goal() {
     let (token, root) = parent_token(&["chat.submit"], 10_000);
     let tool = DelegateTaskTool::new(root, AUDIENCE);
