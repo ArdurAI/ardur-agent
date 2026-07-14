@@ -72,6 +72,7 @@ use secrecy::SecretString;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::config::{Config, MemoryBackend};
+use crate::security_events::SecurityEventLog;
 
 /// The audience every session cap-token is scoped to — and the single audience
 /// the fused runtime verifies against (it is fixed at build time, so it cannot
@@ -535,6 +536,7 @@ impl AppState {
         let telegram: Arc<OnceLock<Arc<TelegramChannel>>> = Arc::new(OnceLock::new());
         let tool_allowlist = tool_allowlist_for_runtime(&tools);
         let security_metrics = Arc::new(SecurityMetrics::default());
+        let security_events = SecurityEventLog::in_data_dir(&data_dir);
         let processor = Processor {
             runtime,
             slack: slack.clone(),
@@ -547,6 +549,7 @@ impl AppState {
             receipt_log,
             receipt_jwks: receipt_jwks.clone(),
             security_metrics: security_metrics.clone(),
+            security_events,
         };
         let (work_tx, worker_handle) = spawn_worker(processor);
 
@@ -939,6 +942,9 @@ struct Processor {
     /// Turn-outcome and security-denial counters, shared with [`AppState`]. The
     /// worker increments them as turns settle; the HTTP layer reads the snapshot.
     security_metrics: Arc<SecurityMetrics>,
+    /// The durable, redacted security-event audit log. The worker appends one
+    /// line per blocked turn; the admin-ui Trust Center reads it read-only.
+    security_events: SecurityEventLog,
 }
 
 /// Which channel backend a turn originated on — decided by the namespaced
@@ -967,6 +973,18 @@ impl Origin {
 }
 
 impl Processor {
+    /// Record a blocked turn: bump the in-process deny counter *and* append a
+    /// redacted line to the durable audit log. Non-security failures increment
+    /// only the `other_errors` counter (the audit log ignores them).
+    fn record_denial(&self, err: &RuntimeError) {
+        self.security_metrics.record_err(err);
+        let at_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        self.security_events.record_denial(err, at_ms);
+    }
+
     /// Run one inbound message through the fused runtime and post the reply.
     async fn handle(&self, incoming: IncomingMessage) {
         // The channel-id scheme tells us which backend to reply through; the
@@ -1048,7 +1066,7 @@ impl Processor {
         }
 
         if let Some(e) = terminal_error {
-            self.security_metrics.record_err(&e);
+            self.record_denial(&e);
             tracing::error!(%user, %channel, error = %e, "streamed channel turn failed");
             let apology = format!("Sorry, that turn failed: {e}");
             if let Err(edit_err) = self
@@ -1140,7 +1158,7 @@ impl Processor {
                 })
             }
             Err(e) => {
-                self.security_metrics.record_err(&e);
+                self.record_denial(&e);
                 tracing::warn!(session_id = %session_id.0, error = %e, "chat turn failed");
                 Err(e)
             }
@@ -1196,7 +1214,7 @@ impl Processor {
             // A `Finish` marks a settled turn; a terminal error is a denial or
             // failure the deny/failure counters should reflect.
             match &item {
-                Err(e) => self.security_metrics.record_err(e),
+                Err(e) => self.record_denial(e),
                 Ok(FusedEvent::Finish(_)) => self.security_metrics.record_ok(),
                 Ok(_) => {}
             }
