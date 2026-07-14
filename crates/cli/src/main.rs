@@ -8,6 +8,7 @@
 mod audit;
 mod device_mesh;
 mod marketplace;
+mod marketplace_policy;
 mod persona;
 mod project_surface;
 mod state_id;

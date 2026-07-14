@@ -664,3 +664,165 @@ fn canonical_payload(
     }
     out
 }
+
+#[test]
+fn marketplace_default_policy_permits_high_risk_capability_install() {
+    // No --policy/ARDUR_MARKETPLACE_POLICY supplied: the built-in default is
+    // permissive, so a shell_exec-declaring manifest installs same as before
+    // Cedar gating existed — this feature is opt-in hardening, not a new
+    // default restriction.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (manifest_path, key_path, _) = signed_skill_manifest(
+        dir.path(),
+        "skill.risky-default",
+        "Risky",
+        "0.1.0",
+        vec!["cap.shell_exec".to_string()],
+    );
+
+    Command::cargo_bin("ardur")
+        .expect("the `ardur` binary builds")
+        .env("HOME", dir.path())
+        .args(["marketplace", "install"])
+        .arg(&manifest_path)
+        .arg("--key")
+        .arg(&key_path)
+        .assert()
+        .success();
+}
+
+#[test]
+fn marketplace_custom_policy_denies_high_risk_capability_install() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (manifest_path, key_path, _) = signed_skill_manifest(
+        dir.path(),
+        "skill.risky",
+        "Risky",
+        "0.1.0",
+        vec!["cap.shell_exec".to_string()],
+    );
+
+    let policy_path = dir.path().join("no-shell-exec.cedar");
+    std::fs::write(
+        &policy_path,
+        r#"forbid(principal, action == Action::"skill_install", resource)
+when { resource.high_risk_capabilities.contains("shell_exec") };
+"#,
+    )
+    .expect("write policy");
+
+    Command::cargo_bin("ardur")
+        .expect("the `ardur` binary builds")
+        .env("HOME", dir.path())
+        .args(["marketplace", "install"])
+        .arg(&manifest_path)
+        .arg("--key")
+        .arg(&key_path)
+        .arg("--policy")
+        .arg(&policy_path)
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("policy denied"));
+
+    // A sibling manifest without the forbidden capability still installs
+    // under the SAME custom policy — proving the deny is capability-specific,
+    // not a blanket refusal.
+    let (clean_manifest, clean_key, _) = signed_skill_manifest(
+        dir.path(),
+        "skill.clean",
+        "Clean",
+        "0.1.0",
+        vec!["cap.fs_read".to_string()],
+    );
+    Command::cargo_bin("ardur")
+        .expect("the `ardur` binary builds")
+        .env("HOME", dir.path())
+        .args(["marketplace", "install"])
+        .arg(&clean_manifest)
+        .arg("--key")
+        .arg(&clean_key)
+        .arg("--policy")
+        .arg(&policy_path)
+        .assert()
+        .success();
+}
+
+#[test]
+fn marketplace_custom_policy_via_env_var_denies_plugin_kind() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (manifest_path, key_path, _) =
+        signed_skill_manifest(dir.path(), "skill.viaenv", "ViaEnv", "0.1.0", vec![]);
+
+    let policy_path = dir.path().join("no-plugins.cedar");
+    std::fs::write(
+        &policy_path,
+        r#"forbid(principal, action == Action::"skill_install", resource)
+when { resource.kind == "plugin" };
+"#,
+    )
+    .expect("write policy");
+
+    // Skill kind installs fine under the "no plugins" policy...
+    Command::cargo_bin("ardur")
+        .expect("the `ardur` binary builds")
+        .env("HOME", dir.path())
+        .env("ARDUR_MARKETPLACE_POLICY", &policy_path)
+        .args(["marketplace", "install"])
+        .arg(&manifest_path)
+        .arg("--key")
+        .arg(&key_path)
+        .assert()
+        .success();
+}
+
+#[test]
+fn marketplace_custom_policy_denies_uninstall_of_high_risk_skill() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (manifest_path, key_path, _) = signed_skill_manifest(
+        dir.path(),
+        "skill.locked",
+        "Locked",
+        "0.1.0",
+        vec!["cap.shell_exec".to_string()],
+    );
+
+    // Install under the permissive default...
+    Command::cargo_bin("ardur")
+        .expect("the `ardur` binary builds")
+        .env("HOME", dir.path())
+        .args(["marketplace", "install"])
+        .arg(&manifest_path)
+        .arg("--key")
+        .arg(&key_path)
+        .assert()
+        .success();
+
+    // ...then a policy that forbids uninstalling high-risk skills blocks
+    // removal (e.g. an org rule requiring an admin workflow for teardown).
+    let policy_path = dir.path().join("no-uninstall-high-risk.cedar");
+    std::fs::write(
+        &policy_path,
+        r#"forbid(principal, action == Action::"skill_uninstall", resource)
+when { resource.high_risk == true };
+"#,
+    )
+    .expect("write policy");
+
+    Command::cargo_bin("ardur")
+        .expect("the `ardur` binary builds")
+        .env("HOME", dir.path())
+        .args(["marketplace", "uninstall", "skill.locked"])
+        .arg("--policy")
+        .arg(&policy_path)
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("policy denied"));
+
+    // The skill is still installed — the refused uninstall had no effect.
+    Command::cargo_bin("ardur")
+        .expect("the `ardur` binary builds")
+        .env("HOME", dir.path())
+        .args(["marketplace", "inspect", "skill.locked"])
+        .assert()
+        .success();
+}

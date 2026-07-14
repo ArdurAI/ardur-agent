@@ -27,6 +27,7 @@ use p256::pkcs8::{DecodePrivateKey, DecodePublicKey};
 use sha2::{Digest, Sha256};
 
 use crate::StateDirs;
+use crate::marketplace_policy;
 use crate::state_id::sanitize_state_id;
 
 /// Manifest byte-size ceiling (256 KiB) — refused before parsing.
@@ -49,6 +50,18 @@ const HIGH_RISK_CAPABILITIES: &[&str] = &["shell_exec", "process_spawn", "networ
 pub struct MarketplaceArgs {
     #[command(subcommand)]
     pub action: MarketplaceAction,
+    /// An operator-authored Cedar policy file composed on top of the
+    /// built-in permissive default, gating `install`/`update`/`uninstall`/
+    /// `publish`/`audit` on the manifest's declared kind/capabilities/claims
+    /// (e.g. `forbid` a `shell_exec` install). Independent of, and layered
+    /// on top of, the signature/bounds checks those verbs already run.
+    #[arg(
+        long,
+        global = true,
+        env = "ARDUR_MARKETPLACE_POLICY",
+        value_name = "CEDAR_FILE"
+    )]
+    pub policy: Option<PathBuf>,
 }
 
 /// Subcommands for `ardur marketplace`.
@@ -615,6 +628,55 @@ fn capability_risk(capability: &str) -> &'static str {
     }
 }
 
+/// The Cedar resource attributes a manifest projects for
+/// [`marketplace_policy::check`] — everything an operator-authored `forbid`
+/// rule might reasonably branch on.
+fn manifest_policy_attrs(manifest: &CapabilityManifest, verified: bool) -> serde_json::Value {
+    let stripped: Vec<&str> = manifest
+        .capabilities
+        .iter()
+        .map(|c| strip_capability_prefix(c))
+        .collect();
+    let high_risk: Vec<&str> = stripped
+        .iter()
+        .copied()
+        .filter(|c| HIGH_RISK_CAPABILITIES.contains(c))
+        .collect();
+    serde_json::json!({
+        "kind": manifest.kind,
+        "capabilities": stripped,
+        "high_risk_capabilities": high_risk,
+        "high_risk": !high_risk.is_empty(),
+        "signed": verified,
+        "claims_count": manifest.runtime_claims.len(),
+        "version": manifest.version,
+    })
+}
+
+/// [`manifest_policy_attrs`]'s equivalent over an already-installed record
+/// (for `uninstall`/`audit`, which act on a record, not a fresh manifest).
+fn record_policy_attrs(record: &SkillRecord) -> serde_json::Value {
+    let stripped: Vec<&str> = record
+        .capabilities
+        .iter()
+        .map(|c| strip_capability_prefix(c))
+        .collect();
+    let high_risk: Vec<&str> = stripped
+        .iter()
+        .copied()
+        .filter(|c| HIGH_RISK_CAPABILITIES.contains(c))
+        .collect();
+    serde_json::json!({
+        "kind": record.kind,
+        "capabilities": stripped,
+        "high_risk_capabilities": high_risk,
+        "high_risk": !high_risk.is_empty(),
+        "signed": record.verified,
+        "claims_count": record.runtime_claims.len(),
+        "version": record.version,
+    })
+}
+
 /// Parse a `major.minor.patch` (patch/minor optional, default 0) numeric
 /// version for ordering. Non-numeric versions return `None` — the caller
 /// falls back to a simple inequality check when this fails.
@@ -669,6 +731,7 @@ pub fn run_marketplace(args: MarketplaceArgs) -> Result<(), CliError> {
     let root = StateDirs::resolve()?.root;
     let dir = skills_dir(&root);
     std::fs::create_dir_all(&dir)?;
+    let policy_bundle = marketplace_policy::load_policy(args.policy.as_deref())?;
 
     match args.action {
         MarketplaceAction::Browse => {
@@ -719,6 +782,12 @@ pub fn run_marketplace(args: MarketplaceArgs) -> Result<(), CliError> {
             let path = Path::new(&source);
             let (manifest, verified) =
                 resolve_install_manifest(path, key.as_ref(), allow_unsigned)?;
+            marketplace_policy::check(
+                &policy_bundle,
+                "skill_install",
+                &manifest.id,
+                manifest_policy_attrs(&manifest, verified),
+            )?;
             let record = record_from_manifest(&manifest, &source, verified)?;
             write_record(&dir, &record)?;
             let synced = sync_skill_markdown(&root, path, &manifest)?;
@@ -798,6 +867,12 @@ pub fn run_marketplace(args: MarketplaceArgs) -> Result<(), CliError> {
 
             let (new_manifest, verified) =
                 resolve_install_manifest(&manifest, key.as_ref(), allow_unsigned)?;
+            marketplace_policy::check(
+                &policy_bundle,
+                "skill_update",
+                &new_manifest.id,
+                manifest_policy_attrs(&new_manifest, verified),
+            )?;
 
             if new_manifest.id != existing.skill_id {
                 return Err(CliError::State(format!(
@@ -869,6 +944,17 @@ pub fn run_marketplace(args: MarketplaceArgs) -> Result<(), CliError> {
                     None => "no skills or plugins installed".to_string(),
                 }));
             }
+            // Bulk `audit` (no id) is read-heavy and low-stakes; gate only the
+            // single-target form, where a policy might reasonably restrict who
+            // may pull a specific skill's audit report.
+            if let Some(id) = &id {
+                marketplace_policy::check(
+                    &policy_bundle,
+                    "skill_audit",
+                    id,
+                    record_policy_attrs(targets[0]),
+                )?;
+            }
 
             let mut unverified_count = 0;
             let mut high_risk_count = 0;
@@ -913,9 +999,16 @@ pub fn run_marketplace(args: MarketplaceArgs) -> Result<(), CliError> {
         MarketplaceAction::Uninstall { id } => {
             sanitize_state_id(&id)?;
             let path = dir.join(format!("{id}.json"));
-            if !path.is_file() {
-                return Err(CliError::State(format!("skill `{id}` not found")));
-            }
+            let content = std::fs::read_to_string(&path)
+                .map_err(|_| CliError::State(format!("skill `{id}` not found")))?;
+            let record: SkillRecord =
+                serde_json::from_str(&content).map_err(|e| CliError::State(e.to_string()))?;
+            marketplace_policy::check(
+                &policy_bundle,
+                "skill_uninstall",
+                &id,
+                record_policy_attrs(&record),
+            )?;
             std::fs::remove_file(&path)?;
             remove_skill_markdown(&root, &id)?;
             println!("removed skill {id}");
@@ -975,6 +1068,12 @@ pub fn run_marketplace(args: MarketplaceArgs) -> Result<(), CliError> {
                 runtime_claims: runtime_claims.clone(),
             };
             validate_manifest_shape_for_publish(&unsigned)?;
+            marketplace_policy::check(
+                &policy_bundle,
+                "skill_publish",
+                &unsigned.id,
+                manifest_policy_attrs(&unsigned, false),
+            )?;
 
             let payload = canonical_manifest_payload(&unsigned)?;
             let key_pem = std::fs::read_to_string(&key)?;

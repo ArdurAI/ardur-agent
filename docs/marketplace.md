@@ -62,3 +62,21 @@ ardur marketplace verify --key ./publisher-public-key.pem
 ```
 
 `verify --key` re-validates installed local manifest sources. Records without signatures, or installed with `--allow-unsigned`, are reported as untrusted.
+
+## Cedar policy gating (optional hardening)
+
+The built-in signature/bounds checks verify a manifest is *authentic and well-formed* — they do not restrict what a fully-signed manifest may *declare*. Nothing stops a well-formed, signed manifest from requesting `cap.shell_exec`. `install`, `update`, `uninstall`, `publish`, and single-target `audit` additionally evaluate a Cedar policy bundle so an operator can restrict that without a recompile:
+
+```sh
+ardur marketplace install ./manifest.json --key ./pub.pem --policy ./no-shell-exec.cedar
+# or: export ARDUR_MARKETPLACE_POLICY=./no-shell-exec.cedar
+```
+
+The built-in default (no `--policy`/env var) permits every action — this is opt-in hardening, not a new default restriction. An operator-authored `.cedar` file is composed on top; a `forbid` in it always wins over the default `permit`. Example, denying any install that declares `shell_exec`:
+
+```cedar
+forbid(principal, action == Action::"skill_install", resource)
+when { resource.high_risk_capabilities.contains("shell_exec") };
+```
+
+Resource attributes available to policy rules: `kind` (`"skill"`/`"plugin"`), `capabilities` (set of capability strings with the `cap.` prefix stripped), `high_risk_capabilities` (the subset in `shell_exec`/`process_spawn`/`network_out`/`fs_write`), `high_risk` (bool), `signed` (bool — was `--key` supplied), `claims_count`, `version`. Actions: `skill_install`, `skill_update`, `skill_uninstall`, `skill_publish`, `skill_audit`. The principal is `MarketplacePrincipal::"<name>"`, where `<name>` defaults to `local-user` and is overridable via `ARDUR_MARKETPLACE_PRINCIPAL` — this CLI has no multi-user auth system, so the principal is a self-declared identity for policies that want to distinguish operators on a shared machine, not an authenticated one.
