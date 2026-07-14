@@ -30,6 +30,9 @@ ardur-provider-runtime = { workspace = true }
 # Shared value types the provider call speaks in — `CostTuple` (the billed
 # cost), `ProviderId` (the registry key), and `Role` (the prompt turn kind).
 ardur-runtime = { workspace = true }
+# Retry+backoff+jitter and circuit-breaker wrapping outbound HTTP calls — the
+# shared resilience layer for external call boundaries.
+ardur-resilience = { workspace = true }
 # Object-safe async `Provider::complete`.
 async-trait = { workspace = true }
 # Live Ollama HTTP client. rustls-tls matches the other backends (no

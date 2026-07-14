@@ -74,6 +74,11 @@ use ardur_provider_runtime::{
     CompletionRequest, CompletionResponse, FinishReason, ModelId, Provider, ProviderError,
     ProviderStream, RateCard, StreamEvent, Usage,
 };
+use ardur_resilience::{
+    CircuitBreakerConfig, RetryPolicy,
+    circuit_breaker::{CircuitBreaker, CircuitError},
+    retry::retry_with_backoff,
+};
 use ardur_runtime::{CostTuple, ProviderId, Role};
 use async_trait::async_trait;
 use futures::stream::{Stream, StreamExt};
@@ -118,6 +123,8 @@ pub struct OllamaConfig {
     api_key: Option<String>,
     request_timeout: Duration,
     default_model: ModelId,
+    retry_policy: RetryPolicy,
+    circuit_breaker: CircuitBreakerConfig,
 }
 
 impl fmt::Debug for OllamaConfig {
@@ -148,6 +155,8 @@ impl OllamaConfig {
             api_key: None,
             request_timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
             default_model: ModelId::new(DEFAULT_MODEL),
+            retry_policy: RetryPolicy::default(),
+            circuit_breaker: CircuitBreakerConfig::default(),
         }
     }
 
@@ -177,6 +186,8 @@ impl OllamaConfig {
             api_key,
             request_timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
             default_model: ModelId::new(DEFAULT_MODEL),
+            retry_policy: RetryPolicy::default(),
+            circuit_breaker: CircuitBreakerConfig::default(),
         }
     }
 
@@ -210,6 +221,24 @@ impl OllamaConfig {
         self
     }
 
+    /// Override the retry/backoff policy applied to transient failures
+    /// (network errors, `429`, `5xx`). The default retries twice with
+    /// exponential backoff + full jitter; pass [`RetryPolicy::none`] to
+    /// disable retrying entirely.
+    #[must_use]
+    pub fn retry_policy(mut self, retry_policy: RetryPolicy) -> Self {
+        self.retry_policy = retry_policy;
+        self
+    }
+
+    /// Override the circuit breaker that trips after repeated failures and
+    /// fails fast (without hitting the network) until it cools down.
+    #[must_use]
+    pub fn circuit_breaker(mut self, circuit_breaker: CircuitBreakerConfig) -> Self {
+        self.circuit_breaker = circuit_breaker;
+        self
+    }
+
     /// The `/api/chat` endpoint URL for this config's base.
     fn chat_url(&self) -> String {
         format!("{}/api/chat", self.base_url.trim_end_matches('/'))
@@ -238,16 +267,22 @@ pub struct OllamaProvider {
     config: OllamaConfig,
     rate_card: RateCard,
     client: reqwest::Client,
+    /// Shared across every call this provider makes — a run of failures on
+    /// `complete` also trips the breaker the streaming entry points see,
+    /// since they all hit the same daemon/cloud endpoint.
+    breaker: CircuitBreaker,
 }
 
 impl OllamaProvider {
     /// Build a live provider from `config`.
     #[must_use]
     pub fn new(config: OllamaConfig) -> Self {
+        let breaker = CircuitBreaker::new(config.circuit_breaker.clone());
         Self {
             config,
             rate_card: ollama_zero_rate_card(),
             client: reqwest::Client::new(),
+            breaker,
         }
     }
 
@@ -317,8 +352,38 @@ impl OllamaProvider {
     ) -> Result<OllamaChunkStream, ProviderError> {
         // No per-request timeout on the stream: the timeout caps a whole request
         // including body read, which would cut off a long generation. Cancellation
-        // is the caller dropping the stream instead.
-        let mut request = self.client.post(url).json(&body);
+        // is the caller dropping the stream instead. The handshake itself (up to
+        // the 2xx/non-2xx status) is retried through the shared circuit breaker —
+        // no bytes have streamed yet, so a resend is safe.
+        let resp = self
+            .breaker
+            .call(|| {
+                retry_with_backoff(
+                    &self.config.retry_policy,
+                    |a: &AttemptError| a.retryable,
+                    || self.ndjson_handshake(&url, &body, &model),
+                )
+            })
+            .await
+            .map_err(circuit_error_to_provider_error)?;
+
+        // Map reqwest transport errors to the crate taxonomy up front so the
+        // NDJSON parser stays decoupled from `reqwest` (and unit-testable with
+        // synthetic chunk streams). `Box::pin` makes the byte stream `Unpin`.
+        let bytes = resp.bytes_stream().map(|r| r.map_err(map_stream_error));
+        Ok(parse_ndjson(Box::pin(bytes)))
+    }
+
+    /// One attempt at the streaming handshake: returns the still-unconsumed
+    /// [`reqwest::Response`] on a `2xx` status, or an [`AttemptError`]
+    /// classifying whether the failure is worth retrying.
+    async fn ndjson_handshake(
+        &self,
+        url: &str,
+        body: &serde_json::Value,
+        model: &ModelId,
+    ) -> Result<reqwest::Response, AttemptError> {
+        let mut request = self.client.post(url).json(body);
         if let Some(key) = &self.config.api_key {
             request = request.bearer_auth(key);
         }
@@ -326,21 +391,105 @@ impl OllamaProvider {
         let resp = request
             .send()
             .await
-            .map_err(|e| map_send_error(e, &self.config.base_url))?;
+            .map_err(|e| AttemptError::retryable(map_send_error(e, &self.config.base_url)))?;
 
         let status = resp.status();
-        if !status.is_success() {
-            let retry_after_ms = parse_retry_after_ms(resp.headers());
-            let code = status.as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(map_http_error(code, retry_after_ms, &body, &model));
+        if status.is_success() {
+            return Ok(resp);
+        }
+        let retry_after_ms = parse_retry_after_ms(resp.headers());
+        let code = status.as_u16();
+        let retryable = is_retryable_status(code);
+        let body_text = resp.text().await.unwrap_or_default();
+        Err(AttemptError::new(
+            map_http_error(code, retry_after_ms, &body_text, model),
+            retryable,
+        ))
+    }
+
+    /// One attempt at the non-streaming `complete` call.
+    async fn send_completion(
+        &self,
+        req: &CompletionRequest,
+        body: &serde_json::Value,
+    ) -> Result<CompletionResponse, AttemptError> {
+        let mut request = self
+            .client
+            .post(self.config.chat_url())
+            .timeout(self.config.request_timeout)
+            .json(body);
+        if let Some(key) = &self.config.api_key {
+            request = request.bearer_auth(key);
         }
 
-        // Map reqwest transport errors to the crate taxonomy up front so the
-        // NDJSON parser stays decoupled from `reqwest` (and unit-testable with
-        // synthetic chunk streams). `Box::pin` makes the byte stream `Unpin`.
-        let bytes = resp.bytes_stream().map(|r| r.map_err(map_stream_error));
-        Ok(parse_ndjson(Box::pin(bytes)))
+        let resp = request
+            .send()
+            .await
+            .map_err(|e| AttemptError::retryable(map_send_error(e, &self.config.base_url)))?;
+
+        let status = resp.status();
+        if status.is_success() {
+            let value: serde_json::Value = resp.json().await.map_err(|e| {
+                AttemptError::new(
+                    ProviderError::Upstream(format!("decoding response body: {e}")),
+                    false,
+                )
+            })?;
+            let parsed: ChatResponse = serde_json::from_value(value.clone()).map_err(|e| {
+                AttemptError::new(
+                    ProviderError::Upstream(format!("unexpected response shape: {e}")),
+                    false,
+                )
+            })?;
+            return Ok(parsed.into_completion(value));
+        }
+
+        let retry_after_ms = parse_retry_after_ms(resp.headers());
+        let code = status.as_u16();
+        let retryable = is_retryable_status(code);
+        let body_text = resp.text().await.unwrap_or_default();
+        Err(AttemptError::new(
+            map_http_error(code, retry_after_ms, &body_text, &req.model),
+            retryable,
+        ))
+    }
+}
+
+/// A single failed attempt at an Ollama HTTP call, classifying whether
+/// [`retry_with_backoff`] should retry it (a transient network error, `429`,
+/// or `5xx`) or stop immediately (`401`/`403`/`400`/`404` — resending an
+/// unauthorized or malformed request cannot succeed).
+struct AttemptError {
+    error: ProviderError,
+    retryable: bool,
+}
+
+impl AttemptError {
+    fn new(error: ProviderError, retryable: bool) -> Self {
+        Self { error, retryable }
+    }
+
+    fn retryable(error: ProviderError) -> Self {
+        Self::new(error, true)
+    }
+}
+
+/// `429` (rate limited) and any `5xx` (upstream/transient server fault) are
+/// worth retrying; anything else (auth, malformed request, unknown model) is
+/// permanent and retrying would just repeat the same failure.
+fn is_retryable_status(code: u16) -> bool {
+    code == 429 || (500..=599).contains(&code)
+}
+
+/// Maps the breaker's own `Open` state onto the same [`ProviderError`]
+/// taxonomy the underlying HTTP failures use, and unwraps a passed-through
+/// inner failure.
+fn circuit_error_to_provider_error(err: CircuitError<AttemptError>) -> ProviderError {
+    match err {
+        CircuitError::Open => ProviderError::Upstream(
+            "circuit breaker open: too many recent Ollama failures".to_string(),
+        ),
+        CircuitError::Inner(attempt) => attempt.error,
     }
 }
 
@@ -376,37 +525,16 @@ impl Provider for OllamaProvider {
         }
         let body = build_request_body(&req, false);
 
-        let mut request = self
-            .client
-            .post(self.config.chat_url())
-            .timeout(self.config.request_timeout)
-            .json(&body);
-        // Bearer auth only for the cloud; a local daemon takes no credentials.
-        if let Some(key) = &self.config.api_key {
-            request = request.bearer_auth(key);
-        }
-
-        let resp = request
-            .send()
+        self.breaker
+            .call(|| {
+                retry_with_backoff(
+                    &self.config.retry_policy,
+                    |a: &AttemptError| a.retryable,
+                    || self.send_completion(&req, &body),
+                )
+            })
             .await
-            .map_err(|e| map_send_error(e, &self.config.base_url))?;
-
-        let status = resp.status();
-        if status.is_success() {
-            let value: serde_json::Value = resp
-                .json()
-                .await
-                .map_err(|e| ProviderError::Upstream(format!("decoding response body: {e}")))?;
-            let parsed: ChatResponse = serde_json::from_value(value.clone())
-                .map_err(|e| ProviderError::Upstream(format!("unexpected response shape: {e}")))?;
-            return Ok(parsed.into_completion(value));
-        }
-
-        // Pull the back-off hint before the body consumes `resp`.
-        let retry_after_ms = parse_retry_after_ms(resp.headers());
-        let code = status.as_u16();
-        let body = resp.text().await.unwrap_or_default();
-        Err(map_http_error(code, retry_after_ms, &body, &req.model))
+            .map_err(circuit_error_to_provider_error)
     }
 
     /// Stream a chat completion as shared [`StreamEvent`]s (§3.X) — the uniform
