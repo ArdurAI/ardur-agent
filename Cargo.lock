@@ -809,6 +809,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "ardur-plugin-runtime"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "ardur-cap-token",
+ "ardur-messaging-gateway",
+ "ardur-runtime",
+ "ardur-tool-registry",
+ "async-trait",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "ardur-provider-claude-cli"
 version = "0.0.1"
 dependencies = [
