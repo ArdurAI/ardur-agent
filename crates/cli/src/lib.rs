@@ -734,22 +734,23 @@ async fn dispatch_compact(
                 )
             );
         }
-        "history" => {
-            match engine.list_checkpoints().await {
-                Ok(checkpoints) if checkpoints.is_empty() => {
-                    println!("{}", state.theme.paint(Role::Dim, "no checkpoints yet"));
-                }
-                Ok(checkpoints) => {
-                    for cp in checkpoints {
-                        println!("{} — {}", cp.checkpoint_id, cp.summary);
-                    }
-                }
-                Err(e) => println!("{}", state.theme.paint(Role::Error, &format!("{e}"))),
+        "history" => match engine.list_checkpoints().await {
+            Ok(checkpoints) if checkpoints.is_empty() => {
+                println!("{}", state.theme.paint(Role::Dim, "no checkpoints yet"));
             }
-        }
+            Ok(checkpoints) => {
+                for cp in checkpoints {
+                    println!("{} — {}", cp.checkpoint_id, cp.summary);
+                }
+            }
+            Err(e) => println!("{}", state.theme.paint(Role::Error, &format!("{e}"))),
+        },
         "get" => match uuid::Uuid::parse_str(rest) {
             Ok(checkpoint_id) => match engine.list_checkpoints().await {
-                Ok(checkpoints) => match checkpoints.into_iter().find(|c| c.checkpoint_id == checkpoint_id) {
+                Ok(checkpoints) => match checkpoints
+                    .into_iter()
+                    .find(|c| c.checkpoint_id == checkpoint_id)
+                {
                     Some(cp) => println!("{}", cp.summary),
                     None => println!("checkpoint {checkpoint_id} not found"),
                 },

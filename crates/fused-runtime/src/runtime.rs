@@ -600,7 +600,7 @@ impl FusedRuntime {
                 tool,
                 "context.compact.applied.v1",
                 Sha256Digest::of(response.content.as_bytes()),
-                runtime_cost_to_receipt(&response.cost),
+                response.cost,
             )
             .await?;
 

@@ -25,7 +25,11 @@ fn only_session_id(home: &std::path::Path) -> String {
         .filter_map(|e| e.ok())
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect();
-    assert_eq!(entries.len(), 1, "expected exactly one session: {entries:?}");
+    assert_eq!(
+        entries.len(),
+        1,
+        "expected exactly one session: {entries:?}"
+    );
     entries.remove(0)
 }
 

@@ -145,7 +145,13 @@ async fn a_compaction_checkpoint_is_restorable_via_rollback() {
     let cap_token = CapTokenRef(compact_token());
 
     let compacted = runtime
-        .compact(session_id, &cap_token, "context.compact", &sample_history(), None)
+        .compact(
+            session_id,
+            &cap_token,
+            "context.compact",
+            &sample_history(),
+            None,
+        )
         .await
         .expect("compact succeeds");
 
@@ -175,10 +181,19 @@ async fn compact_is_denied_without_the_capability_and_never_spends() {
     let cap_token = CapTokenRef(no_capability_token());
 
     let result = runtime
-        .compact(session_id, &cap_token, "context.compact", &sample_history(), None)
+        .compact(
+            session_id,
+            &cap_token,
+            "context.compact",
+            &sample_history(),
+            None,
+        )
         .await;
 
-    assert!(result.is_err(), "a token without context.compact must be denied");
+    assert!(
+        result.is_err(),
+        "a token without context.compact must be denied"
+    );
     assert_eq!(
         provider.call_count(),
         0,
@@ -208,7 +223,13 @@ async fn compaction_receipts_chain_with_turn_receipts() {
     ));
 
     let compacted = runtime
-        .compact(session_id, &cap_token, "context.compact", &sample_history(), None)
+        .compact(
+            session_id,
+            &cap_token,
+            "context.compact",
+            &sample_history(),
+            None,
+        )
         .await
         .expect("compact succeeds");
 
@@ -217,8 +238,7 @@ async fn compaction_receipts_chain_with_turn_receipts() {
         .await
         .expect("the turn completes");
 
-    let chain =
-        ardur_fused_runtime::load_persisted_chain(receipt_log.path()).expect("chain loads");
+    let chain = ardur_fused_runtime::load_persisted_chain(receipt_log.path()).expect("chain loads");
     assert_eq!(chain.len(), 2);
     assert_eq!(chain[0].body.receipt_id, compacted.receipt_id.0);
     assert_eq!(
