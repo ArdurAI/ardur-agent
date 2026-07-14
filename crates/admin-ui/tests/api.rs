@@ -104,7 +104,7 @@ fn append_receipt(
         "verb": verb,
         "issued_at": issued_ms,
         "subject": "user:test",
-        "cap_token_id": "tok-test",
+        "cap_token_id": "00000000-0000-0000-0000-000000000abc",
         "payload_digest": "0".repeat(64),
         "cost": {
             "tokens_in": tokens_in,
@@ -141,7 +141,7 @@ fn append_receipt_with_provider(
         "verb": verb,
         "issued_at": issued_ms,
         "subject": "user:test",
-        "cap_token_id": "tok-test",
+        "cap_token_id": "00000000-0000-0000-0000-000000000abc",
         "payload_digest": "0".repeat(64),
         "cost": {
             "tokens_in": 1,
@@ -630,7 +630,7 @@ async fn trust_center_wallet_receipts_and_policy_debugger() {
             "verb": "llm.completion.minted.v1",
             "issued_at": issued_ms,
             "subject": "user:test",
-            "cap_token_id": "tok-test",
+            "cap_token_id": "00000000-0000-0000-0000-000000000abc",
             "payload_digest": "0".repeat(64),
             "cost": { "tokens_in": 1, "tokens_out": 1, "cents": 1, "wall_ms": 1, "attention_score": 0 },
             "provider": "anthropic",

@@ -69,25 +69,12 @@ impl<'de> Deserialize<'de> for VerbObject {
     }
 }
 
-/// The `jti` of the capability token under whose authority the receipted
-/// action occurred.
-///
-// NOTE §0.0 reconciliation: the canonical, type-safe token id is
-// [`ardur_core_types::TokenId`] (a UUIDv4, matching a cap-token's minted
-// `jti`). This receipt-local form stays a free-form `String` because a receipt
-// subject's `cap_token_id` is today populated from heterogeneous producers —
-// a stringified cap-token UUID at the fused-runtime mint, but an opaque
-// `CapTokenRef` handle from the Phase-1 hooked runtime. Migrating to the Uuid
-// newtype is a behavioural change on those producers, tracked as a follow-up.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct TokenId(pub String);
-
-impl<T: Into<String>> From<T> for TokenId {
-    fn from(s: T) -> Self {
-        Self(s.into())
-    }
-}
+// The `jti` of the capability token under whose authority the receipted action
+// occurred — the canonical, type-safe [`ardur_core_types::TokenId`] (a UUID
+// matching a cap-token's minted `jti`), re-exported so a receipt's
+// `cap_token_id` is the exact type the cost gate spends against. It serializes
+// as the hyphenated UUID string.
+pub use ardur_core_types::TokenId;
 
 /// One tool invocation a turn made, recorded on its [`ReceiptBody`] for audit.
 ///

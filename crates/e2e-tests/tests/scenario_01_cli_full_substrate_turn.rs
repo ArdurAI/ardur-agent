@@ -239,7 +239,7 @@ async fn single_turn_through_full_substrate() {
             verb: VerbObject::new("chat.completion.recorded.v1").expect("verb is well-formed"),
             issued_at: ardur_receipt::UnixTsMillis(NOW_MS),
             subject: ardur_receipt::HolderId(TEST_HOLDER.to_string()),
-            cap_token_id: ardur_receipt::TokenId(claims.token_id.to_string()),
+            cap_token_id: ardur_receipt::TokenId(claims.token_id),
             payload_digest: ardur_receipt::Sha256Digest::of(outcome.response.as_bytes()),
             session_id: None,
             cost: ardur_receipt::CostTuple {
