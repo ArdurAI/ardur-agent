@@ -167,10 +167,17 @@ async fn server_routes_signed_slack_message_through_runtime_to_chat_post_message
     );
 
     // Boot persisted the receipt chain + journal — the deployment is durable.
-    assert!(
-        data_dir.path().join("receipts/chain.jsonl").is_file(),
-        "the turn's receipt was persisted"
-    );
+    //
+    // The worker sends the final `chat.update` mid-stream, from inside the
+    // fused-runtime generator's `ProviderStream` stage; receipt minting
+    // (`ReceiptMint`, including the `sync_all`-backed `persist_receipt`) is a
+    // *later* stage of the same turn and only runs once the worker resumes
+    // polling the stream after `edit_reply` returns. So the second Slack call
+    // completing is not evidence the receipt file already exists — poll for
+    // it the same way we poll for the Slack posts, instead of asserting
+    // immediately.
+    let receipt_path = data_dir.path().join("receipts/chain.jsonl");
+    wait_for_file(&receipt_path, Duration::from_secs(10)).await;
 }
 
 /// Poll the mock until it has recorded at least `count` requests, or `timeout`
@@ -189,6 +196,26 @@ async fn wait_for_posts(
         }
         if tokio::time::Instant::now() >= deadline {
             panic!("timed out waiting for the worker's progressive Slack calls");
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+/// Poll for `path` to appear as a regular file, or panic once `timeout`
+/// elapses — the receipt commit that creates it runs after the final Slack
+/// call returns, so it is not yet guaranteed to exist the instant the mock
+/// observes that call.
+async fn wait_for_file(path: &std::path::Path, timeout: Duration) {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if path.is_file() {
+            return;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!(
+                "timed out waiting for the turn's receipt chain to be persisted at {}",
+                path.display()
+            );
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
