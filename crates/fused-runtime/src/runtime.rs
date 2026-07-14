@@ -5,11 +5,12 @@
 //!
 //! [`submit`]: FusedRuntime::submit
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use ardur_approvals::{ApprovalStatus, ApprovalStore};
 use ardur_cap_token::{
     BiscuitCapTokenVerifier, CapToken, CapTokenError, CapTokenVerifier, PublicKey, RequiredCaveats,
     VerifiedClaims,
@@ -185,6 +186,17 @@ pub struct FusedRuntime {
     /// ARD-491 — the per-turn cap (bytes) on accumulated streamed assistant
     /// content.
     pub(crate) stream_content_max_bytes: usize,
+    /// ARD-139 — the shared on-disk approval-card store a gated tool call
+    /// proposes into. `None` (the builder default) disables approval-gating
+    /// entirely, regardless of [`approval_gated_capabilities`], so a runtime
+    /// that does not opt in behaves exactly as before this stage existed.
+    ///
+    /// [`approval_gated_capabilities`]: Self::approval_gated_capabilities
+    pub(crate) approvals: Option<ApprovalStore>,
+    /// ARD-139 — the [`Capability`] labels that require human approval before
+    /// a tool call carrying them may proceed, even once the cap-token/cedar
+    /// checks already allow it. Empty (the builder default) gates nothing.
+    pub(crate) approval_gated_capabilities: HashSet<String>,
 }
 
 impl FusedRuntime {
@@ -552,6 +564,156 @@ impl FusedRuntime {
             }
         }
         Ok(())
+    }
+
+    /// **ARD-139.** Mint and durably chain a receipt for a session-control
+    /// operation that is not a turn: no provider call, no cost-gate
+    /// reservation (`cost` is the caller's actual spend — zero for a purely
+    /// local operation like an approval propose). Reuses the exact
+    /// durability guarantees the turn-receipt commit path gives ordinary
+    /// turns — the same `commit_lock`, the same `chain_tail`, the same
+    /// fsync'd receipt log — so a control-plane receipt sits in the *same*
+    /// hash chain as ordinary turn receipts.
+    async fn commit_control_receipt(
+        &self,
+        session_id: SessionId,
+        cap_token: &CapTokenRef,
+        tool: &str,
+        verb: &str,
+        payload_digest: Sha256Digest,
+        cost: ardur_receipt::CostTuple,
+    ) -> Result<ReceiptBody, RuntimeError> {
+        let claims = self.verify_cap_token_for_tool(cap_token, tool)?;
+        let verb = VerbObject::new(verb)
+            .map_err(|e| RuntimeError::Internal(anyhow::anyhow!("invalid receipt verb: {e}")))?;
+        let now_ms = self.clock.now_ms();
+
+        let _commit_guard = self.commit_lock.lock().await;
+        let parent_hash = *self.chain_tail.lock();
+        let body = ReceiptBody {
+            receipt_id: uuid::Uuid::new_v4(),
+            parent_hash,
+            verb,
+            issued_at: ardur_receipt::UnixTsMillis(now_ms),
+            subject: ardur_receipt::HolderId(claims.subject.0.clone()),
+            cap_token_id: ardur_receipt::TokenId(claims.token_id.to_string()),
+            payload_digest,
+            session_id: Some(session_id.0),
+            cost,
+            tool_calls: Vec::new(),
+            provider: None,
+        };
+        let signed = ReceiptSigner::sign(body, &self.receipt_key)
+            .map_err(|e| RuntimeError::Internal(anyhow::anyhow!("receipt mint failed: {e}")))?;
+        self.persist_receipt(signed.jws_compact())
+            .map_err(|e| RuntimeError::Internal(anyhow::anyhow!("receipt persist failed: {e}")))?;
+        *self.chain_tail.lock() = Some(Sha256Digest::of(signed.jws_compact().as_bytes()));
+        Ok(signed.body().clone())
+    }
+
+    /// **ARD-139.** The propose-half of the approval-gate loop: called after
+    /// `authorize_tool_invocation`/`authorize_tool_capabilities` have already
+    /// allowed `tool_name`'s call, this additionally requires human sign-off
+    /// for any call whose required capabilities intersect
+    /// [`approval_gated_capabilities`](Self::approval_gated_capabilities).
+    ///
+    /// Looks up an existing card by `(tool_name, arguments_digest,
+    /// session_id)` so a retried *identical* call is idempotent rather than
+    /// proposing a fresh card every time the model re-requests it:
+    /// - no card exists: propose one, mint `approval.propose.created.v1`,
+    ///   and deny with [`RuntimeError::ApprovalRequired`].
+    /// - a `Pending` card exists: deny again with the *same* card id (no
+    ///   second receipt — the propose already happened).
+    /// - an `Approved` card exists: allow the call to proceed.
+    /// - a `Denied` card exists: deny with [`RuntimeError::ApprovalRejected`].
+    ///
+    /// A tool whose required capabilities do not intersect the gated set, or
+    /// a runtime with no [`approvals`](Self::approvals) store configured, is
+    /// unaffected — this stage is a no-op in both cases, matching every other
+    /// opt-in builder knob's "absent config behaves as before" contract.
+    async fn authorize_or_propose_approval(
+        &self,
+        cap_token: &CapTokenRef,
+        session_id: SessionId,
+        now_unix: u64,
+        tool_name: &str,
+        capabilities: &[Capability],
+        arguments: &serde_json::Value,
+    ) -> Result<(), RuntimeError> {
+        let Some(store) = &self.approvals else {
+            return Ok(());
+        };
+        let Some(gated_capability) = capabilities
+            .iter()
+            .map(Capability::as_str)
+            .find(|label| self.approval_gated_capabilities.contains(label.as_str()))
+        else {
+            return Ok(());
+        };
+
+        let arguments_digest =
+            Sha256Digest::of(&serde_json::to_vec(arguments).unwrap_or_default()).to_hex();
+        let session_id_str = session_id.0.to_string();
+
+        let existing = store
+            .find_matching(tool_name, &arguments_digest, Some(&session_id_str))
+            .map_err(|e| {
+                RuntimeError::Internal(anyhow::anyhow!("approval store lookup failed: {e}"))
+            })?;
+
+        match existing {
+            Some(card) if card.status == ApprovalStatus::Approved => Ok(()),
+            Some(card) if card.status == ApprovalStatus::Denied => {
+                Err(RuntimeError::ApprovalRejected {
+                    approval_id: card.id.unwrap_or_default(),
+                    tool: tool_name.to_string(),
+                    reason: card.deny_reason.unwrap_or_default(),
+                })
+            }
+            Some(card) => Err(RuntimeError::ApprovalRequired {
+                approval_id: card.id.unwrap_or_default(),
+                tool: tool_name.to_string(),
+                reason: card.reason,
+            }),
+            None => {
+                let reason = format!(
+                    "tool `{tool_name}` requires capability `{gated_capability}`, which is approval-gated"
+                );
+                let card = store
+                    .propose(
+                        tool_name,
+                        gated_capability.as_str(),
+                        &arguments_digest,
+                        Some(session_id_str),
+                        &reason,
+                        now_unix,
+                    )
+                    .map_err(|e| {
+                        RuntimeError::Internal(anyhow::anyhow!("approval propose failed: {e}"))
+                    })?;
+                let approval_id = card.id.clone().unwrap_or_default();
+                self.commit_control_receipt(
+                    session_id,
+                    cap_token,
+                    &gated_capability,
+                    "approval.propose.created.v1",
+                    Sha256Digest::of(approval_id.as_bytes()),
+                    ardur_receipt::CostTuple {
+                        tokens_in: 0,
+                        tokens_out: 0,
+                        cents: 0,
+                        wall_ms: 0,
+                        attention_score: 0.0,
+                    },
+                )
+                .await?;
+                Err(RuntimeError::ApprovalRequired {
+                    approval_id,
+                    tool: tool_name.to_string(),
+                    reason,
+                })
+            }
+        }
     }
 
     /// **Stage 3 (setup).** Resolve the budget holder (the verified subject
@@ -1192,6 +1354,25 @@ impl FusedRuntime {
                             .await;
                         return Err(err);
                     }
+                    // ARD-139: a call whose required capabilities include an
+                    // approval-gated one needs human sign-off even though the
+                    // cap-token/cedar checks above already allow it.
+                    if let Err(err) = self
+                        .authorize_or_propose_approval(
+                            &req.cap_token,
+                            session_id,
+                            tool_auth_now_unix,
+                            &call.name,
+                            tool.required_capabilities(),
+                            &call.arguments,
+                        )
+                        .await
+                    {
+                        self.release(reservation).await;
+                        self.fire_error(session_id, LifecyclePhase::Submit, &err)
+                            .await;
+                        return Err(err);
+                    }
                     let ctx = self.tool_context(&req.cap_token, session_id);
                     let output = match tokio::time::timeout(
                         self.tool_timeout,
@@ -1785,6 +1966,27 @@ impl FusedRuntime {
                             &call.name,
                             tool.required_capabilities(),
                         ) {
+                            self.release(reservation.take().expect("reservation held")).await;
+                            yield FusedEvent::StageEnd { stage: StageKind::ToolExec, ok: false };
+                            self.fire_error(session_id, LifecyclePhase::Submit, &err).await;
+                            Err(err)?;
+                            unreachable!()
+                        }
+                        // ARD-139: a call whose required capabilities include
+                        // an approval-gated one needs human sign-off even
+                        // though the cap-token/cedar checks above already
+                        // allow it.
+                        if let Err(err) = self
+                            .authorize_or_propose_approval(
+                                &req.cap_token,
+                                session_id,
+                                invocation_now_unix,
+                                &call.name,
+                                tool.required_capabilities(),
+                                &call.arguments,
+                            )
+                            .await
+                        {
                             self.release(reservation.take().expect("reservation held")).await;
                             yield FusedEvent::StageEnd { stage: StageKind::ToolExec, ok: false };
                             self.fire_error(session_id, LifecyclePhase::Submit, &err).await;

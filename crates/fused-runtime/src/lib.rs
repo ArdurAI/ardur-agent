@@ -94,8 +94,8 @@ pub mod streaming;
 
 pub use builder::FusedRuntimeBuilder;
 pub use receipts::{
-    PersistedReceipt, ReceiptChainError, load_persisted_chain, verify_persisted_chain,
-    verify_persisted_chain_with_jwks,
+    PersistedReceipt, ReceiptChainError, load_persisted_chain, mint_control_receipt,
+    verify_persisted_chain, verify_persisted_chain_with_jwks,
 };
 pub use reconcile::{
     ReconciliationAction, ReconciliationError, ReconciliationReport, ReconciliationStrategy,
