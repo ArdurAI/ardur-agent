@@ -611,6 +611,46 @@ impl FusedRuntime {
         Ok(signed.body().clone())
     }
 
+    /// **ARD-139.** Mint a signed receipt for an approval **decision**
+    /// (`approval.approve.accepted.v1`/`approval.reject.accepted.v1`) made
+    /// against `approval_id`, minted under `cap_token`'s verified subject.
+    /// A thin `pub` wrapper over [`commit_control_receipt`](Self::commit_control_receipt)
+    /// for a caller that already mutated the approval card through
+    /// [`ardur_approvals::ApprovalStore::decide`] elsewhere (the actual
+    /// store mutation stays outside this runtime — the same non-turn,
+    /// non-cost-gated control-plane receipt pattern
+    /// [`checkpoint`](Self)-style operations use elsewhere in this epic).
+    ///
+    /// # Errors
+    /// Returns [`RuntimeError`] if the cap-token does not grant `tool` or
+    /// the receipt could not be minted.
+    pub async fn mint_approval_decision_receipt(
+        &self,
+        session_id: SessionId,
+        cap_token: &CapTokenRef,
+        tool: &str,
+        verb: &str,
+        approval_id: &str,
+    ) -> Result<ReceiptId, RuntimeError> {
+        let receipt = self
+            .commit_control_receipt(
+                session_id,
+                cap_token,
+                tool,
+                verb,
+                Sha256Digest::of(approval_id.as_bytes()),
+                ardur_receipt::CostTuple {
+                    tokens_in: 0,
+                    tokens_out: 0,
+                    cents: 0,
+                    wall_ms: 0,
+                    attention_score: 0.0,
+                },
+            )
+            .await?;
+        Ok(ReceiptId(receipt.receipt_id))
+    }
+
     /// **ARD-139.** The propose-half of the approval-gate loop: called after
     /// `authorize_tool_invocation`/`authorize_tool_capabilities` have already
     /// allowed `tool_name`'s call, this additionally requires human sign-off

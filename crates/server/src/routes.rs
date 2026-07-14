@@ -436,11 +436,11 @@ async fn apply_approval_decision(
     let Some(object) = card.as_object_mut() else {
         return internal_error("approval record is not an object");
     };
-    let (new_status, audit_verb) = match &decision {
-        ApprovalDecision::Approve => ("approved", "approved"),
+    let (new_status, audit_verb, receipt_verb) = match &decision {
+        ApprovalDecision::Approve => ("approved", "approved", "approval.approve.accepted.v1"),
         ApprovalDecision::Reject { reason } => {
             object.insert("deny_reason".to_string(), json!(reason));
-            ("denied", "rejected")
+            ("denied", "rejected", "approval.reject.accepted.v1")
         }
     };
     object.insert("status".to_string(), json!(new_status));
@@ -457,9 +457,7 @@ async fn apply_approval_decision(
 
     // Audit trail: append the decision to the session journal. The decision is
     // already durable in the approvals store above (the source of truth), so a
-    // journal failure is logged but does not fail the request. NOTE: a *signed
-    // receipt* is deliberately not minted here — that is not reachable from a
-    // handler without a runtime refactor and is tracked as a separate follow-up.
+    // journal failure is logged but does not fail the request.
     let audit = JournalEntry::Checkpoint {
         checkpoint_id: uuid::Uuid::now_v7(),
         summary: format!("approval {id} {audit_verb} via HTTP admin endpoint"),
@@ -467,6 +465,25 @@ async fn apply_approval_decision(
     };
     if let Err(e) = state.journal().append(audit).await {
         tracing::error!(error = %e, approval_id = %id, "failed to append approval audit entry");
+    }
+
+    // ARD-139: mint a signed receipt for the decision, chained onto the same
+    // receipt log turns use. Like the journal audit above, the decision is
+    // already durable in the approvals store — a minting failure (the turn
+    // worker being unavailable, say) is logged but does not fail the request;
+    // the store, not the receipt, is this endpoint's source of truth.
+    match state
+        .mint_approval_receipt(id.to_string(), receipt_verb.to_string())
+        .await
+    {
+        Ok(receipt_id) => {
+            if let Some(object) = card.as_object_mut() {
+                object.insert("receipt_id".to_string(), json!(receipt_id.0.to_string()));
+            }
+        }
+        Err(e) => {
+            tracing::error!(error = %e, approval_id = %id, "failed to mint approval decision receipt");
+        }
     }
 
     (StatusCode::OK, Json(card)).into_response()
