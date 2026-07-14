@@ -47,12 +47,13 @@ const HTTP_TURN_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Build the application router over the shared [`AppState`].
 ///
-/// Always mounts `POST /slack/events`, `POST /chat`, and `GET /healthz`. When the
-/// MCP surface is enabled (see [`AppState::mcp`]), the bearer-gated MCP routes are
+/// Always mounts `POST /chat` and `GET /healthz`. `POST /slack/events` is mounted
+/// only when the Slack channel is enabled (see [`AppState::slack`]) — an HTTP-only
+/// boot omits it, so an inbound Slack request there gets a `404`. When the MCP
+/// surface is enabled (see [`AppState::mcp`]), the bearer-gated MCP routes are
 /// merged in at the configured path prefix.
 pub fn build_router(state: Arc<AppState>) -> Router {
     let mut router = Router::new()
-        .route("/slack/events", post(slack_events))
         .route("/chat", post(chat))
         .route("/acp", post(acp))
         .route("/healthz", get(healthz))
@@ -65,6 +66,12 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/openapi.json", get(openapi_json))
         .route("/openapi/clients/rust", get(openapi_rust_client))
         .route("/openapi/clients/python", get(openapi_python_client));
+
+    // The Slack webhook is mounted only when Slack is enabled, mirroring the
+    // conditional MCP merge below. HTTP-only boots leave it off entirely.
+    if state.slack().is_some() {
+        router = router.route("/slack/events", post(slack_events));
+    }
 
     if let Some(mcp) = state.mcp() {
         router = router.merge(crate::build_mcp_router(
@@ -187,7 +194,7 @@ async fn openapi_json(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
     if let Err(response) = authorize_admin(&state, &headers) {
         return *response;
     }
-    Json(openapi_spec()).into_response()
+    Json(openapi_spec(state.slack().is_some())).into_response()
 }
 
 /// `GET /openapi/clients/rust` — return generated Rust client source.
@@ -1031,7 +1038,14 @@ async fn slack_events(
         return (StatusCode::BAD_REQUEST, "request body is not valid UTF-8").into_response();
     };
 
-    match state.slack().parse_event(&slack_headers, body_str) {
+    // Unreachable in practice: this route is only mounted when Slack is enabled
+    // (see `build_router`). Guard rather than panic if it is ever hit.
+    let Some(slack) = state.slack() else {
+        tracing::error!("slack event received but Slack is disabled");
+        return StatusCode::NOT_FOUND.into_response();
+    };
+
+    match slack.parse_event(&slack_headers, body_str) {
         Ok(SlackEvent::UrlVerification { challenge }) => {
             (StatusCode::OK, Json(json!({ "challenge": challenge }))).into_response()
         }

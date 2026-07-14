@@ -76,6 +76,7 @@ async fn main() -> anyhow::Result<()> {
         model = %config.model,
         provider = %provider_id,
         budget_cents = config.cost_budget_cents,
+        slack_enabled = config.slack_enabled,
         channel_matrix = config.channel_matrix,
         channel_discord = config.channel_discord,
         channel_telegram = config.channel_telegram,
@@ -123,7 +124,11 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(&config.bind_addr)
         .await
         .map_err(|e| anyhow::anyhow!("binding {}: {e}", config.bind_addr))?;
-    tracing::info!(addr = %config.bind_addr, "listening for slack events");
+    if config.slack_enabled {
+        tracing::info!(addr = %config.bind_addr, "listening for HTTP + Slack events");
+    } else {
+        tracing::info!(addr = %config.bind_addr, "listening for HTTP requests (Slack disabled)");
+    }
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
