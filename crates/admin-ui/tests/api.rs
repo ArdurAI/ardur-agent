@@ -733,7 +733,10 @@ async fn trust_center_renders_injection_and_policy_events() {
     assert_eq!(view["total"], 2);
     assert_eq!(view["injection"].as_array().unwrap().len(), 1);
     assert_eq!(view["decisions"].as_array().unwrap().len(), 1);
-    assert_eq!(view["injection"][0]["flags"][0]["pattern_id"], "instruction_override");
+    assert_eq!(
+        view["injection"][0]["flags"][0]["pattern_id"],
+        "instruction_override"
+    );
     assert_eq!(view["decisions"][0]["gate"], "policy");
 
     // The HTML page renders both panels.
