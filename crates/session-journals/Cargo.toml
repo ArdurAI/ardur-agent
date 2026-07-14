@@ -42,6 +42,11 @@ uuid = { workspace = true, features = ["v4"] }
 # Descriptor-relative no-follow traversal protects append-only journals from
 # parent and final-component symlink races.
 rustix = { workspace = true }
+# Secret-shaped-pattern matching backing `redact::redact_text` — the same
+# patterns `ardur-cli`'s `redact` command uses, now shared so any consumer of
+# `JournalEntry` (e.g. `ardur-admin`) can redact free-text fields before
+# displaying them outside the originating session's trust boundary.
+regex = { workspace = true }
 
 [dev-dependencies]
 # The async trait methods need a runtime to poll them; the concurrency test

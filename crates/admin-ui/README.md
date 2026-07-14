@@ -86,9 +86,16 @@ available grouping key is the receipt **verb** (`verb.object.state.vN`, e.g.
   remains available as a lighter single-credential gate. Neither adds TLS
   termination or rate limiting; put the dashboard behind a reverse proxy /
   network ACL if it is reachable from anywhere untrusted.
-- **No secrets exposed.** The dashboard surfaces costs, message counts, tool
-  names, and receipt metadata. Journal *message contents* are returned by
-  `/api/sessions/{id}/journal`; treat the endpoint accordingly.
+- **Redacted message content.** `/api/sessions/{id}/journal` returns journal
+  message text (`UserMessage`/`AssistantMessage` content, `Checkpoint`
+  summaries, `Invalidation` reasons) with secret-shaped substrings —
+  API keys, bearer tokens, AWS-style access keys, PEM private key blocks,
+  `password=`/`secret:`-style natural-language leakage — replaced with
+  `<REDACTED>` (`ardur-session-journals`' `redact` module, shared with
+  `ardur cli`'s own `redact` command). This is pattern-based, not a content
+  classifier: it catches secret-*shaped* text, not every sensitive thing a
+  user might type. Treat the endpoint's output as still-sensitive
+  conversational content.
 
 ## Implementation notes
 
