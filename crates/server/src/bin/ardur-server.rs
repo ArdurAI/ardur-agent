@@ -59,12 +59,21 @@ async fn main() -> anyhow::Result<()> {
         MemoryBackend::Qdrant => "qdrant",
         MemoryBackend::Hybrid => "hybrid",
     };
+    // Loaded here (rather than only inside `AppState::boot`) so the
+    // `delegate_task` tool — which must parse and attenuate a caller's
+    // cap-token — can be constructed against the real issuer root before the
+    // registry is sealed into `Arc` and handed to `boot`. `AppState::boot`
+    // reads the same persisted `keys/issuer.key` a second time; the file is
+    // minted on the first-ever read of an absent key, so the two reads agree.
+    let cap_root = ardur_server::issuer_public_key(&config.data_dir)
+        .map_err(|e| anyhow::anyhow!("loading cap-token issuer key: {e}"))?;
     let tools = Arc::new(
         assemble_tool_registry(
             provider_id.clone(),
             memory_label,
             &config.skills_dirs,
             &config.mcp_remote_servers,
+            cap_root,
         )
         .await,
     );

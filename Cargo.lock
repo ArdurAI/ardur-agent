@@ -499,6 +499,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "ardur-delegate-tool"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "ardur-cap-token",
+ "ardur-cost-gate",
+ "ardur-multi-agent",
+ "ardur-receipt",
+ "ardur-runtime",
+ "ardur-tool-registry",
+ "async-trait",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "ardur-e2e-tests"
 version = "0.0.0"
 dependencies = [
@@ -942,6 +961,7 @@ dependencies = [
  "ardur-channel-matrix",
  "ardur-channel-telegram",
  "ardur-cost-gate",
+ "ardur-delegate-tool",
  "ardur-fused-runtime",
  "ardur-hooks-openclaw-compat",
  "ardur-media-audio",
