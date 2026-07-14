@@ -7,9 +7,12 @@ use std::net::SocketAddr;
 
 use clap::Parser;
 
+use ardur_admin::approvals::ServerConfig;
 use ardur_admin::auth::{BasicAuth, BearerAuth};
 use ardur_admin::build_router;
-use ardur_admin::config::{Cli, parse_bearer_tokens, resolve_bind_addr, validate_bind};
+use ardur_admin::config::{
+    Cli, parse_bearer_tokens, resolve_bind_addr, validate_approvals_auth, validate_bind,
+};
 use ardur_admin::state::{AppState, MemorySource};
 use ardur_cedar_policy::{CedarPolicyBundle, PolicyBundle, PolicySource};
 
@@ -26,6 +29,10 @@ async fn main() -> anyhow::Result<()> {
     // a startup error.
     let bind_ip = resolve_bind_addr(&cli).map_err(anyhow::Error::msg)?;
     validate_bind(&cli, &bind_ip).map_err(anyhow::Error::msg)?;
+    // Refuse an unauthenticated approvals proxy — clap's `requires` already
+    // guarantees --server-url and --server-admin-token appear together, but
+    // says nothing about admin-ui's own auth gate.
+    validate_approvals_auth(&cli).map_err(anyhow::Error::msg)?;
 
     // Optional, read-only Qdrant connection for the memory endpoint.
     let memory = match &cli.qdrant_url {
@@ -64,6 +71,10 @@ async fn main() -> anyhow::Result<()> {
             "Trust Center policy debugger enabled"
         );
         state = state.with_policies(policies);
+    }
+    if let (Some(url), Some(token)) = (&cli.server_url, &cli.server_admin_token) {
+        tracing::info!(server_url = %url, "Approvals proxy enabled");
+        state = state.with_approvals_server(ServerConfig::new(url.clone(), token.clone()));
     }
 
     let app = build_router(state.shared());

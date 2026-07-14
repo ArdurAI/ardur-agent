@@ -7,6 +7,7 @@ use ardur_cap_token::VerifiedClaims;
 use ardur_cedar_policy::CedarPolicyBundle;
 use qdrant_client::Qdrant;
 
+use crate::approvals::ServerConfig;
 use crate::auth::{BasicAuth, BearerAuth};
 
 /// A connected, read-only Qdrant source for the optional memory endpoint.
@@ -44,6 +45,9 @@ pub struct AppState {
     pub capabilities: Vec<VerifiedClaims>,
     /// Cedar policy bundle used by the policy debugger.
     pub policies: Option<CedarPolicyBundle>,
+    /// ardur-server's admin API, if the operator configured the approvals
+    /// proxy. The one write-capable feature this dashboard exposes.
+    pub approvals_server: Option<ServerConfig>,
 }
 
 impl AppState {
@@ -58,6 +62,7 @@ impl AppState {
             bearer_auth: None,
             capabilities: Vec::new(),
             policies: None,
+            approvals_server: None,
         }
     }
 
@@ -93,6 +98,13 @@ impl AppState {
     #[must_use]
     pub fn with_policies(mut self, policies: CedarPolicyBundle) -> Self {
         self.policies = Some(policies);
+        self
+    }
+
+    /// Enable the approvals proxy against a configured ardur-server.
+    #[must_use]
+    pub fn with_approvals_server(mut self, config: ServerConfig) -> Self {
+        self.approvals_server = Some(config);
         self
     }
 

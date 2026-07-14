@@ -8,6 +8,7 @@
 use std::fs;
 use std::path::Path;
 
+use ardur_admin::approvals::ServerConfig;
 use ardur_admin::auth::{BasicAuth, BearerAuth};
 use ardur_admin::build_router;
 use ardur_admin::state::AppState;
@@ -196,6 +197,12 @@ impl Fixture {
     fn server_with_basic(&self, user_pass: &str) -> TestServer {
         let state = AppState::new(&self.journal_dir, &self.receipt_store)
             .with_basic_auth(BasicAuth::from_user_pass(user_pass));
+        TestServer::new(build_router(state.shared()))
+    }
+
+    fn server_with_approvals(&self, base_url: &str, admin_token: &str) -> TestServer {
+        let state = AppState::new(&self.journal_dir, &self.receipt_store)
+            .with_approvals_server(ServerConfig::new(base_url, admin_token));
         TestServer::new(build_router(state.shared()))
     }
 }
@@ -723,8 +730,11 @@ async fn read_only_no_write_endpoints() {
     let fx = Fixture::new();
     let server = fx.server();
 
-    // Every route is GET-only: a write method on a known path is 405 Method
-    // Not Allowed (never a 2xx). There is no handler that mutates anything.
+    // Every artifact-observability route is GET-only: a write method on a
+    // known path is 405 Method Not Allowed (never a 2xx). No handler here
+    // mutates any journal/receipt/memory artifact directly — the one
+    // deliberate exception, /api/operator/approvals* (a proxy to
+    // ardur-server's own write API), is covered by its own tests below.
     for (method, path) in [
         ("POST", "/api/sessions"),
         ("PUT", "/api/receipts"),
@@ -814,4 +824,234 @@ async fn no_auth_configured_passes_through() {
     let fx = Fixture::new();
     let res = fx.server().get("/healthz").await;
     res.assert_status_ok();
+}
+
+#[tokio::test]
+async fn operator_approvals_returns_503_when_unconfigured() {
+    let fx = Fixture::new();
+    let server = fx.server();
+    for (method, path) in [
+        ("get", "/api/operator/approvals"),
+        ("post", "/api/operator/approvals/abc/approve"),
+        ("post", "/api/operator/approvals/abc/reject"),
+    ] {
+        let res = match method {
+            "get" => server.get(path).await,
+            "post" => server.post(path).await,
+            _ => unreachable!(),
+        };
+        assert_eq!(res.status_code().as_u16(), 503, "{path} should be 503");
+    }
+}
+
+#[tokio::test]
+async fn operator_approvals_list_proxies_to_ardur_server() {
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let mock = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/approvals"))
+        .and(header("Authorization", "Bearer admin-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            { "id": "card-1", "status": "pending" }
+        ])))
+        .mount(&mock)
+        .await;
+
+    let fx = Fixture::new();
+    let server = fx.server_with_approvals(&mock.uri(), "admin-token");
+    let res = server.get("/api/operator/approvals").await;
+    res.assert_status_ok();
+    let cards: Value = res.json();
+    assert_eq!(cards[0]["id"], "card-1");
+}
+
+#[tokio::test]
+async fn operator_approvals_approve_proxies_to_ardur_server() {
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/approvals/card-1/approve"))
+        .and(header("Authorization", "Bearer admin-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "card-1", "status": "approved"
+        })))
+        .mount(&mock)
+        .await;
+
+    let fx = Fixture::new();
+    let server = fx.server_with_approvals(&mock.uri(), "admin-token");
+    let res = server.post("/api/operator/approvals/card-1/approve").await;
+    res.assert_status_ok();
+    assert_eq!(
+        res.header("HX-Trigger"),
+        "approvalsChanged",
+        "a successful decision must fire the event #approvals-list listens for, \
+         so the dashboard picks up the new status without a fixed poll"
+    );
+    let card: Value = res.json();
+    assert_eq!(card["status"], "approved");
+}
+
+#[tokio::test]
+async fn operator_approvals_reject_forwards_the_reason() {
+    use wiremock::matchers::{body_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/approvals/card-1/reject"))
+        .and(body_json(serde_json::json!({ "reason": "too risky" })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "card-1", "status": "denied", "deny_reason": "too risky"
+        })))
+        .mount(&mock)
+        .await;
+
+    let fx = Fixture::new();
+    let server = fx.server_with_approvals(&mock.uri(), "admin-token");
+    let res = server
+        .post("/api/operator/approvals/card-1/reject")
+        .json(&serde_json::json!({ "reason": "too risky" }))
+        .await;
+    res.assert_status_ok();
+    assert_eq!(res.header("HX-Trigger"), "approvalsChanged");
+    let card: Value = res.json();
+    assert_eq!(card["status"], "denied");
+}
+
+#[tokio::test]
+async fn operator_approvals_rejects_malformed_id_without_a_network_call() {
+    // No mock server configured at all — if this reached the network it
+    // would fail to connect and surface as a 502, not a 400.
+    let fx = Fixture::new();
+    let server = fx.server_with_approvals("http://127.0.0.1:1", "admin-token");
+    let res = server
+        .post("/api/operator/approvals/../escape/approve")
+        .await;
+    // Axum's router itself normalizes/rejects `..` in a path segment before
+    // the handler ever runs; either a 400 from admin-ui's own validation or
+    // a 404 from the router not matching the route proves the same thing —
+    // the malformed id never reached the proxy.
+    let code = res.status_code().as_u16();
+    assert!(
+        code == 400 || code == 404,
+        "malformed id should never reach the network layer, got {code}"
+    );
+}
+
+#[tokio::test]
+async fn operator_approvals_maps_ardur_server_401_to_502() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let mock = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/approvals"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&mock)
+        .await;
+
+    let fx = Fixture::new();
+    // Deliberately wrong token from admin-ui's point of view — ardur-server
+    // rejects it, which must surface as admin-ui's *own* 502 (a proxy
+    // failure), not a 401 (which would be indistinguishable from admin-ui's
+    // own auth gate rejecting the caller).
+    let server = fx.server_with_approvals(&mock.uri(), "stale-token");
+    let res = server.get("/api/operator/approvals").await;
+    assert_eq!(res.status_code().as_u16(), 502);
+}
+
+#[tokio::test]
+async fn operator_approvals_failed_decision_does_not_fire_the_refresh_event() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/approvals/card-1/approve"))
+        .respond_with(ResponseTemplate::new(409).set_body_json(serde_json::json!({
+            "error": "approval already decided", "status": "approved"
+        })))
+        .mount(&mock)
+        .await;
+
+    let fx = Fixture::new();
+    let server = fx.server_with_approvals(&mock.uri(), "admin-token");
+    let res = server.post("/api/operator/approvals/card-1/approve").await;
+    assert_eq!(res.status_code().as_u16(), 409);
+    assert!(
+        res.headers().get("HX-Trigger").is_none(),
+        "a failed decision must not fire approvalsChanged — nothing to refresh to"
+    );
+}
+
+#[tokio::test]
+async fn operator_approvals_html_fragment_renders_cards_with_action_buttons() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let mock = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/approvals"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            { "id": "card-1", "status": "pending" },
+            { "id": "card-2", "status": "approved" },
+        ])))
+        .mount(&mock)
+        .await;
+
+    let fx = Fixture::new();
+    let server = fx.server_with_approvals(&mock.uri(), "admin-token");
+    let res = server.get("/operator/approvals").await;
+    res.assert_status_ok();
+    let html = res.text();
+    assert!(html.contains("card-1"));
+    assert!(html.contains("card-2"));
+    assert!(
+        html.contains("hx-post=\"/api/operator/approvals/card-1/approve\""),
+        "pending card should show an approve action: {html}"
+    );
+    assert!(
+        html.contains("hx-post=\"/api/operator/approvals/card-1/reject\""),
+        "pending card should show a reject action: {html}"
+    );
+    assert!(
+        !html.contains("hx-post=\"/api/operator/approvals/card-2/approve\""),
+        "an already-decided card should not show action buttons: {html}"
+    );
+}
+
+#[tokio::test]
+async fn operator_approvals_html_fragment_shows_error_on_proxy_failure() {
+    let fx = Fixture::new();
+    // Nothing listening on this port — a genuine connection failure.
+    let server = fx.server_with_approvals("http://127.0.0.1:1", "admin-token");
+    let res = server.get("/operator/approvals").await;
+    res.assert_status_ok();
+    let html = res.text();
+    assert!(html.contains("Could not reach ardur-server"));
+}
+
+#[tokio::test]
+async fn dashboard_html_shows_approvals_section_state() {
+    let fx = Fixture::new();
+
+    let res = fx.server().get("/").await;
+    let html = res.text();
+    assert!(html.contains("Approvals"));
+    assert!(html.contains("Approvals proxy not configured"));
+
+    let state = AppState::new(&fx.journal_dir, &fx.receipt_store)
+        .with_approvals_server(ServerConfig::new("http://127.0.0.1:1", "token"));
+    let server = TestServer::new(build_router(state.shared()));
+    let res = server.get("/").await;
+    let html = res.text();
+    assert!(
+        html.contains("hx-get=\"/operator/approvals\""),
+        "configured approvals proxy should render the lazy-loading container: {html}"
+    );
 }

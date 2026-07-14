@@ -18,14 +18,17 @@ pub const DEFAULT_PORT: u16 = 8090;
 /// a non-loopback interface.
 pub const DEFAULT_BIND: &str = "127.0.0.1";
 
-/// `ardur-admin` — a read-only observability dashboard over an ardur-server
-/// deployment's persisted journals, receipts, and (optionally) memory.
+/// `ardur-admin` — an observability + operator-console dashboard over an
+/// ardur-server deployment's persisted journals, receipts, and (optionally)
+/// memory, plus an optional approvals-decision proxy.
 #[derive(Debug, Clone, Parser)]
 #[command(
     name = "ardur-admin",
-    about = "Read-only observability dashboard for ardur-server (journals, receipts, memory).",
+    about = "Observability + operator-console dashboard for ardur-server.",
     long_about = "Reads ardur-server's persisted artifacts directly and serves them over an \
-HTTP dashboard. Strictly read-only: it never writes to any journal, receipt, or memory store. \
+HTTP dashboard. Every artifact access is read-only, with one narrow, explicit exception: when \
+--server-url and --server-admin-token are set, it proxies approve/reject decisions to \
+ardur-server's own admin-bearer-gated /approvals API rather than writing to any store itself. \
 Intended for a trusted local or private network (see README for the security model)."
 )]
 pub struct Cli {
@@ -59,6 +62,28 @@ pub struct Cli {
     /// hypothetical queries against it, never enforces it.
     #[arg(long, value_name = "PATH")]
     pub policy_bundle: Option<PathBuf>,
+
+    /// Base URL of the ardur-server instance to proxy approval decisions to,
+    /// e.g. `http://127.0.0.1:3000`. Enables the Approvals surface — the
+    /// dashboard's one write-capable action — when set together with
+    /// `--server-admin-token`. Admin-ui never writes to the approvals store
+    /// itself; it forwards approve/reject calls to ardur-server's own
+    /// admin-bearer-gated `/approvals` API.
+    #[arg(long, value_name = "URL", requires = "server_admin_token")]
+    pub server_url: Option<String>,
+
+    /// The admin bearer token ardur-server was started with
+    /// (`ARDUR_ADMIN_BEARER_TOKENS`), forwarded on every proxied approvals
+    /// call. The `ARDUR_ADMIN_SERVER_TOKEN` environment variable overrides
+    /// the default when the flag is absent, so the token need not appear in
+    /// shell history.
+    #[arg(
+        long,
+        value_name = "TOKEN",
+        env = "ARDUR_ADMIN_SERVER_TOKEN",
+        requires = "server_url"
+    )]
+    pub server_admin_token: Option<String>,
 
     /// Port to serve the dashboard on.
     #[arg(long, default_value_t = DEFAULT_PORT)]
@@ -163,4 +188,29 @@ pub fn validate_bind(cli: &Cli, addr: &IpAddr) -> Result<(), String> {
          Re-run with --bearer-tokens TOKEN (preferred) or --basic-auth USER:PASS to protect it, \
          or pass --unsafe-bind to acknowledge the risk."
     ))
+}
+
+/// Refuse to enable the approvals proxy (`--server-url`) unless admin-ui
+/// itself requires Basic or Bearer auth. Without this, anyone who can reach
+/// admin-ui's port gets an unauthenticated proxy to ardur-server's
+/// write-capable admin API — a materially bigger risk than the read-only
+/// dashboard `--unsafe-bind` already warns about, so there is no equivalent
+/// override flag here.
+///
+/// # Errors
+/// Returns a human-readable error when `--server-url` is set but neither
+/// `--basic-auth` nor `--bearer-tokens` is configured.
+pub fn validate_approvals_auth(cli: &Cli) -> Result<(), String> {
+    if cli.server_url.is_none() {
+        return Ok(());
+    }
+    if cli.basic_auth.is_some() || !parse_bearer_tokens(cli.bearer_tokens.as_deref()).is_empty() {
+        return Ok(());
+    }
+    Err(
+        "refusing to enable the approvals proxy (--server-url) without --basic-auth or \
+         --bearer-tokens on ardur-admin itself. The approvals proxy is write-capable; \
+         re-run with --bearer-tokens TOKEN (preferred) or --basic-auth USER:PASS."
+            .to_string(),
+    )
 }
