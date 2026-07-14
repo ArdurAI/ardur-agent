@@ -1,8 +1,9 @@
 use ardur_media_video::{
     AsyncJobModel, AuthorizedVideoToken, ContentClass, GeminiVideoAnalyzeProvider,
-    GeminiVideoConfig, MediaProvider, MissionId, VideoAnalyzeObjective, VideoAnalyzeRequest,
-    VideoAnalyzeTool, VideoFormat, VideoInput, VideoModelId, VideoProvider, VideoProviderId,
-    VideoScope, VideoVerb,
+    GeminiVideoConfig, LanguageTag, MediaProvider, MissionId, SampleRateFps, VideoAnalyzeObjective,
+    VideoAnalyzeRequest, VideoAnalyzeTool, VideoDescribeRequest, VideoDescribeTool, VideoFormat,
+    VideoGenerateTool, VideoInput, VideoModelId, VideoProvider, VideoProviderId, VideoScope,
+    VideoVerb,
 };
 use ardur_runtime::{CapTokenRef, SessionId};
 use ardur_tool_registry::{Tool, ToolContext};
@@ -301,4 +302,222 @@ async fn video_analyze_tool_blocks_provider_returned_injection_content() {
             );
         }
     }
+}
+
+fn describe_token(provider_id: VideoProviderId) -> AuthorizedVideoToken {
+    AuthorizedVideoToken {
+        cap_token: CapTokenRef("cap-token-for-video.describe".to_string()),
+        scope: VideoScope {
+            verb: VideoVerb::Describe,
+            provider_id,
+            content_class_ceiling: ContentClass::Safe,
+            duration_seconds_ceiling: 0,
+            sample_rate_fps_ceiling: Some(2.0),
+        },
+    }
+}
+
+fn describe_request(provider_id: VideoProviderId, model_id: VideoModelId) -> VideoDescribeRequest {
+    VideoDescribeRequest {
+        provider_id,
+        model_id,
+        input: VideoInput::InlineBytes {
+            bytes: tiny_mp4(),
+            format: VideoFormat::Mp4H264,
+        },
+        sample_rate_fps: SampleRateFps::new(1.0).expect("1 fps is valid"),
+        include_scene_summary: true,
+        language_tag: LanguageTag::new("en").expect("`en` is valid"),
+        mission_id: MissionId::new("mission.video-describe-test"),
+        requested_at: 1,
+    }
+}
+
+#[tokio::test]
+async fn gemini_provider_describes_whole_video_and_records_receipt_hash() {
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/models/gemini-2.5-pro:generateContent"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "candidates": [{
+                "content": { "parts": [{
+                    "text": "A lake at dawn; a person walks into frame and sits by the water."
+                }]}
+            }]
+        })))
+        .mount(&mock)
+        .await;
+
+    let config = GeminiVideoConfig::new("test-gemini-key")
+        .with_base_url(mock.uri())
+        .expect("loopback mock base URL is accepted");
+    let provider = GeminiVideoAnalyzeProvider::new(config).expect("provider config is valid");
+    let provider_id = provider.media_provider_id().clone();
+    let model_id = VideoModelId::new("gemini-2.5-pro");
+
+    let output = provider
+        .describe(
+            &describe_token(provider_id.clone()),
+            describe_request(provider_id.clone(), model_id),
+        )
+        .await
+        .expect("mock gemini describe succeeds");
+
+    assert_eq!(
+        output.scene_summary.as_deref(),
+        Some("A lake at dawn; a person walks into frame and sits by the water.")
+    );
+    // Per-frame describe is a forward-ref, so the whole-video path samples none.
+    assert!(output.per_frame.is_empty());
+    assert!(!output.receipt_hash.as_str().is_empty());
+    assert!(output.cost_envelope.total_micro_usd() > 0);
+}
+
+#[tokio::test]
+async fn gemini_provider_describe_refuses_sample_rate_above_ceiling() {
+    let mock = MockServer::start().await;
+    let config = GeminiVideoConfig::new("test-gemini-key")
+        .with_base_url(mock.uri())
+        .expect("loopback mock base URL is accepted");
+    let provider = GeminiVideoAnalyzeProvider::new(config).expect("provider config is valid");
+    let provider_id = provider.media_provider_id().clone();
+    let model_id = VideoModelId::new("gemini-2.5-pro");
+
+    // Token ceiling is 2.0 fps; request 5.0 fps.
+    let mut req = describe_request(provider_id.clone(), model_id);
+    req.sample_rate_fps = SampleRateFps::new(5.0).expect("5 fps is valid");
+
+    let err = provider
+        .describe(&describe_token(provider_id), req)
+        .await
+        .expect_err("sample rate above the token ceiling is refused before any network call");
+    assert!(err.to_string().contains("capability"));
+    assert_eq!(
+        mock.received_requests()
+            .await
+            .expect("requests queried")
+            .len(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn video_describe_tool_returns_scene_description() {
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/models/gemini-2.5-pro:generateContent"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "candidates": [{
+                "content": { "parts": [{ "text": "A cat naps on a windowsill in the sun." }]}
+            }]
+        })))
+        .mount(&mock)
+        .await;
+
+    let config = GeminiVideoConfig::new("test-gemini-key")
+        .with_base_url(mock.uri())
+        .expect("loopback mock base URL is accepted");
+    let provider = GeminiVideoAnalyzeProvider::new(config).expect("provider config is valid");
+    let tool = VideoDescribeTool::new(provider);
+    let ctx = ToolContext {
+        cap_token: CapTokenRef("cap-token-for-video.describe".to_string()),
+        session_id: SessionId::new(),
+        invocation_id: Default::default(),
+        cwd: std::env::current_dir().expect("cwd"),
+        env: Default::default(),
+        cost_budget_cents: 100,
+    };
+
+    let output = tool
+        .invoke(
+            &ctx,
+            json!({
+                "video_base64": BASE64_STANDARD.encode(tiny_mp4()),
+                "format": "mp4"
+            }),
+        )
+        .await
+        .expect("describe tool succeeds");
+
+    assert_eq!(
+        output.content["description"].as_str(),
+        Some("A cat naps on a windowsill in the sun.")
+    );
+    assert!(!output.content["receipt_hash"].as_str().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn video_generate_tool_is_default_deny_without_opt_in() {
+    let mock = MockServer::start().await;
+    let config = GeminiVideoConfig::new("test-gemini-key")
+        .with_base_url(mock.uri())
+        .expect("loopback mock base URL is accepted");
+    let provider = GeminiVideoAnalyzeProvider::new(config).expect("provider config is valid");
+    // opted_in = false: the tenant has not enabled paid generation.
+    let tool = VideoGenerateTool::new(provider, false, 30);
+    let ctx = ToolContext {
+        cap_token: CapTokenRef("cap-token-for-video.generate".to_string()),
+        session_id: SessionId::new(),
+        invocation_id: Default::default(),
+        cwd: std::env::current_dir().expect("cwd"),
+        env: Default::default(),
+        cost_budget_cents: 100,
+    };
+
+    let err = tool
+        .invoke(
+            &ctx,
+            json!({ "prompt": "a hot air balloon over a valley", "duration_seconds": 5 }),
+        )
+        .await
+        .expect_err("generation is default-deny until the tenant opts in");
+    assert!(
+        err.to_string().contains("opt"),
+        "expected a tenant-opt-in refusal, got: {err}"
+    );
+    assert_eq!(
+        mock.received_requests()
+            .await
+            .expect("requests queried")
+            .len(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn video_generate_tool_enforces_duration_ceiling() {
+    let mock = MockServer::start().await;
+    let config = GeminiVideoConfig::new("test-gemini-key")
+        .with_base_url(mock.uri())
+        .expect("loopback mock base URL is accepted");
+    let provider = GeminiVideoAnalyzeProvider::new(config).expect("provider config is valid");
+    // Opted in, but a 30s ceiling; request 120s.
+    let tool = VideoGenerateTool::new(provider, true, 30);
+    let ctx = ToolContext {
+        cap_token: CapTokenRef("cap-token-for-video.generate".to_string()),
+        session_id: SessionId::new(),
+        invocation_id: Default::default(),
+        cwd: std::env::current_dir().expect("cwd"),
+        env: Default::default(),
+        cost_budget_cents: 100,
+    };
+
+    let err = tool
+        .invoke(
+            &ctx,
+            json!({ "prompt": "a long documentary", "duration_seconds": 120 }),
+        )
+        .await
+        .expect_err("duration above the ceiling is refused before any provider call");
+    assert!(
+        err.to_string().contains("duration"),
+        "expected a duration-ceiling refusal, got: {err}"
+    );
+    assert_eq!(
+        mock.received_requests()
+            .await
+            .expect("requests queried")
+            .len(),
+        0
+    );
 }

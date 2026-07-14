@@ -968,6 +968,7 @@ dependencies = [
  "ardur-fused-runtime",
  "ardur-hooks-openclaw-compat",
  "ardur-media-audio",
+ "ardur-media-video",
  "ardur-memory",
  "ardur-memory-qdrant",
  "ardur-messaging-gateway",

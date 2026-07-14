@@ -3,15 +3,25 @@
 //! This crate freezes the Phase 1 type surface for text-to-video generation,
 //! per-frame describe, and action/scene/transcript analyze. It ships one
 //! concrete adapter — [`GeminiVideoAnalyzeProvider`] — that calls a
-//! vision-capable multimodal API directly on whole-video bytes, so `analyze`
-//! and `describe` work without depending on the not-yet-landed FFmpeg
-//! frame-sampling substrate (`generate` and per-frame describe delegation to
-//! §10.1 remain contract-only until those substrates ship).
+//! vision-capable multimodal API directly on whole-video bytes, and exposes all
+//! three verbs as tools:
+//!
+//! - [`VideoAnalyzeTool`] (`video.analyze`) — action recognition, scene
+//!   segmentation, and on-screen-text OCR, fully wired against Gemini.
+//! - [`VideoDescribeTool`] (`video.describe`) — a whole-video scene
+//!   description. True per-frame describe (FFmpeg frame sampling + §10.1
+//!   delegation) is a forward-ref, so `sample_rate_fps` shapes only the scope
+//!   and cost today; the summary carries the description.
+//! - [`VideoGenerateTool`] (`video.generate`) — default-deny (tenant opt-in +
+//!   per-cap-token duration ceiling). The shipped adapter does not generate, so
+//!   an opted-in request surfaces the provider's forward-ref refusal; the gate,
+//!   cost envelope, and receipt discipline are the tool's contribution until a
+//!   Sora/Runway/Veo/Pika adapter lands.
 //!
 //! Every verb is cap-token-scoped ([`AuthorizedVideoToken`]), cost-gated
 //! ([`VideoCostEnvelope`]), and receipt-recorded ([`receipt_events`]).
 //! Provider-returned text is untrusted content from an external video, so the
-//! [`VideoAnalyzeTool`] scans it with `ardur-injection-defense` before it
+//! describe and analyze tools scan it with `ardur-injection-defense` before it
 //! re-enters agent context.
 
 #![forbid(unsafe_code)]
@@ -28,7 +38,10 @@ use uuid::Uuid;
 
 mod gemini_video_in;
 
-pub use gemini_video_in::{GeminiVideoAnalyzeProvider, GeminiVideoConfig, VideoAnalyzeTool};
+pub use gemini_video_in::{
+    GeminiVideoAnalyzeProvider, GeminiVideoConfig, VideoAnalyzeTool, VideoDescribeTool,
+    VideoGenerateTool,
+};
 
 /// Unix timestamp in milliseconds since the epoch.
 pub type UnixTsMillis = u64;
