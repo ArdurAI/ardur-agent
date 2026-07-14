@@ -22,6 +22,9 @@ pub mod event;
 mod inbound;
 /// Outbound webhook delivery client and configuration.
 pub mod outbound;
+/// Registry mapping paths/sources to inbound handlers, and the axum
+/// [`Router`](registry::WebhookRegistry::router) it mounts them under.
+pub mod registry;
 /// Webhook signature computation and verification.
 pub mod signature;
 
@@ -29,4 +32,5 @@ pub use error::{Result, WebhookError};
 pub use event::{EventType, WebhookEvent};
 pub use inbound::{InboundState, InboundWebhookHandler, WebhookConfig, receive_webhook};
 pub use outbound::{OutboundWebhookClient, OutboundWebhookConfig};
+pub use registry::{WebhookEndpoint, WebhookRegistry};
 pub use signature::{sign_body, verify_signature};

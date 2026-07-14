@@ -6,10 +6,12 @@
 #![forbid(unsafe_code)]
 
 mod audit;
+mod automation_gate;
 mod device_mesh;
 mod marketplace;
 mod persona;
 mod project_surface;
+mod webhook_surface;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -81,6 +83,8 @@ enum Commands {
     Nodes(NodesArgs),
     /// Manage scheduled automation jobs.
     Schedule(ScheduleArgs),
+    /// Manage inbound webhook triggers that fire schedules (§9.7).
+    Webhook(webhook_surface::WebhookArgs),
     /// Manage messaging channel adapters.
     Channel(ChannelArgs),
     /// Import or export state from Hermes / OpenClaw.
@@ -337,6 +341,7 @@ fn main() -> ExitCode {
         Commands::Redact(args) => run_redact(args),
         Commands::Nodes(args) => run_nodes(args),
         Commands::Schedule(args) => run_schedule(args),
+        Commands::Webhook(args) => webhook_surface::run_webhook(args),
         Commands::Channel(args) => run_channel(args),
         Commands::Migrate(args) => run_migrate(args),
         Commands::Persona(args) => run_persona(args),
@@ -1930,6 +1935,14 @@ enum ScheduleAction {
         /// Prompt to run when the schedule fires.
         #[arg(short, long)]
         prompt: String,
+        /// Total fire budget, in cents, before `fire` is refused (§9.4/ARD-996
+        /// cost-gate ceiling; default 1000 = $10).
+        #[arg(long, default_value_t = 1000)]
+        budget_cents: u64,
+        /// A token minted by `ardur token create --scope write` (or higher);
+        /// required because creating a schedule is a mutation.
+        #[arg(long)]
+        token: Option<String>,
     },
     /// List schedules.
     List,
@@ -1941,15 +1954,51 @@ enum ScheduleAction {
         #[arg(long, default_value_t = 5)]
         count: usize,
     },
+    /// Pause a schedule so `fire` refuses it until resumed.
+    Pause {
+        /// Schedule ID.
+        id: String,
+        /// A token minted by `ardur token create --scope write` (or higher).
+        #[arg(long)]
+        token: Option<String>,
+    },
+    /// Resume a paused schedule.
+    Resume {
+        /// Schedule ID.
+        id: String,
+        /// A token minted by `ardur token create --scope write` (or higher).
+        #[arg(long)]
+        token: Option<String>,
+    },
+    /// Show the run history (fires, cost, receipt ids) for a schedule.
+    History {
+        /// Schedule ID.
+        id: String,
+        /// Maximum number of most-recent runs to show.
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+    },
     /// Delete a schedule.
     Delete {
         /// Schedule ID.
         id: String,
+        /// A token minted by `ardur token create --scope write` (or higher).
+        #[arg(long)]
+        token: Option<String>,
     },
-    /// Test fire a schedule now (dry-run).
+    /// Fire a schedule now: checks it is enabled and within budget, charges
+    /// the fire against its budget, records run history, and emits a
+    /// receipt. Execution of the bound prompt is not yet wired (ARD-996
+    /// §9.4 Phase 1 scope is admission + audit, not dispatch).
     Fire {
         /// Schedule ID.
         id: String,
+        /// A token minted by `ardur token create --scope write` (or higher).
+        #[arg(long)]
+        token: Option<String>,
+        /// Cost, in cents, to charge this fire against the schedule's budget.
+        #[arg(long, default_value_t = 1)]
+        cost_cents: u64,
     },
 }
 
@@ -1962,6 +2011,28 @@ struct ScheduleRecord {
     prompt: String,
     created_at: u64,
     enabled: bool,
+    /// Total fire budget, in cents, before `fire` is refused. Additive field:
+    /// records written before ARD-996 load with the default (1000 = $10).
+    #[serde(default = "default_schedule_budget_cents")]
+    budget_cents: u64,
+    /// Cumulative cents charged against `budget_cents` by past fires.
+    #[serde(default)]
+    spent_cents: u64,
+}
+
+fn default_schedule_budget_cents() -> u64 {
+    1000
+}
+
+/// One line of a schedule's run-history log
+/// (`<root>/schedules/history/<id>.jsonl`).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ScheduleRunRecord {
+    fired_at: u64,
+    cost_cents: u64,
+    spent_cents_after: u64,
+    receipt_id: String,
+    source: String,
 }
 
 /// Simple cron-like parser for the most common NL patterns.
@@ -2022,6 +2093,12 @@ fn parse_time_to_cron(time_str: &str) -> Option<String> {
     Some(format!("{minute} {hour} * * *"))
 }
 
+/// Whether a schedule with `id` exists under `root`. Used by `ardur webhook
+/// add` to refuse binding an endpoint to a schedule that does not exist.
+fn schedule_exists(root: &Path, id: &str) -> bool {
+    schedule_path(root, id).is_file()
+}
+
 /// Read schedule records from the state directory.
 fn read_schedules(root: &Path) -> Result<Vec<ScheduleRecord>, CliError> {
     let dir = root.join("schedules");
@@ -2075,6 +2152,116 @@ fn next_fire_times(
     Ok(fires)
 }
 
+fn schedule_path(root: &Path, id: &str) -> PathBuf {
+    root.join("schedules").join(format!("{id}.json"))
+}
+
+fn write_schedule_record(root: &Path, record: &ScheduleRecord) -> Result<(), CliError> {
+    std::fs::write(
+        schedule_path(root, &record.schedule_id),
+        serde_json::to_string_pretty(record).map_err(|e| CliError::State(e.to_string()))?,
+    )?;
+    Ok(())
+}
+
+/// The holder identity a schedule's cost-gate budget and receipts are keyed
+/// under.
+fn schedule_holder_id(id: &str) -> String {
+    format!("cron.schedule:{id}")
+}
+
+/// Fire schedule `id`: requires it exist and be enabled, admits `cost_cents`
+/// against its persisted budget, records a run-history line, and emits a
+/// `cron.schedule.fired.v1` receipt. Shared by `ardur schedule fire` (source
+/// `"cli"`) and the `ardur webhook` inbound trigger surface (source
+/// `"webhook:<endpoint source>"`). Returns the appended [`ScheduleRunRecord`].
+fn fire_schedule(
+    root: &Path,
+    id: &str,
+    token: Option<&str>,
+    cost_cents: u64,
+    source: &str,
+) -> Result<ScheduleRunRecord, CliError> {
+    let token_id = automation_gate::require_token_scope(root, token, "write")?;
+
+    let mut records = read_schedules(root)?;
+    let index = records
+        .iter()
+        .position(|r| r.schedule_id == id)
+        .ok_or_else(|| CliError::State(format!("schedule `{id}` not found")))?;
+    if !records[index].enabled {
+        return Err(CliError::State(format!(
+            "schedule `{id}` is paused; run `ardur schedule resume {id}` first"
+        )));
+    }
+
+    let holder = schedule_holder_id(id);
+    let new_spent = automation_gate::admit_and_charge(
+        &holder,
+        records[index].budget_cents,
+        records[index].spent_cents,
+        cost_cents,
+    )?;
+    records[index].spent_cents = new_spent;
+    write_schedule_record(root, &records[index])?;
+
+    let fired_at = unix_now_ms() / 1000;
+    let receipt_id = automation_gate::append_receipt(
+        root,
+        "cron.schedule.fired.v1",
+        &holder,
+        &token_id,
+        cost_cents,
+        &json!({
+            "schedule_id": id,
+            "source": source,
+            "spent_cents_after": new_spent,
+        }),
+    )?;
+
+    let run = ScheduleRunRecord {
+        fired_at,
+        cost_cents,
+        spent_cents_after: new_spent,
+        receipt_id: receipt_id.to_string(),
+        source: source.to_string(),
+    };
+    let history_dir = root.join("schedules").join("history");
+    std::fs::create_dir_all(&history_dir)?;
+    let mut existing =
+        std::fs::read_to_string(history_dir.join(format!("{id}.jsonl"))).unwrap_or_default();
+    existing.push_str(&serde_json::to_string(&run).map_err(|e| CliError::State(e.to_string()))?);
+    existing.push('\n');
+    std::fs::write(history_dir.join(format!("{id}.jsonl")), existing)?;
+
+    Ok(run)
+}
+
+fn read_schedule_history(
+    root: &Path,
+    id: &str,
+    limit: usize,
+) -> Result<Vec<ScheduleRunRecord>, CliError> {
+    let path = root
+        .join("schedules")
+        .join("history")
+        .join(format!("{id}.jsonl"));
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(CliError::Io(e)),
+    };
+    let mut runs: Vec<ScheduleRunRecord> = content
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    if runs.len() > limit {
+        runs = runs.split_off(runs.len() - limit);
+    }
+    Ok(runs)
+}
+
 /// Run `ardur schedule` subcommands.
 fn run_schedule(args: ScheduleArgs) -> Result<(), CliError> {
     let root = StateDirs::resolve()?.root;
@@ -2086,7 +2273,10 @@ fn run_schedule(args: ScheduleArgs) -> Result<(), CliError> {
             label,
             pattern,
             prompt,
+            budget_cents,
+            token,
         } => {
+            let token_id = automation_gate::require_token_scope(&root, token.as_deref(), "write")?;
             let cron = parse_pattern(&pattern).ok_or_else(|| {
                 CliError::State(format!("unrecognized schedule pattern: {pattern}"))
             })?;
@@ -2103,11 +2293,17 @@ fn run_schedule(args: ScheduleArgs) -> Result<(), CliError> {
                     .map(|d| d.as_secs())
                     .unwrap_or(0),
                 enabled: true,
+                budget_cents,
+                spent_cents: 0,
             };
-            std::fs::write(
-                schedules_dir.join(format!("{id}.json")),
-                serde_json::to_string_pretty(&record)
-                    .map_err(|e| CliError::State(e.to_string()))?,
+            write_schedule_record(&root, &record)?;
+            automation_gate::append_receipt(
+                &root,
+                "cron.schedule.created.v1",
+                &schedule_holder_id(&id),
+                &token_id,
+                0,
+                &json!({"schedule_id": id, "pattern": record.pattern, "budget_cents": budget_cents}),
             )?;
             println!("created schedule {id}");
             let next = next_fire_times(&record.pattern, 1)?;
@@ -2129,6 +2325,8 @@ fn run_schedule(args: ScheduleArgs) -> Result<(), CliError> {
                             "pattern": r.pattern,
                             "prompt": r.prompt,
                             "enabled": r.enabled,
+                            "budget_cents": r.budget_cents,
+                            "spent_cents": r.spent_cents,
                         })
                     })
                     .collect();
@@ -2154,28 +2352,86 @@ fn run_schedule(args: ScheduleArgs) -> Result<(), CliError> {
                 }
             }
         }
-        ScheduleAction::Delete { id } => {
-            let path = schedules_dir.join(format!("{id}.json"));
+        ScheduleAction::Pause { id, token } => {
+            let token_id = automation_gate::require_token_scope(&root, token.as_deref(), "write")?;
+            let mut records = read_schedules(&root)?;
+            let index = records
+                .iter()
+                .position(|r| r.schedule_id == id)
+                .ok_or_else(|| CliError::State(format!("schedule `{id}` not found")))?;
+            records[index].enabled = false;
+            write_schedule_record(&root, &records[index])?;
+            automation_gate::append_receipt(
+                &root,
+                "cron.schedule.paused.v1",
+                &schedule_holder_id(&id),
+                &token_id,
+                0,
+                &json!({"schedule_id": id}),
+            )?;
+            println!("paused schedule {id}");
+        }
+        ScheduleAction::Resume { id, token } => {
+            let token_id = automation_gate::require_token_scope(&root, token.as_deref(), "write")?;
+            let mut records = read_schedules(&root)?;
+            let index = records
+                .iter()
+                .position(|r| r.schedule_id == id)
+                .ok_or_else(|| CliError::State(format!("schedule `{id}` not found")))?;
+            records[index].enabled = true;
+            write_schedule_record(&root, &records[index])?;
+            automation_gate::append_receipt(
+                &root,
+                "cron.schedule.resumed.v1",
+                &schedule_holder_id(&id),
+                &token_id,
+                0,
+                &json!({"schedule_id": id}),
+            )?;
+            println!("resumed schedule {id}");
+        }
+        ScheduleAction::History { id, limit } => {
+            if !schedule_path(&root, &id).is_file() {
+                return Err(CliError::State(format!("schedule `{id}` not found")));
+            }
+            let runs = read_schedule_history(&root, &id, limit)?;
+            if runs.is_empty() {
+                println!("no run history for schedule {id}");
+            } else {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!(runs)).expect("history serialises")
+                );
+            }
+        }
+        ScheduleAction::Delete { id, token } => {
+            let token_id = automation_gate::require_token_scope(&root, token.as_deref(), "write")?;
+            let path = schedule_path(&root, &id);
             if !path.is_file() {
                 return Err(CliError::State(format!("schedule `{id}` not found")));
             }
             std::fs::remove_file(&path)?;
+            automation_gate::append_receipt(
+                &root,
+                "cron.schedule.deleted.v1",
+                &schedule_holder_id(&id),
+                &token_id,
+                0,
+                &json!({"schedule_id": id}),
+            )?;
             println!("deleted schedule {id}");
         }
-        ScheduleAction::Fire { id } => {
-            let records = read_schedules(&root)?;
-            let found = records.iter().find(|r| r.schedule_id == id);
-            match found {
-                Some(r) => {
-                    println!("dry-run fire schedule {id}");
-                    println!("  prompt: {}", r.prompt);
-                    println!("  pattern: {}", r.pattern);
-                    println!("  note: execution engine not yet wired");
-                }
-                None => {
-                    return Err(CliError::State(format!("schedule `{id}` not found")));
-                }
-            }
+        ScheduleAction::Fire {
+            id,
+            token,
+            cost_cents,
+        } => {
+            let run = fire_schedule(&root, &id, token.as_deref(), cost_cents, "cli")?;
+            println!("fired schedule {id}");
+            println!("  cost_cents: {}", run.cost_cents);
+            println!("  spent_cents_after: {}", run.spent_cents_after);
+            println!("  receipt_id: {}", run.receipt_id);
+            println!("  note: prompt execution engine not yet wired (admission + audit only)");
         }
     }
     Ok(())

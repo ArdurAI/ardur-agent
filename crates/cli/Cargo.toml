@@ -95,6 +95,12 @@ reqwest = { workspace = true }
 # ARD-120/121/132: supply-chain audit tooling.
 ignore = { workspace = true }
 cargo-lock = { workspace = true }
+# ARD-996: `ardur webhook` inbound trigger surface (§9.7 blueprint) — HMAC
+# verify/sign + replay protection, and the axum registry/router it mounts.
+ardur-webhook = { workspace = true }
+axum = { workspace = true }
+async-trait = { workspace = true }
+secrecy = { workspace = true }
 
 [dev-dependencies]
 # Integration tests are a separate crate; they re-declare the deps they name.

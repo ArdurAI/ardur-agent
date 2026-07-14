@@ -1,8 +1,8 @@
 use crate::error::WebhookError;
 use crate::event::WebhookEvent;
-use crate::inbound::{InboundWebhookHandler, InboundState, WebhookConfig};
-use axum::routing::post;
+use crate::inbound::{InboundState, InboundWebhookHandler, WebhookConfig};
 use axum::Router;
+use axum::routing::post;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::info;
@@ -41,11 +41,7 @@ impl WebhookRegistry {
     }
 
     /// Register an endpoint with its handler.
-    pub fn register(
-        &mut self,
-        endpoint: WebhookEndpoint,
-        handler: Arc<dyn InboundWebhookHandler>,
-    ) {
+    pub fn register(&mut self, endpoint: WebhookEndpoint, handler: Arc<dyn InboundWebhookHandler>) {
         let source = endpoint.source.clone();
         let path = endpoint.path.clone();
         self.endpoints.insert(path.clone(), endpoint);
@@ -78,7 +74,10 @@ impl WebhookRegistry {
                 config: endpoint.config.clone(),
                 handler,
             });
-            router = router.route(path, post(crate::inbound::receive_webhook).with_state(state));
+            router = router.route(
+                path,
+                post(crate::inbound::receive_webhook).with_state(state),
+            );
         }
         router
     }

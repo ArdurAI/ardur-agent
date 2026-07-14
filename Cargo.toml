@@ -278,6 +278,7 @@ ardur-server = { path = "crates/server" }
 ardur-browser = { path = "crates/browser" }
 ardur-terminal = { path = "crates/terminal" }
 ardur-web = { path = "crates/web" }
+ardur-webhook = { path = "crates/webhook" }
 ardur-config = { path = "crates/config" }
 ardur-health = { path = "crates/health" }
 ardur-logs = { path = "crates/logs" }
