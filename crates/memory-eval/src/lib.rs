@@ -34,12 +34,14 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod chunking;
 pub mod corpus;
 pub mod metrics;
 pub mod report;
 pub mod retriever;
 pub mod runner;
 
+pub use chunking::{Chunk, ChunkConfig, chunk};
 pub use corpus::{DocKind, EvalDoc, GoldenQuery, GoldenSet, QueryType};
 pub use metrics::ContradictionPair;
 pub use report::{EvalReport, GateVerdict, MetricSummary, ReleaseGate, RetrieverReport};
