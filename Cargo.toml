@@ -50,6 +50,7 @@ members = [
     "crates/admin-ui",
     "crates/e2e-tests",
     "crates/eval-harness",
+    "crates/memory-eval",
     "crates/browser",
     "crates/terminal",
     "crates/web",
@@ -254,6 +255,7 @@ ardur-hooks-openclaw-compat = { path = "crates/hooks-openclaw-compat" }
 ardur-cedar-policy = { path = "crates/cedar-policy" }
 ardur-memory = { path = "crates/memory" }
 ardur-memory-qdrant = { path = "crates/memory-qdrant" }
+ardur-memory-eval = { path = "crates/memory-eval" }
 ardur-runtime = { path = "crates/runtime" }
 ardur-acp = { path = "crates/acp" }
 ardur-automation = { path = "crates/automation" }
