@@ -183,6 +183,17 @@ fn restore_backup(
         )));
     }
 
+    // An archive made by an older `ardur` may predate a schema change; bring
+    // the now-live tree up to the current on-disk shape the same way a
+    // normal boot would (StateDirs::create() / the server's data_dir setup).
+    // No migration exists yet, so this is a no-op stamp today.
+    ardur_durability::schema::migrate_to(
+        state_root,
+        ardur_durability::schema::UNVERSIONED_BASELINE,
+        &[],
+    )
+    .map_err(|e| CliError::State(format!("restored state schema migration: {e}")))?;
+
     let previous_state_preserved_at = match previous_state_preserved_at {
         Some(displaced) if force => {
             std::fs::remove_dir_all(&displaced)?;

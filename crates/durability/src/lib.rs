@@ -22,6 +22,8 @@ use std::path::{Component, Path};
 #[cfg(unix)]
 use std::ffi::{OsStr, OsString};
 
+pub mod schema;
+
 /// A failure from a durability primitive, distinct from a plain [`io::Error`]
 /// so callers can tell a symlink refusal apart from an ordinary I/O failure.
 #[derive(Debug, thiserror::Error)]
@@ -32,6 +34,15 @@ pub enum DurabilityError {
     /// The target existed and was not a regular file.
     #[error("refusing non-regular file: {0}")]
     NotRegularFile(String),
+    /// [`schema::migrate_to`] found no migration covering the version
+    /// reached, short of the requested target.
+    #[error("no migration from schema version {at} toward target {target}")]
+    MigrationGap {
+        /// The version last successfully reached (still stamped on disk).
+        at: u32,
+        /// The version [`schema::migrate_to`] was asked to reach.
+        target: u32,
+    },
     /// Any other I/O failure.
     #[error(transparent)]
     Io(#[from] io::Error),

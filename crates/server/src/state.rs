@@ -264,6 +264,17 @@ impl AppState {
             std::fs::create_dir_all(dir)
                 .map_err(|e| anyhow::anyhow!("creating {}: {e}", dir.display()))?;
         }
+        // Stamp (or migrate) the data_dir's on-disk schema version — no
+        // migration exists yet, so this is a no-op stamp on every boot until
+        // a future format change registers a real migration step. The CLI's
+        // StateDirs::create() stamps the same way, since both trees share
+        // this shape.
+        ardur_durability::schema::migrate_to(
+            &data_dir,
+            ardur_durability::schema::UNVERSIONED_BASELINE,
+            &[],
+        )
+        .map_err(|e| anyhow::anyhow!("data_dir schema migration: {e}"))?;
 
         // 2. Long-lived keys: the cap-token issuer (Ed25519/Biscuit) and the
         //    receipt signing key (ES256), loaded if present else minted + saved.
