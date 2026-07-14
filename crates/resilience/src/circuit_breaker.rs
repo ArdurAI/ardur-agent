@@ -67,6 +67,7 @@ pub enum CircuitError<E> {
     Inner(E),
 }
 
+#[derive(Debug)]
 pub struct CircuitBreaker {
     state: Mutex<State>,
     config: CircuitBreakerConfig,

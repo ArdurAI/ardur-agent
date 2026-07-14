@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+# Retry+backoff+jitter and circuit-breaker wrapping the outbound POST — the
+# shared resilience layer for external call boundaries.
+ardur-resilience = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

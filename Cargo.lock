@@ -1023,6 +1023,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "ardur-messaging-gateway",
+ "ardur-resilience",
  "async-trait",
  "hex",
  "hmac 0.13.0",
@@ -1122,6 +1123,7 @@ name = "ardur-webhook"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "ardur-resilience",
  "async-trait",
  "axum 0.8.9",
  "base64 0.22.1",

@@ -17,6 +17,8 @@ use ardur_messaging_gateway::{
     ChannelId, GatewayError, IncomingMessage, MessageBody, MessageReceipt, MessageTarget,
     MessagingGateway, OutgoingMessage, UnixTsMillis,
 };
+use ardur_resilience::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitError};
+use ardur_resilience::retry::{RetryPolicy, retry_with_backoff};
 
 use crate::error::SlackError;
 use crate::event::{
@@ -28,6 +30,15 @@ type HmacSha256 = Hmac<Sha256>;
 /// Slack's production Web-API base. Overridable via
 /// [`SlackAdapter::with_base_url`] so tests can point the adapter at a mock.
 const DEFAULT_BASE_URL: &str = "https://slack.com/api";
+
+/// A single failed attempt at `chat.postMessage`/`chat.update`, classifying
+/// whether [`retry_with_backoff`] should retry it (a transient network error,
+/// `429`, `5xx`, or a Slack-reported `ratelimited`) or stop immediately (any
+/// other Slack business error — resending it cannot succeed).
+struct AttemptError {
+    error: SlackError,
+    retryable: bool,
+}
 
 /// The deserialized `chat.postMessage` response (the fields Phase 1 reads).
 #[derive(Debug, Deserialize)]
@@ -59,6 +70,12 @@ pub struct SlackAdapter {
     /// stops stale signed requests, while this cache rejects the same valid
     /// Slack signature if it is replayed again inside the freshness window.
     replay_cache: Mutex<HashMap<String, u64>>,
+    /// Retry/backoff policy applied to transient `chat.postMessage` /
+    /// `chat.update` failures (network errors, `429`, `5xx`).
+    retry_policy: RetryPolicy,
+    /// Trips after repeated transient failures and fails fast until it cools
+    /// down.
+    breaker: CircuitBreaker,
 }
 
 impl SlackAdapter {
@@ -73,6 +90,8 @@ impl SlackAdapter {
             base_url: DEFAULT_BASE_URL.to_owned(),
             allowed_senders: HashSet::new(),
             replay_cache: Mutex::new(HashMap::new()),
+            retry_policy: RetryPolicy::default(),
+            breaker: CircuitBreaker::new(CircuitBreakerConfig::default()),
         }
     }
 
@@ -111,6 +130,24 @@ impl SlackAdapter {
     #[must_use]
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = base_url.into();
+        self
+    }
+
+    /// Override the retry/backoff policy applied to transient send failures
+    /// (network errors, `429`, `5xx`). The default retries twice with
+    /// exponential backoff + full jitter; pass [`RetryPolicy::none`] to
+    /// disable retrying entirely.
+    #[must_use]
+    pub fn with_retry_policy(mut self, retry_policy: RetryPolicy) -> Self {
+        self.retry_policy = retry_policy;
+        self
+    }
+
+    /// Override the circuit breaker that trips after repeated send failures
+    /// and fails fast (without hitting the network) until it cools down.
+    #[must_use]
+    pub fn with_circuit_breaker(mut self, circuit_breaker: CircuitBreakerConfig) -> Self {
+        self.breaker = CircuitBreaker::new(circuit_breaker);
         self
     }
 
@@ -159,51 +196,10 @@ impl SlackAdapter {
             payload["blocks"] = blocks;
         }
 
-        let resp = self
-            .http
-            .post(&url)
-            .bearer_auth(self.bot_token.expose_secret())
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|e| SlackError::NetworkFailure(e.to_string()))?;
-
-        // Capture Retry-After before the body consumes the response.
-        let retry_after_ms = resp
-            .headers()
-            .get(reqwest::header::RETRY_AFTER)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.trim().parse::<u64>().ok())
-            .map(|secs| secs.saturating_mul(1_000));
-
-        // Slack signals rate limiting with HTTP 429 (often with an empty body),
-        // so branch on the status before attempting to parse JSON.
-        if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            return Err(SlackError::RateLimited {
-                retry_after_ms: retry_after_ms.unwrap_or(0),
-            });
-        }
-
-        let parsed: PostMessageResponse = resp
-            .json()
-            .await
-            .map_err(|e| SlackError::ParseError(e.to_string()))?;
-
-        if parsed.ok {
-            return parsed.ts.ok_or_else(|| {
-                SlackError::ParseError("ok=true response carried no ts".to_owned())
-            });
-        }
-
-        Err(match parsed.error.as_deref().unwrap_or("") {
-            "not_in_channel" => SlackError::Forbidden,
-            "channel_not_found" => SlackError::ChannelNotFound,
-            "invalid_auth" => SlackError::Unauthorized,
-            "ratelimited" => SlackError::RateLimited {
-                retry_after_ms: retry_after_ms.unwrap_or(0),
-            },
-            other => SlackError::Upstream(other.to_owned()),
-        })
+        let parsed = self.resilient_post(&url, &payload).await?;
+        parsed
+            .ts
+            .ok_or_else(|| SlackError::ParseError("ok=true response carried no ts".to_owned()))
     }
 
     /// POST `chat.update` for an existing message and return the updated message `ts`.
@@ -223,15 +219,60 @@ impl SlackAdapter {
             payload["blocks"] = blocks;
         }
 
+        let parsed = self.resilient_post(&url, &payload).await?;
+        Ok(parsed.ts.unwrap_or_else(|| ts.to_owned()))
+    }
+
+    /// Runs [`Self::attempt_post`] through the shared retry policy + circuit
+    /// breaker: a network error, `429`, or `5xx` is retried with backoff;
+    /// once the breaker trips, further calls fail fast without hitting the
+    /// network at all.
+    async fn resilient_post(
+        &self,
+        url: &str,
+        payload: &Value,
+    ) -> Result<PostMessageResponse, SlackError> {
+        self.breaker
+            .call(|| {
+                retry_with_backoff(
+                    &self.retry_policy,
+                    |a: &AttemptError| a.retryable,
+                    || self.attempt_post(url, payload),
+                )
+            })
+            .await
+            .map_err(|e| match e {
+                CircuitError::Open => SlackError::Upstream(
+                    "circuit breaker open: too many recent Slack API failures".to_string(),
+                ),
+                CircuitError::Inner(attempt) => attempt.error,
+            })
+    }
+
+    /// One attempt at a `chat.postMessage`/`chat.update`-shaped call: sends
+    /// the request, classifies a transport failure or rate limit as
+    /// retryable, and — for an `ok: false` response — classifies a
+    /// Slack-reported `ratelimited` as retryable but every other business
+    /// error (bad channel, bad auth, malformed request, …) as permanent,
+    /// since resending it would just repeat the same rejection.
+    async fn attempt_post(
+        &self,
+        url: &str,
+        payload: &Value,
+    ) -> Result<PostMessageResponse, AttemptError> {
         let resp = self
             .http
-            .post(&url)
+            .post(url)
             .bearer_auth(self.bot_token.expose_secret())
-            .json(&payload)
+            .json(payload)
             .send()
             .await
-            .map_err(|e| SlackError::NetworkFailure(e.to_string()))?;
+            .map_err(|e| AttemptError {
+                error: SlackError::NetworkFailure(e.to_string()),
+                retryable: true,
+            })?;
 
+        // Capture Retry-After before the body consumes the response.
         let retry_after_ms = resp
             .headers()
             .get(reqwest::header::RETRY_AFTER)
@@ -239,22 +280,34 @@ impl SlackAdapter {
             .and_then(|s| s.trim().parse::<u64>().ok())
             .map(|secs| secs.saturating_mul(1_000));
 
-        if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            return Err(SlackError::RateLimited {
-                retry_after_ms: retry_after_ms.unwrap_or(0),
+        // Slack signals rate limiting with HTTP 429 (often with an empty body),
+        // so branch on the status before attempting to parse JSON.
+        let status = resp.status();
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return Err(AttemptError {
+                error: SlackError::RateLimited {
+                    retry_after_ms: retry_after_ms.unwrap_or(0),
+                },
+                retryable: true,
+            });
+        }
+        if status.is_server_error() {
+            return Err(AttemptError {
+                error: SlackError::Upstream(format!("HTTP {status}")),
+                retryable: true,
             });
         }
 
-        let parsed: PostMessageResponse = resp
-            .json()
-            .await
-            .map_err(|e| SlackError::ParseError(e.to_string()))?;
+        let parsed: PostMessageResponse = resp.json().await.map_err(|e| AttemptError {
+            error: SlackError::ParseError(e.to_string()),
+            retryable: false,
+        })?;
 
         if parsed.ok {
-            return Ok(parsed.ts.unwrap_or_else(|| ts.to_owned()));
+            return Ok(parsed);
         }
 
-        Err(match parsed.error.as_deref().unwrap_or("") {
+        let error = match parsed.error.as_deref().unwrap_or("") {
             "not_in_channel" => SlackError::Forbidden,
             "channel_not_found" => SlackError::ChannelNotFound,
             "invalid_auth" => SlackError::Unauthorized,
@@ -262,7 +315,9 @@ impl SlackAdapter {
                 retry_after_ms: retry_after_ms.unwrap_or(0),
             },
             other => SlackError::Upstream(other.to_owned()),
-        })
+        };
+        let retryable = matches!(error, SlackError::RateLimited { .. });
+        Err(AttemptError { error, retryable })
     }
 
     /// Verify and parse an inbound Events-API request, using the current wall

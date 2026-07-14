@@ -24,6 +24,9 @@ repository.workspace = true
 # `MessageBody`. Re-use rather than redefine so the adapter and the gateway
 # never drift into two schemas.
 ardur-messaging-gateway = { workspace = true }
+# Retry+backoff+jitter and circuit-breaker wrapping the outbound
+# `chat.postMessage` / `chat.update` calls — the shared resilience layer.
+ardur-resilience = { workspace = true }
 # `send_message` / `receive` are async trait methods; `async-trait` boxes the
 # futures so `SlackAdapter` stays object-safe behind `dyn MessagingGateway`.
 async-trait = { workspace = true }
