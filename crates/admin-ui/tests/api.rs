@@ -92,7 +92,7 @@ fn append_receipt(
                 "tool_name": name,
                 "arguments_digest": "0".repeat(64),
                 "output_digest": "0".repeat(64),
-                "cost": { "tokens_in": 0, "tokens_out": 0, "cents": 0, "wall_ms": 0, "attention_score": 0.0 },
+                "cost": { "tokens_in": 0, "tokens_out": 0, "cents": 0, "wall_ms": 0, "attention_score": 0 },
             })
         })
         .collect();
@@ -109,7 +109,7 @@ fn append_receipt(
             "tokens_out": tokens_out,
             "cents": cents,
             "wall_ms": 250,
-            "attention_score": 0.0
+            "attention_score": 0
         },
         "tool_calls": tool_calls,
     });
@@ -146,7 +146,7 @@ fn append_receipt_with_provider(
             "tokens_out": 1,
             "cents": cents,
             "wall_ms": 250,
-            "attention_score": 0.0
+            "attention_score": 0
         },
         "provider": provider,
     });
@@ -550,7 +550,7 @@ async fn trust_center_wallet_receipts_and_policy_debugger() {
             "subject": "user:test",
             "cap_token_id": "tok-test",
             "payload_digest": "0".repeat(64),
-            "cost": { "tokens_in": 1, "tokens_out": 1, "cents": 1, "wall_ms": 1, "attention_score": 0.0 },
+            "cost": { "tokens_in": 1, "tokens_out": 1, "cents": 1, "wall_ms": 1, "attention_score": 0 },
             "provider": "anthropic",
         });
         let payload = B64URL.encode(serde_json::to_vec(&body).unwrap());

@@ -5,13 +5,17 @@
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::error::JournalError;
 use ardur_cost_gate::{CostDelta, CostTuple, UnixTsMillis};
 use ardur_runtime::ReceiptId;
 use ardur_tool_registry::ToolId;
+
+// The content digest a `ToolInvocation` records is the workspace-canonical
+// `Sha256Digest` (owned by `ardur-core-types`). Its wire form is the same 64-
+// char lowercase hex string this crate always emitted, so journals written
+// before the consolidation replay byte-for-byte.
+pub use ardur_core_types::Sha256Digest;
 
 /// The monotonic, per-session position of an entry in its journal.
 ///
@@ -43,71 +47,6 @@ impl fmt::Display for EntryId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
     }
-}
-
-/// A hex-encoded SHA-256 content digest: exactly 64 lowercase hex characters
-/// (the 32 raw digest bytes, two hex chars each).
-///
-/// A [`JournalEntry::ToolInvocation`] records the digests of the tool's input
-/// and output payloads rather than the payloads themselves, so the journal
-/// stays bounded while still binding each call to the exact bytes it ran on.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct Sha256Digest(String);
-
-impl Sha256Digest {
-    /// Hash `data` with SHA-256 and hex-encode the digest.
-    #[must_use]
-    pub fn of(data: &[u8]) -> Self {
-        let mut hasher = Sha256::new();
-        hasher.update(data);
-        Self(to_hex(&hasher.finalize()))
-    }
-
-    /// Wrap a pre-computed hex digest, validating that it is exactly 64
-    /// lowercase hex characters.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`JournalError::Malformed`] if `hex` is not 64 characters or
-    /// contains a non-`[0-9a-f]` character.
-    pub fn from_hex(hex: impl Into<String>) -> Result<Self, JournalError> {
-        let hex = hex.into();
-        if hex.len() != 64
-            || !hex
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        {
-            return Err(JournalError::Malformed(format!(
-                "expected 64 lowercase hex chars, got {:?}",
-                hex
-            )));
-        }
-        Ok(Self(hex))
-    }
-
-    /// The digest as a 64-character hex string slice.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Display for Sha256Digest {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-/// Lowercase-hex-encode a byte slice.
-fn to_hex(bytes: &[u8]) -> String {
-    use fmt::Write as _;
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        // Writing to a String is infallible.
-        let _ = write!(out, "{b:02x}");
-    }
-    out
 }
 
 /// Identifier of the cost reservation a [`JournalEntry::CostFinalized`] settles.

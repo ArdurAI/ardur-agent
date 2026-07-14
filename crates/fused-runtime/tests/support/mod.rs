@@ -324,7 +324,7 @@ impl Provider for BillingProvider {
                 tokens_out: 0,
                 cents: self.cents,
                 wall_ms: 0,
-                attention_score: 0.0,
+                attention_score: 0,
             },
             raw_provider_response: None,
         })
@@ -381,7 +381,7 @@ impl LifecycleHook for CapturingPostReceiptCostHook {
     async fn on_post_receipt(&self, ctx: &PostReceiptCtx<'_>) -> Result<(), HookError> {
         self.observed.lock().push(ObservedPostReceiptCost {
             ctx_cost: ctx.cost,
-            receipt_cost: ctx.receipt.cost.clone(),
+            receipt_cost: ctx.receipt.cost,
             response_cost: ctx.response.cost,
         });
         Ok(())

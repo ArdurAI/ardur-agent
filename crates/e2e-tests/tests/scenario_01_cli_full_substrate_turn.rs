@@ -247,7 +247,7 @@ async fn single_turn_through_full_substrate() {
                 tokens_out: 0,
                 cents: 0,
                 wall_ms: 0,
-                attention_score: 0.0,
+                attention_score: 0,
             },
             tool_calls: Vec::new(),
             provider: None,

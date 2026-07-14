@@ -352,7 +352,7 @@ async fn chat_tokens_and_cost_in_response() {
         tokens_out: 30,
         cents: 250,
         wall_ms: 0,
-        attention_score: 0.0,
+        attention_score: 0,
     };
     let provider = ScriptedProvider::new(vec![Step::Reply {
         content: "scripted reply".to_string(),

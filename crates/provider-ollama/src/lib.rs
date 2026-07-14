@@ -633,7 +633,7 @@ impl ChatResponse {
             tokens_out: u64::from(usage.tokens_out),
             cents: 0,
             wall_ms: 0,
-            attention_score: 0.0,
+            attention_score: 0,
         };
 
         CompletionResponse {

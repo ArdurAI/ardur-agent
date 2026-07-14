@@ -9,6 +9,7 @@
 resolver = "2"
 members = [
     "crates/acp",
+    "crates/core-types",
     "crates/cap-token",
     "crates/embeddings",
     "crates/bm25-index",
@@ -239,6 +240,7 @@ russh = { version = "0.62", default-features = false, features = ["flate2", "aws
 
 # --- Internal crate path-deps (one per Phase-0 crate). Declared here so
 #     cross-crate wiring in Phase 1 references `{ workspace = true }`. ---
+ardur-core-types = { path = "crates/core-types" }
 ardur-cap-token = { path = "crates/cap-token" }
 ardur-embeddings = { path = "crates/embeddings" }
 ardur-bm25-index = { path = "crates/bm25-index" }

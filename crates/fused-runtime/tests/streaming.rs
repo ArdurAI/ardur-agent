@@ -296,7 +296,7 @@ fn tool_call_with_usage(
             tokens_out: u64::from(usage.tokens_out),
             cents: usage.cost_cents.unwrap_or_default(),
             wall_ms: 0,
-            attention_score: 0.0,
+            attention_score: 0,
         },
         raw_provider_response: None,
     }
@@ -372,7 +372,7 @@ fn envelope_for(cost: CostTuple) -> CostEnvelope {
         tokens_out_max: cost.tokens_out as u32,
         cents_max: cost.cents as u32,
         wall_ms_max: cost.wall_ms as u32,
-        attention_score_max: cost.attention_score.ceil() as u32,
+        attention_score_max: cost.attention_score as u32,
     }
 }
 
@@ -541,21 +541,21 @@ async fn fused_stream_post_receipt_hook_cost_matches_combined_receipt_cost_for_t
         tokens_out: 3,
         cents: 5,
         wall_ms: 0,
-        attention_score: 0.0,
+        attention_score: 0,
     };
     let tool_cost = CostTuple {
         tokens_in: 11,
         tokens_out: 13,
         cents: 17,
         wall_ms: 19,
-        attention_score: 0.5,
+        attention_score: 500,
     };
     let expected = CostTuple {
         tokens_in: 13,
         tokens_out: 16,
         cents: 22,
         wall_ms: 19,
-        attention_score: 0.5,
+        attention_score: 500,
     };
     let tool_name = "priced.tool";
     let provider = Arc::new(ScriptedProvider::new(

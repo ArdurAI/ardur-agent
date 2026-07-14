@@ -167,10 +167,29 @@ async fn server_routes_signed_slack_message_through_runtime_to_chat_post_message
     );
 
     // Boot persisted the receipt chain + journal — the deployment is durable.
+    // The worker persists the receipt chain asynchronously and can lag the final
+    // Slack post it precedes, so poll for the file (as the reply wait does) rather
+    // than checking it the instant the posts land — an instant check races the
+    // write under CI load (macOS runner flake).
+    let receipt_chain = data_dir.path().join("receipts/chain.jsonl");
     assert!(
-        data_dir.path().join("receipts/chain.jsonl").is_file(),
+        wait_for_file(&receipt_chain, Duration::from_secs(10)).await,
         "the turn's receipt was persisted"
     );
+}
+
+/// Poll for `path` to become a file, up to `timeout`; `true` once it exists.
+async fn wait_for_file(path: &std::path::Path, timeout: Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if path.is_file() {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
 }
 
 /// Poll the mock until it has recorded at least `count` requests, or `timeout`

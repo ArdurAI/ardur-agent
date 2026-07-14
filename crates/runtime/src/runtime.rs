@@ -5,7 +5,8 @@ use std::future::Future;
 use serde::{Deserialize, Serialize};
 
 use crate::error::RuntimeError;
-use crate::types::{CapTokenRef, ChatMessage, CostTuple, ProviderId, ReceiptId, Role, SessionId};
+use crate::types::{CapTokenRef, ChatMessage, Role, SessionId};
+use ardur_core_types::{CostTuple, ProviderId, ReceiptId};
 
 /// A request to run one turn against the runtime.
 #[derive(Clone, Debug, Serialize, Deserialize)]

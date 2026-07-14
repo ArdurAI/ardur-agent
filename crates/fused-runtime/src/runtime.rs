@@ -1226,7 +1226,7 @@ impl FusedRuntime {
                         return Err(err);
                     }
 
-                    tool_cost = add_cost(tool_cost, &output.cost);
+                    tool_cost = tool_cost.saturating_add(&output.cost);
                     tool_receipts.push(ToolCallReceipt {
                         call_id: call.id.clone(),
                         tool_name: call.name.clone(),
@@ -1236,7 +1236,7 @@ impl FusedRuntime {
                         output_digest: Sha256Digest::of(
                             &serde_json::to_vec(&output.content).unwrap_or_default(),
                         ),
-                        cost: runtime_cost_to_receipt(&output.cost),
+                        cost: output.cost,
                     });
                     tool_messages.push(ChatMessage::tool_result(
                         &call.id,
@@ -1255,7 +1255,7 @@ impl FusedRuntime {
                             &serde_json::to_vec(&call.arguments).unwrap_or_default(),
                         ),
                         output_digest: Sha256Digest::of(b""),
-                        cost: runtime_cost_to_receipt(&RuntimeCostTuple::default()),
+                        cost: RuntimeCostTuple::default(),
                     });
                 }
             }
@@ -1266,7 +1266,7 @@ impl FusedRuntime {
             //    signing, cost finalization, journal append, receipt persistence,
             //    and tail update; this prevents concurrent turns from forking the
             //    receipt chain or rolling back each other's journals.
-            let combined_cost = add_cost(response.cost, &tool_cost);
+            let combined_cost = response.cost.saturating_add(&tool_cost);
             let (signed, receipt) = {
                 let _commit_guard = self.commit_lock.lock().await;
                 let parent_hash = *self.chain_tail.lock();
@@ -1279,7 +1279,7 @@ impl FusedRuntime {
                     cap_token_id: ardur_receipt::TokenId(claims.token_id.to_string()),
                     payload_digest: Sha256Digest::of(response.content.as_bytes()),
                     session_id: Some(session_id.0),
-                    cost: runtime_cost_to_receipt(&combined_cost),
+                    cost: combined_cost,
                     tool_calls: tool_receipts,
                     provider: Some(self.provider.name()),
                 };
@@ -1299,7 +1299,7 @@ impl FusedRuntime {
                 //    combined actual (provider + tools) before making the turn
                 //    durable. If the reservation expired, no receipt/journal entry
                 //    is committed for a turn the cost gate rejected.
-                let actual = runtime_cost_to_gate(&combined_cost);
+                let actual = combined_cost;
                 let finalization = match self.gate.finalize(reservation, actual).await {
                     Ok(finalization) => finalization,
                     Err(e) => {
@@ -1436,7 +1436,7 @@ impl FusedRuntime {
             //     post-receipt hooks/finalize/memory, so no separate journal append
             //     runs here.
 
-            total_cost = add_cost(total_cost, &combined_cost);
+            total_cost = total_cost.saturating_add(&combined_cost);
 
             // Termination: a response with no tool calls is the final answer; a
             // tool-wanting response at the iteration ceiling aborts; otherwise we
@@ -1832,7 +1832,7 @@ impl FusedRuntime {
                             result: output.content.clone(),
                         };
 
-                        tool_cost = add_cost(tool_cost, &output.cost);
+                        tool_cost = tool_cost.saturating_add(&output.cost);
                         tool_receipts.push(ToolCallReceipt {
                             call_id: call.id.clone(),
                             tool_name: call.name.clone(),
@@ -1842,7 +1842,7 @@ impl FusedRuntime {
                             output_digest: Sha256Digest::of(
                                 &serde_json::to_vec(&output.content).unwrap_or_default(),
                             ),
-                            cost: runtime_cost_to_receipt(&output.cost),
+                            cost: output.cost,
                         });
                         tool_messages.push(ChatMessage::tool_result(
                             &call.id,
@@ -1861,14 +1861,14 @@ impl FusedRuntime {
                                 &serde_json::to_vec(&call.arguments).unwrap_or_default(),
                             ),
                             output_digest: Sha256Digest::of(b""),
-                            cost: runtime_cost_to_receipt(&RuntimeCostTuple::default()),
+                            cost: RuntimeCostTuple::default(),
                         });
                     }
                 }
 
                 // 7. receipt mint + chain.
                 yield FusedEvent::StageStart { stage: StageKind::ReceiptMint };
-                let combined_cost = add_cost(response.cost, &tool_cost);
+                let combined_cost = response.cost.saturating_add(&tool_cost);
                 // Match the non-streaming atomicity contract: serialize parent-tail
                 // selection, cost settlement, receipt persistence, and journal append.
                 let _commit_guard = self.commit_lock.lock().await;
@@ -1882,7 +1882,7 @@ impl FusedRuntime {
                     cap_token_id: ardur_receipt::TokenId(claims.token_id.to_string()),
                     payload_digest: Sha256Digest::of(response.content.as_bytes()),
                     session_id: Some(session_id.0),
-                    cost: runtime_cost_to_receipt(&combined_cost),
+                    cost: combined_cost,
                     tool_calls: tool_receipts,
                     provider: Some(self.provider.name()),
                 };
@@ -1903,7 +1903,7 @@ impl FusedRuntime {
                 // journal state becomes durable. A rejected/expired reservation
                 // therefore cannot produce authoritative spend evidence.
                 yield FusedEvent::StageStart { stage: StageKind::CostGateFinalize };
-                let actual = runtime_cost_to_gate(&combined_cost);
+                let actual = combined_cost;
                 let finalization = match self
                     .gate
                     .finalize(reservation.take().expect("reservation held"), actual)
@@ -2162,18 +2162,6 @@ fn map_provider_error(err: &ProviderError) -> RuntimeError {
     }
 }
 
-/// Sum two runtime cost tuples dimension-wise (saturating on the integer axes),
-/// used to fold each tool call's cost into a turn's provider cost (§6.0).
-fn add_cost(a: RuntimeCostTuple, b: &RuntimeCostTuple) -> RuntimeCostTuple {
-    RuntimeCostTuple {
-        tokens_in: a.tokens_in.saturating_add(b.tokens_in),
-        tokens_out: a.tokens_out.saturating_add(b.tokens_out),
-        cents: a.cents.saturating_add(b.cents),
-        wall_ms: a.wall_ms.saturating_add(b.wall_ms),
-        attention_score: a.attention_score + b.attention_score,
-    }
-}
-
 /// Map a tool-registry failure onto the runtime's error surface. A tool that
 /// reported its own timeout maps to [`RuntimeError::ToolTimeout`]; everything
 /// else degrades to [`RuntimeError::Internal`] carrying the tool name.
@@ -2193,30 +2181,6 @@ fn tool_output_text(value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::String(s) => s.clone(),
         other => other.to_string(),
-    }
-}
-
-/// Convert the runtime's `CostTuple` into the receipt crate's (identically
-/// shaped) `CostTuple`.
-fn runtime_cost_to_receipt(cost: &RuntimeCostTuple) -> ardur_receipt::CostTuple {
-    ardur_receipt::CostTuple {
-        tokens_in: cost.tokens_in,
-        tokens_out: cost.tokens_out,
-        cents: cost.cents,
-        wall_ms: cost.wall_ms,
-        attention_score: cost.attention_score,
-    }
-}
-
-/// Widen the runtime's `CostTuple` into the cost gate's, mapping the fractional
-/// attention score onto the gate's integer axis.
-fn runtime_cost_to_gate(cost: &RuntimeCostTuple) -> GateCostTuple {
-    GateCostTuple {
-        tokens_in: cost.tokens_in,
-        tokens_out: cost.tokens_out,
-        cents: cost.cents,
-        wall_ms: cost.wall_ms,
-        attention_score: cost.attention_score as u64,
     }
 }
 
