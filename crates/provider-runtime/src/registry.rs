@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use ardur_runtime::ProviderId;
 
+use crate::embedding::EmbeddingProvider;
 use crate::provider::Provider;
 
 /// An in-process registry of providers, keyed by [`ProviderId`].
@@ -33,6 +34,47 @@ impl ProviderRegistry {
     /// Resolve a provider by id, returning a shared handle.
     #[must_use]
     pub fn get(&self, id: &ProviderId) -> Option<Arc<dyn Provider>> {
+        self.providers.get(id).cloned()
+    }
+
+    /// The ids of every registered provider, in unspecified order.
+    #[must_use]
+    pub fn list(&self) -> Vec<ProviderId> {
+        self.providers.keys().cloned().collect()
+    }
+}
+
+/// An in-process registry of [`EmbeddingProvider`]s, keyed by [`ProviderId`].
+///
+/// Mirrors [`ProviderRegistry`] — a separate registry rather than a shared one
+/// because a `ProviderId` (e.g. `"anthropic"`) may resolve to a completion
+/// backend, an embedding backend, both, or neither; callers that need
+/// embeddings resolve against this registry explicitly.
+#[derive(Default)]
+pub struct EmbeddingProviderRegistry {
+    providers: HashMap<ProviderId, Arc<dyn EmbeddingProvider>>,
+}
+
+impl EmbeddingProviderRegistry {
+    /// An empty registry.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register `provider` under its own [`EmbeddingProvider::id`], replacing
+    /// any prior entry with the same id and returning the displaced provider,
+    /// if any.
+    pub fn register(
+        &mut self,
+        provider: Arc<dyn EmbeddingProvider>,
+    ) -> Option<Arc<dyn EmbeddingProvider>> {
+        self.providers.insert(provider.id(), provider)
+    }
+
+    /// Resolve a provider by id, returning a shared handle.
+    #[must_use]
+    pub fn get(&self, id: &ProviderId) -> Option<Arc<dyn EmbeddingProvider>> {
         self.providers.get(id).cloned()
     }
 

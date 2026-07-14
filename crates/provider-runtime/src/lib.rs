@@ -42,6 +42,7 @@
 #![warn(missing_docs)]
 
 mod anthropic;
+mod embedding;
 mod error;
 mod instrument;
 mod provider;
@@ -52,11 +53,12 @@ pub mod telemetry;
 mod types;
 
 pub use anthropic::AnthropicProvider;
+pub use embedding::{EmbeddingProvider, EmbeddingRequest, EmbeddingResponse};
 pub use error::ProviderError;
 pub use instrument::InstrumentedProvider;
 pub use provider::Provider;
 pub use rate_card::RateCard;
-pub use registry::ProviderRegistry;
+pub use registry::{EmbeddingProviderRegistry, ProviderRegistry};
 pub use stream::{ProviderStream, StreamEvent};
 pub use telemetry::{TelemetryConfig, TelemetryError, init_genai_tracing, shutdown_genai_tracing};
 pub use types::{
