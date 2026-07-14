@@ -80,3 +80,28 @@ when { resource.high_risk_capabilities.contains("shell_exec") };
 ```
 
 Resource attributes available to policy rules: `kind` (`"skill"`/`"plugin"`), `capabilities` (set of capability strings with the `cap.` prefix stripped), `high_risk_capabilities` (the subset in `shell_exec`/`process_spawn`/`network_out`/`fs_write`), `high_risk` (bool), `signed` (bool — was `--key` supplied), `claims_count`, `version`. Actions: `skill_install`, `skill_update`, `skill_uninstall`, `skill_publish`, `skill_audit`. The principal is `MarketplacePrincipal::"<name>"`, where `<name>` defaults to `local-user` and is overridable via `ARDUR_MARKETPLACE_PRINCIPAL` — this CLI has no multi-user auth system, so the principal is a self-declared identity for policies that want to distinguish operators on a shared machine, not an authenticated one.
+
+## Local advisory database (optional hardening)
+
+`install`, `update`, and `audit` can additionally check a manifest's exact `(id, version)` against a local, bounded advisory database:
+
+```sh
+ardur marketplace install ./manifest.json --key ./pub.pem --advisory-db ./advisories.json
+# or: export ARDUR_MARKETPLACE_ADVISORY_DB=./advisories.json
+```
+
+This is **not** a live OSV/NVD/RustSec feed — no network call, no background sync. The built-in default is empty, so this feature is inert until you supply a database. The format is a JSON array:
+
+```json
+[
+  {
+    "advisory_id": "ARDUR-ADV-0001",
+    "skill_id": "skill.example",
+    "affected_versions": ["1.0.0", "1.0.1"],
+    "severity": "critical",
+    "summary": "Reported credential-exfiltration behavior."
+  }
+]
+```
+
+A match refuses `install`/`update` by default; pass `--allow-known-vulnerable <advisory_id>` (repeatable) to explicitly accept a specific advisory and proceed anyway — accepted matches still print, so the override is visible. `audit` reports every match regardless of any override, for ongoing visibility into what's running despite an accepted risk. Matching is exact-version (no range syntax), keeping the format and its parser trivial to audit. Bounded: the database file is capped at 5 MiB / 10,000 entries, and each summary at 500 characters.

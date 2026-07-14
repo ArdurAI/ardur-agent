@@ -826,3 +826,194 @@ when { resource.high_risk == true };
         .assert()
         .success();
 }
+
+#[test]
+fn marketplace_no_advisory_db_permits_install() {
+    // No --advisory-db/ARDUR_MARKETPLACE_ADVISORY_DB supplied: the built-in
+    // default is empty, so installs behave exactly as before this feature
+    // existed.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (manifest_path, key_path, _) =
+        signed_skill_manifest(dir.path(), "skill.plain", "Plain", "0.1.0", vec![]);
+
+    Command::cargo_bin("ardur")
+        .expect("the `ardur` binary builds")
+        .env("HOME", dir.path())
+        .args(["marketplace", "install"])
+        .arg(&manifest_path)
+        .arg("--key")
+        .arg(&key_path)
+        .assert()
+        .success();
+}
+
+#[test]
+fn marketplace_advisory_db_blocks_known_vulnerable_version_by_default() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (manifest_path, key_path, _) = signed_skill_manifest(
+        dir.path(),
+        "skill.vulnerable",
+        "Vulnerable",
+        "1.0.0",
+        vec![],
+    );
+
+    let advisory_path = dir.path().join("advisories.json");
+    std::fs::write(
+        &advisory_path,
+        json!([{
+            "advisory_id": "ARDUR-ADV-0001",
+            "skill_id": "skill.vulnerable",
+            "affected_versions": ["1.0.0"],
+            "severity": "critical",
+            "summary": "Reported credential-exfiltration behavior."
+        }])
+        .to_string(),
+    )
+    .expect("write advisories");
+
+    Command::cargo_bin("ardur")
+        .expect("the `ardur` binary builds")
+        .env("HOME", dir.path())
+        .args(["marketplace", "install"])
+        .arg(&manifest_path)
+        .arg("--key")
+        .arg(&key_path)
+        .arg("--advisory-db")
+        .arg(&advisory_path)
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("ARDUR-ADV-0001"));
+
+    // Explicitly accepting the advisory id lets the install through.
+    Command::cargo_bin("ardur")
+        .expect("the `ardur` binary builds")
+        .env("HOME", dir.path())
+        .args(["marketplace", "install"])
+        .arg(&manifest_path)
+        .arg("--key")
+        .arg(&key_path)
+        .arg("--advisory-db")
+        .arg(&advisory_path)
+        .arg("--allow-known-vulnerable")
+        .arg("ARDUR-ADV-0001")
+        .assert()
+        .success();
+}
+
+#[test]
+fn marketplace_advisory_db_is_exact_version_scoped() {
+    // The advisory names version 1.0.0; a different version of the same
+    // skill_id is unaffected — proving the match is exact-version, not
+    // blanket-by-id.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (manifest_path, key_path, _) = signed_skill_manifest(
+        dir.path(),
+        "skill.vulnerable",
+        "Vulnerable",
+        "2.0.0",
+        vec![],
+    );
+
+    let advisory_path = dir.path().join("advisories.json");
+    std::fs::write(
+        &advisory_path,
+        json!([{
+            "advisory_id": "ARDUR-ADV-0002",
+            "skill_id": "skill.vulnerable",
+            "affected_versions": ["1.0.0"],
+            "severity": "high",
+            "summary": "Only affects 1.0.0."
+        }])
+        .to_string(),
+    )
+    .expect("write advisories");
+
+    Command::cargo_bin("ardur")
+        .expect("the `ardur` binary builds")
+        .env("HOME", dir.path())
+        .args(["marketplace", "install"])
+        .arg(&manifest_path)
+        .arg("--key")
+        .arg(&key_path)
+        .arg("--advisory-db")
+        .arg(&advisory_path)
+        .assert()
+        .success();
+}
+
+#[test]
+fn marketplace_audit_reports_advisory_matches_regardless_of_override() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (manifest_path, key_path, _) = signed_skill_manifest(
+        dir.path(),
+        "skill.audited-vuln",
+        "AuditedVuln",
+        "1.0.0",
+        vec![],
+    );
+
+    let advisory_path = dir.path().join("advisories.json");
+    std::fs::write(
+        &advisory_path,
+        json!([{
+            "advisory_id": "ARDUR-ADV-0003",
+            "skill_id": "skill.audited-vuln",
+            "affected_versions": ["1.0.0"],
+            "severity": "medium",
+            "summary": "Flagged for audit visibility."
+        }])
+        .to_string(),
+    )
+    .expect("write advisories");
+
+    Command::cargo_bin("ardur")
+        .expect("the `ardur` binary builds")
+        .env("HOME", dir.path())
+        .args(["marketplace", "install"])
+        .arg(&manifest_path)
+        .arg("--key")
+        .arg(&key_path)
+        .arg("--advisory-db")
+        .arg(&advisory_path)
+        .arg("--allow-known-vulnerable")
+        .arg("ARDUR-ADV-0003")
+        .assert()
+        .success();
+
+    Command::cargo_bin("ardur")
+        .expect("the `ardur` binary builds")
+        .env("HOME", dir.path())
+        .args(["marketplace", "audit", "skill.audited-vuln"])
+        .arg("--advisory-db")
+        .arg(&advisory_path)
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("ARDUR-ADV-0003"))
+        .stdout(predicates::str::contains("1 with matching advisories"));
+}
+
+#[test]
+fn marketplace_advisory_db_rejects_oversized_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (manifest_path, key_path, _) =
+        signed_skill_manifest(dir.path(), "skill.x", "X", "0.1.0", vec![]);
+
+    let advisory_path = dir.path().join("huge.json");
+    // 6 MiB of whitespace-padded JSON, exceeding the 5 MiB ceiling.
+    let padding = " ".repeat(6 * 1024 * 1024);
+    std::fs::write(&advisory_path, format!("[{padding}]")).expect("write");
+
+    Command::cargo_bin("ardur")
+        .expect("the `ardur` binary builds")
+        .env("HOME", dir.path())
+        .args(["marketplace", "install"])
+        .arg(&manifest_path)
+        .arg("--key")
+        .arg(&key_path)
+        .arg("--advisory-db")
+        .arg(&advisory_path)
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("exceeding"));
+}
