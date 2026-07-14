@@ -1874,9 +1874,11 @@ fn append_grant_receipt(
             .map_err(|e| CliError::State(format!("invalid grant verb: {e}")))?,
         issued_at: ardur_receipt::UnixTsMillis(issued_at_ms),
         subject: ardur_receipt::HolderId(subject.to_string()),
-        // Operator grants are not made under a session cap-token; label the
-        // authority explicitly rather than borrowing a turn's token id.
-        cap_token_id: ardur_receipt::TokenId("operator-grant".to_string()),
+        // Operator grants are not made under a session cap-token; use a fixed
+        // sentinel token id (a stable, self-documenting UUID) rather than
+        // borrowing a turn's token id. `TokenId` is a `Uuid` newtype (H5), so a
+        // 16-byte ASCII label stands in for the absent session token.
+        cap_token_id: ardur_receipt::TokenId(uuid::Uuid::from_bytes(*b"ardur-op-grant!!")),
         payload_digest: ardur_receipt::Sha256Digest::of(&payload_bytes),
         session_id: None,
         // A grant costs nothing — it is an authorization record, not a turn.

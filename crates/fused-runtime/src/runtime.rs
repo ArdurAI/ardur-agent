@@ -332,7 +332,7 @@ impl FusedRuntime {
             verb,
             issued_at: ardur_receipt::UnixTsMillis(now_ms),
             subject: ardur_receipt::HolderId(claims.subject.0.clone()),
-            cap_token_id: ardur_receipt::TokenId(claims.token_id.to_string()),
+            cap_token_id: ardur_receipt::TokenId(claims.token_id),
             payload_digest,
             session_id: Some(session_id.0),
             cost,
