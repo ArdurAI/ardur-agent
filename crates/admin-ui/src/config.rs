@@ -52,6 +52,14 @@ pub struct Cli {
     #[arg(long, value_name = "NAME", default_value = "ardur_memory")]
     pub qdrant_collection: String,
 
+    /// Path to the Cedar policy bundle `ardur-server` enforces (the same
+    /// `.cedar` file passed to its own policy config). When set, enables the
+    /// Trust Center's policy debugger (`/api/trust/policy/debug`,
+    /// `/trust`'s policy-debugger form). Read-only: admin-ui only evaluates
+    /// hypothetical queries against it, never enforces it.
+    #[arg(long, value_name = "PATH")]
+    pub policy_bundle: Option<PathBuf>,
+
     /// Port to serve the dashboard on.
     #[arg(long, default_value_t = DEFAULT_PORT)]
     pub port: u16,

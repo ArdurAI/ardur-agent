@@ -59,7 +59,16 @@ async fn dashboard(State(state): State<SharedState>) -> Result<Markup, ApiError>
     let sessions = journal::list_sessions(&state.journal_dir)?;
     let recent = receipts::recent(&state.receipt_store, 50)?;
     let receipt_summaries: Vec<ReceiptSummary> = recent.iter().map(ReceiptSummary::from).collect();
-    Ok(html::dashboard(&report, &sessions, &receipt_summaries))
+    let wallet = trust::wallet(&state.capabilities, now_ms() / 1000);
+    let chain = trust::verify_receipts(&state.receipt_store)?;
+    Ok(html::dashboard(
+        &report,
+        &sessions,
+        &receipt_summaries,
+        &wallet,
+        &chain,
+        state.policies.is_some(),
+    ))
 }
 
 /// `GET /api/sessions`
