@@ -55,6 +55,7 @@ members = [
     "crates/config",
     "crates/health",
     "crates/logs",
+    "crates/resilience",
 ]
 
 [workspace.package]
@@ -232,6 +233,12 @@ futures = "0.3"
 rmcp = { version = "=2.0.0", default-features = false, features = ["server", "client", "transport-streamable-http-server", "transport-streamable-http-client-reqwest"] }
 # Docker daemon API for terminal Docker exec backend (ARD-315/ARD-324).
 bollard = "0.21"
+# Jitter for the shared resilience layer's retry/backoff (crates/resilience).
+# Plain `rand`, not `rand_core` alone, because jitter needs a full RNG
+# (`random_range`) rather than the raw byte-fill trait rand_core exposes.
+# Pinned to 0.10 to match `crates/cli`'s existing direct `rand = "0.10"` dep
+# (#265) — one version in the tree, no cargo-deny duplicate-version warning.
+rand = "0.10"
 # SSH client library for terminal SSH remote backend (ARD-315/ARD-324). Disable
 # russh's default `rsa` feature because upstream rsa has an unfixed Marvin timing
 # side-channel advisory (RUSTSEC-2023-0071); keep compression and aws-lc crypto.
@@ -281,3 +288,4 @@ ardur-web = { path = "crates/web" }
 ardur-config = { path = "crates/config" }
 ardur-health = { path = "crates/health" }
 ardur-logs = { path = "crates/logs" }
+ardur-resilience = { path = "crates/resilience" }
