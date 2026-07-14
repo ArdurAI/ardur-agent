@@ -2690,6 +2690,9 @@ fn run_fetch(args: FetchArgs) -> Result<(), CliError> {
         ));
     }
 
+    // Friendly, path-aware allowlist message before we dial anything. The
+    // `HttpFetchTool` re-checks this (defence in depth), but its Denied reason
+    // does not know the config path, so keep the CLI's own guidance here.
     let host = url
         .split('/')
         .nth(2)
@@ -2705,20 +2708,13 @@ fn run_fetch(args: FetchArgs) -> Result<(), CliError> {
         )));
     }
 
+    // Route the actual fetch through the library's hardened `HttpFetchTool`
+    // rather than a raw reqwest client. The tool enforces the SSRF blocklist
+    // (private/internal IPs, with per-redirect-hop re-validation and DNS-rebind
+    // pinning), GET/HEAD only, and a streamed byte cap — none of which the old
+    // raw path did (R1: an allowlisted host could redirect to cloud-metadata/LAN).
     let rt = tokio::runtime::Runtime::new()?;
-    let body = rt.block_on(async {
-        let client = reqwest::Client::new();
-        let response = client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| CliError::State(format!("request failed: {e}")))?;
-        let text = response
-            .text()
-            .await
-            .map_err(|e| CliError::State(format!("read failed: {e}")))?;
-        Ok::<String, CliError>(text.chars().take(args.max_bytes).collect())
-    })?;
+    let body = rt.block_on(fetch_through_guard(&url, allowlist, args.max_bytes))?;
 
     match args.output {
         Some(path) => {
@@ -2728,6 +2724,60 @@ fn run_fetch(args: FetchArgs) -> Result<(), CliError> {
         None => println!("{body}"),
     }
     Ok(())
+}
+
+/// Fetch `url` through the hardened [`HttpFetchTool`], returning the response
+/// body as a UTF-8-lossy string truncated at `max_bytes`.
+///
+/// `allowlist` is the set of hosts the user opted into (exact host,
+/// `*.suffix` wildcard, or `*`). Routing through the tool — instead of the
+/// former raw `reqwest::Client::new()` — gives `ardur fetch` the same SSRF
+/// defence the agent's `http.fetch` tool has: private/internal-IP blocklist,
+/// per-redirect-hop re-validation, DNS-rebind pinning, GET/HEAD only, and a
+/// streamed byte cap. Private-IP access stays disabled, so an allowlisted host
+/// that resolves or redirects to a loopback/RFC-1918/link-local address is
+/// refused rather than dialled (R1).
+async fn fetch_through_guard(
+    url: &str,
+    allowlist: Vec<String>,
+    max_bytes: usize,
+) -> Result<String, CliError> {
+    use ardur_tool_registry::{
+        CapTokenRef, HttpFetchTool, InvocationId, SessionId, Tool, ToolContext, ToolError,
+    };
+
+    let tool = HttpFetchTool::new()
+        .with_allowlist(allowlist)
+        .with_max_bytes(max_bytes);
+
+    // `HttpFetchTool` does not consult the context for authorization (the fused
+    // runtime gates it upstream); `ardur fetch` is the local user, so a minimal
+    // context suffices. Crucially, `with_private_ip_access` is left at its
+    // default (`false`), keeping the SSRF blocklist active.
+    let ctx = ToolContext {
+        cap_token: CapTokenRef(String::new()),
+        session_id: SessionId::new(),
+        invocation_id: InvocationId::new(),
+        cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        env: std::collections::HashMap::new(),
+        cost_budget_cents: u32::MAX,
+    };
+
+    let output = tool
+        .invoke(&ctx, serde_json::json!({ "url": url }))
+        .await
+        .map_err(|e| match e {
+            ToolError::Denied { reason } => CliError::State(format!("fetch denied: {reason}")),
+            ToolError::Timeout => CliError::State("fetch timed out".to_string()),
+            other => CliError::State(format!("fetch failed: {other}")),
+        })?;
+
+    Ok(output
+        .content
+        .get("body")
+        .and_then(|b| b.as_str())
+        .unwrap_or_default()
+        .to_string())
 }
 
 /// Run `ardur search` (stub; provider wiring in Phase 2).
@@ -3098,4 +3148,54 @@ fn run_migrate(args: MigrateArgs) -> Result<(), CliError> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod fetch_ssrf_tests {
+    //! R1 regression: `ardur fetch` must not bypass the library SSRF guard.
+    //!
+    //! Before the fix, `run_fetch` used a bare `reqwest::Client::new()` with a
+    //! plaintext host allowlist and default (auto-following) redirects, so an
+    //! allowlisted host that resolved or redirected to a private/internal
+    //! address was dialled. Routing through `HttpFetchTool` (see
+    //! [`fetch_through_guard`]) restores the internal-IP blocklist. These tests
+    //! make no network connection — every case is refused at the IP/host gate
+    //! before any socket is opened.
+    use super::*;
+
+    fn refusal_reason(url: &str, allow: &[&str]) -> String {
+        let allowlist: Vec<String> = allow.iter().map(|s| s.to_string()).collect();
+        let rt = tokio::runtime::Runtime::new().expect("build tokio runtime");
+        match rt.block_on(fetch_through_guard(url, allowlist, 1024)) {
+            Ok(body) => panic!("expected the fetch to be refused, got body: {body:?}"),
+            Err(e) => e.to_string(),
+        }
+    }
+
+    #[test]
+    fn allowlisted_metadata_ip_is_refused() {
+        // The cloud-metadata endpoint, explicitly allowlisted, is still refused.
+        let reason = refusal_reason("http://169.254.169.254/latest/meta-data/", &["169.254.169.254"]);
+        assert!(reason.contains("denied"), "expected a denial, got: {reason}");
+        assert!(
+            reason.contains("SSRF") || reason.contains("internal") || reason.contains("private"),
+            "expected an SSRF/internal-IP denial, got: {reason}"
+        );
+    }
+
+    #[test]
+    fn allowlisted_rfc1918_ip_is_refused() {
+        let reason = refusal_reason("http://10.0.0.1/", &["10.0.0.1"]);
+        assert!(reason.contains("denied"), "expected a denial, got: {reason}");
+    }
+
+    #[test]
+    fn host_not_on_guard_allowlist_is_refused() {
+        // Defence in depth: the tool re-checks the host allowlist too.
+        let reason = refusal_reason("http://example.com/", &["other.invalid"]);
+        assert!(
+            reason.contains("denied") || reason.contains("allowlist"),
+            "expected an allowlist denial, got: {reason}"
+        );
+    }
 }

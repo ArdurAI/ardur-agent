@@ -45,6 +45,10 @@ ardur-session-journals = { workspace = true }
 # ARD-426: automation — the task-flow DAG model + orchestrator trait for
 # `ardur task` commands (task.create / task.list / task.cancel / task.status).
 ardur-automation = { workspace = true }
+# §6.1 tool registry — `ardur fetch` routes through the hardened `HttpFetchTool`
+# so the CLI shares the library's SSRF defence (internal-IP blocklist, per-hop
+# redirect re-validation, streamed byte cap) instead of a bare reqwest client.
+ardur-tool-registry = { workspace = true }
 # Ed25519 cap-token issuer key custody: load/persist the issuer private key so
 # the session's cap-token root is stable across runs.
 biscuit-auth = { workspace = true }
@@ -90,8 +94,6 @@ rand = "0.10"
 # ARD-143: schedule / cron CLI.
 chrono = { workspace = true }
 ardur-cron = { workspace = true }
-# ARD-144/145: connector HTTP fetch.
-reqwest = { workspace = true }
 # ARD-120/121/132: supply-chain audit tooling.
 ignore = { workspace = true }
 cargo-lock = { workspace = true }
