@@ -55,6 +55,7 @@ members = [
     "crates/config",
     "crates/health",
     "crates/logs",
+    "crates/benches",
 ]
 
 [workspace.package]
