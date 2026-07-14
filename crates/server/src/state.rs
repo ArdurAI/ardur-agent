@@ -36,8 +36,8 @@
 //! session budget provisioning, which needs a request-time provisioning API on
 //! the runtime (or an injectable shared budget store).
 
-use std::panic::AssertUnwindSafe;
 use std::collections::{BTreeMap, BTreeSet};
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -628,8 +628,14 @@ impl AppState {
             if let Some(session) = body.session_id {
                 sessions.insert(session);
             }
-            *stats.by_verb.entry(body.verb.as_str().to_string()).or_default() += 1;
-            let provider = body.provider.clone().unwrap_or_else(|| "unknown".to_string());
+            *stats
+                .by_verb
+                .entry(body.verb.as_str().to_string())
+                .or_default() += 1;
+            let provider = body
+                .provider
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string());
             *stats.by_provider.entry(provider).or_default() += 1;
         }
         stats.distinct_sessions = sessions.len();
@@ -1668,7 +1674,10 @@ mod tests {
         assert_eq!(s.turns_ok, 2);
         assert_eq!(s.injection_blocked, 1);
         assert_eq!(s.policy_denied, 1);
-        assert_eq!(s.cap_denied, 2, "missing + denied both count as cap denials");
+        assert_eq!(
+            s.cap_denied, 2,
+            "missing + denied both count as cap denials"
+        );
         assert_eq!(s.cost_rejected, 1);
         assert_eq!(s.hook_vetoed, 1);
         assert_eq!(s.tool_denied, 1);

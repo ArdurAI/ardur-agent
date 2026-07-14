@@ -192,7 +192,11 @@ async fn metrics(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Resp
         "# HELP ardur_server_tool_calls_total Tool calls attested across the receipt chain."
     );
     let _ = writeln!(body, "# TYPE ardur_server_tool_calls_total counter");
-    let _ = writeln!(body, "ardur_server_tool_calls_total {}", stats.tool_calls_sum);
+    let _ = writeln!(
+        body,
+        "ardur_server_tool_calls_total {}",
+        stats.tool_calls_sum
+    );
     let _ = writeln!(
         body,
         "# HELP ardur_server_sessions_total Distinct sessions spanned by the receipt chain."
