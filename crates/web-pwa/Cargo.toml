@@ -1,0 +1,48 @@
+# ardur-web-pwa — installable PWA support: a VAPID keypair, a subscription
+# store, and Web Push send, mounted by the server under an opt-in HTTP
+# surface alongside the static `web-client/` shell.
+#
+# Plan family: §10.14 (PWA Install, Service Worker, Web Push Subscribe, And
+# Test Blueprint). Phase 1 subset — see the crate docs' adapt-points note for
+# what the full blueprint calls for that this PR defers to Phase 2 (Cedar
+# per-push policy gate, JWS-ES256 + TSA per-delivery receipts, SessionStore-
+# projected subscription rows, per-tenant key/subscription partitioning).
+
+[package]
+name = "ardur-web-pwa"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The VAPID identity key is a P-256 keypair — same curve/crate the receipt
+# chain's ES256 signing key already uses (`crates/receipt`), so this follows
+# an established in-repo convention rather than introducing a second ECC
+# stack.
+p256 = { workspace = true }
+rand_core = { workspace = true }
+# Builds the VAPID JWT + encrypts the push payload (RFC 8188 aes128gcm) and
+# assembles the provider-agnostic `WebPushMessage`. `default-features = false`
+# drops the crate's bundled HTTP clients (`isahc`/`hyper-tls`, both non-
+# rustls) — this crate does the actual POST itself via the workspace's
+# rustls-tls `reqwest`, converting only the message's endpoint/headers/body,
+# not its `http` 0.2 `Request` type (which would collide with reqwest's `http`
+# 1.x).
+web-push = { version = "0.11", default-features = false }
+reqwest = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+base64 = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+tempfile = { workspace = true }
+tower = { workspace = true }

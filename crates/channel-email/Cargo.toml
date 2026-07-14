@@ -1,0 +1,69 @@
+# ardur-channel-email — an email channel adapter behind the §4.0
+# `MessagingGateway` contract (alongside the Slack, Matrix, Discord, and
+# Telegram adapters).
+#
+# Plan family: §4.4 (Channel Adapter Catalog, Hermes-derived) — Cycle-4 P0
+# subset ("Slack, Discord, Telegram, WhatsApp, Signal, SMS, Email, Webhook",
+# plans/4.4-channel-adapter-catalog-hermes-blueprint.md lines 82-83). Phase 1 =
+# IMAP polling for receive (not IDLE — see the crate docs' adapt-points note),
+# SMTP for send, a sender-address allowlist, and self-echo loop prevention (an
+# inbound message From the configured account address is dropped).
+
+[package]
+name = "ardur-channel-email"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The §4.0 gateway owns every value type a delivery speaks in — the
+# `MessagingGateway` trait this adapter implements, plus `OutgoingMessage` /
+# `IncomingMessage` / `MessageReceipt` / `GatewayError` / `MessageTarget` /
+# `MessageBody`. Re-use rather than redefine so the adapter and the gateway
+# never drift into two schemas.
+ardur-messaging-gateway = { workspace = true }
+# IMAP client for the receive side. Pinned to the 3.0 alpha line (the only
+# maintained major version of `rust-imap`); `rustls-tls` keeps the TLS stack
+# pure-Rust, matching the workspace's existing `reqwest` rustls-tls choice
+# rather than pulling in native-tls/OpenSSL.
+imap = { version = "=3.0.0-alpha.15", default-features = false, features = ["rustls-tls"] }
+# SMTP client for the send side. `tokio1-rustls-tls` gives the async
+# `AsyncSmtpTransport<Tokio1Executor>` transport over pure-Rust TLS.
+lettre = { version = "0.11", default-features = false, features = [
+  "builder",
+  "smtp-transport",
+  "tokio1-rustls-tls",
+] }
+# Parses the fetched RFC 5322 message into headers + a plaintext body (Phase 1
+# extracts `From` / `Subject` / the first `text/plain` part; HTML-only bodies
+# and attachments are Phase 2).
+mail-parser = { version = "0.11" }
+# `send_message` / `receive` are async trait methods; `async-trait` boxes the
+# futures so `EmailChannel` stays object-safe behind `dyn MessagingGateway`.
+async-trait = { workspace = true }
+# The IMAP poll loop runs on a blocking Tokio task (the `imap` crate is
+# synchronous); the inbound queue is a Tokio mpsc.
+tokio = { workspace = true }
+# Structured logging for the poll loop lifecycle and dropped messages.
+tracing = { workspace = true }
+# `EmailError` is the crate's typed config/connect/send/parse failure surface.
+thiserror = { workspace = true }
+# `EmailError::into_gateway_error` lowers config-time failures onto
+# `GatewayError::Internal(#[from] anyhow::Error)`.
+anyhow = { workspace = true }
+# Mirrors the other adapters: the gateway value types derive serde, and the
+# config struct is serde-friendly for callers that load it from a file.
+serde = { workspace = true }
+# A parsed inbound message is assigned a fresh v4 correlation id (the workspace
+# pin is v7; opt v4 in on top, as the other adapters do).
+uuid = { workspace = true, features = ["v4"] }
+# The account password / app-password is held as `SecretString` so it never
+# leaks through `Debug`/logs — same custody pattern as the other adapters'
+# tokens.
+secrecy = { workspace = true }
+
+[dev-dependencies]
+# The trait methods are async; unit tests that touch them run on a Tokio runtime.
+tokio = { workspace = true }

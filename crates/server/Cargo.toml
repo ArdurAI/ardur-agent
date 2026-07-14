@@ -42,6 +42,12 @@ ardur-channel-matrix = { workspace = true }
 # `ARDUR_CHANNEL_TELEGRAM` are set.
 ardur-channel-discord = { workspace = true }
 ardur-channel-telegram = { workspace = true }
+# The §4.4 email channel adapter — another `MessagingGateway` backend wired
+# alongside Slack when `ARDUR_CHANNEL_EMAIL` is set.
+ardur-channel-email = { workspace = true }
+# The §10.14 PWA substrate — VAPID key + Web Push subscribe/send, mounted
+# under `/pwa` when `ARDUR_PWA_ENABLED` is set.
+ardur-web-pwa = { workspace = true }
 ardur-provider-runtime = { workspace = true }
 # §3.0 provider selection — reads ARDUR_PROVIDER and boxes the chosen backend
 # (anthropic | openrouter | openai-compat | ollama | codex | claude-cli) the

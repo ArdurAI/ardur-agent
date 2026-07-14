@@ -69,6 +69,8 @@ pub fn test_config(data_dir: &TempDir, slack_base: Option<String>) -> Config {
         channel_matrix: false,
         channel_discord: false,
         channel_telegram: false,
+        channel_email: false,
+        pwa_enabled: false,
         log_format: LogFormat::Text,
         mcp_enabled: false,
         mcp_bearer_tokens: Vec::new(),

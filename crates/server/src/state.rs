@@ -46,6 +46,7 @@ use ardur_cap_token::{
 };
 use ardur_cedar_policy::{ActionRef, CedarPolicyBundle, PolicyBundle, PolicySource};
 use ardur_channel_discord::DiscordChannel;
+use ardur_channel_email::EmailChannel;
 use ardur_channel_matrix::MatrixChannel;
 use ardur_channel_telegram::TelegramChannel;
 use ardur_cost_gate::{CostEnvelope, CostTuple as GateCostTuple, HolderId as GateHolderId};
@@ -203,6 +204,9 @@ pub struct AppState {
     tool_allowlist: Vec<String>,
     cost_budget_cents: u64,
     mcp: Option<McpSurface>,
+    /// The §10.14 PWA surface, once loaded (only when `ARDUR_PWA_ENABLED=true`).
+    /// `build_router` mounts it under `/pwa` when present.
+    pwa: Option<Arc<ardur_web_pwa::PwaService>>,
     /// The Matrix channel, once [`attach_matrix`](AppState::attach_matrix) wires
     /// it (only when `ARDUR_CHANNEL_MATRIX=true`). Shared with the worker's
     /// [`Processor`] through the same `OnceLock`, so setting it here makes the
@@ -216,6 +220,10 @@ pub struct AppState {
     /// wires it (only when `ARDUR_CHANNEL_TELEGRAM=true`). Same `OnceLock`-shared
     /// reply path as Matrix.
     telegram: Arc<OnceLock<Arc<TelegramChannel>>>,
+    /// The email channel, once [`attach_email`](AppState::attach_email) wires
+    /// it (only when `ARDUR_CHANNEL_EMAIL=true`). Same `OnceLock`-shared reply
+    /// path as Matrix.
+    email: Arc<OnceLock<Arc<EmailChannel>>>,
     /// The receipt JWKS used to authenticate the server's receipt chain before
     /// reporting counts or tool names to admin/metrics endpoints.
     receipt_jwks: ardur_receipt::Jwks,
@@ -388,6 +396,7 @@ impl AppState {
         let matrix: Arc<OnceLock<Arc<MatrixChannel>>> = Arc::new(OnceLock::new());
         let discord: Arc<OnceLock<Arc<DiscordChannel>>> = Arc::new(OnceLock::new());
         let telegram: Arc<OnceLock<Arc<TelegramChannel>>> = Arc::new(OnceLock::new());
+        let email: Arc<OnceLock<Arc<EmailChannel>>> = Arc::new(OnceLock::new());
         let tool_allowlist = tool_allowlist_for_runtime(&tools);
         let processor = Processor {
             runtime,
@@ -395,6 +404,7 @@ impl AppState {
             matrix: matrix.clone(),
             discord: discord.clone(),
             telegram: telegram.clone(),
+            email: email.clone(),
             issuer,
             cap_budget_remaining: config.cost_budget_cents,
             tool_allowlist: tool_allowlist.clone(),
@@ -421,6 +431,19 @@ impl AppState {
             None
         };
 
+        // 9. The §10.14 PWA surface (opt-in). No companion credentials — the
+        //    VAPID key is generated on first boot and persisted under
+        //    `<data_dir>/pwa/`.
+        let pwa = if config.pwa_enabled {
+            let service = ardur_web_pwa::PwaService::load(&data_dir)
+                .await
+                .map_err(|e| anyhow::anyhow!("loading pwa service: {e}"))?;
+            tracing::info!("pwa surface enabled");
+            Some(Arc::new(service))
+        } else {
+            None
+        };
+
         Ok(Arc::new(Self {
             slack,
             work_tx: Arc::new(Mutex::new(Some(work_tx))),
@@ -432,9 +455,11 @@ impl AppState {
             tool_allowlist,
             cost_budget_cents: config.cost_budget_cents,
             mcp,
+            pwa,
             matrix,
             discord,
             telegram,
+            email,
             receipt_jwks,
         }))
     }
@@ -484,6 +509,13 @@ impl AppState {
     #[must_use]
     pub fn mcp(&self) -> Option<&McpSurface> {
         self.mcp.as_ref()
+    }
+
+    /// The PWA service to mount under `/pwa`, if `ARDUR_PWA_ENABLED` was set
+    /// at boot.
+    #[must_use]
+    pub fn pwa(&self) -> Option<Arc<ardur_web_pwa::PwaService>> {
+        self.pwa.clone()
     }
 
     /// Wire a connected Matrix channel into the running server: record it for the
@@ -539,6 +571,22 @@ impl AppState {
         }
         telegram.start();
         spawn_inbound_forwarder("telegram", Arc::clone(&self.work_tx), telegram);
+    }
+
+    /// Wire a connected email channel into the running server: record it for
+    /// the worker's reply path, start its IMAP poll loop, and forward each
+    /// inbound message onto the same work queue Slack uses.
+    ///
+    /// Called by the binary after [`boot`](Self::boot) when
+    /// `ARDUR_CHANNEL_EMAIL=true`. Calling it more than once is a no-op for
+    /// the reply slot (the first channel wins).
+    pub fn attach_email(&self, email: Arc<EmailChannel>) {
+        if self.email.set(email.clone()).is_err() {
+            tracing::warn!("email channel already attached; ignoring the second attach");
+            return;
+        }
+        email.start();
+        spawn_inbound_forwarder("email", Arc::clone(&self.work_tx), email);
     }
 
     /// The Slack adapter, for inbound event verification in the HTTP handler.
@@ -708,6 +756,9 @@ struct Processor {
     /// The Telegram channel; used to reply when a turn originated on Telegram
     /// (`telegram://…`). `None` until attached.
     telegram: Arc<OnceLock<Arc<TelegramChannel>>>,
+    /// The email channel; used to reply when a turn originated over email
+    /// (`email://…`). `None` until attached.
+    email: Arc<OnceLock<Arc<EmailChannel>>>,
     issuer: BiscuitCapTokenIssuer,
     cap_budget_remaining: u64,
     tool_allowlist: Vec<String>,
@@ -729,6 +780,7 @@ enum Origin {
     Matrix,
     Discord,
     Telegram,
+    Email,
 }
 
 impl Origin {
@@ -740,9 +792,21 @@ impl Origin {
             Origin::Discord
         } else if channel_id.starts_with("telegram://") {
             Origin::Telegram
+        } else if channel_id.starts_with("email://") {
+            Origin::Email
         } else {
             Origin::Slack
         }
+    }
+
+    /// Whether this backend supports in-place message editing.
+    ///
+    /// Email has no such primitive — an SMTP "send" cannot be revised after
+    /// delivery — so the streaming turn handler withholds delivery until the
+    /// turn completes rather than emailing every intermediate chunk (see
+    /// [`Processor::handle`]).
+    fn is_editable(self) -> bool {
+        !matches!(self, Origin::Email)
     }
 }
 
@@ -774,12 +838,21 @@ impl Processor {
             requested_provider: None,
         };
 
-        let provider_message_id = match self.post_reply(origin, &channel, "…").await {
-            Ok(id) => id,
-            Err(e) => {
-                tracing::error!(%user, %channel, error = %e, "failed to post streaming placeholder");
-                return;
+        // Channels without an in-place edit primitive (email — an SMTP send
+        // cannot be revised after delivery) skip the "post a placeholder,
+        // then edit it per delta" dance entirely: the reply accumulates
+        // silently and is delivered once, in full, after the stream ends.
+        let editable = origin.is_editable();
+        let provider_message_id = if editable {
+            match self.post_reply(origin, &channel, "…").await {
+                Ok(id) => id,
+                Err(e) => {
+                    tracing::error!(%user, %channel, error = %e, "failed to post streaming placeholder");
+                    return;
+                }
             }
+        } else {
+            String::new()
         };
         let mut reply = String::new();
         let mut last_sent = "…".to_string();
@@ -795,7 +868,7 @@ impl Processor {
                         continue;
                     }
                     reply.push_str(&delta);
-                    if reply != last_sent {
+                    if editable && reply != last_sent {
                         match self
                             .edit_reply(origin, &channel, &provider_message_id, &reply)
                             .await
@@ -830,15 +903,18 @@ impl Processor {
         if let Some(e) = terminal_error {
             tracing::error!(%user, %channel, error = %e, "streamed channel turn failed");
             let apology = format!("Sorry, that turn failed: {e}");
-            if let Err(edit_err) = self
-                .edit_reply(origin, &channel, &provider_message_id, &apology)
-                .await
-            {
+            let post_result = if editable {
+                self.edit_reply(origin, &channel, &provider_message_id, &apology)
+                    .await
+            } else {
+                self.post_reply(origin, &channel, &apology).await
+            };
+            if let Err(post_err) = post_result {
                 tracing::error!(
                     %user,
                     %channel,
-                    error = %edit_err,
-                    "failed to edit failure notice"
+                    error = %post_err,
+                    "failed to deliver failure notice"
                 );
             }
             return;
@@ -846,6 +922,18 @@ impl Processor {
 
         if reply.is_empty() {
             reply.push_str("No response generated.");
+        }
+        if !editable {
+            // Non-editable channels never sent anything during the loop —
+            // deliver the complete (or empty-response fallback) reply now,
+            // exactly once.
+            if let Err(e) = self.post_reply(origin, &channel, &reply).await {
+                tracing::warn!(%user, %channel, error = %e, "failed to deliver channel reply");
+            }
+        } else if last_sent != reply {
+            // `reply.is_empty()` above may have appended the fallback text
+            // after the loop's last edit; make sure an editable channel's
+            // final message reflects it too.
             if let Err(e) = self
                 .edit_reply(origin, &channel, &provider_message_id, &reply)
                 .await
@@ -1066,6 +1154,15 @@ impl Processor {
                     .await
                     .map_err(|e| anyhow::anyhow!(e.to_string()))
             }
+            Origin::Email => {
+                let email = self.email.get().ok_or_else(|| {
+                    anyhow::anyhow!("email reply requested but no channel attached")
+                })?;
+                email
+                    .send_text(channel, text)
+                    .await
+                    .map_err(|e| anyhow::anyhow!(e.to_string()))
+            }
         }
     }
 
@@ -1107,6 +1204,19 @@ impl Processor {
                     anyhow::anyhow!("telegram edit requested but no channel attached")
                 })?;
                 telegram
+                    .edit_text(channel, message_id, text)
+                    .await
+                    .map_err(|e| anyhow::anyhow!(e.to_string()))
+            }
+            Origin::Email => {
+                // Reached only for the terminal error / empty-response paths
+                // in `handle` (the streaming per-delta path is skipped for
+                // `Origin::Email` — see `Origin::is_editable`), so this sends
+                // at most one email per turn, not one per streamed chunk.
+                let email = self.email.get().ok_or_else(|| {
+                    anyhow::anyhow!("email edit requested but no channel attached")
+                })?;
+                email
                     .edit_text(channel, message_id, text)
                     .await
                     .map_err(|e| anyhow::anyhow!(e.to_string()))
@@ -1560,9 +1670,11 @@ mod tests {
             tool_allowlist: Vec::new(),
             cost_budget_cents: 0,
             mcp: None,
+            pwa: None,
             matrix: Arc::new(OnceLock::new()),
             discord: Arc::new(OnceLock::new()),
             telegram: Arc::new(OnceLock::new()),
+            email: Arc::new(OnceLock::new()),
             receipt_jwks: ardur_receipt::Jwks::new(),
         };
 

@@ -105,6 +105,17 @@ pub struct Config {
     /// `TELEGRAM_BOT_TOKEN` credential is required at config-load (the bin
     /// constructs `TelegramChannel::from_env` at boot).
     pub channel_telegram: bool,
+    /// Whether to start the email channel adapter alongside Slack
+    /// (`ARDUR_CHANNEL_EMAIL`, default `false`). When `true`, the
+    /// `ARDUR_EMAIL_*` credentials are required at config-load (the bin
+    /// constructs `EmailChannel::from_env` at boot).
+    pub channel_email: bool,
+    /// Whether the §10.14 PWA surface (VAPID key + Web Push
+    /// subscribe/unsubscribe/test) is mounted under `/pwa`
+    /// (`ARDUR_PWA_ENABLED`, default `false`). No companion credentials are
+    /// required — the VAPID key is generated on first boot and persisted
+    /// under `<data_dir>/pwa/`.
+    pub pwa_enabled: bool,
     /// How tracing events are formatted (`ARDUR_LOG_FORMAT`).
     pub log_format: LogFormat,
     /// Whether the §6.0 MCP surface is mounted (`ARDUR_MCP_ENABLED`, default
@@ -198,6 +209,8 @@ impl fmt::Debug for Config {
             .field("channel_matrix", &self.channel_matrix)
             .field("channel_discord", &self.channel_discord)
             .field("channel_telegram", &self.channel_telegram)
+            .field("channel_email", &self.channel_email)
+            .field("pwa_enabled", &self.pwa_enabled)
             .field("log_format", &self.log_format)
             .field("mcp_enabled", &self.mcp_enabled)
             .field(
@@ -312,6 +325,18 @@ impl Config {
         if channel_telegram {
             require("TELEGRAM_BOT_TOKEN")?;
         }
+        let channel_email = optional("ARDUR_CHANNEL_EMAIL")
+            .as_deref()
+            .is_some_and(is_truthy);
+        if channel_email {
+            require("ARDUR_EMAIL_ADDRESS")?;
+            require("ARDUR_EMAIL_PASSWORD")?;
+            require("ARDUR_EMAIL_IMAP_HOST")?;
+            require("ARDUR_EMAIL_SMTP_HOST")?;
+        }
+        let pwa_enabled = optional("ARDUR_PWA_ENABLED")
+            .as_deref()
+            .is_some_and(is_truthy);
 
         Ok(Self {
             anthropic_api_key,
@@ -342,6 +367,8 @@ impl Config {
             channel_matrix,
             channel_discord,
             channel_telegram,
+            channel_email,
+            pwa_enabled,
             log_format: match optional("ARDUR_LOG_FORMAT").as_deref() {
                 None | Some("") | Some("text") => LogFormat::Text,
                 Some("json") => LogFormat::Json,

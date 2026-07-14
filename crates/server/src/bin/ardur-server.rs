@@ -79,6 +79,7 @@ async fn main() -> anyhow::Result<()> {
         channel_matrix = config.channel_matrix,
         channel_discord = config.channel_discord,
         channel_telegram = config.channel_telegram,
+        channel_email = config.channel_email,
         "ardur-server booted"
     );
 
@@ -117,6 +118,17 @@ async fn main() -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!("connecting telegram channel: {e}"))?;
         state.attach_telegram(std::sync::Arc::new(telegram));
         tracing::info!("telegram channel attached and polling");
+    }
+
+    // Fifth channel: email.
+    if config.channel_email {
+        let email_config = ardur_channel_email::EmailConfig::from_env()
+            .map_err(|e| anyhow::anyhow!("reading email config: {e}"))?;
+        let email = ardur_channel_email::EmailChannel::new(email_config)
+            .await
+            .map_err(|e| anyhow::anyhow!("connecting email channel: {e}"))?;
+        state.attach_email(std::sync::Arc::new(email));
+        tracing::info!("email channel attached and polling");
     }
 
     let app = build_router(state.clone());

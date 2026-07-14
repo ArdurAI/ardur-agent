@@ -352,6 +352,65 @@ enable it with `ARDUR_CHANNEL_TELEGRAM=true`.
 Inbound Discord and Telegram messages run through the same fused turn pipeline
 as Slack, and replies are posted back into the originating channel/chat.
 
+## Email channel (optional)
+
+ardur can send and receive email alongside Slack. The adapter
+(`crates/channel-email`, built on `imap` 3.0-alpha + `lettre` 0.11) is **off by
+default**; enable it with `ARDUR_CHANNEL_EMAIL=true`.
+
+1. **Get an app password** for the mailbox ardur should use (most providers
+   require one instead of the account password when IMAP/SMTP access is
+   enabled from a non-browser client).
+2. **Configure the env** (see `.env.example`):
+   ```sh
+   ARDUR_CHANNEL_EMAIL=true
+   ARDUR_EMAIL_ADDRESS=bot@example.com
+   ARDUR_EMAIL_PASSWORD=…
+   ARDUR_EMAIL_IMAP_HOST=imap.example.com
+   ARDUR_EMAIL_SMTP_HOST=smtp.example.com
+   ARDUR_EMAIL_ALLOWED_SENDERS=      # required: comma-separated sender addresses (deny-by-default — empty allows no one)
+   ```
+   When `ARDUR_CHANNEL_EMAIL=true`, `ARDUR_EMAIL_ADDRESS`,
+   `ARDUR_EMAIL_PASSWORD`, `ARDUR_EMAIL_IMAP_HOST`, and
+   `ARDUR_EMAIL_SMTP_HOST` are required at startup (the boot fails fast if
+   any is missing), and the IMAP login is verified once before the server
+   starts serving.
+3. **Send mail** to the configured address from an allowlisted sender. The
+   adapter polls `INBOX` every `ARDUR_EMAIL_POLL_INTERVAL_SECS` (default 30)
+   for unseen messages rather than using `IMAP IDLE` — see the crate's
+   module docs for the adapt-points this Phase-1 implementation takes
+   (no `IDLE`, no DKIM verification, plaintext-only body extraction).
+
+Unlike the chat-style channels above, email has no in-place message edit: the
+server withholds the reply until the turn completes, then sends exactly one
+email with the full answer, rather than emailing every streamed chunk.
+
+## PWA surface (optional)
+
+The static `web-client/` PWA shell (installable app + service worker) is
+always servable as static files (see `web-client/README.md`). Its Web Push
+subscribe/send backend (`crates/web-pwa`) is a separate, opt-in HTTP surface;
+enable it with `ARDUR_PWA_ENABLED=true`.
+
+1. **No credentials needed.** On first boot, a VAPID (RFC 8292) keypair is
+   generated and persisted to `<ARDUR_DATA_DIR>/pwa/vapid.pem`; subscriptions
+   persist to `<ARDUR_DATA_DIR>/pwa/subscriptions.json`.
+2. **Configure the env** (see `.env.example`):
+   ```sh
+   ARDUR_PWA_ENABLED=true
+   ```
+3. **Routes mounted under `/pwa`**: `GET /pwa/vapid-public-key` (the browser
+   fetches this before calling `PushManager.subscribe`), `POST /pwa/subscribe`
+   (body `{endpoint, p256dh, auth}`, returns `{id}`), `POST /pwa/unsubscribe`
+   (body `{id}`), and `POST /pwa/test` (body `{id}`, sends a canned "it works"
+   notification to that subscription only).
+
+This is the Phase-1 substrate `plans/10.14-pwa-installable-web-client-
+blueprint.md` calls for — see the crate's module docs for what's deferred to
+Phase 2 (a Cedar policy gate before send, signed receipts per push lifecycle
+event, SessionStore-projected subscription rows, per-tenant key/subscription
+partitioning, and an authenticated arbitrary-send route).
+
 ## Local development
 
 ```sh

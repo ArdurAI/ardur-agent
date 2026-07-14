@@ -44,6 +44,8 @@ members = [
     "crates/channel-matrix",
     "crates/channel-discord",
     "crates/channel-telegram",
+    "crates/channel-email",
+    "crates/web-pwa",
     "crates/server",
     "crates/admin-ui",
     "crates/e2e-tests",
@@ -274,6 +276,8 @@ ardur-slack-adapter = { path = "crates/slack-adapter" }
 ardur-channel-matrix = { path = "crates/channel-matrix" }
 ardur-channel-discord = { path = "crates/channel-discord" }
 ardur-channel-telegram = { path = "crates/channel-telegram" }
+ardur-channel-email = { path = "crates/channel-email" }
+ardur-web-pwa = { path = "crates/web-pwa" }
 ardur-server = { path = "crates/server" }
 ardur-browser = { path = "crates/browser" }
 ardur-terminal = { path = "crates/terminal" }

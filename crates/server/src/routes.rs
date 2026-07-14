@@ -70,6 +70,14 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         ));
     }
 
+    if let Some(pwa) = state.pwa() {
+        // `ardur_web_pwa::router` already calls `.with_state`, so it comes
+        // back as a state-erased `Router<()>` — `nest_service` (rather than
+        // `nest`, which requires a matching `S`) mounts it as-is, the same
+        // way `build_mcp_router` is folded in with `.merge` above.
+        router = router.nest_service("/pwa", ardur_web_pwa::router(pwa));
+    }
+
     router
         .layer(DefaultBodyLimit::max(HTTP_BODY_LIMIT_BYTES))
         .with_state(state)

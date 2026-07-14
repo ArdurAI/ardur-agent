@@ -119,3 +119,6 @@ ardur-channel-matrix = { workspace = true }
 # inbound message; their gated-live halves connect the real adapters.
 ardur-channel-discord = { workspace = true }
 ardur-channel-telegram = { workspace = true }
+# The §4.4 email scenario drives a fused turn from an email-shaped inbound
+# message; its gated-live half connects a real `EmailChannel`.
+ardur-channel-email = { workspace = true }
