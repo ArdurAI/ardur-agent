@@ -9,9 +9,28 @@ use maud::{DOCTYPE, Markup, PreEscaped, html};
 use crate::costs::CostsReport;
 use crate::journal::SessionSummary;
 use crate::receipts::ReceiptSummary;
+use crate::trust::{ChainOverview, WalletResponse};
 
 /// HTMX 1.9 from a CDN (the dashboard's only client-side dependency).
 const HTMX_CDN: &str = "https://unpkg.com/htmx.org@1.9.12";
+
+/// Format a millisecond epoch as a compact `YYYY-MM-DD HH:MM:SSZ` UTC string,
+/// falling back to the raw value when it is out of representable range.
+fn utc_ms(ms: u64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms as i64)
+        .map(|dt| dt.format("%Y-%m-%d %H:%M:%SZ").to_string())
+        .unwrap_or_else(|| format!("ms:{ms}"))
+}
+
+/// The shared top navigation, marking `active` on the current page.
+fn nav(active: &str) -> Markup {
+    html! {
+        nav.tabs {
+            a.tab.active[active == "dashboard"] href="/" { "Dashboard" }
+            a.tab.active[active == "trust"] href="/trust" { "Trust Center" }
+        }
+    }
+}
 
 /// Render cents as a `$x.yy` dollar string.
 fn dollars(cents: u64) -> String {
@@ -173,9 +192,189 @@ pub fn dashboard(
                 header.topbar {
                     h1 { "ardur-admin" }
                     span.subtitle { "read-only observability · auto-refreshing" }
+                    (nav("dashboard"))
                 }
                 main {
                     (dashboard_fragment(report, sessions, receipts))
+                }
+            }
+        }
+    }
+}
+
+/// The receipt-chain verification banner: green when every link holds, red with
+/// the offending index when a `parent_hash` breaks.
+fn chain_banner(overview: &ChainOverview) -> Markup {
+    html! {
+        @if overview.chain_valid {
+            div.banner.ok {
+                strong { "Chain verified" }
+                " · " (overview.total) " receipt(s), every parent-hash link intact."
+            }
+        } @else {
+            div.banner.bad {
+                strong { "Chain broken" }
+                @if let Some(idx) = overview.error_index {
+                    " · first mismatch at index " (idx) " of " (overview.total) "."
+                } @else {
+                    " · " (overview.total) " receipt(s)."
+                }
+            }
+        }
+    }
+}
+
+/// The receipt-chain explorer table (newest first).
+fn chain_table(overview: &ChainOverview) -> Markup {
+    html! {
+        table {
+            thead {
+                tr {
+                    th { "#" } th { "Verb" } th { "Provider" } th { "Cost" }
+                    th { "Tokens" } th { "Tools" } th { "Link" } th { "Issued (UTC)" } th { "Receipt" }
+                }
+            }
+            tbody {
+                @if overview.links.is_empty() {
+                    tr { td colspan="9" .empty { "No receipts yet." } }
+                } @else {
+                    @for l in &overview.links {
+                        tr {
+                            td { (l.index) }
+                            td { code { (l.verb) } }
+                            td { (l.provider) }
+                            td { (dollars(l.cents)) }
+                            td { (l.tokens_in) "→" (l.tokens_out) }
+                            td { (l.tool_count) }
+                            td {
+                                @if l.link_ok { span.pill.ok { "ok" } }
+                                @else { span.pill.bad { "broken" } }
+                            }
+                            td { (utc_ms(l.issued_at_ms)) }
+                            td title=(l.receipt_id) { code { (short(&l.receipt_id)) } }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The capability-wallet table: active (non-expired) grants.
+fn wallet_table(wallet: &WalletResponse) -> Markup {
+    html! {
+        table {
+            thead {
+                tr {
+                    th { "Token" } th { "Subject" } th { "Audience" }
+                    th { "Tools" } th { "Budget" } th { "Expires (UTC)" }
+                }
+            }
+            tbody {
+                @if wallet.grants.is_empty() {
+                    tr { td colspan="6" .empty { "No active capability grants." } }
+                } @else {
+                    @for g in &wallet.grants {
+                        tr {
+                            td title=(g.token_id) { code { (short(&g.token_id)) } }
+                            td { (g.subject) }
+                            td { (g.audience) }
+                            td { (g.tools.join(", ")) }
+                            td { (g.budget_remaining) }
+                            td { (utc_ms(g.expires_unix.saturating_mul(1000))) }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The cost-ledger by-day table (most recent day first).
+fn ledger_table(report: &CostsReport) -> Markup {
+    html! {
+        table {
+            thead {
+                tr { th { "Day (UTC)" } th { "Receipts" } th { "Cost" } }
+            }
+            tbody {
+                @if report.by_day.is_empty() {
+                    tr { td colspan="3" .empty { "No settled cost yet." } }
+                } @else {
+                    @for d in &report.by_day {
+                        tr {
+                            td { (d.day) }
+                            td { (d.count) }
+                            td { (dollars(d.cents)) }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The Trust Center page: receipt-chain integrity + explorer, the cost ledger,
+/// the capability wallet, and the policy-debugger pointer. Every panel is a
+/// read-only projection of on-disk artifacts and boot-time configured state.
+pub fn trust_center(
+    overview: &ChainOverview,
+    wallet: &WalletResponse,
+    report: &CostsReport,
+    policy_enabled: bool,
+) -> Markup {
+    html! {
+        (DOCTYPE)
+        html lang="en" {
+            head {
+                meta charset="utf-8";
+                meta name="viewport" content="width=device-width, initial-scale=1";
+                title { "ardur-admin · Trust Center" }
+                script src=(HTMX_CDN) {}
+                style { (PreEscaped(STYLE)) }
+            }
+            body {
+                header.topbar {
+                    h1 { "ardur-admin" }
+                    span.subtitle { "Trust Center · receipts · cost · policy" }
+                    (nav("trust"))
+                }
+                main {
+                    section.cards {
+                        (card("Today", report.today_cents))
+                        (card("Last 7 days", report.last_7d_cents))
+                        (card("Last 30 days", report.last_30d_cents))
+                        (card("All time", report.total_cents))
+                    }
+
+                    section {
+                        h2 { "Receipt chain" }
+                        (chain_banner(overview))
+                        (chain_table(overview))
+                    }
+
+                    section {
+                        h2 { "Cost ledger" }
+                        (ledger_table(report))
+                    }
+
+                    section {
+                        h2 { "Capability wallet" }
+                        (wallet_table(wallet))
+                    }
+
+                    section {
+                        h2 { "Policy decisions" }
+                        @if policy_enabled {
+                            p.note {
+                                "A Cedar policy bundle is loaded. Trace a decision via "
+                                code { "GET /api/trust/policy/debug?principal=&action=&resource=" }
+                                " — allow/deny with the matched policy ids."
+                            }
+                        } @else {
+                            p.note { "No Cedar policy bundle configured (policy debugger disabled)." }
+                        }
+                    }
                 }
             }
         }
@@ -212,4 +411,16 @@ code { font-family: ui-monospace, monospace; }
 .r-cost { color: #4a90d9; }
 .r-id { margin-left: auto; color: #8888; font-family: ui-monospace, monospace; }
 .empty { color: #8888; font-style: italic; padding: .5rem 0; }
+.tabs { margin-left: auto; display: flex; gap: .25rem; }
+.tab { text-decoration: none; color: inherit; padding: .35rem .75rem; border-radius: 8px; font-size: .9rem; border: 1px solid transparent; }
+.tab:hover { border-color: #8884; }
+.tab.active { background: #4a90d922; border-color: #4a90d9; color: #4a90d9; font-weight: 600; }
+.banner { padding: .6rem .8rem; border-radius: 8px; margin-bottom: .8rem; font-size: .9rem; }
+.banner.ok { background: #2ecc7122; border: 1px solid #2ecc71; }
+.banner.bad { background: #e74c3c22; border: 1px solid #e74c3c; }
+.pill { padding: .1rem .5rem; border-radius: 999px; font-size: .75rem; font-weight: 600; }
+.pill.ok { background: #2ecc7122; color: #2ecc71; }
+.pill.bad { background: #e74c3c22; color: #e74c3c; }
+.note { color: #8888; font-size: .9rem; }
+.note code { background: #8882; padding: .1rem .35rem; border-radius: 4px; }
 "#;

@@ -614,6 +614,88 @@ async fn trust_center_wallet_receipts_and_policy_debugger() {
 }
 
 #[tokio::test]
+async fn trust_center_page_renders_chain_ledger_and_wallet() {
+    use ardur_cap_token::{HolderId, VerifiedClaims};
+
+    let fx = Fixture::new();
+    append_receipt_with_provider(
+        &fx.receipt_store,
+        &uuid(9),
+        "llm.completion.minted.v1",
+        "anthropic",
+        1_000,
+        42,
+    );
+    let claims = VerifiedClaims {
+        token_id: ::uuid::Uuid::parse_str("77777777-7777-4777-8777-777777777777").unwrap(),
+        audience: "ardur".to_string(),
+        subject: HolderId("user:trust".to_string()),
+        expires_unix: 2_000_000_000,
+        budget_remaining: 99,
+        tool_allowlist: vec!["chat.submit".to_string()],
+    };
+    let state = AppState::new(&fx.journal_dir, &fx.receipt_store).with_capabilities(vec![claims]);
+    let server = TestServer::new(build_router(state.shared()));
+
+    let res = server.get("/trust").await;
+    res.assert_status_ok();
+    let html = res.text();
+    assert!(html.contains("Trust Center"));
+    assert!(html.contains("Receipt chain"));
+    assert!(html.contains("Chain verified"), "green integrity banner");
+    assert!(html.contains("Cost ledger"));
+    assert!(html.contains("Capability wallet"));
+    assert!(html.contains("user:trust"), "wallet grant rendered");
+    assert!(html.contains("Policy decisions"));
+    assert!(
+        html.contains("No Cedar policy bundle configured"),
+        "policy panel reflects disabled debugger"
+    );
+    // Cross-page navigation is present.
+    assert!(html.contains("href=\"/\""));
+    assert!(html.contains("href=\"/trust\""));
+}
+
+#[tokio::test]
+async fn trust_chain_api_reports_broken_link() {
+    let fx = Fixture::new();
+    // Two genesis-shaped receipts (both parent_hash=null): the second's link is
+    // broken because it should chain off the first.
+    append_receipt(
+        &fx.receipt_store,
+        &uuid(1),
+        "llm.completion.minted.v1",
+        1_000,
+        1,
+        1,
+        1,
+        &[],
+    );
+    append_receipt(
+        &fx.receipt_store,
+        &uuid(2),
+        "llm.completion.minted.v1",
+        2_000,
+        1,
+        1,
+        1,
+        &[],
+    );
+
+    let overview: Value = fx.server().get("/api/trust/chain").await.json();
+    assert_eq!(overview["total"], 2);
+    assert_eq!(overview["chain_valid"], false);
+    assert_eq!(overview["error_index"], 1);
+    // Newest-first: the broken link (index 1) leads.
+    let links = overview["links"].as_array().unwrap();
+    assert_eq!(links.len(), 2);
+    assert_eq!(links[0]["index"], 1);
+    assert_eq!(links[0]["link_ok"], false);
+    assert_eq!(links[1]["index"], 0);
+    assert_eq!(links[1]["link_ok"], true);
+}
+
+#[tokio::test]
 async fn read_only_no_write_endpoints() {
     let fx = Fixture::new();
     let server = fx.server();

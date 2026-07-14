@@ -62,6 +62,31 @@ async fn dashboard(State(state): State<SharedState>) -> Result<Markup, ApiError>
     Ok(html::dashboard(&report, &sessions, &receipt_summaries))
 }
 
+/// `GET /trust` — the server-rendered Trust Center page: receipt-chain
+/// integrity + explorer, the cost ledger, the capability wallet, and the
+/// policy-debugger status. Read-only, like every other route.
+async fn trust_center(State(state): State<SharedState>) -> Result<Markup, ApiError> {
+    let overview = trust::chain_overview(&state.receipt_store, 100)?;
+    let wallet = trust::wallet(
+        &state.capabilities,
+        chrono::Utc::now().timestamp().max(0) as u64,
+    );
+    let report = costs::report(&state.receipt_store, &state.journal_dir, now_ms())?;
+    Ok(html::trust_center(
+        &overview,
+        &wallet,
+        &report,
+        state.policies.is_some(),
+    ))
+}
+
+/// `GET /api/trust/chain` — the receipt-chain overview as JSON.
+async fn trust_chain(
+    State(state): State<SharedState>,
+) -> Result<Json<trust::ChainOverview>, ApiError> {
+    Ok(Json(trust::chain_overview(&state.receipt_store, 100)?))
+}
+
 /// `GET /api/sessions`
 async fn list_sessions(
     State(state): State<SharedState>,
@@ -178,6 +203,7 @@ async fn trust_policy_debug(
 pub fn build_router(state: SharedState) -> Router {
     Router::new()
         .route("/", get(dashboard))
+        .route("/trust", get(trust_center))
         .route("/healthz", get(healthz))
         .route("/api/sessions", get(list_sessions))
         .route("/api/sessions/{id}/journal", get(session_journal))
@@ -186,6 +212,7 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/api/costs", get(costs_report))
         .route("/api/memory/recent", get(memory_recent))
         .route("/api/trust/wallet", get(trust_wallet))
+        .route("/api/trust/chain", get(trust_chain))
         .route("/api/trust/receipts/verify", get(trust_receipts_verify))
         .route("/api/trust/policy/debug", get(trust_policy_debug))
         .layer(axum::middleware::from_fn_with_state(

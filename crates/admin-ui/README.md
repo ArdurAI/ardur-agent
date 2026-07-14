@@ -50,6 +50,7 @@ All endpoints are `GET` — there are no write routes.
 | Method | Path | Returns |
 | --- | --- | --- |
 | `GET` | `/` | HTML dashboard (server-rendered, auto-refreshing via HTMX). |
+| `GET` | `/trust` | HTML **Trust Center**: receipt-chain integrity banner + explorer, cost ledger, capability wallet, policy-debugger status. |
 | `GET` | `/healthz` | `200 ok` readiness check. |
 | `GET` | `/api/sessions` | Session list: id, journal mtime, message/entry counts, last activity, last settled cost. |
 | `GET` | `/api/sessions/{id}/journal` | Journal entries for a session. Defaults to the last 100; `?limit=&offset=` paginate. With no `offset`, the page is the tail. |
@@ -57,6 +58,10 @@ All endpoints are `GET` — there are no write routes.
 | `GET` | `/api/receipts/{id}` | One receipt in full: decoded body + compact JWS. `404` if unknown. |
 | `GET` | `/api/costs` | Aggregate cost: total + today/7d/30d windows, by provider, by day, top-10 sessions. |
 | `GET` | `/api/memory/recent` | Last 20 memory records (when `--qdrant-url` is set; otherwise `{"enabled": false}`). |
+| `GET` | `/api/trust/wallet` | Active (non-expired) capability grants from the configured cap-token claims. |
+| `GET` | `/api/trust/chain` | Receipt-chain overview: total, per-link `parent_hash` validity, first broken index, newest 100 links. |
+| `GET` | `/api/trust/receipts/verify` | Whole-chain hash-linkage verification result. |
+| `GET` | `/api/trust/policy/debug` | Trace one Cedar decision: `?principal=&action=&resource=&attributes=` → allow/deny + matched policy ids (`503` when no bundle is configured). |
 
 ### The "provider" dimension
 

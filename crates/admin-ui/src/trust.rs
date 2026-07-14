@@ -83,6 +83,89 @@ pub struct ReceiptVerification {
     pub reason: Option<String>,
 }
 
+/// One receipt as shown in the Trust Center chain explorer: the decoded body's
+/// salient fields plus whether its hash-linkage to the previous receipt holds.
+#[derive(Debug, Clone, Serialize)]
+pub struct ChainLink {
+    /// 0-based position in append order.
+    pub index: usize,
+    /// Receipt id (UUID).
+    pub receipt_id: String,
+    /// The receipt verb (`verb.object.state.vN`).
+    pub verb: String,
+    /// The provider dimension (explicit backend, else verb — see [`receipts`]).
+    pub provider: String,
+    /// Cost in cents.
+    pub cents: u64,
+    /// Input tokens billed.
+    pub tokens_in: u64,
+    /// Output tokens billed.
+    pub tokens_out: u64,
+    /// Number of tool calls attested.
+    pub tool_count: usize,
+    /// When the receipted action occurred (ms since epoch).
+    pub issued_at_ms: u64,
+    /// Whether this receipt's `parent_hash` matches the prior receipt's JWS
+    /// digest (genesis: `parent_hash == None`). A `false` here is the exact
+    /// index [`ReceiptVerification::error_index`] points at.
+    pub link_ok: bool,
+}
+
+/// The Trust Center receipt-chain view: the overall verification result plus the
+/// most recent links, newest first.
+#[derive(Debug, Clone, Serialize)]
+pub struct ChainOverview {
+    /// Total receipts in the chain.
+    pub total: usize,
+    /// Whether every link verified.
+    pub chain_valid: bool,
+    /// First broken index, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_index: Option<usize>,
+    /// The most recent links (newest first), capped at the requested limit.
+    pub links: Vec<ChainLink>,
+}
+
+/// Build the chain explorer view: decode the chain, check each link's parent
+/// hash against the prior receipt's JWS digest, and return the newest `limit`
+/// links along with the overall verification result. Read-only — no signatures
+/// are checked (the admin-ui holds no JWKS; see the module + crate docs).
+pub fn chain_overview(receipt_store: &Path, limit: usize) -> anyhow::Result<ChainOverview> {
+    let chain = receipts::load_chain(receipt_store)?;
+    let mut error_index = None;
+    let mut links: Vec<ChainLink> = Vec::with_capacity(chain.len());
+    let mut prev: Option<&receipts::LoadedReceipt> = None;
+    for (index, receipt) in chain.iter().enumerate() {
+        let expected = prev.map(|p| Sha256Digest::of(p.jws_compact.as_bytes()));
+        let link_ok = receipt.body.parent_hash == expected;
+        if !link_ok && error_index.is_none() {
+            error_index = Some(index);
+        }
+        links.push(ChainLink {
+            index,
+            receipt_id: receipt.body.receipt_id.to_string(),
+            verb: receipt.body.verb.as_str().to_string(),
+            provider: receipt.provider().to_string(),
+            cents: receipt.body.cost.cents,
+            tokens_in: receipt.body.cost.tokens_in,
+            tokens_out: receipt.body.cost.tokens_out,
+            tool_count: receipt.body.tool_calls.len(),
+            issued_at_ms: receipt.body.issued_at.0,
+            link_ok,
+        });
+        prev = Some(receipt);
+    }
+    let total = links.len();
+    links.reverse();
+    links.truncate(limit);
+    Ok(ChainOverview {
+        total,
+        chain_valid: error_index.is_none(),
+        error_index,
+        links,
+    })
+}
+
 /// Verify admin-ui's decoded receipt chain using the same parent-hash rule as
 /// the fused runtime: genesis has no parent; each child points at SHA256(prev
 /// compact JWS).
