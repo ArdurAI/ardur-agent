@@ -423,6 +423,7 @@ dependencies = [
  "ardur-receipt",
  "ardur-runtime",
  "ardur-session-journals",
+ "ardur-webhook",
  "assert_cmd",
  "async-trait",
  "base64 0.22.1",
@@ -1106,6 +1107,8 @@ name = "ardur-webhook"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "ardur-cap-token",
+ "ardur-receipt",
  "async-trait",
  "axum 0.8.9",
  "base64 0.22.1",
@@ -1118,6 +1121,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "subtle",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tower 0.5.3",

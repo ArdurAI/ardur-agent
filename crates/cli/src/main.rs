@@ -10,6 +10,7 @@ mod device_mesh;
 mod marketplace;
 mod persona;
 mod project_surface;
+mod webhook_ui;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -29,6 +30,7 @@ use persona::{PersonaArgs, run_persona};
 use project_surface::{ProjectArgs, run_project};
 use serde_json::json;
 use sha2::Digest;
+use webhook_ui::{WebhookArgs, run_webhook};
 
 /// Ardur — a capability-secure, cost-metered agent runtime.
 #[derive(Parser)]
@@ -81,6 +83,8 @@ enum Commands {
     Nodes(NodesArgs),
     /// Manage scheduled automation jobs.
     Schedule(ScheduleArgs),
+    /// Manage outbound webhook endpoints and inbound triggers.
+    Webhook(WebhookArgs),
     /// Manage messaging channel adapters.
     Channel(ChannelArgs),
     /// Import or export state from Hermes / OpenClaw.
@@ -337,6 +341,7 @@ fn main() -> ExitCode {
         Commands::Redact(args) => run_redact(args),
         Commands::Nodes(args) => run_nodes(args),
         Commands::Schedule(args) => run_schedule(args),
+        Commands::Webhook(args) => run_webhook(args),
         Commands::Channel(args) => run_channel(args),
         Commands::Migrate(args) => run_migrate(args),
         Commands::Persona(args) => run_persona(args),

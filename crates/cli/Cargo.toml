@@ -90,6 +90,8 @@ rand = "0.10"
 # ARD-143: schedule / cron CLI.
 chrono = { workspace = true }
 ardur-cron = { workspace = true }
+# §9.7: operator webhook surface.
+ardur-webhook = { workspace = true }
 # ARD-144/145: connector HTTP fetch.
 reqwest = { workspace = true }
 # ARD-120/121/132: supply-chain audit tooling.
