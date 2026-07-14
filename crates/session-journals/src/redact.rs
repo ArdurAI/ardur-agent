@@ -69,7 +69,9 @@ pub fn redact_entries(entries: &[JournalEntry], patterns: &[regex::Regex]) -> Ve
             JournalEntry::Invalidation { reason, .. } => {
                 *reason = redact_text(reason, patterns);
             }
-            JournalEntry::ToolInvocation { .. } | JournalEntry::CostFinalized { .. } => {}
+            JournalEntry::ToolInvocation { .. }
+            | JournalEntry::CostFinalized { .. }
+            | JournalEntry::Rollback { .. } => {}
         }
     }
     redacted
