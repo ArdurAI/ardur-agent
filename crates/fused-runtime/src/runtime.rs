@@ -330,7 +330,7 @@ impl FusedRuntime {
             receipt_id: uuid::Uuid::new_v4(),
             parent_hash,
             verb,
-            issued_at: ardur_receipt::UnixTsMillis(now_ms),
+            issued_at: now_ms,
             subject: ardur_receipt::HolderId(claims.subject.0.clone()),
             cap_token_id: ardur_receipt::TokenId(claims.token_id),
             payload_digest,
@@ -444,7 +444,7 @@ impl FusedRuntime {
                     checkpoint_id: *checkpoint_id,
                     entry_id: ardur_session_journals::EntryId::new(pos as u64),
                     summary: summary.clone(),
-                    at: *at,
+                    at: at.get(),
                 }),
                 _ => None,
             })
