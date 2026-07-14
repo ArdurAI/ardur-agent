@@ -1222,6 +1222,7 @@ impl FusedRuntime {
     }
 }
 
+#[async_trait::async_trait]
 impl ChatRuntime for FusedRuntime {
     async fn submit(&self, req: SubmitRequest) -> Result<SubmitResult, RuntimeError> {
         self.submit_inner(req, PerRequestProvisioning::default())

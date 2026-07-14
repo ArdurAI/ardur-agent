@@ -972,6 +972,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "ardur-core-types",
+ "async-trait",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

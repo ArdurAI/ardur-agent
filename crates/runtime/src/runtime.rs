@@ -1,7 +1,6 @@
 //! The interactive chat runtime: submit a batch of messages to run one turn.
 
-use std::future::Future;
-
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::error::RuntimeError;
@@ -35,13 +34,18 @@ pub struct SubmitResult {
 
 /// The interactive chat runtime: submit a batch of messages to run one turn,
 /// receiving the response, its receipt id, and its cost.
-pub trait ChatRuntime {
+///
+/// `#[async_trait]` (rather than a bare `-> impl Future`) so the trait is
+/// **object-safe** — a caller can hold an `Arc<dyn ChatRuntime>` — and the
+/// returned future is **`Send`**, so a turn can be driven on any async runtime
+/// (e.g. spawned onto a worker thread). The `Send + Sync` supertrait lets a
+/// `dyn ChatRuntime` be shared across threads. This matches every other async
+/// trait in the workspace (`Provider`, `MultiAgentRuntime`, `CostAdmissionGate`).
+#[async_trait]
+pub trait ChatRuntime: Send + Sync {
     /// Run a single turn: validate the request, produce a response, and return
     /// the receipt id and cost.
-    fn submit(
-        &self,
-        req: SubmitRequest,
-    ) -> impl Future<Output = Result<SubmitResult, RuntimeError>>;
+    async fn submit(&self, req: SubmitRequest) -> Result<SubmitResult, RuntimeError>;
 }
 
 /// An in-memory [`ChatRuntime`] that echoes the last user message back. It
@@ -58,6 +62,7 @@ impl InMemoryRuntime {
     }
 }
 
+#[async_trait]
 impl ChatRuntime for InMemoryRuntime {
     async fn submit(&self, req: SubmitRequest) -> Result<SubmitResult, RuntimeError> {
         if req.cap_token.0.is_empty() {
