@@ -734,6 +734,18 @@ async fn dispatch_slash(
             dispatch_task_sub(engine, tasks, state, args).await;
             false
         }
+        "steer" | "tell" => {
+            dispatch_steer(engine, tasks, state, args).await;
+            false
+        }
+        "interrupt" => {
+            dispatch_interrupt(engine, tasks, state, args).await;
+            false
+        }
+        "queue" | "status" => {
+            dispatch_queue_status(tasks, state);
+            false
+        }
         _ => {
             let ctx = CommandContext {
                 command: command.to_string(),
@@ -930,21 +942,26 @@ async fn dispatch_task_sub(
     };
     match sub {
         "status" | "log" => match tasks.get(id) {
-            Some(task) => println!(
-                "{} [{}] owner-session={} {}{}{}",
-                task.id,
-                task.status,
-                task.owner_session_id.0,
-                task.prompt,
-                task.result
-                    .as_ref()
-                    .map(|r| format!("\nresult: {r}"))
-                    .unwrap_or_default(),
-                task.error
-                    .as_ref()
-                    .map(|e| format!("\nerror: {e}"))
-                    .unwrap_or_default(),
-            ),
+            Some(task) => {
+                println!(
+                    "{} [{}] owner-session={} {}{}{}",
+                    task.id,
+                    task.status,
+                    task.owner_session_id.0,
+                    task.prompt,
+                    task.result
+                        .as_ref()
+                        .map(|r| format!("\nresult: {r}"))
+                        .unwrap_or_default(),
+                    task.error
+                        .as_ref()
+                        .map(|e| format!("\nerror: {e}"))
+                        .unwrap_or_default(),
+                );
+                for directive in &task.steer_directives {
+                    println!("steer[{}]: {}", directive.receipt_id.0, directive.message);
+                }
+            }
             None => println!("task {id} not found"),
         },
         "result" => match tasks.get(id) {
@@ -979,6 +996,91 @@ async fn dispatch_task_sub(
         },
         _ => println!("usage: /task status|log|result|cancel <task-id>"),
     }
+}
+
+/// **§1.10.** `/steer <task-id> <message>` (alias `/tell`): accept a
+/// steering directive against an active background task. Receipted and
+/// durably recorded on the task, but — per
+/// [`ardur_fused_runtime::FusedRuntime::accept_steer_directive`]'s
+/// documented limitation — not yet consumed by the one-shot task runtime.
+async fn dispatch_steer(
+    engine: &ActiveEngine,
+    tasks: &background_task::TaskRegistry,
+    state: &mut ReplState,
+    args: &str,
+) {
+    let (id_str, message) = args.split_once(char::is_whitespace).unwrap_or((args, ""));
+    let message = message.trim();
+    let Ok(id) = id_str.parse::<uuid::Uuid>().map(background_task::TaskId) else {
+        println!("usage: /steer <task-id> <message> (alias: /tell)");
+        return;
+    };
+    if message.is_empty() {
+        println!("usage: /steer <task-id> <message> (alias: /tell)");
+        return;
+    }
+    match engine.fused_engine_ref() {
+        Ok(fused) => match tasks.steer(fused, id, message.to_string()).await {
+            Ok(()) => println!(
+                "{}",
+                state.theme.paint(
+                    Role::Dim,
+                    &format!("steering directive accepted for task {id}")
+                )
+            ),
+            Err(e) => println!("{}", state.theme.paint(Role::Error, &format!("{e}"))),
+        },
+        Err(e) => println!("{}", state.theme.paint(Role::Error, &format!("{e}"))),
+    }
+}
+
+/// **§1.10.** `/interrupt <task-id>`: accept an interrupt against an active
+/// background task, aborting it — mechanically identical to `/task cancel`
+/// but a distinct receipted intent (see
+/// [`ardur_fused_runtime::FusedRuntime::accept_interrupt`]).
+async fn dispatch_interrupt(
+    engine: &ActiveEngine,
+    tasks: &background_task::TaskRegistry,
+    state: &mut ReplState,
+    args: &str,
+) {
+    let Ok(id) = args
+        .trim()
+        .parse::<uuid::Uuid>()
+        .map(background_task::TaskId)
+    else {
+        println!("usage: /interrupt <task-id>");
+        return;
+    };
+    match engine.fused_engine_ref() {
+        Ok(fused) => match tasks.interrupt(fused, id).await {
+            Ok(()) => println!(
+                "{}",
+                state
+                    .theme
+                    .paint(Role::Dim, &format!("interrupted task {id}"))
+            ),
+            Err(e) => println!("{}", state.theme.paint(Role::Error, &format!("{e}"))),
+        },
+        Err(e) => println!("{}", state.theme.paint(Role::Error, &format!("{e}"))),
+    }
+}
+
+/// **§1.10.** `/queue` (alias `/status`): a summary of how many background
+/// tasks are active vs. terminal, and how many steering directives have
+/// been accepted but are not yet deliverable to their target.
+fn dispatch_queue_status(tasks: &background_task::TaskRegistry, state: &mut ReplState) {
+    let summary = tasks.queue_summary();
+    println!(
+        "{}",
+        state.theme.paint(
+            Role::Dim,
+            &format!(
+                "{} active, {} terminal, {} steering directive(s) pending delivery",
+                summary.active_tasks, summary.terminal_tasks, summary.pending_steer_directives
+            )
+        )
+    );
 }
 
 /// Submit `line` as a chat turn, appending it (and any reply) to `history`.
