@@ -156,7 +156,9 @@ fn queue_reflects_a_real_background_task() {
 
     let output = offline_chat()
         .env("HOME", &home_path)
-        .write_stdin("/background summarize the open questions\nhello\nhello again\n/queue\n/quit\n")
+        .write_stdin(
+            "/background summarize the open questions\nhello\nhello again\n/queue\n/quit\n",
+        )
         .output()
         .expect("the chat process runs");
     assert!(output.status.success(), "exit: {:?}", output.status);

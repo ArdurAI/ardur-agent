@@ -590,7 +590,12 @@ impl FusedEngine {
         target_task_id: uuid::Uuid,
     ) -> Result<ardur_runtime::ReceiptId, CliError> {
         self.runtime
-            .accept_interrupt(self.session_id, &self.cap_token, INTERRUPT_CAPABILITY, target_task_id)
+            .accept_interrupt(
+                self.session_id,
+                &self.cap_token,
+                INTERRUPT_CAPABILITY,
+                target_task_id,
+            )
             .await
             .map_err(|e| CliError::State(format!("interrupt failed: {e}")))
     }

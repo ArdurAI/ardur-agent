@@ -117,7 +117,12 @@ async fn accept_interrupt_is_denied_without_the_capability() {
     let cap_token = CapTokenRef(no_capability_token());
 
     let result = runtime
-        .accept_interrupt(session_id, &cap_token, "input.interrupt", uuid::Uuid::now_v7())
+        .accept_interrupt(
+            session_id,
+            &cap_token,
+            "input.interrupt",
+            uuid::Uuid::now_v7(),
+        )
         .await;
 
     assert!(result.is_err());
@@ -165,8 +170,7 @@ async fn steer_and_interrupt_receipts_chain_with_turn_receipts() {
         .await
         .expect("the turn completes");
 
-    let chain =
-        ardur_fused_runtime::load_persisted_chain(receipt_log.path()).expect("chain loads");
+    let chain = ardur_fused_runtime::load_persisted_chain(receipt_log.path()).expect("chain loads");
     assert_eq!(chain.len(), 3);
     assert_eq!(chain[0].body.receipt_id, steer.0);
     assert_eq!(chain[1].body.receipt_id, interrupt.0);

@@ -1023,7 +1023,10 @@ async fn dispatch_steer(
         Ok(fused) => match tasks.steer(fused, id, message.to_string()).await {
             Ok(()) => println!(
                 "{}",
-                state.theme.paint(Role::Dim, &format!("steering directive accepted for task {id}"))
+                state.theme.paint(
+                    Role::Dim,
+                    &format!("steering directive accepted for task {id}")
+                )
             ),
             Err(e) => println!("{}", state.theme.paint(Role::Error, &format!("{e}"))),
         },
@@ -1041,7 +1044,11 @@ async fn dispatch_interrupt(
     state: &mut ReplState,
     args: &str,
 ) {
-    let Ok(id) = args.trim().parse::<uuid::Uuid>().map(background_task::TaskId) else {
+    let Ok(id) = args
+        .trim()
+        .parse::<uuid::Uuid>()
+        .map(background_task::TaskId)
+    else {
         println!("usage: /interrupt <task-id>");
         return;
     };
@@ -1049,7 +1056,9 @@ async fn dispatch_interrupt(
         Ok(fused) => match tasks.interrupt(fused, id).await {
             Ok(()) => println!(
                 "{}",
-                state.theme.paint(Role::Dim, &format!("interrupted task {id}"))
+                state
+                    .theme
+                    .paint(Role::Dim, &format!("interrupted task {id}"))
             ),
             Err(e) => println!("{}", state.theme.paint(Role::Error, &format!("{e}"))),
         },
