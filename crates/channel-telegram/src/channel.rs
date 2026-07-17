@@ -100,7 +100,7 @@ impl Forwarder {
             channel_id: ChannelId(format!("{}/{chat_id}", self.channel_prefix)),
             sender: SenderRef(sender),
             body: MessageBody::Text(text.to_owned()),
-            received_at: msg.date.timestamp_millis().max(0) as u64,
+            received_at: UnixTsMillis(msg.date.timestamp_millis().max(0) as u64),
             thread_id: None,
         };
 
@@ -286,10 +286,12 @@ impl MessagingGateway for TelegramChannel {
 
 /// Current wall-clock time in Unix milliseconds (saturating to 0 before the epoch).
 fn now_millis() -> UnixTsMillis {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+    UnixTsMillis(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0),
+    )
 }
 
 #[cfg(test)]

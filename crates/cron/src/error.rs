@@ -2,6 +2,10 @@
 pub enum CronError {
     #[error("invalid cron expression: {0}")]
     InvalidExpression(String),
+    #[error("cron parse error: {0}")]
+    Parse(String),
+    #[error("no next execution time within the search horizon")]
+    NoNextExecution,
     #[error("job not found: {0}")]
     JobNotFound(String),
     #[error("scheduler already running")]

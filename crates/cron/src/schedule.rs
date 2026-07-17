@@ -1,6 +1,6 @@
 //! Next-execution time computation for cron expressions.
 
-use chrono::{DateTime, Datelike, Duration, Timelike, Utc};
+use chrono::{DateTime, Duration, Timelike, Utc};
 
 use crate::{CronError, CronExpr};
 
@@ -24,27 +24,13 @@ pub fn next_execution(expr: &CronExpr, from: DateTime<Utc>) -> Result<DateTime<U
 
     for _ in 0..(366 * 24 * 60 + 10) {
         // ~1 year of minutes
-        if matches(expr, &candidate) {
+        if expr.matches(&candidate) {
             return Ok(candidate);
         }
-        candidate = candidate + Duration::minutes(1);
+        candidate += Duration::minutes(1);
     }
 
     Err(CronError::NoNextExecution)
-}
-
-fn matches(expr: &CronExpr, dt: &DateTime<Utc>) -> bool {
-    let minute = dt.minute() as u8;
-    let hour = dt.hour() as u8;
-    let day = dt.day() as u8;
-    let month = dt.month() as u8;
-    let weekday = dt.weekday().num_days_from_sunday() as u8;
-
-    expr.minute.contains(minute)
-        && expr.hour.contains(hour)
-        && expr.day.contains(day)
-        && expr.month.contains(month)
-        && expr.weekday.contains(weekday)
 }
 
 #[cfg(test)]

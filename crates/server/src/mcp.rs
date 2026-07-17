@@ -24,9 +24,13 @@ use rmcp::transport::streamable_http_server::session::local::LocalSessionManager
 use rmcp::transport::{StreamableHttpServerConfig, StreamableHttpService};
 
 use ardur_media_audio::{VoiceTranscribeTool, WhisperApiTranscriptionProvider};
+use ardur_media_video::{
+    GeminiVideoAnalyzeProvider, VideoAnalyzeTool, VideoDescribeTool, VideoGenerateTool,
+};
 use ardur_tool_registry::{
-    ArdurMcpServer, EchoTool, HealthCheckTool, RemoteMcpToolset, SkillLoader, SkillTool, Tool,
-    ToolRegistry, bearer_token_allowed, extract_bearer_token,
+    ArdurMcpServer, BuiltinOpts, EchoTool, HealthCheckTool, HttpFetchTool, ListDirTool,
+    ReadFileTool, RemoteMcpToolset, ShellTool, SkillLoader, SkillTool, Tool, ToolId, ToolRegistry,
+    WriteFileTool, bearer_token_allowed, extract_bearer_token,
 };
 
 /// The two example tools the server advertises over MCP: a trivial `echo`
@@ -89,6 +93,65 @@ pub async fn connect_remote_tools(servers: &[(String, String)]) -> Vec<Box<dyn T
     tools
 }
 
+/// **§10.2.** Register the video tools (`video.analyze`, `video.describe`,
+/// `video.generate`) backed by the Gemini video-input provider, when
+/// `GEMINI_API_KEY` is configured. `video.generate` is default-deny: it is only
+/// opted in when `ARDUR_VIDEO_GENERATE_OPT_IN` is truthy, and its per-request
+/// duration ceiling comes from `ARDUR_VIDEO_MAX_DURATION_SECONDS` (default 30).
+/// A missing key degrades gracefully — the tools are simply not registered.
+fn register_video_tools(registry: &mut ToolRegistry) {
+    let provider = match GeminiVideoAnalyzeProvider::from_env() {
+        Ok(Some(provider)) => provider,
+        Ok(None) => {
+            tracing::debug!("GEMINI_API_KEY unset; video.* tools not registered");
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Gemini video provider config invalid; video.* tools disabled");
+            return;
+        }
+    };
+
+    let opted_in = std::env::var("ARDUR_VIDEO_GENERATE_OPT_IN")
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false);
+    let max_duration_seconds = std::env::var("ARDUR_VIDEO_MAX_DURATION_SECONDS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .unwrap_or(VideoGenerateTool::DEFAULT_MAX_DURATION_SECONDS);
+
+    let registrations: Vec<(&str, Box<dyn Tool>)> = vec![
+        (
+            VideoAnalyzeTool::ID,
+            Box::new(VideoAnalyzeTool::new(provider.clone())),
+        ),
+        (
+            VideoDescribeTool::ID,
+            Box::new(VideoDescribeTool::new(provider.clone())),
+        ),
+        (
+            VideoGenerateTool::ID,
+            Box::new(VideoGenerateTool::new(
+                provider.clone(),
+                opted_in,
+                max_duration_seconds,
+            )),
+        ),
+    ];
+    for (id, tool) in registrations {
+        if let Err(e) = registry.register(tool) {
+            tracing::warn!(tool = id, error = %e, "skipping video tool registration");
+        } else {
+            tracing::info!(tool = id, "registered Gemini video tool");
+        }
+    }
+    tracing::info!(
+        video_generate_opted_in = opted_in,
+        video_max_duration_seconds = max_duration_seconds,
+        "video generation opt-in posture"
+    );
+}
+
 /// **§8.X.** Load every filesystem `SKILL.md` skill under each directory in
 /// `skills_dirs` (`ARDUR_SKILLS_DIRS`) and register it as a [`SkillTool`]. A
 /// directory that cannot be read, or a skill whose id collides with an
@@ -115,19 +178,76 @@ pub fn register_skills<P: AsRef<Path>>(registry: &mut ToolRegistry, skills_dirs:
     }
 }
 
+/// **ARD-457 / §6.1.** Register the operator-granted hardened built-in tools
+/// selected by `opts` into `registry`, logging each one that installs (mirroring
+/// the `voice.transcribe` info/warn logging). With no opt-ins the call is a
+/// no-op, so the default boot registers no hardened tool (fail-closed).
+///
+/// Registering a tool here is *also* what makes it invokable: the runtime
+/// cap-token allowlist is derived from the registered tool set
+/// (`tool_allowlist_for_runtime` in [`crate::state`]), so a granted tool's
+/// `cap.*` capabilities are minted into every turn's token exactly when — and
+/// only when — its tool is registered. Non-granted tools are absent, so they
+/// stay `CapDenied` even if a prompt names them.
+///
+/// An id collision (which the fixed built-in ids never cause against the example
+/// registry) is logged and the remaining registration is skipped, rather than
+/// aborting boot.
+fn register_hardened_builtins(registry: &mut ToolRegistry, opts: BuiltinOpts) {
+    // Snapshot what was requested before `opts` is moved into the installer, so
+    // the post-registration log reflects intent.
+    let want_shell = opts.enable_shell;
+    let want_files = opts.file_root.is_some();
+    let want_http = opts.http.as_ref().is_some_and(|http| http.enable);
+    if !(want_shell || want_files || want_http || opts.enable_media) {
+        // Fail-closed default: the operator opted into nothing.
+        return;
+    }
+
+    if let Err(e) = registry.register_builtins(opts) {
+        tracing::warn!(error = %e, "skipping hardened built-in tool registration (id collision)");
+        return;
+    }
+
+    // Report each hardened tool that actually installed, and — because
+    // registration is what grants invokability — that its capabilities are now
+    // minted into the runtime cap-token.
+    for id in [
+        ShellTool::ID,
+        HttpFetchTool::ID,
+        ReadFileTool::ID,
+        WriteFileTool::ID,
+        ListDirTool::ID,
+    ] {
+        if registry.get(&ToolId::new(id)).is_some() {
+            tracing::info!(
+                tool = id,
+                "registered hardened built-in tool (ARD-457 operator grant); its capabilities are minted into the runtime cap-token"
+            );
+        }
+    }
+}
+
 /// **§6.0.** Assemble the tool registry the fused runtime invokes: the local
-/// tools ([`example_registry`]), every filesystem skill under `skills_dirs`
-/// (`ARDUR_SKILLS_DIRS`, §8.X), and every tool from the configured remote MCP
-/// servers (`ARDUR_MCP_REMOTE_SERVERS`). A skill or remote tool whose id
-/// collides with an already-registered one is logged and skipped (first
+/// tools ([`example_registry`]), the operator-granted hardened §6.1 built-ins
+/// (`builtin_opts`, ARD-457 — off by default), every filesystem skill under
+/// `skills_dirs` (`ARDUR_SKILLS_DIRS`, §8.X), and every tool from the configured
+/// remote MCP servers (`ARDUR_MCP_REMOTE_SERVERS`). A skill or remote tool whose
+/// id collides with an already-registered one is logged and skipped (first
 /// registration wins).
 pub async fn assemble_tool_registry<P: AsRef<Path>>(
     provider: impl Into<String>,
     memory_backend: impl Into<String>,
     skills_dirs: &[P],
     servers: &[(String, String)],
+    builtin_opts: BuiltinOpts,
 ) -> ToolRegistry {
     let mut registry = example_registry(provider, memory_backend);
+    // ARD-457: install the operator-granted hardened built-ins before skills and
+    // remote tools so their fixed ids win any (accidental) collision, and so a
+    // granted tool's capabilities are present in the set the runtime cap-token
+    // allowlist is derived from.
+    register_hardened_builtins(&mut registry, builtin_opts);
     match WhisperApiTranscriptionProvider::from_env() {
         Ok(Some(provider)) => {
             if let Err(e) = registry.register(Box::new(VoiceTranscribeTool::new(provider))) {
@@ -146,6 +266,7 @@ pub async fn assemble_tool_registry<P: AsRef<Path>>(
             tracing::warn!(error = %e, "Whisper voice transcription config invalid; tool disabled")
         }
     }
+    register_video_tools(&mut registry);
     register_skills(&mut registry, skills_dirs);
     for tool in connect_remote_tools(servers).await {
         let id = tool.id();
