@@ -26,9 +26,15 @@ const CHAT_TOKEN: &str = "e2e-streaming-chat-token";
 fn test_config(data_dir: &tempfile::TempDir) -> Config {
     Config {
         anthropic_api_key: String::new(),
-        slack_bot_token: "redacted-test-token".to_string(),
-        slack_signing_secret: "streaming-e2e-signing-secret".to_string(),
-        slack_app_id: "A0STREAMINGE2E".to_string(),
+        enable_shell_tool: false,
+        shell_allowlist: Vec::new(),
+        enable_http_tool: false,
+        http_allowlist: Vec::new(),
+        file_tool_root: None,
+        slack_enabled: true,
+        slack_bot_token: Some("redacted-test-token".to_string()),
+        slack_signing_secret: Some("streaming-e2e-signing-secret".to_string()),
+        slack_app_id: Some("A0STREAMINGE2E".to_string()),
         slack_allowed_senders: vec!["U0STREAM".to_string()],
         data_dir: data_dir.path().to_path_buf(),
         bind_addr: "127.0.0.1:0".to_string(),
@@ -80,7 +86,9 @@ async fn scenario_streaming_chat_sse_emits_fused_events_and_receipt() {
     let provider: Arc<dyn Provider> =
         Arc::new(AnthropicProvider::stub(ModelId::new(&config.model)));
     let tools = Arc::new(ardur_server::example_registry("stub", "in-memory"));
-    let state = AppState::boot(&config, provider, tools).expect("server boots");
+    let state = AppState::boot(&config, provider, tools)
+        .await
+        .expect("server boots");
     let router = build_router(state.clone());
 
     let response = router
@@ -180,7 +188,9 @@ async fn scenario_streaming_chat_cancel_drops_before_receipt() {
         rate_card: RateCard::anthropic_2026_q2_v1(),
     });
     let tools = Arc::new(ardur_server::example_registry("stub", "in-memory"));
-    let state = AppState::boot(&config, provider, tools).expect("server boots");
+    let state = AppState::boot(&config, provider, tools)
+        .await
+        .expect("server boots");
     let router = build_router(state.clone());
 
     let response = router

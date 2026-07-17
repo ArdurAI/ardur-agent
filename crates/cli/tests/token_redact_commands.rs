@@ -67,8 +67,9 @@ fn token_create_lists_and_revokes() {
 
 #[test]
 fn redact_plain_text_masks_default_patterns() {
-    // Use a high-entropy secret pattern that the default regexes definitely catch.
-    let input = "My key is sk-abcdefghijklmnopqrstuvwxyz1234567890abc and pass is secret123";
+    let anthropic = format!("sk-ant-api03-{}", "a".repeat(32));
+    let openrouter = format!("sk-or-v1-{}", "b".repeat(32));
+    let input = format!("My keys are {anthropic} and {openrouter}; pass is secret123");
     let output = Command::cargo_bin("ardur")
         .expect("the `ardur` binary builds")
         .args(["redact"])
@@ -84,8 +85,12 @@ fn redact_plain_text_masks_default_patterns() {
         "should redact secrets: {stdout}"
     );
     assert!(
-        !stdout.contains("sk-abcdefghijklmnopqrstuvwxyz1234567890abc"),
-        "secret leaked: {stdout}"
+        !stdout.contains(&anthropic),
+        "Anthropic key leaked: {stdout}"
+    );
+    assert!(
+        !stdout.contains(&openrouter),
+        "OpenRouter key leaked: {stdout}"
     );
     assert!(!stdout.contains("secret123"), "password leaked: {stdout}");
 }
@@ -126,6 +131,27 @@ fn redact_custom_pattern_can_be_added() {
         !stdout.contains("XYZZY-9999-0000"),
         "custom secret leaked: {stdout}"
     );
+}
+
+/// 2026-07-12 cli security sweep, finding 4: `run_redact` used to
+/// `fs::read_to_string`/`read_to_string(stdin)` with no size cap, despite
+/// this command's whole purpose being to sanitize pasted/piped,
+/// potentially untrusted content before it's shared. An oversized input
+/// must be refused outright (not silently truncated-and-redacted, which
+/// would give a false sense of security about the untouched remainder).
+#[test]
+fn redact_refuses_an_oversized_input_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let input_path = dir.path().join("huge.txt");
+    fs::write(&input_path, vec![b'a'; 26 * 1024 * 1024]).expect("write huge input");
+
+    let assert = Command::cargo_bin("ardur")
+        .expect("the `ardur` binary builds")
+        .args(["redact", "-i", input_path.to_str().unwrap()])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(stderr.contains("cap"), "{stderr}");
 }
 
 #[test]

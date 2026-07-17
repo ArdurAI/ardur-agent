@@ -24,8 +24,13 @@ use ardur_cap_token::BiscuitCapTokenIssuer;
 use ardur_cedar_policy::{CedarPolicyBundle, PolicyBundle, PolicySource};
 use ardur_receipt::Es256SigningKey;
 use biscuit_auth::{Algorithm, KeyPair, PrivateKey};
+use serde::{Deserialize, Serialize};
 
-use crate::error::CliError;
+use crate::CliError;
+use crate::secure_io::{
+    create_private_file_no_follow, read_file_no_follow, read_string_no_follow,
+    write_private_file_atomic_no_follow,
+};
 
 /// The deny-all Cedar bundle used when no `cedar.policies` file is present.
 /// Operators must either provide a real policy file or opt into the explicit
@@ -34,6 +39,26 @@ const DENY_ALL_POLICY: &str = "forbid(principal, action, resource);";
 
 /// Explicit local-development fallback for ad-hoc CLI smoke tests.
 const PERMISSIVE_POLICY: &str = "permit(principal, action, resource);";
+
+/// Operator-facing metadata recorded alongside a durable session journal.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct SessionMetadata {
+    /// Durable session UUID.
+    pub session_id: String,
+    /// First time this metadata file was written, in Unix milliseconds.
+    pub created_at_ms: u64,
+    /// Most recent time this session was opened, in Unix milliseconds.
+    pub updated_at_ms: u64,
+    /// Provider selected for the session.
+    pub provider: String,
+    /// Requested model selected for the session.
+    pub model: String,
+    /// Ingress surface that created or opened the session.
+    pub source: String,
+    /// Workspace name captured when the session was first created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
+}
 
 /// The resolved `~/.ardur/` state directories for a session. Construct with
 /// [`resolve`](StateDirs::resolve), then [`create`](StateDirs::create) to
@@ -109,7 +134,7 @@ impl StateDirs {
     /// minting and persisting a fresh Ed25519 root key on first run.
     pub fn load_or_create_issuer(&self) -> Result<BiscuitCapTokenIssuer, CliError> {
         let path = self.issuer_key_path();
-        match std::fs::read(&path) {
+        match read_file_no_follow(&path) {
             Ok(bytes) => {
                 let private = PrivateKey::from_bytes(&bytes, Algorithm::Ed25519).map_err(|e| {
                     CliError::State(format!(
@@ -121,7 +146,7 @@ impl StateDirs {
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 let keypair = KeyPair::new();
-                write_private(&path, &keypair.private().to_bytes())?;
+                create_private_file_no_follow(&path, &keypair.private().to_bytes())?;
                 Ok(BiscuitCapTokenIssuer::new(keypair))
             }
             Err(e) => Err(CliError::Io(e)),
@@ -133,7 +158,7 @@ impl StateDirs {
     /// fresh P-256 key (PKCS#8 PEM) on first run.
     pub fn load_or_create_receipt_key(&self) -> Result<Es256SigningKey, CliError> {
         let path = self.receipt_key_path();
-        match std::fs::read_to_string(&path) {
+        match read_string_no_follow(&path) {
             Ok(pem) => Es256SigningKey::from_pkcs8_pem(&pem).map_err(|e| {
                 CliError::State(format!(
                     "receipt key at {} is malformed: {e}",
@@ -145,7 +170,7 @@ impl StateDirs {
                 let pem = key.to_pkcs8_pem().map_err(|e| {
                     CliError::State(format!("could not serialize receipt key: {e}"))
                 })?;
-                write_private(&path, pem.as_bytes())?;
+                create_private_file_no_follow(&path, pem.as_bytes())?;
                 Ok(key)
             }
             Err(e) => Err(CliError::Io(e)),
@@ -188,6 +213,76 @@ impl StateDirs {
     pub fn local_subject(&self) -> String {
         format!("cli://localhost-{}", local_uid(&self.root))
     }
+
+    /// Create or update the operator metadata stored beside a session journal.
+    pub fn record_session_metadata(
+        &self,
+        session_id: &str,
+        provider: &str,
+        model: &str,
+        source: &str,
+    ) -> Result<(), CliError> {
+        let session_id = uuid::Uuid::parse_str(session_id)
+            .map(|id| id.to_string())
+            .map_err(|_| CliError::State("session metadata id must be a valid UUID".to_string()))?;
+        let path = self
+            .journals
+            .join("sessions")
+            .join(&session_id)
+            .join("metadata.json");
+        let existing = match read_string_no_follow(&path) {
+            Ok(raw) => {
+                let metadata = serde_json::from_str::<SessionMetadata>(&raw).map_err(|error| {
+                    CliError::State(format!(
+                        "parsing existing session metadata {}: {error}",
+                        path.display()
+                    ))
+                })?;
+                if metadata.session_id != session_id {
+                    return Err(CliError::State(format!(
+                        "session metadata id mismatch: expected `{session_id}`, found `{}`",
+                        metadata.session_id
+                    )));
+                }
+                Some(metadata)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(CliError::Io(error)),
+        };
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
+            .unwrap_or(0);
+        let metadata = SessionMetadata {
+            session_id: session_id.to_string(),
+            created_at_ms: existing
+                .as_ref()
+                .map(|metadata| metadata.created_at_ms)
+                .filter(|created_at| *created_at > 0)
+                .unwrap_or(now_ms),
+            updated_at_ms: now_ms,
+            provider: provider.to_string(),
+            model: model.to_string(),
+            source: source.to_string(),
+            workspace: existing
+                .as_ref()
+                .and_then(|metadata| metadata.workspace.clone())
+                .or_else(current_workspace_name),
+        };
+        let bytes = serde_json::to_vec_pretty(&metadata)
+            .map_err(|error| CliError::State(format!("serializing session metadata: {error}")))?;
+        write_private_file_atomic_no_follow(&path, &bytes)?;
+        Ok(())
+    }
+}
+
+fn current_workspace_name() -> Option<String> {
+    std::env::current_dir()
+        .ok()?
+        .file_name()?
+        .to_str()
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
 }
 
 /// Whether the explicit local-development permissive Cedar fallback is enabled.
@@ -200,21 +295,6 @@ fn dev_permissive_policy_enabled() -> bool {
             )
         })
         .unwrap_or(false)
-}
-
-/// Write `bytes` to `path`, owner-read/write only on unix (`0o600`) so private
-/// key material is not group/world readable.
-fn write_private(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(path, bytes)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    }
-    Ok(())
 }
 
 /// The local user id used in the session subject. See [`StateDirs::local_subject`].
@@ -280,8 +360,87 @@ mod tests {
 
         let bundle = state
             .load_cedar_policies_with_dev_fallback(true)
-            .expect("explicit dev fallback loads permissive policy");
-
+            .expect("missing policy loads explicit dev fallback");
         assert!(matches!(eval_chat_submit(&bundle), Decision::Allow { .. }));
+    }
+
+    #[test]
+    fn session_metadata_rejects_non_uuid_path_components() {
+        let home = tempfile::tempdir().expect("temp home");
+        let state = state_under(home.path());
+
+        let error = state
+            .record_session_metadata("../escape", "provider", "model", "cli")
+            .expect_err("session path traversal must be rejected");
+
+        assert!(error.to_string().contains("valid UUID"), "{error}");
+        assert!(!state.journals.join("escape/metadata.json").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_key_and_metadata_loaders_reject_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let home = tempfile::tempdir().expect("temp home");
+        let home_path = home.path().canonicalize().expect("canonical temp home");
+        let state = state_under(&home_path);
+        std::fs::create_dir_all(&state.keys).expect("keys directory");
+        let key_target = home_path.join("outside-receipt.pem");
+        std::fs::write(&key_target, "not a private key").expect("key target");
+        symlink(&key_target, state.receipt_key_path()).expect("receipt key symlink");
+        let error = match state.load_or_create_receipt_key() {
+            Ok(_) => panic!("receipt key symlink must fail closed"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("symlink"), "{error}");
+
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let session_dir = state.journals.join("sessions").join(&session_id);
+        std::fs::create_dir_all(&session_dir).expect("session directory");
+        let metadata_target = home_path.join("outside-metadata.json");
+        std::fs::write(
+            &metadata_target,
+            format!(
+                r#"{{"session_id":"{session_id}","created_at_ms":1,"updated_at_ms":1,"provider":"p","model":"m","source":"cli"}}"#
+            ),
+        )
+        .expect("metadata target");
+        symlink(&metadata_target, session_dir.join("metadata.json")).expect("metadata symlink");
+        let error = state
+            .record_session_metadata(&session_id, "p", "m", "cli")
+            .expect_err("metadata symlink must fail closed");
+        assert!(error.to_string().contains("symlink"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn session_metadata_is_created_owner_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let home = tempfile::tempdir().expect("temp home");
+        let home_path = home.path().canonicalize().expect("canonical temp home");
+        let state = state_under(&home_path);
+        let session_id = uuid::Uuid::new_v4().to_string();
+        state
+            .record_session_metadata(&session_id, "provider", "model", "cli")
+            .expect("metadata write");
+
+        let session_dir = state.journals.join("sessions").join(session_id);
+        let mode = std::fs::metadata(session_dir.join("metadata.json"))
+            .expect("metadata stat")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+        assert!(
+            std::fs::read_dir(&session_dir)
+                .expect("session directory")
+                .all(|entry| !entry
+                    .expect("directory entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".metadata-")),
+            "atomic rename must not leave temporary metadata files"
+        );
     }
 }

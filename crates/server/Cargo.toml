@@ -60,6 +60,7 @@ ardur-messaging-gateway = { workspace = true }
 # Optional Whisper-backed voice.transcribe tool registration; missing API keys
 # degrade gracefully at boot.
 ardur-media-audio = { workspace = true }
+ardur-media-video = { workspace = true }
 # §6.0 Phase 2 — the tool registry + its MCP bridge. The server exposes ardur's
 # tools over MCP (`ArdurMcpServer` mounted on the Streamable-HTTP transport) and
 # gates the surface with the registry's bearer-token allowlist helpers.
@@ -76,6 +77,9 @@ ardur-automation = { workspace = true }
 # loading the persisted issuer key needs `PrivateKey::from_bytes_hex`. Pulled
 # directly, as `crates/e2e-tests` does for the same reason.
 biscuit-auth = { workspace = true }
+# Descriptor-relative, no-follow access to persisted server key material on Unix.
+rustix = { workspace = true }
+uuid = { workspace = true }
 
 # HTTP server + the Slack bot-token / signing-secret custody type.
 axum = { workspace = true }

@@ -132,6 +132,7 @@ impl HookedRuntime {
     }
 }
 
+#[async_trait::async_trait]
 impl ChatRuntime for HookedRuntime {
     async fn submit(&self, req: SubmitRequest) -> Result<SubmitResult, RuntimeError> {
         let session_id = req.session_id;
@@ -232,6 +233,22 @@ fn map_provider_error(err: &ProviderError) -> RuntimeError {
     }
 }
 
+/// Namespace for deriving a stable cap-token `jti` surrogate from an opaque
+/// [`CapTokenRef`] handle. Fixed UUID so the derivation is deterministic across
+/// runs and processes.
+const CAP_TOKEN_JTI_NAMESPACE: uuid::Uuid =
+    uuid::Uuid::from_u128(0xA5D0_1CAB_7012_4711_9E5A_11E0_0CA9_7011);
+
+/// Derive the receipt's cap-token id from the request's [`CapTokenRef`].
+///
+/// The canonical `cap_token_id` is a cap-token's minted `jti` (a UUID). This
+/// Phase-1 hooked runtime does not verify tokens, so it has no minted jti;
+/// instead it derives a **stable UUIDv5** from the opaque token handle, so the
+/// same token always receipts under the same id.
+fn cap_token_jti(cap_token: &CapTokenRef) -> uuid::Uuid {
+    uuid::Uuid::new_v5(&CAP_TOKEN_JTI_NAMESPACE, cap_token.0.as_bytes())
+}
+
 /// Mint the receipt body for a completed turn. The `payload_digest` covers the
 /// *response actually produced*, so a turn whose request was redacted by a
 /// pre-submit hook is receipted against the redacted text.
@@ -242,8 +259,9 @@ fn mint_receipt(req: &SubmitRequest, response: &CompletionResponse) -> ReceiptBo
         verb: VerbObject::new(COMPLETION_VERB).expect("COMPLETION_VERB is a valid receipt verb"),
         issued_at: ardur_receipt::UnixTsMillis(now_millis()),
         subject: ardur_receipt::HolderId(req.session_id.0.to_string()),
-        cap_token_id: ardur_receipt::TokenId(req.cap_token.0.clone()),
+        cap_token_id: ardur_receipt::TokenId(cap_token_jti(&req.cap_token)),
         payload_digest: Sha256Digest::of(response.content.as_bytes()),
+        session_id: Some(req.session_id.0),
         cost: to_receipt_cost(response.cost),
         // This Phase-1 hooked runtime does not execute tools; the §6.0
         // tool-call receipts are minted by the fused runtime.

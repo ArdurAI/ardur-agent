@@ -50,6 +50,9 @@ ardur-tool-registry = { workspace = true }
 # §9.6 — OpenClaw hook compatibility: the registry extension trait that
 # translates and registers OpenClaw-format hooks into the lifecycle registry.
 ardur-hooks-openclaw-compat = { workspace = true }
+# ARD-139 propose-half — the shared on-disk approval-card store a gated tool
+# call proposes into (and checks for an already-decided card in).
+ardur-approvals = { workspace = true }
 
 async-trait = { workspace = true }
 anyhow = { workspace = true }
@@ -62,6 +65,10 @@ serde_json = { workspace = true }
 # Decoding persisted JWS payloads back into receipt bodies for cross-restart
 # chain verification (`SignedReceipt::from_parts` is crate-private to receipt).
 base64 = { workspace = true }
+# O_NOFOLLOW for race-resistant persisted receipt-chain opens on Unix.
+libc = { workspace = true }
+# Descriptor-relative, no-follow traversal for persisted receipt logs on Unix.
+rustix = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 # §6.0 — per-tool-call timeout (`tokio::time::timeout`) in the tool-execution
 # loop. Driven by the caller's runtime (the server worker, tests' #[tokio::test]).

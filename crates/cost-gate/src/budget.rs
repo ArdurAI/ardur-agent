@@ -37,7 +37,11 @@ pub trait BudgetStore: Send + Sync {
 
     /// Credit a signed `delta` back to the holder named by `handle` (the
     /// `reserved - actual` refund, or a full credit on release).
-    async fn refund(&self, handle: ReservationHandle, delta: CostDelta) -> Result<(), BudgetError>;
+    async fn refund(
+        &self,
+        handle: ReservationHandle,
+        delta: CostDelta,
+    ) -> Result<(CostTuple, CostTuple), BudgetError>;
 
     /// Atomically merge `add` into the holder's balance — creating the account
     /// from zero if it does not exist yet — and return the resulting balance.
@@ -158,14 +162,20 @@ impl BudgetStore for InMemoryBudgetStore {
         }
     }
 
-    async fn refund(&self, handle: ReservationHandle, delta: CostDelta) -> Result<(), BudgetError> {
+    async fn refund(
+        &self,
+        handle: ReservationHandle,
+        delta: CostDelta,
+    ) -> Result<(CostTuple, CostTuple), BudgetError> {
         let mut accounts = self.accounts.write();
         let acct = accounts
             .get_mut(&handle.holder)
             .ok_or(BudgetError::HolderNotFound)?;
+        let before = acct.balance;
         acct.balance = acct.balance.apply_delta(&delta);
+        let after = acct.balance;
         acct.version = acct.version.wrapping_add(1);
-        Ok(())
+        Ok((before, after))
     }
 
     async fn provision_merge(

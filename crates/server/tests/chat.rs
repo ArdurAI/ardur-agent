@@ -49,31 +49,35 @@ async fn post_chat_with_auth(
 }
 
 /// Boot a stub-backed router over a fresh tempdir config.
-fn stub_router() -> Router {
+async fn stub_router() -> Router {
     let dir = Box::leak(Box::new(tempfile::tempdir().expect("tempdir")));
     let config = support::test_config(dir, None);
-    support::boot_router(&config)
+    support::boot_router(&config).await
 }
 
 /// Boot a router whose model backend is the scripted `provider`.
-fn scripted_router(provider: Arc<dyn Provider>) -> Router {
+async fn scripted_router(provider: Arc<dyn Provider>) -> Router {
     let dir = Box::leak(Box::new(tempfile::tempdir().expect("tempdir")));
     let config: Config = support::test_config(dir, None);
     let tools = Arc::new(example_registry("scripted", "in-memory"));
-    let state = AppState::boot(&config, provider, tools).expect("AppState boots");
+    let state = AppState::boot(&config, provider, tools)
+        .await
+        .expect("AppState boots");
     build_router(state)
 }
 
 /// Boot a production-like router with no configured Cedar policy and no dev
 /// fallback. The server should boot with the built-in deny-all policy, then deny
 /// `/chat` requests before reaching the provider.
-fn production_deny_all_router(provider: Arc<dyn Provider>) -> Router {
+async fn production_deny_all_router(provider: Arc<dyn Provider>) -> Router {
     let dir = Box::leak(Box::new(tempfile::tempdir().expect("tempdir")));
     let mut config: Config = support::test_config(dir, None);
     config.dev_permissive_policy = false;
     config.cedar_policy_path = None;
     let tools = Arc::new(example_registry("scripted", "in-memory"));
-    let state = AppState::boot(&config, provider, tools).expect("AppState boots");
+    let state = AppState::boot(&config, provider, tools)
+        .await
+        .expect("AppState boots");
     build_router(state)
 }
 
@@ -178,7 +182,7 @@ impl Provider for ScriptedProvider {
 #[tokio::test]
 async fn chat_rejects_missing_bearer_before_body_processing() {
     let (status, json) =
-        post_chat_with_auth(stub_router(), json!({ "message": "hello" }), None).await;
+        post_chat_with_auth(stub_router().await, json!({ "message": "hello" }), None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert!(
         json["error"]
@@ -191,7 +195,7 @@ async fn chat_rejects_missing_bearer_before_body_processing() {
 #[tokio::test]
 async fn chat_rejects_invalid_bearer() {
     let (status, json) = post_chat_with_auth(
-        stub_router(),
+        stub_router().await,
         json!({ "message": "hello" }),
         Some("wrong-token"),
     )
@@ -209,7 +213,7 @@ async fn chat_rejects_invalid_bearer() {
 async fn chat_rejects_oversized_bearer_without_processing_body() {
     let oversized = "x".repeat(5000);
     let (status, json) = post_chat_with_auth(
-        stub_router(),
+        stub_router().await,
         json!({ "message": "hello" }),
         Some(&oversized),
     )
@@ -230,7 +234,7 @@ async fn production_missing_cedar_policy_denies_chat_before_provider_dispatch() 
         cost: CostTuple::default(),
     }]);
     let (status, json) = post_chat(
-        production_deny_all_router(provider.clone()),
+        production_deny_all_router(provider.clone()).await,
         json!({ "message": "deny by default" }),
     )
     .await;
@@ -252,7 +256,7 @@ async fn production_missing_cedar_policy_denies_chat_before_provider_dispatch() 
 
 #[tokio::test]
 async fn chat_returns_reply_with_offline_provider() {
-    let (status, json) = post_chat(stub_router(), json!({ "message": "hello ardur" })).await;
+    let (status, json) = post_chat(stub_router().await, json!({ "message": "hello ardur" })).await;
     assert_eq!(status, StatusCode::OK);
     // The stub provider's deterministic completion is returned to the caller.
     assert_eq!(json["reply"], "[anthropic stub]");
@@ -260,7 +264,7 @@ async fn chat_returns_reply_with_offline_provider() {
 
 #[tokio::test]
 async fn chat_generates_session_id_when_missing() {
-    let (status, json) = post_chat(stub_router(), json!({ "message": "hi" })).await;
+    let (status, json) = post_chat(stub_router().await, json!({ "message": "hi" })).await;
     assert_eq!(status, StatusCode::OK);
     let session_id = json["session_id"].as_str().expect("session_id is a string");
     assert!(!session_id.is_empty(), "a fresh session id was minted");
@@ -275,7 +279,7 @@ async fn chat_generates_session_id_when_missing() {
 async fn chat_uses_provided_session_id() {
     let provided = "018f5e1a-0000-7000-8000-000000000abc";
     let (status, json) = post_chat(
-        stub_router(),
+        stub_router().await,
         json!({ "message": "hi", "session_id": provided }),
     )
     .await;
@@ -288,14 +292,14 @@ async fn chat_uses_provided_session_id() {
 
 #[tokio::test]
 async fn chat_400_on_missing_message() {
-    let (status, json) = post_chat(stub_router(), json!({ "session_id": null })).await;
+    let (status, json) = post_chat(stub_router().await, json!({ "session_id": null })).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(json["error"].is_string(), "carries a JSON error message");
 }
 
 #[tokio::test]
 async fn chat_400_on_empty_message() {
-    let (status, _json) = post_chat(stub_router(), json!({ "message": "   " })).await;
+    let (status, _json) = post_chat(stub_router().await, json!({ "message": "   " })).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
@@ -303,7 +307,7 @@ async fn chat_400_on_empty_message() {
 async fn chat_200_on_stream_true() {
     // Streaming (SSE) is now supported; a `stream: true` request returns
     // text/event-stream instead of 400.
-    let router = stub_router();
+    let router = stub_router().await;
     let request = Request::builder()
         .method("POST")
         .uri("/chat")
@@ -328,7 +332,11 @@ async fn chat_502_on_runtime_error() {
     // A provider failure propagates as a `RuntimeError`, which the HTTP surface
     // maps to 502 (the upstream pipeline errored).
     let provider = ScriptedProvider::new(vec![Step::Error]);
-    let (status, json) = post_chat(scripted_router(provider), json!({ "message": "boom" })).await;
+    let (status, json) = post_chat(
+        scripted_router(provider).await,
+        json!({ "message": "boom" }),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_GATEWAY);
     assert!(
         json["error"].is_string(),
@@ -344,13 +352,17 @@ async fn chat_tokens_and_cost_in_response() {
         tokens_out: 30,
         cents: 250,
         wall_ms: 0,
-        attention_score: 0.0,
+        attention_score: 0,
     };
     let provider = ScriptedProvider::new(vec![Step::Reply {
         content: "scripted reply".to_string(),
         cost,
     }]);
-    let (status, json) = post_chat(scripted_router(provider), json!({ "message": "spend" })).await;
+    let (status, json) = post_chat(
+        scripted_router(provider).await,
+        json!({ "message": "spend" }),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["tokens"]["input"], 120);
     assert_eq!(json["tokens"]["output"], 30);
@@ -375,7 +387,7 @@ async fn chat_tools_called_list_populated() {
         },
     ]);
     let (status, json) = post_chat(
-        scripted_router(provider),
+        scripted_router(provider).await,
         json!({ "message": "use a tool" }),
     )
     .await;
@@ -392,7 +404,8 @@ async fn chat_tools_called_list_populated() {
 
 #[tokio::test]
 async fn chat_receipt_id_in_response() {
-    let (status, json) = post_chat(stub_router(), json!({ "message": "receipt please" })).await;
+    let (status, json) =
+        post_chat(stub_router().await, json!({ "message": "receipt please" })).await;
     assert_eq!(status, StatusCode::OK);
     let receipt_id = json["receipt_id"].as_str().expect("receipt_id is a string");
     assert!(

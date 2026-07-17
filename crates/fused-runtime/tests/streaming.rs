@@ -31,7 +31,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use ardur_cost_gate::{CostEnvelope, CostTuple as GateCostTuple};
+use ardur_cost_gate::{CostEnvelope, CostTuple as GateCostTuple, ManualClock, UnixTsMillis};
 use ardur_fused_runtime::{FusedEvent, StageKind, load_persisted_chain, verify_persisted_chain};
 use ardur_injection_defense::{FilterRegistry, PatternBasedFilter};
 use ardur_lifecycle_hooks::HookRegistry;
@@ -189,6 +189,42 @@ impl Provider for ReportedCostStreamProvider {
     }
 }
 
+/// Advances the gate clock after admission but before finalization, forcing the
+/// reservation-expiry path deterministically.
+struct ExpiringStreamProvider {
+    clock: Arc<ManualClock>,
+    rate_card: RateCard,
+}
+
+#[async_trait]
+impl Provider for ExpiringStreamProvider {
+    async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
+        unreachable!("the expiry regression uses streaming")
+    }
+
+    async fn stream(&self, _req: CompletionRequest) -> Result<ProviderStream, ProviderError> {
+        self.clock.advance(1_000_000);
+        let events = vec![
+            StreamEvent::ContentDelta("must not commit".to_string()),
+            StreamEvent::Usage(Usage::default()),
+            StreamEvent::Finish(FinishReason::Stop),
+        ];
+        Ok(Box::pin(futures::stream::iter(events.into_iter().map(Ok))))
+    }
+
+    fn id(&self) -> ProviderId {
+        ProviderId("expiring-stream".to_string())
+    }
+
+    fn supports_streaming(&self) -> bool {
+        true
+    }
+
+    fn rate_card(&self) -> &RateCard {
+        &self.rate_card
+    }
+}
+
 /// A provider returning a scripted queue of responses, one per call (the same
 /// shape `tool_execution.rs` uses). It implements only `complete()`, so the
 /// runtime streams it through the trait's default `complete()`-wrapping
@@ -260,7 +296,7 @@ fn tool_call_with_usage(
             tokens_out: u64::from(usage.tokens_out),
             cents: usage.cost_cents.unwrap_or_default(),
             wall_ms: 0,
-            attention_score: 0.0,
+            attention_score: 0,
         },
         raw_provider_response: None,
     }
@@ -336,7 +372,7 @@ fn envelope_for(cost: CostTuple) -> CostEnvelope {
         tokens_out_max: cost.tokens_out as u32,
         cents_max: cost.cents as u32,
         wall_ms_max: cost.wall_ms as u32,
-        attention_score_max: cost.attention_score.ceil() as u32,
+        attention_score_max: cost.attention_score as u32,
     }
 }
 
@@ -374,6 +410,26 @@ async fn fused_stream_emits_stage_start_end_in_order() {
             "stage {stage:?} should end ok",
         );
     }
+    let finalize_end = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                Ok(FusedEvent::StageEnd {
+                    stage: StageKind::CostGateFinalize,
+                    ok: true
+                })
+            )
+        })
+        .expect("cost finalization succeeds");
+    let receipt = events
+        .iter()
+        .position(|event| matches!(event, Ok(FusedEvent::Receipt { .. })))
+        .expect("receipt is emitted");
+    assert!(
+        finalize_end < receipt,
+        "cost settlement must succeed before the receipt commit boundary"
+    );
     assert!(matches!(
         events.last(),
         Some(Ok(FusedEvent::Finish(FinishReason::Stop)))
@@ -485,21 +541,21 @@ async fn fused_stream_post_receipt_hook_cost_matches_combined_receipt_cost_for_t
         tokens_out: 3,
         cents: 5,
         wall_ms: 0,
-        attention_score: 0.0,
+        attention_score: 0,
     };
     let tool_cost = CostTuple {
         tokens_in: 11,
         tokens_out: 13,
         cents: 17,
         wall_ms: 19,
-        attention_score: 0.5,
+        attention_score: 500,
     };
     let expected = CostTuple {
         tokens_in: 13,
         tokens_out: 16,
         cents: 22,
         wall_ms: 19,
-        attention_score: 0.5,
+        attention_score: 500,
     };
     let tool_name = "priced.tool";
     let provider = Arc::new(ScriptedProvider::new(
@@ -556,6 +612,18 @@ async fn fused_stream_post_receipt_hook_cost_matches_combined_receipt_cost_for_t
         tool_round.ctx_cost.cents > tool_round.response_cost.cents,
         "the hook cost includes the paid tool, not just the provider response"
     );
+    let event_costs: Vec<u64> = events
+        .iter()
+        .filter_map(|event| match event {
+            Ok(FusedEvent::Receipt { cost_cents, .. }) => Some(*cost_cents),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        event_costs.first().copied(),
+        Some(expected.cents),
+        "the streamed receipt event must expose the same provider-plus-tool cost"
+    );
 
     let chain = load_persisted_chain(receipt_log.path()).expect("chain loads");
     assert_eq!(chain.len(), 2);
@@ -592,6 +660,7 @@ async fn fused_stream_mints_receipt_at_end() {
             Ok(FusedEvent::Receipt {
                 receipt_id,
                 chain_hash,
+                ..
             }) => Some((*receipt_id, chain_hash.clone())),
             _ => None,
         })
@@ -690,6 +759,68 @@ async fn fused_stream_dropped_refunds_reservation() {
     assert_eq!(
         after.cents, 10,
         "a cancelled turn refunds its reservation, not leaks it (ARD-488)"
+    );
+}
+
+/// ARD-501: a streaming turn whose provider is slower than the reservation TTL
+/// must not be discarded. The lease is refreshed as provider events arrive, so
+/// the turn settles normally and commits its receipt and journal — the user saw
+/// the streamed content, so it is billed and recorded.
+///
+/// (Supersedes the earlier test that asserted the *pre-fix* behavior — a
+/// finalize failure with no durable commit when the clock jumped past the TTL
+/// mid-stream. The finalize-before-commit ordering is unchanged; this stream
+/// simply no longer fails to finalize.)
+#[tokio::test]
+async fn fused_stream_finalize_failure_commits_neither_receipt_nor_journal() {
+    let clock = Arc::new(ManualClock::new(UnixTsMillis(support::NOW_MS)));
+    let provider = Arc::new(ExpiringStreamProvider {
+        clock: clock.clone(),
+        rate_card: RateCard::anthropic_2026_q2_v1(),
+    });
+    let root = tempfile::tempdir().expect("temp dir");
+    let session_id = SessionId::new();
+    let journal =
+        Arc::new(FileSessionJournal::new(root.path(), session_id).expect("journal opens"));
+    let receipt_log = root.path().join("receipts.jsonl");
+    let runtime = runtime_builder(provider)
+        .clock(clock)
+        .with_journal(journal.clone())
+        .receipt_log(&receipt_log)
+        .build()
+        .expect("runtime builds");
+
+    let events = collect_stream(
+        &runtime,
+        request_for("slow stream survives", &valid_token(), session_id),
+    )
+    .await;
+
+    assert!(
+        !has_failed_stage(&events, StageKind::CostGateFinalize),
+        "the refreshed reservation finalizes rather than expiring"
+    );
+    assert!(terminal_error(&events).is_none(), "the turn does not error");
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Ok(FusedEvent::Receipt { .. }))),
+        "the completed turn emits its receipt"
+    );
+    assert_eq!(
+        load_persisted_chain(&receipt_log)
+            .expect("receipt log loads")
+            .len(),
+        1,
+        "the completed turn commits exactly one durable receipt"
+    );
+    assert!(
+        !journal
+            .replay(session_id)
+            .await
+            .expect("journal replays")
+            .is_empty(),
+        "the completed turn commits its journal history"
     );
 }
 

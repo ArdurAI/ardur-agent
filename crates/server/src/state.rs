@@ -36,8 +36,10 @@
 //! session budget provisioning, which needs a request-time provisioning API on
 //! the runtime (or an injectable shared budget store).
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -59,7 +61,7 @@ use ardur_messaging_gateway::{IncomingMessage, MessageBody, MessagingGateway};
 use ardur_provider_runtime::{ModelId, Provider};
 use ardur_receipt::Es256SigningKey;
 use ardur_runtime::{
-    CapTokenRef, ChatMessage, ChatRuntime, RuntimeError, SessionId, SubmitRequest,
+    CapTokenRef, ChatMessage, ChatRuntime, ReceiptId, RuntimeError, SessionId, SubmitRequest,
 };
 use ardur_session_journals::{FileSessionJournal, SessionJournal};
 use ardur_slack_adapter::SlackAdapter;
@@ -70,6 +72,7 @@ use secrecy::SecretString;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::config::{Config, MemoryBackend};
+use crate::security_events::SecurityEventLog;
 
 /// The audience every session cap-token is scoped to — and the single audience
 /// the fused runtime verifies against (it is fixed at build time, so it cannot
@@ -79,6 +82,10 @@ pub const AUDIENCE: &str = "ardur";
 /// The capability the chat turn exercises. Matches the runtime's verifier caveat
 /// and the Cedar policy's bound.
 pub const TOOL: &str = "chat.submit";
+/// Stable UUIDv7-shaped journal identity for the server-wide receipt/audit log.
+/// A stable identity lets startup reconciliation compare receipts with the same
+/// journal across process restarts instead of treating the whole chain as new.
+const SERVER_JOURNAL_SESSION_UUID: u128 = 0x018f_f6f0_7d5a_7b87_b3d6_6ab7_ad0f_0000;
 
 /// The fixed cost-gate holder / cap-token subject every session token is issued
 /// under (see the module Phase-3 note on why this is not the per-Slack-user id).
@@ -124,6 +131,19 @@ enum WorkItem {
     /// the HTTP body. Dropping the receiver cancels the in-flight stream before
     /// receipt/journal/memory side effects are committed.
     HttpStream(HttpStreamTurn),
+    /// **ARD-139.** Mint a signed receipt for an approval decision (approve
+    /// or reject) already durably recorded in the approvals store by the
+    /// HTTP handler — the only piece of an approval decision that needs the
+    /// `!Send` fused runtime, since the card mutation itself is plain file
+    /// I/O the axum handler already does directly.
+    ApprovalReceipt(ApprovalReceiptRequest),
+}
+
+/// A request to mint a signed receipt for an already-decided approval card.
+struct ApprovalReceiptRequest {
+    approval_id: String,
+    verb: String,
+    reply: oneshot::Sender<Result<ReceiptId, RuntimeError>>,
 }
 
 /// A synchronous chat turn submitted over `POST /chat`: the prompt, the session
@@ -179,14 +199,123 @@ pub enum ChatSubmitError {
     QueueFull,
 }
 
+/// Process-lifetime turn-outcome and security-denial counters, shared between
+/// the turn worker (which increments them as turns settle) and the HTTP layer
+/// (which reads them for `/metrics` and `/admin/runtime`).
+///
+/// These are **counts only** — never message content, tokens, tool names, or
+/// principal ids. A denial counter answers "how many turns were blocked by this
+/// gate", which is a reconnaissance-neutral operational signal; the *why* of any
+/// single block lives only in the server's tracing logs, not here. Relaxed
+/// ordering is sufficient: the counters are monotonic and read for display, with
+/// no happens-before relationship to protect.
+#[derive(Debug, Default)]
+pub struct SecurityMetrics {
+    turns_ok: AtomicU64,
+    injection_blocked: AtomicU64,
+    policy_denied: AtomicU64,
+    cap_denied: AtomicU64,
+    cost_rejected: AtomicU64,
+    hook_vetoed: AtomicU64,
+    tool_denied: AtomicU64,
+    other_errors: AtomicU64,
+}
+
+impl SecurityMetrics {
+    /// Record a turn that completed successfully (a receipt was minted).
+    pub fn record_ok(&self) {
+        self.turns_ok.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Classify a failed turn's [`RuntimeError`] into the matching denial bucket.
+    /// Non-security failures (provider outage, internal error) land in
+    /// `other_errors` so the security buckets stay a clean deny signal.
+    pub fn record_err(&self, err: &RuntimeError) {
+        let bucket = match err {
+            RuntimeError::InjectionBlocked { .. } => &self.injection_blocked,
+            RuntimeError::PolicyDenied { .. } => &self.policy_denied,
+            RuntimeError::CapDenied { .. }
+            | RuntimeError::CapTokenMissing
+            | RuntimeError::CapTokenExpired => &self.cap_denied,
+            RuntimeError::CostCeilingExceeded => &self.cost_rejected,
+            RuntimeError::VetoedByHook { .. } => &self.hook_vetoed,
+            RuntimeError::UnknownTool { .. } => &self.tool_denied,
+            _ => &self.other_errors,
+        };
+        bucket.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A redaction-safe snapshot of every counter, for the metrics/admin surfaces.
+    #[must_use]
+    pub fn snapshot(&self) -> SecurityMetricsSnapshot {
+        SecurityMetricsSnapshot {
+            turns_ok: self.turns_ok.load(Ordering::Relaxed),
+            injection_blocked: self.injection_blocked.load(Ordering::Relaxed),
+            policy_denied: self.policy_denied.load(Ordering::Relaxed),
+            cap_denied: self.cap_denied.load(Ordering::Relaxed),
+            cost_rejected: self.cost_rejected.load(Ordering::Relaxed),
+            hook_vetoed: self.hook_vetoed.load(Ordering::Relaxed),
+            tool_denied: self.tool_denied.load(Ordering::Relaxed),
+            other_errors: self.other_errors.load(Ordering::Relaxed),
+        }
+    }
+}
+
+/// An immutable read of [`SecurityMetrics`] taken at one instant.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SecurityMetricsSnapshot {
+    /// Turns that settled with a minted receipt.
+    pub turns_ok: u64,
+    /// Turns blocked by the injection-defense filter (stage 4.5).
+    pub injection_blocked: u64,
+    /// Turns denied by the Cedar policy engine.
+    pub policy_denied: u64,
+    /// Turns rejected for a missing, expired, or otherwise invalid cap-token.
+    pub cap_denied: u64,
+    /// Turns rejected by the cost gate for exceeding the ceiling.
+    pub cost_rejected: u64,
+    /// Turns vetoed by a pre-submit lifecycle hook.
+    pub hook_vetoed: u64,
+    /// Tool calls rejected for referencing a tool outside the cap allowlist.
+    pub tool_denied: u64,
+    /// Non-security failures (provider outage, internal error, tool timeout).
+    pub other_errors: u64,
+}
+
+/// Redaction-safe aggregates rolled up from the on-disk receipt chain at scrape
+/// time. Everything here is a count or a summed cost — no message content, no
+/// per-principal identifiers, and only the low-cardinality `verb`/`provider`
+/// label sets Prometheus can carry safely.
+#[derive(Debug, Clone, Default)]
+pub struct ReceiptStats {
+    /// Number of receipts persisted in the chain.
+    pub total: usize,
+    /// Whether the chain verified (hash linkage + ES256 signatures) cleanly.
+    pub chain_verified: bool,
+    /// Sum of every receipt's settled cost, in cents.
+    pub cost_cents_sum: u64,
+    /// Total tool calls attested across the chain.
+    pub tool_calls_sum: u64,
+    /// Number of distinct sessions the chain spans.
+    pub distinct_sessions: usize,
+    /// Receipt count keyed by verb (a small, fixed vocabulary).
+    pub by_verb: BTreeMap<String, u64>,
+    /// Receipt count keyed by model backend (`provider`), `"unknown"` when a
+    /// legacy receipt predates the provider field.
+    pub by_provider: BTreeMap<String, u64>,
+}
+
 /// The wired application state shared (behind an [`Arc`]) across request handlers.
 ///
 /// Holds only what the HTTP layer needs: the Slack adapter (inbound signature
-/// verification), the channel onto the turn-processing worker, the journal
-/// handle (for graceful shutdown), and the data directory. The fused runtime and
-/// the cap-token issuer live on the worker thread (see the module docs).
+/// verification) when Slack is enabled, the channel onto the turn-processing
+/// worker, the journal handle (for graceful shutdown), and the data directory.
+/// The fused runtime and the cap-token issuer live on the worker thread (see the
+/// module docs).
 pub struct AppState {
-    slack: Arc<SlackAdapter>,
+    /// The Slack adapter for inbound `/slack/events` verification. `None` when
+    /// Slack is disabled (HTTP-only boot); the route is then never mounted.
+    slack: Option<Arc<SlackAdapter>>,
     work_tx: Arc<Mutex<Option<mpsc::Sender<WorkItem>>>>,
     /// The OS-thread handle for the turn worker — used by [`shutdown`](Self::shutdown)
     /// to join the worker after closing the work channel. `None` in test harnesses
@@ -212,6 +341,11 @@ pub struct AppState {
     /// wires it (only when `ARDUR_CHANNEL_TELEGRAM=true`). Same `OnceLock`-shared
     /// reply path as Matrix.
     telegram: Arc<OnceLock<Arc<TelegramChannel>>>,
+    /// The receipt JWKS used to authenticate the server's receipt chain before
+    /// reporting counts or tool names to admin/metrics endpoints.
+    receipt_jwks: ardur_receipt::Jwks,
+    /// Turn-outcome and security-denial counters, shared with the worker.
+    security_metrics: Arc<SecurityMetrics>,
 }
 
 /// The data [`build_router`](crate::build_router) needs to mount the §6.0 MCP
@@ -237,7 +371,7 @@ impl AppState {
     /// Any I/O failure creating the data directories or reading/writing the
     /// persisted keys, a malformed key file, a Cedar policy that fails to
     /// compile, or a receipt log that cannot be read back to resume the chain.
-    pub fn boot(
+    pub async fn boot(
         config: &Config,
         provider: Arc<dyn Provider>,
         tools: Arc<ToolRegistry>,
@@ -253,7 +387,14 @@ impl AppState {
         let journals_dir = data_dir.join("journals");
         let receipts_dir = data_dir.join("receipts");
         let keys_dir = data_dir.join("keys");
-        for dir in [&memory_dir, &journals_dir, &receipts_dir, &keys_dir] {
+        let approvals_dir = data_dir.join("approvals");
+        for dir in [
+            &memory_dir,
+            &journals_dir,
+            &receipts_dir,
+            &keys_dir,
+            &approvals_dir,
+        ] {
             std::fs::create_dir_all(dir)
                 .map_err(|e| anyhow::anyhow!("creating {}: {e}", dir.display()))?;
         }
@@ -263,6 +404,7 @@ impl AppState {
         let issuer = load_or_mint_issuer(&keys_dir)?;
         let cap_root = issuer.public_key();
         let receipt_key = load_or_generate_receipt_key(&keys_dir)?;
+        let receipt_jwks = ardur_receipt::Jwks::from_public_key(&receipt_key.public_key());
 
         // 3. Policy: the operator's file if configured + present, else built-in.
         let policy = load_policy(
@@ -315,9 +457,9 @@ impl AppState {
             }
         };
 
-        // One journal per process boot. The fused runtime appends every turn's
-        // user + assistant messages here (fsynced per entry).
-        let boot_session = SessionId::new();
+        // One stable server-wide audit journal. Reusing its canonical UUID on
+        // every boot lets receipt reconciliation compare against prior entries.
+        let boot_session = SessionId(uuid::Uuid::from_u128(SERVER_JOURNAL_SESSION_UUID));
         let journal: Arc<dyn SessionJournal> = Arc::new(
             FileSessionJournal::new(&journals_dir, boot_session)
                 .map_err(|e| anyhow::anyhow!("opening session journal: {e}"))?,
@@ -329,7 +471,7 @@ impl AppState {
         //    — so receipts chain correctly across turns.
         let envelope = per_turn_envelope(config.cost_budget_cents);
         let budget = gateway_budget(config.cost_budget_cents);
-        let runtime = FusedRuntimeBuilder::new(
+        let (runtime, reconciliation) = FusedRuntimeBuilder::new(
             cap_root,
             policy,
             provider,
@@ -345,21 +487,58 @@ impl AppState {
         .with_memory(memory)
         .with_journal(journal.clone())
         .with_tools(tools.clone())
+        // ARD-H1: the server faces untrusted channel input, so install the
+        // built-in injection-defense signatures rather than shipping stage 4.5
+        // inert (an empty registry passes everything through).
+        .with_default_injection_filters()
         .receipt_log(&receipt_log)
-        .build()
-        .map_err(|e| anyhow::anyhow!("building fused runtime: {e}"))?;
+        .build_reconciled()
+        .await
+        .map_err(|e| anyhow::anyhow!("building/reconciling fused runtime: {e}"))?;
+        if reconciliation.orphan_receipt_count() > 0 {
+            tracing::warn!(
+                repaired = reconciliation.orphan_receipt_count(),
+                action = ?reconciliation.action,
+                "reconciled orphan receipts during server startup"
+            );
+        }
 
         // 6. The Slack adapter (base URL overridable so tests point at a mock).
-        let mut slack = SlackAdapter::new(
-            SecretString::from(config.slack_bot_token.clone()),
-            SecretString::from(config.slack_signing_secret.clone()),
-            config.slack_app_id.clone(),
-        )
-        .with_allowed_senders(config.slack_allowed_senders.clone());
-        if let Some(base) = &config.slack_base_url {
-            slack = slack.with_base_url(base.clone());
-        }
-        let slack = Arc::new(slack);
+        //    Auto-detected: built only when Slack is enabled (all three
+        //    credentials present). HTTP-only boots leave it `None`, and the
+        //    `/slack/events` route is not mounted (see `build_router`).
+        let slack = if config.slack_enabled {
+            match (
+                &config.slack_bot_token,
+                &config.slack_signing_secret,
+                &config.slack_app_id,
+            ) {
+                (Some(bot_token), Some(signing_secret), Some(app_id)) => {
+                    let mut slack = SlackAdapter::new(
+                        SecretString::from(bot_token.clone()),
+                        SecretString::from(signing_secret.clone()),
+                        app_id.clone(),
+                    )
+                    .with_allowed_senders(config.slack_allowed_senders.clone());
+                    if let Some(base) = &config.slack_base_url {
+                        slack = slack.with_base_url(base.clone());
+                    }
+                    Some(Arc::new(slack))
+                }
+                // `slack_enabled` is derived from all three credentials being
+                // present, so this is unreachable via `Config::from_env`; guard
+                // it anyway rather than unwrap a hand-built inconsistent config.
+                _ => {
+                    return Err(anyhow::anyhow!(
+                        "slack_enabled is set but one or more Slack credentials \
+                         are missing (bot token, signing secret, app id)"
+                    ));
+                }
+            }
+        } else {
+            tracing::info!("Slack channel disabled; booting HTTP-only (/chat)");
+            None
+        };
 
         // 7. The turn-processing worker (see module docs on why a thread). The
         //    Matrix slot is shared with the worker so a Matrix-origin turn can be
@@ -369,6 +548,8 @@ impl AppState {
         let discord: Arc<OnceLock<Arc<DiscordChannel>>> = Arc::new(OnceLock::new());
         let telegram: Arc<OnceLock<Arc<TelegramChannel>>> = Arc::new(OnceLock::new());
         let tool_allowlist = tool_allowlist_for_runtime(&tools);
+        let security_metrics = Arc::new(SecurityMetrics::default());
+        let security_events = SecurityEventLog::in_data_dir(&data_dir);
         let processor = Processor {
             runtime,
             slack: slack.clone(),
@@ -379,6 +560,9 @@ impl AppState {
             cap_budget_remaining: config.cost_budget_cents,
             tool_allowlist: tool_allowlist.clone(),
             receipt_log,
+            receipt_jwks: receipt_jwks.clone(),
+            security_metrics: security_metrics.clone(),
+            security_events,
         };
         let (work_tx, worker_handle) = spawn_worker(processor);
 
@@ -414,6 +598,8 @@ impl AppState {
             matrix,
             discord,
             telegram,
+            receipt_jwks,
+            security_metrics,
         }))
     }
 
@@ -451,8 +637,64 @@ impl AppState {
     #[must_use]
     pub fn receipt_count(&self) -> usize {
         load_persisted_chain(self.data_dir.join("receipts").join("chain.jsonl"))
-            .map(|chain| chain.len())
+            .and_then(|chain| {
+                ardur_fused_runtime::verify_persisted_chain_with_jwks(&chain, &self.receipt_jwks)
+                    .map(|()| chain.len())
+            })
             .unwrap_or(0)
+    }
+
+    /// The shared turn-outcome / security-denial counters (see [`SecurityMetrics`]).
+    #[must_use]
+    pub fn security_metrics(&self) -> &SecurityMetrics {
+        &self.security_metrics
+    }
+
+    /// Roll the persisted receipt chain up into redaction-safe aggregates for the
+    /// `/metrics` surface: totals, summed cost, tool-call count, distinct
+    /// sessions, and low-cardinality `verb`/`provider` breakdowns.
+    ///
+    /// The chain is loaded once and aggregated whether or not it verifies; the
+    /// `chain_verified` flag records the ES256 + hash-linkage result so a broken
+    /// or tampered chain surfaces as a `0` gauge rather than a silent gap. A chain
+    /// that cannot be read at all yields [`ReceiptStats::default`] (all zeros,
+    /// `chain_verified == false`).
+    #[must_use]
+    pub fn receipt_stats(&self) -> ReceiptStats {
+        let Ok(chain) = load_persisted_chain(self.data_dir.join("receipts").join("chain.jsonl"))
+        else {
+            return ReceiptStats::default();
+        };
+        let chain_verified =
+            ardur_fused_runtime::verify_persisted_chain_with_jwks(&chain, &self.receipt_jwks)
+                .is_ok();
+        let mut stats = ReceiptStats {
+            total: chain.len(),
+            chain_verified,
+            ..ReceiptStats::default()
+        };
+        let mut sessions: BTreeSet<uuid::Uuid> = BTreeSet::new();
+        for receipt in &chain {
+            let body = &receipt.body;
+            stats.cost_cents_sum = stats.cost_cents_sum.saturating_add(body.cost.cents);
+            stats.tool_calls_sum = stats
+                .tool_calls_sum
+                .saturating_add(body.tool_calls.len() as u64);
+            if let Some(session) = body.session_id {
+                sessions.insert(session);
+            }
+            *stats
+                .by_verb
+                .entry(body.verb.as_str().to_string())
+                .or_default() += 1;
+            let provider = body
+                .provider
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string());
+            *stats.by_provider.entry(provider).or_default() += 1;
+        }
+        stats.distinct_sessions = sessions.len();
+        stats
     }
 
     /// The MCP surface to mount, if `ARDUR_MCP_ENABLED` was set at boot.
@@ -517,9 +759,11 @@ impl AppState {
     }
 
     /// The Slack adapter, for inbound event verification in the HTTP handler.
+    /// `None` when Slack is disabled (HTTP-only boot); the router then omits the
+    /// `/slack/events` route entirely, so a handler never sees `None`.
     #[must_use]
-    pub fn slack(&self) -> &SlackAdapter {
-        &self.slack
+    pub fn slack(&self) -> Option<&SlackAdapter> {
+        self.slack.as_deref()
     }
 
     /// Hand a verified inbound message to the processing worker. Returns `false`
@@ -567,6 +811,45 @@ impl AppState {
         }
     }
 
+    /// **ARD-139.** Mint a signed receipt for an approval decision
+    /// (`verb` is `approval.approve.accepted.v1`/
+    /// `approval.reject.accepted.v1`) already durably recorded in the
+    /// approvals store by the caller. Routed through the turn worker like
+    /// [`submit_chat`](Self::submit_chat), since the `!Send` fused runtime
+    /// that mints and chains the receipt lives there — the card mutation
+    /// itself is plain file I/O the HTTP handler already performs directly,
+    /// before calling this.
+    ///
+    /// # Errors
+    /// [`ChatSubmitError::Runtime`] if the receipt could not be minted,
+    /// [`ChatSubmitError::WorkerGone`] if the worker thread has shut down,
+    /// [`ChatSubmitError::QueueFull`] if the bounded turn queue is
+    /// saturated.
+    pub async fn mint_approval_receipt(
+        &self,
+        approval_id: String,
+        verb: String,
+    ) -> Result<ReceiptId, ChatSubmitError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let item = WorkItem::ApprovalReceipt(ApprovalReceiptRequest {
+            approval_id,
+            verb,
+            reply: reply_tx,
+        });
+        let Some(work_tx) = self.work_sender() else {
+            return Err(ChatSubmitError::WorkerGone);
+        };
+        match work_tx.try_send(item) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => return Err(ChatSubmitError::QueueFull),
+            Err(mpsc::error::TrySendError::Closed(_)) => return Err(ChatSubmitError::WorkerGone),
+        }
+        match reply_rx.await {
+            Ok(result) => result.map_err(ChatSubmitError::Runtime),
+            Err(_canceled) => Err(ChatSubmitError::WorkerGone),
+        }
+    }
+
     /// Run a streaming chat turn (the `POST /chat { stream: true }` path): hand
     /// the prompt to the turn worker and return a receiver that carries the
     /// progressive fused-runtime event feed. If the HTTP response body is
@@ -608,6 +891,16 @@ impl AppState {
     #[must_use]
     pub fn data_dir(&self) -> &Path {
         &self.data_dir
+    }
+
+    /// The on-disk approval-card store (`<data_dir>/approvals`).
+    ///
+    /// This is the same directory the CLI's `ardur approvals` subcommand
+    /// reads/writes (`<state_root>/approvals/<id>.json`), so the HTTP decide
+    /// endpoints and the CLI operate over a single source of truth.
+    #[must_use]
+    pub fn approvals_dir(&self) -> PathBuf {
+        self.data_dir.join("approvals")
     }
 
     /// Signal the background worker to drain, then join its OS thread.
@@ -673,7 +966,11 @@ fn tool_allowlist_for_runtime(tools: &ToolRegistry) -> Vec<String> {
 /// fused-runtime pipeline and posts the reply.
 struct Processor {
     runtime: FusedRuntime,
-    slack: Arc<SlackAdapter>,
+    /// The Slack adapter, shared with [`AppState`]; `None` when Slack is disabled.
+    /// Used to post the reply when a turn originated on Slack (`slack://…`) — an
+    /// origin that only occurs when a `/slack/events` route exists, which in turn
+    /// requires the adapter to be present.
+    slack: Option<Arc<SlackAdapter>>,
     /// The Matrix channel, shared with [`AppState`]; `None` until attached. Used
     /// to post the reply when a turn originated on Matrix (`matrix://…`).
     matrix: Arc<OnceLock<Arc<MatrixChannel>>>,
@@ -691,6 +988,15 @@ struct Processor {
     /// single-threaded, so the receipts appended across one `submit` belong to
     /// exactly that turn).
     receipt_log: PathBuf,
+    /// The JWKS derived from the configured receipt signing key, used to
+    /// authenticate the receipt chain before reading tool-call data.
+    receipt_jwks: ardur_receipt::Jwks,
+    /// Turn-outcome and security-denial counters, shared with [`AppState`]. The
+    /// worker increments them as turns settle; the HTTP layer reads the snapshot.
+    security_metrics: Arc<SecurityMetrics>,
+    /// The durable, redacted security-event audit log. The worker appends one
+    /// line per blocked turn; the admin-ui Trust Center reads it read-only.
+    security_events: SecurityEventLog,
 }
 
 /// Which channel backend a turn originated on — decided by the namespaced
@@ -719,6 +1025,18 @@ impl Origin {
 }
 
 impl Processor {
+    /// Record a blocked turn: bump the in-process deny counter *and* append a
+    /// redacted line to the durable audit log. Non-security failures increment
+    /// only the `other_errors` counter (the audit log ignores them).
+    fn record_denial(&self, err: &RuntimeError) {
+        self.security_metrics.record_err(err);
+        let at_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        self.security_events.record_denial(err, at_ms);
+    }
+
     /// Run one inbound message through the fused runtime and post the reply.
     async fn handle(&self, incoming: IncomingMessage) {
         // The channel-id scheme tells us which backend to reply through; the
@@ -800,6 +1118,7 @@ impl Processor {
         }
 
         if let Some(e) = terminal_error {
+            self.record_denial(&e);
             tracing::error!(%user, %channel, error = %e, "streamed channel turn failed");
             let apology = format!("Sorry, that turn failed: {e}");
             if let Err(edit_err) = self
@@ -826,6 +1145,7 @@ impl Processor {
             }
         }
 
+        self.security_metrics.record_ok();
         tracing::info!(
             %user,
             %channel,
@@ -871,6 +1191,7 @@ impl Processor {
 
         let outcome = match self.runtime.submit(request).await {
             Ok(result) => {
+                self.security_metrics.record_ok();
                 let tools_called = self.tools_called_since(receipts_before);
                 tracing::info!(
                     session_id = %session_id.0,
@@ -889,6 +1210,7 @@ impl Processor {
                 })
             }
             Err(e) => {
+                self.record_denial(&e);
                 tracing::warn!(session_id = %session_id.0, error = %e, "chat turn failed");
                 Err(e)
             }
@@ -940,6 +1262,14 @@ impl Processor {
                 item = stream.next() => item,
             };
             let Some(item) = item else { break };
+            // Classify the outcome before the event is moved into the response.
+            // A `Finish` marks a settled turn; a terminal error is a denial or
+            // failure the deny/failure counters should reflect.
+            match &item {
+                Err(e) => self.record_denial(e),
+                Ok(FusedEvent::Finish(_)) => self.security_metrics.record_ok(),
+                Ok(_) => {}
+            }
             let terminal_error = item.is_err();
             if events.send(item).await.is_err() {
                 tracing::info!(
@@ -958,26 +1288,38 @@ impl Processor {
     /// log is absent or unreadable). Brackets a turn's receipts for
     /// [`tools_called_since`](Self::tools_called_since).
     fn receipt_count(&self) -> usize {
-        load_persisted_chain(&self.receipt_log)
-            .map(|chain| chain.len())
+        ardur_fused_runtime::load_persisted_chain(&self.receipt_log)
+            .and_then(|chain| {
+                ardur_fused_runtime::verify_persisted_chain_with_jwks(&chain, &self.receipt_jwks)
+                    .map(|()| chain.len())
+            })
             .unwrap_or(0)
     }
 
     /// The tool names recorded on every receipt appended after index `before` —
     /// the tools this turn's provider iterations invoked, in receipt order.
     fn tools_called_since(&self, before: usize) -> Vec<String> {
-        match load_persisted_chain(&self.receipt_log) {
-            Ok(chain) => chain
-                .into_iter()
-                .skip(before)
-                .flat_map(|receipt| {
-                    receipt
-                        .body
-                        .tool_calls
-                        .into_iter()
-                        .map(|call| call.tool_name)
-                })
-                .collect(),
+        match ardur_fused_runtime::load_persisted_chain(&self.receipt_log) {
+            Ok(chain) => {
+                if let Err(e) = ardur_fused_runtime::verify_persisted_chain_with_jwks(
+                    &chain,
+                    &self.receipt_jwks,
+                ) {
+                    tracing::warn!(error = %e, "receipt chain verification failed; discarding tool-call data");
+                    return Vec::new();
+                }
+                chain
+                    .into_iter()
+                    .skip(before)
+                    .flat_map(|receipt| {
+                        receipt
+                            .body
+                            .tool_calls
+                            .into_iter()
+                            .map(|call| call.tool_name)
+                    })
+                    .collect()
+            }
             Err(e) => {
                 tracing::warn!(error = %e, "reading receipt chain for tools_called");
                 Vec::new()
@@ -994,11 +1336,15 @@ impl Processor {
         text: &str,
     ) -> anyhow::Result<String> {
         match origin {
-            Origin::Slack => self
-                .slack
-                .post_message(channel, text, None)
-                .await
-                .map_err(|e| anyhow::anyhow!(e.to_string())),
+            Origin::Slack => {
+                let slack = self.slack.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("slack reply requested but Slack is disabled")
+                })?;
+                slack
+                    .post_message(channel, text, None)
+                    .await
+                    .map_err(|e| anyhow::anyhow!(e.to_string()))
+            }
             Origin::Matrix => {
                 let matrix = self.matrix.get().ok_or_else(|| {
                     anyhow::anyhow!("matrix reply requested but no channel attached")
@@ -1039,11 +1385,16 @@ impl Processor {
         text: &str,
     ) -> anyhow::Result<String> {
         match origin {
-            Origin::Slack => self
-                .slack
-                .update_message(channel, message_id, text, None)
-                .await
-                .map_err(|e| anyhow::anyhow!(e.to_string())),
+            Origin::Slack => {
+                let slack = self
+                    .slack
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("slack edit requested but Slack is disabled"))?;
+                slack
+                    .update_message(channel, message_id, text, None)
+                    .await
+                    .map_err(|e| anyhow::anyhow!(e.to_string()))
+            }
             Origin::Matrix => {
                 let matrix = self.matrix.get().ok_or_else(|| {
                     anyhow::anyhow!("matrix edit requested but no channel attached")
@@ -1088,7 +1439,62 @@ impl Processor {
         )?;
         Ok(token.to_base64()?)
     }
+
+    /// **ARD-139.** Mint a fresh, short-lived cap-token scoped to exactly
+    /// `tool` (rather than [`mint_session_token`](Self::mint_session_token)'s
+    /// general chat allowlist) — an approval decision's receipt is a
+    /// narrowly-scoped control-plane action, not a chat turn, so it does not
+    /// need (and should not carry) the full tool allowlist a chat session
+    /// would.
+    fn mint_scoped_token(&self, now_unix: u64, tool: &str) -> anyhow::Result<String> {
+        let token = self.issuer.issue(
+            CapHolderId(GATEWAY_SUBJECT.to_string()),
+            CapScope {
+                audience: AUDIENCE.to_string(),
+                expires_unix: now_unix.saturating_add(CAP_TTL_SECS),
+                budget_remaining: self.cap_budget_remaining,
+                tool_allowlist: vec![tool.to_string()],
+            },
+        )?;
+        Ok(token.to_base64()?)
+    }
+
+    /// **ARD-139.** Mint the signed receipt for an approval decision and
+    /// reply with its id (or the `RuntimeError` that prevented minting).
+    async fn handle_approval_receipt(&self, request: ApprovalReceiptRequest) {
+        let ApprovalReceiptRequest {
+            approval_id,
+            verb,
+            reply,
+        } = request;
+        let result = async {
+            let now_unix = now_unix();
+            let token = self
+                .mint_scoped_token(now_unix, APPROVAL_DECIDE_TOOL)
+                .map_err(|e| {
+                    RuntimeError::Internal(anyhow::anyhow!(
+                        "minting approval decision cap-token: {e}"
+                    ))
+                })?;
+            self.runtime
+                .mint_approval_decision_receipt(
+                    SessionId::new(),
+                    &CapTokenRef(token),
+                    APPROVAL_DECIDE_TOOL,
+                    &verb,
+                    &approval_id,
+                )
+                .await
+        }
+        .await;
+        let _ = reply.send(result);
+    }
 }
+
+/// **ARD-139.** The capability label an approval-decision receipt is minted
+/// under — narrower than [`TOOL`] (chat), since deciding an approval card is
+/// not a chat turn.
+const APPROVAL_DECIDE_TOOL: &str = "approval.decide";
 
 /// Spawn the worker thread: a current-thread Tokio runtime that drains the work
 /// queue, processing each message to completion in arrival order. Returns the
@@ -1128,6 +1534,12 @@ fn spawn_worker(processor: Processor) -> (mpsc::Sender<WorkItem>, std::thread::J
                             .is_err(),
                         WorkItem::HttpStream(turn) => {
                             AssertUnwindSafe(processor.handle_http_stream(turn))
+                                .catch_unwind()
+                                .await
+                                .is_err()
+                        }
+                        WorkItem::ApprovalReceipt(request) => {
+                            AssertUnwindSafe(processor.handle_approval_receipt(request))
                                 .catch_unwind()
                                 .await
                                 .is_err()
@@ -1277,17 +1689,20 @@ fn qdrant_config(config: &Config) -> QdrantMemoryConfig {
 
 fn load_or_mint_issuer(keys_dir: &Path) -> anyhow::Result<BiscuitCapTokenIssuer> {
     let path = keys_dir.join("issuer.key");
-    if path.exists() {
-        let hex = std::fs::read_to_string(&path)
-            .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?;
-        let private = PrivateKey::from_bytes_hex(hex.trim(), Algorithm::Ed25519)
-            .map_err(|e| anyhow::anyhow!("parsing issuer key {}: {e}", path.display()))?;
-        Ok(BiscuitCapTokenIssuer::new(KeyPair::from(&private)))
-    } else {
-        let keypair = KeyPair::new();
-        let hex = keypair.private().to_bytes_hex();
-        write_private(&path, &hex)?;
-        Ok(BiscuitCapTokenIssuer::new(keypair))
+    match read_private(keys_dir, "issuer.key") {
+        Ok(hex) => {
+            let private = PrivateKey::from_bytes_hex(hex.trim(), Algorithm::Ed25519)
+                .map_err(|e| anyhow::anyhow!("parsing issuer key {}: {e}", path.display()))?;
+            Ok(BiscuitCapTokenIssuer::new(KeyPair::from(&private)))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let keypair = KeyPair::new();
+            let hex = keypair.private().to_bytes_hex();
+            create_private(keys_dir, "issuer.key", &hex)
+                .map_err(|e| anyhow::anyhow!("writing {}: {e}", path.display()))?;
+            Ok(BiscuitCapTokenIssuer::new(keypair))
+        }
+        Err(error) => Err(anyhow::anyhow!("reading {}: {error}", path.display())),
     }
 }
 
@@ -1295,18 +1710,19 @@ fn load_or_mint_issuer(keys_dir: &Path) -> anyhow::Result<BiscuitCapTokenIssuer>
 /// persisting one (PKCS#8 PEM) on first boot.
 fn load_or_generate_receipt_key(keys_dir: &Path) -> anyhow::Result<Es256SigningKey> {
     let path = keys_dir.join("receipt.pem");
-    if path.exists() {
-        let pem = std::fs::read_to_string(&path)
-            .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?;
-        Es256SigningKey::from_pkcs8_pem(&pem)
-            .map_err(|e| anyhow::anyhow!("parsing receipt key {}: {e}", path.display()))
-    } else {
-        let key = Es256SigningKey::generate();
-        let pem = key
-            .to_pkcs8_pem()
-            .map_err(|e| anyhow::anyhow!("encoding receipt key: {e}"))?;
-        write_private(&path, &pem)?;
-        Ok(key)
+    match read_private(keys_dir, "receipt.pem") {
+        Ok(pem) => Es256SigningKey::from_pkcs8_pem(&pem)
+            .map_err(|e| anyhow::anyhow!("parsing receipt key {}: {e}", path.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let key = Es256SigningKey::generate();
+            let pem = key
+                .to_pkcs8_pem()
+                .map_err(|e| anyhow::anyhow!("encoding receipt key: {e}"))?;
+            create_private(keys_dir, "receipt.pem", &pem)
+                .map_err(|e| anyhow::anyhow!("writing {}: {e}", path.display()))?;
+            Ok(key)
+        }
+        Err(error) => Err(anyhow::anyhow!("reading {}: {error}", path.display())),
     }
 }
 
@@ -1328,24 +1744,174 @@ fn load_policy(path: Option<&Path>, dev_permissive: bool) -> anyhow::Result<Ceda
     CedarPolicyBundle::load(source).map_err(|e| anyhow::anyhow!("compiling cedar policy: {e}"))
 }
 
-/// Write a secret to `path` with owner-only permissions where the platform
-/// supports it (`0o600` on Unix).
-fn write_private(path: &Path, contents: &str) -> anyhow::Result<()> {
-    std::fs::write(path, contents)
-        .map_err(|e| anyhow::anyhow!("writing {}: {e}", path.display()))?;
+#[cfg(unix)]
+fn open_keys_directory(keys_dir: &Path) -> std::io::Result<std::fs::File> {
+    use rustix::fs::{Mode, OFlags, openat};
+
+    let trusted_root = keys_dir.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "keys directory has no parent",
+        )
+    })?;
+    let name = keys_dir.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "keys directory has no name",
+        )
+    })?;
+    let trusted = {
+        use rustix::fs::{CWD, Mode, OFlags, openat};
+        let fd = openat(
+            CWD,
+            trusted_root,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|error| std::io::Error::from_raw_os_error(error.raw_os_error()))?;
+        std::fs::File::from(fd)
+    };
+    let descriptor = openat(
+        &trusted,
+        name,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|error| std::io::Error::from_raw_os_error(error.raw_os_error()))?;
+    Ok(std::fs::File::from(descriptor))
+}
+
+fn read_private(keys_dir: &Path, name: &str) -> std::io::Result<String> {
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| anyhow::anyhow!("chmod {}: {e}", path.display()))?;
+    let mut file = {
+        use rustix::fs::{Mode, OFlags, openat};
+        let keys = open_keys_directory(keys_dir)?;
+        let descriptor = openat(
+            &keys,
+            name,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|error| std::io::Error::from_raw_os_error(error.raw_os_error()))?;
+        std::fs::File::from(descriptor)
+    };
+    #[cfg(not(unix))]
+    let mut file = std::fs::File::open(keys_dir.join(name))?;
+    if !file.metadata()?.file_type().is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "private key path is not a regular file",
+        ));
     }
-    Ok(())
+    let mut contents = String::new();
+    std::io::Read::read_to_string(&mut file, &mut contents)?;
+    Ok(contents)
+}
+
+fn create_private(keys_dir: &Path, name: &str, contents: &str) -> std::io::Result<()> {
+    #[cfg(unix)]
+    let mut file = {
+        use rustix::fs::{Mode, OFlags, openat};
+        let keys = open_keys_directory(keys_dir)?;
+        let descriptor = openat(
+            &keys,
+            name,
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::from_bits_truncate(0o600),
+        )
+        .map_err(|error| std::io::Error::from_raw_os_error(error.raw_os_error()))?;
+        std::fs::File::from(descriptor)
+    };
+    #[cfg(not(unix))]
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(keys_dir.join(name))?;
+    std::io::Write::write_all(&mut file, contents.as_bytes())?;
+    file.sync_all()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use ardur_session_journals::InMemorySessionJournal;
+
+    #[test]
+    fn security_metrics_classify_each_denial_into_its_own_bucket() {
+        let m = SecurityMetrics::default();
+        m.record_ok();
+        m.record_ok();
+        m.record_err(&RuntimeError::injection_blocked(
+            "injection-defense",
+            "instruction override",
+            Vec::new(),
+        ));
+        m.record_err(&RuntimeError::PolicyDenied {
+            reason: "cedar forbid".to_string(),
+        });
+        m.record_err(&RuntimeError::CapTokenMissing);
+        m.record_err(&RuntimeError::CapDenied {
+            reason: "audience mismatch".to_string(),
+        });
+        m.record_err(&RuntimeError::CostCeilingExceeded);
+        m.record_err(&RuntimeError::VetoedByHook {
+            hook_id: "guard".to_string(),
+            reason: "blocked".to_string(),
+        });
+        m.record_err(&RuntimeError::UnknownTool {
+            tool: "shell.run".to_string(),
+        });
+        // Non-security failures land in `other_errors`, never a deny bucket.
+        m.record_err(&RuntimeError::ProviderUnavailable);
+        m.record_err(&RuntimeError::Internal(anyhow::anyhow!("boom")));
+
+        let s = m.snapshot();
+        assert_eq!(s.turns_ok, 2);
+        assert_eq!(s.injection_blocked, 1);
+        assert_eq!(s.policy_denied, 1);
+        assert_eq!(
+            s.cap_denied, 2,
+            "missing + denied both count as cap denials"
+        );
+        assert_eq!(s.cost_rejected, 1);
+        assert_eq!(s.hook_vetoed, 1);
+        assert_eq!(s.tool_denied, 1);
+        assert_eq!(s.other_errors, 2, "provider + internal are non-security");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn persisted_server_keys_reject_parent_and_final_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let trusted = tempfile::tempdir().expect("trusted state root");
+        let outside = tempfile::tempdir().expect("outside root");
+        let keys = trusted.path().join("keys");
+        symlink(outside.path(), &keys).expect("keys directory symlink");
+        assert!(
+            load_or_generate_receipt_key(&keys).is_err(),
+            "symlinked keys directory must fail closed"
+        );
+        assert!(!outside.path().join("receipt.pem").exists());
+
+        std::fs::remove_file(&keys).expect("remove keys symlink");
+        std::fs::create_dir(&keys).expect("real keys directory");
+        let receipt_target = outside.path().join("receipt.pem");
+        std::fs::write(&receipt_target, "attacker key").expect("receipt target");
+        symlink(&receipt_target, keys.join("receipt.pem")).expect("receipt key symlink");
+        assert!(
+            load_or_generate_receipt_key(&keys).is_err(),
+            "symlinked receipt key must fail closed"
+        );
+
+        let issuer_target = outside.path().join("issuer.key");
+        std::fs::write(&issuer_target, "00").expect("issuer target");
+        symlink(&issuer_target, keys.join("issuer.key")).expect("issuer key symlink");
+        assert!(
+            load_or_mint_issuer(&keys).is_err(),
+            "symlinked issuer key must fail closed"
+        );
+    }
 
     /// ARD-493: a panic inside a `catch_unwind`-wrapped turn future is caught,
     /// so the worker loop survives and later turns still run — the exact wrap
@@ -1395,11 +1961,11 @@ mod tests {
 
         let tempdir = tempfile::tempdir().expect("tempdir");
         let state = AppState {
-            slack: Arc::new(SlackAdapter::new(
+            slack: Some(Arc::new(SlackAdapter::new(
                 SecretString::from("xoxb-test".to_string()),
                 SecretString::from("signing-secret".to_string()),
                 "A123".to_string(),
-            )),
+            ))),
             work_tx: Arc::new(Mutex::new(Some(work_tx))),
             worker_handle: Mutex::new(Some(worker_handle)),
             journal: Arc::new(InMemorySessionJournal::new(SessionId::new())),
@@ -1412,6 +1978,8 @@ mod tests {
             matrix: Arc::new(OnceLock::new()),
             discord: Arc::new(OnceLock::new()),
             telegram: Arc::new(OnceLock::new()),
+            receipt_jwks: ardur_receipt::Jwks::new(),
+            security_metrics: Arc::new(SecurityMetrics::default()),
         };
 
         assert!(state.worker_alive());

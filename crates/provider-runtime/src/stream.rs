@@ -45,10 +45,17 @@ pub enum StreamEvent {
     },
     /// The token ledger so far. Emitted at least twice on a live stream: once
     /// near the start (input tokens, output zero) and once at the end with the
-    /// final input+output totals the receipt is minted from.
+    /// final input+output totals the receipt is minted from. The final `Usage`
+    /// **must precede** [`Finish`](Self::Finish) — a provider whose wire protocol
+    /// reports the finish reason before the usage totals (OpenRouter does) is
+    /// required to buffer the finish and flush it after usage so this ordering
+    /// holds. Otherwise a consumer that stops at `Finish` bills zero.
     Usage(Usage),
     /// Generation finished; carries the terminal [`FinishReason`] (with any
-    /// assembled tool calls). This is the last event a well-formed stream emits.
+    /// assembled tool calls). This is the last event a well-formed stream emits:
+    /// no [`Usage`](Self::Usage) (or any other event) follows it. Consumers must
+    /// still drain the stream to `None` rather than stopping on `Finish`, so a
+    /// non-conforming provider cannot strand a trailing event.
     Finish(FinishReason),
     /// The actual model name the provider served (when different from the
     /// requested model — e.g. a fallback or version-resolved alias). Emitted

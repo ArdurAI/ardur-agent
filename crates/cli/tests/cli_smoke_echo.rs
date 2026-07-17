@@ -13,7 +13,10 @@ fn echo_mode_echoes_a_piped_turn() {
         .expect("the `ardur` binary builds")
         .arg("chat")
         .arg("--echo")
-        .env("HOME", home.path())
+        .env(
+            "HOME",
+            home.path().canonicalize().expect("canonical temp HOME"),
+        )
         .env_remove("ANTHROPIC_API_KEY")
         .write_stdin("hello echo world\n/quit\n")
         .output()

@@ -17,7 +17,7 @@ async fn file_journal_roundtrips_across_a_drop() {
             journal
                 .append(JournalEntry::UserMessage {
                     content: format!("persisted {i}"),
-                    at: 42 + i,
+                    at: ardur_session_journals::UnixTsMillis(42 + i),
                 })
                 .await
                 .expect("append");
@@ -34,7 +34,7 @@ async fn file_journal_roundtrips_across_a_drop() {
         match entry {
             JournalEntry::UserMessage { content, at } => {
                 assert_eq!(content, &format!("persisted {i}"));
-                assert_eq!(*at, 42 + i as u64);
+                assert_eq!(at.get(), 42 + i as u64);
             }
             other => panic!("unexpected entry at {i}: {other:?}"),
         }
@@ -44,7 +44,7 @@ async fn file_journal_roundtrips_across_a_drop() {
     let next = reopened
         .append(JournalEntry::UserMessage {
             content: "after reopen".into(),
-            at: 99,
+            at: ardur_session_journals::UnixTsMillis(99),
         })
         .await
         .expect("append after reopen");
@@ -60,7 +60,7 @@ async fn file_journal_drops_and_truncates_torn_trailing_line() {
     journal
         .append(JournalEntry::UserMessage {
             content: "before crash".into(),
-            at: 1,
+            at: ardur_session_journals::UnixTsMillis(1),
         })
         .await
         .expect("append first");
@@ -81,7 +81,7 @@ async fn file_journal_drops_and_truncates_torn_trailing_line() {
     let next = reopened
         .append(JournalEntry::UserMessage {
             content: "after repair".into(),
-            at: 2,
+            at: ardur_session_journals::UnixTsMillis(2),
         })
         .await
         .expect("append after repair");
@@ -100,4 +100,59 @@ async fn file_journal_drops_and_truncates_torn_trailing_line() {
     for line in raw.lines() {
         serde_json::from_str::<JournalEntry>(line).expect("every remaining line is valid JSONL");
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn file_journal_rejects_symlinked_file_and_session_directory() {
+    use std::os::unix::fs::symlink;
+
+    let root = tempfile::tempdir().expect("root");
+    let outside = tempfile::tempdir().expect("outside");
+    let session_id = SessionId::new();
+    let session_dir = root.path().join("sessions").join(session_id.0.to_string());
+    std::fs::create_dir_all(&session_dir).expect("session dir");
+    let outside_file = outside.path().join("journal.jsonl");
+    std::fs::write(&outside_file, "").expect("outside journal");
+    symlink(&outside_file, session_dir.join("journal.jsonl")).expect("journal symlink");
+    assert!(
+        FileSessionJournal::new(root.path(), session_id).is_err(),
+        "final journal symlink must fail closed"
+    );
+
+    std::fs::remove_dir_all(&session_dir).expect("remove session dir");
+    let outside_session = outside.path().join("session");
+    std::fs::create_dir_all(&outside_session).expect("outside session dir");
+    symlink(&outside_session, &session_dir).expect("session directory symlink");
+    assert!(
+        FileSessionJournal::new(root.path(), session_id).is_err(),
+        "session directory symlink must fail closed"
+    );
+
+    std::fs::remove_file(&session_dir).expect("remove session symlink");
+    std::fs::remove_dir(root.path().join("sessions")).expect("remove sessions dir");
+    let outside_sessions = outside.path().join("sessions");
+    std::fs::create_dir_all(&outside_sessions).expect("outside sessions dir");
+    symlink(&outside_sessions, root.path().join("sessions")).expect("sessions symlink");
+    assert!(
+        FileSessionJournal::new(root.path(), SessionId::new()).is_err(),
+        "sessions parent symlink must fail closed"
+    );
+
+    let trusted = tempfile::tempdir().expect("trusted state root");
+    let outside_base = outside.path().join("journals");
+    std::fs::create_dir_all(&outside_base).expect("outside journal base");
+    let symlinked_base = trusted.path().join("journals");
+    symlink(&outside_base, &symlinked_base).expect("journal base symlink");
+    assert!(
+        FileSessionJournal::new(&symlinked_base, SessionId::new()).is_err(),
+        "journal base symlink must fail closed"
+    );
+    assert!(
+        std::fs::read_dir(&outside_base)
+            .expect("outside base remains readable")
+            .next()
+            .is_none(),
+        "journal creation must not escape through the symlinked base"
+    );
 }

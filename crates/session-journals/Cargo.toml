@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+# `Sha256Digest` (which owns the SHA-256 hashing) is re-exported from the
+# workspace's leaf `core-types` crate, so `sha2` is no longer a direct dep.
+ardur-core-types = { workspace = true }
 # §1.0 owns the session identity a journal is keyed on and the receipt id an
 # assistant turn / tool call folds into; re-exported so the journal and the
 # runtime never drift into two incompatible schemas (§7.10).
@@ -36,9 +39,14 @@ tracing = { workspace = true }
 # Workspace pins v7 (time-ordered ids); the locally-defined `ReservationId`
 # placeholder mints v4 (random), so opt v4 in on top of the shared pin.
 uuid = { workspace = true, features = ["v4"] }
-# SHA-256 backs `Sha256Digest::of` — the content digests a `ToolInvocation`
-# entry records for its input/output payloads.
-sha2 = { workspace = true }
+# Descriptor-relative no-follow traversal protects append-only journals from
+# parent and final-component symlink races.
+rustix = { workspace = true }
+# Secret-shaped-pattern matching backing `redact::redact_text` — the same
+# patterns `ardur-cli`'s `redact` command uses, now shared so any consumer of
+# `JournalEntry` (e.g. `ardur-admin`) can redact free-text fields before
+# displaying them outside the originating session's trust boundary.
+regex = { workspace = true }
 
 [dev-dependencies]
 # The async trait methods need a runtime to poll them; the concurrency test

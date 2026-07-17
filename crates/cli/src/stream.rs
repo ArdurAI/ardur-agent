@@ -1,44 +1,26 @@
 //! Progressive streaming display for a chat turn (§2.1b + §2.X polish).
 //!
-//! [`drive_turn`] is the single entry the REPL drives a provider through. When
-//! streaming is enabled and the backend [`supports_streaming`], it consumes
-//! [`Provider::stream`] and renders each [`StreamEvent`] as it arrives:
-//! [`ContentDelta`](StreamEvent::ContentDelta)s stream live (raw, for
-//! responsiveness), a [`ToolCallStart`](StreamEvent::ToolCallStart) draws a themed
-//! rounded **tool box** ([`crate::toolbox`]), and [`Usage`](StreamEvent::Usage)
-//! closes the turn with a themed, context-pressure-coloured **cost line**. A
-//! mid-stream error prints the partial output already shown plus the error rather
-//! than crashing. Otherwise it falls back to a single [`Provider::complete`] call,
-//! whose finished content is rendered through the full **Markdown renderer**
-//! ([`crate::markdown`]) — headings, code with syntax highlight, tables, the lot.
+//! [`drive_fused_turn`] is the default CLI renderer. It consumes
+//! [`FusedEvent`] values from the full ten-stage runtime pipeline, so progressive
+//! output keeps capability, Cedar, budget, receipt, memory, and durable-journal
+//! guarantees. [`drive_turn`] remains the provider-level compatibility renderer
+//! used by focused rendering tests and non-fused callers.
 //!
-//! All rendering flows through a [`RenderCtx`] (the active [`Theme`], the column
-//! budget, and OSC-8 capability), so colour and the `NO_COLOR`/`--plain`
-//! degradation are decided in one place. Tests drive the surface with an unstyled
-//! theme and a fixed width for deterministic, escape-free output.
-//!
-//! # Trade-offs (documented)
-//!
-//! 1. The streamed path calls [`Provider::stream`] **directly at the CLI layer**,
-//!    bypassing the [`FusedRuntime`](ardur_fused_runtime::FusedRuntime)'s ten-stage
-//!    pipeline that the non-streaming [`complete`](Provider::complete) path routes
-//!    through (the original §2.1b trade-off).
-//! 2. Streamed **content** is shown raw (not Markdown-rendered) because full
-//!    rendering needs block boundaries that only exist once a block completes;
-//!    the `complete()`/`--no-stream`/piped path renders Markdown fully. Live
-//!    block-by-block Markdown streaming is the proposed §2 follow-up.
-//!
-//! [`Provider::stream`]: ardur_provider_runtime::Provider::stream
-//! [`Provider::complete`]: ardur_provider_runtime::Provider::complete
-//! [`supports_streaming`]: ardur_provider_runtime::Provider::supports_streaming
+//! Both surfaces stream content deltas live (raw, for responsiveness), draw
+//! themed tool boxes, and close with token/cost information. Rendering flows
+//! through a [`RenderCtx`] (theme, width, and OSC-8 capability), so colour and
+//! `NO_COLOR`/`--plain` behavior remain centralized.
 
+use std::collections::HashMap;
 use std::io::Write;
 use std::time::{Duration, Instant};
 
+use ardur_fused_runtime::FusedEvent;
 use ardur_provider_runtime::{
     CompletionRequest, FinishReason, Provider, RateCard, StreamEvent, Usage,
 };
-use futures::StreamExt as _;
+use ardur_runtime::{ReceiptId, RuntimeError};
+use futures::{Stream, StreamExt as _};
 
 use crate::anim::{CLEAR_LINE, TYPING_DOTS_TICK, TypingDots};
 use crate::markdown::render_markdown_with;
@@ -76,13 +58,19 @@ impl<'a> RenderCtx<'a> {
 /// stream (the partial output was still shown).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct StreamOutcome {
-    /// The full assistant text, concatenated from every content delta.
+    /// The full assistant text, concatenated from every content delta for display.
     pub content: String,
+    /// Per-round assistant responses that crossed the receipt commit boundary, in
+    /// journal order. Live history uses these instead of collapsing tool loops.
+    pub committed_assistant_messages: Vec<String>,
     /// The final token ledger, when the turn reported usage.
     pub usage: Option<Usage>,
-    /// The turn's priced cost in US cents, when usage was reported — fed into the
-    /// session `/cost` tally.
+    /// The turn's committed provider-plus-tool cost in US cents, when at least
+    /// one receipt was minted — fed into the session `/cost` tally.
     pub cost_cents: Option<u64>,
+    /// Receipt ids committed by completed fused rounds, in event order. A
+    /// non-empty vector means durable history exists even if a later stage failed.
+    pub receipt_ids: Vec<ReceiptId>,
     /// The terminal finish reason, when the turn finished cleanly.
     pub finish_reason: Option<FinishReason>,
     /// Names of the tools the model requested this turn (in arrival order).
@@ -127,6 +115,152 @@ pub async fn drive_turn<W: Write>(
     } else {
         render_complete(provider, req, out, ctx, started).await
     }
+}
+
+/// Render one stream from [`ardur_fused_runtime::FusedRuntime::stream`].
+///
+/// Unlike [`drive_turn`]'s provider-level compatibility surface, this consumes
+/// events from the full fused pipeline, so a clean streamed turn retains Cedar,
+/// cost-gate, receipt, memory, and durable-journal semantics.
+pub async fn drive_fused_turn<S, W>(
+    stream: S,
+    out: &mut W,
+    ctx: &RenderCtx<'_>,
+) -> std::io::Result<StreamOutcome>
+where
+    S: Stream<Item = Result<FusedEvent, RuntimeError>>,
+    W: Write,
+{
+    let started = Instant::now();
+    futures::pin_mut!(stream);
+    let mut outcome = StreamOutcome::default();
+    let mut current_round_content = String::new();
+    let mut total_cost_cents = 0_u64;
+    let mut newline_pending = false;
+    let mut pending_tools: HashMap<String, (String, String)> = HashMap::new();
+
+    let mut waiting = ctx.theme.is_styled();
+    let mut dots = TypingDots::new();
+    let mut ticker = tokio::time::interval(TYPING_DOTS_TICK);
+
+    loop {
+        let item = if waiting {
+            tokio::select! {
+                biased;
+                maybe = stream.next() => maybe,
+                _ = ticker.tick() => {
+                    write!(out, "{CLEAR_LINE}{}", dots.render(ctx.theme))?;
+                    out.flush()?;
+                    dots.tick();
+                    continue;
+                }
+            }
+        } else {
+            stream.next().await
+        };
+        let Some(item) = item else { break };
+
+        let visible = matches!(
+            &item,
+            Ok(FusedEvent::Content(_) | FusedEvent::ToolCallResult { .. } | FusedEvent::Finish(_))
+                | Err(_)
+        );
+        if waiting && visible {
+            write!(out, "{CLEAR_LINE}")?;
+            out.flush()?;
+            waiting = false;
+        }
+
+        match item {
+            Ok(FusedEvent::StageStart { .. } | FusedEvent::StageEnd { .. }) => {}
+            Ok(FusedEvent::Receipt {
+                receipt_id,
+                cost_cents,
+                ..
+            }) => {
+                outcome
+                    .committed_assistant_messages
+                    .push(std::mem::take(&mut current_round_content));
+                outcome.receipt_ids.push(receipt_id);
+                total_cost_cents = total_cost_cents.saturating_add(cost_cents);
+            }
+            Ok(FusedEvent::Content(text)) => {
+                newline_pending = !text.is_empty() && !text.ends_with('\n');
+                current_round_content.push_str(&text);
+                outcome.content.push_str(&text);
+                write!(out, "{text}")?;
+                out.flush()?;
+            }
+            Ok(FusedEvent::ToolCallStart { id, name }) => {
+                outcome.tool_calls.push(name.clone());
+                pending_tools.insert(id, (name, String::new()));
+            }
+            Ok(FusedEvent::ToolCallDelta { id, delta }) => {
+                if let Some((_, arguments)) = pending_tools.get_mut(&id) {
+                    arguments.push_str(&delta);
+                }
+            }
+            Ok(FusedEvent::ToolCallResult { id, .. }) => {
+                if newline_pending {
+                    writeln!(out)?;
+                    newline_pending = false;
+                }
+                if let Some((name, arguments)) = pending_tools.remove(&id) {
+                    let arguments = serde_json::from_str::<serde_json::Value>(&arguments)
+                        .ok()
+                        .and_then(|value| serde_json::to_string_pretty(&value).ok())
+                        .unwrap_or(arguments);
+                    writeln!(
+                        out,
+                        "{}",
+                        render_tool_call_box(&name, &arguments, ctx.theme, ctx.width)
+                    )?;
+                }
+            }
+            Ok(FusedEvent::Usage(usage)) => match &mut outcome.usage {
+                Some(total) => {
+                    total.tokens_in = total.tokens_in.saturating_add(usage.tokens_in);
+                    total.tokens_out = total.tokens_out.saturating_add(usage.tokens_out);
+                    total.cost_cents = match (total.cost_cents, usage.cost_cents) {
+                        (Some(lhs), Some(rhs)) => Some(lhs.saturating_add(rhs)),
+                        _ => None,
+                    };
+                }
+                None => outcome.usage = Some(usage),
+            },
+            Ok(FusedEvent::Finish(reason)) => {
+                if newline_pending {
+                    writeln!(out)?;
+                    newline_pending = false;
+                }
+                write_finish_note(out, &reason, ctx.theme)?;
+                outcome.finish_reason = Some(reason);
+            }
+            Err(error) => {
+                if newline_pending {
+                    writeln!(out)?;
+                    newline_pending = false;
+                }
+                let message = error.to_string();
+                write_error(out, &message, ctx.theme)?;
+                outcome.error = Some(message);
+                break;
+            }
+        }
+    }
+
+    if newline_pending {
+        writeln!(out)?;
+    }
+    if !outcome.receipt_ids.is_empty() {
+        outcome.cost_cents = Some(total_cost_cents);
+    }
+    if let Some(usage) = outcome.usage {
+        // A pre-commit failure released its reservation, so a token-bearing
+        // partial stream with no receipt correctly displays a zero committed cost.
+        write_cost_line_with_cents(out, usage, total_cost_cents, started.elapsed(), ctx)?;
+    }
+    Ok(outcome)
 }
 
 /// Render a live [`ProviderStream`](ardur_provider_runtime::ProviderStream),
@@ -269,8 +403,10 @@ async fn render_complete<W: Write>(
             )?;
             Ok(StreamOutcome {
                 content: resp.content,
+                committed_assistant_messages: Vec::new(),
                 usage: Some(resp.usage),
                 cost_cents: Some(provider.rate_card().price(resp.usage).cents),
+                receipt_ids: Vec::new(),
                 finish_reason: Some(resp.finish_reason),
                 tool_calls,
                 error: None,
@@ -295,7 +431,17 @@ fn write_cost_line<W: Write>(
     elapsed: Duration,
     ctx: &RenderCtx<'_>,
 ) -> std::io::Result<()> {
-    let dollars = rate_card.price(usage).cents as f64 / 100.0;
+    write_cost_line_with_cents(out, usage, rate_card.price(usage).cents, elapsed, ctx)
+}
+
+fn write_cost_line_with_cents<W: Write>(
+    out: &mut W,
+    usage: Usage,
+    cost_cents: u64,
+    elapsed: Duration,
+    ctx: &RenderCtx<'_>,
+) -> std::io::Result<()> {
+    let dollars = cost_cents as f64 / 100.0;
     let stats = TurnStats {
         tokens_in: u64::from(usage.tokens_in),
         tokens_out: u64::from(usage.tokens_out),

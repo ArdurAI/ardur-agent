@@ -107,7 +107,8 @@ async fn streaming_returns_sse_content_type() {
     let router = support::boot_router(&support::test_config(
         Box::leak(Box::new(tempfile::tempdir().expect("tempdir"))),
         None,
-    ));
+    ))
+    .await;
 
     let body = json!({
         "message": "hello",
@@ -141,7 +142,8 @@ async fn streaming_body_contains_data_event() {
     let router = support::boot_router(&support::test_config(
         Box::leak(Box::new(tempfile::tempdir().expect("tempdir"))),
         None,
-    ));
+    ))
+    .await;
 
     let body = json!({
         "message": "hello",
@@ -176,6 +178,12 @@ async fn streaming_body_contains_data_event() {
         "stream should include content deltas, got: {payloads:?}"
     );
     assert!(
+        payloads
+            .iter()
+            .any(|p| { p["type"] == "receipt" && p["cost_cents"].as_u64().is_some() }),
+        "receipt events should expose authoritative combined cost, got: {payloads:?}"
+    );
+    assert!(
         payloads.iter().any(|p| p["type"] == "finish"),
         "stream should include terminal finish, got: {payloads:?}"
     );
@@ -189,7 +197,9 @@ async fn dropping_sse_response_before_reading_mints_no_receipt() {
         rate_card: RateCard::anthropic_2026_q2_v1(),
     });
     let tools = Arc::new(example_registry("stub", "in-memory"));
-    let state = AppState::boot(&config, provider, tools).expect("AppState boots");
+    let state = AppState::boot(&config, provider, tools)
+        .await
+        .expect("AppState boots");
     let router = build_router(state.clone());
 
     let request = Request::builder()
@@ -222,7 +232,9 @@ async fn streaming_error_event_is_valid_json() {
         rate_card: RateCard::anthropic_2026_q2_v1(),
     });
     let tools = Arc::new(example_registry("stub", "in-memory"));
-    let state = AppState::boot(&config, provider, tools).expect("AppState boots");
+    let state = AppState::boot(&config, provider, tools)
+        .await
+        .expect("AppState boots");
     let router = build_router(state);
 
     let request = Request::builder()

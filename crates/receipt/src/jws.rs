@@ -103,7 +103,14 @@ impl ReceiptVerifier {
     /// Verify `receipt`: resolve its `kid` in `jwks`, check the ES256
     /// signature, and decode the body.
     pub fn verify(receipt: &SignedReceipt, jwks: &Jwks) -> Result<VerifiedReceipt, ReceiptError> {
-        let mut parts = receipt.jws_compact().split('.');
+        Self::verify_compact(receipt.jws_compact(), jwks)
+    }
+
+    /// Verify a persisted compact JWS without requiring callers to reconstruct a
+    /// [`SignedReceipt`]. This is the canonical verification entry point for
+    /// receipt logs loaded from disk.
+    pub fn verify_compact(jws_compact: &str, jwks: &Jwks) -> Result<VerifiedReceipt, ReceiptError> {
+        let mut parts = jws_compact.split('.');
         let (header_b64, payload_b64, sig_b64) =
             match (parts.next(), parts.next(), parts.next(), parts.next()) {
                 (Some(h), Some(p), Some(s), None) => (h, p, s),
@@ -123,6 +130,12 @@ impl ReceiptVerifier {
             return Err(ReceiptError::Malformed(format!(
                 "unsupported alg `{}`",
                 header.alg
+            )));
+        }
+        if header.typ != TYP {
+            return Err(ReceiptError::Malformed(format!(
+                "unsupported typ `{}`",
+                header.typ
             )));
         }
 
@@ -172,18 +185,32 @@ mod tests {
             verb: VerbObject::new("cost.admission.allow.v1").unwrap(),
             issued_at: UnixTsMillis(1_700_000_000_000),
             subject: HolderId("spiffe://ardur/user/alice".to_string()),
-            cap_token_id: TokenId("jti-0001".to_string()),
+            cap_token_id: TokenId(uuid::Uuid::from_u128(0x0001)),
             payload_digest: Sha256Digest::of(b"event-payload"),
+            session_id: None,
             cost: CostTuple {
                 tokens_in: 100,
                 tokens_out: 50,
                 cents: 2,
                 wall_ms: 1_200,
-                attention_score: 0.5,
+                attention_score: 500,
             },
             tool_calls: Vec::new(),
             provider: None,
         }
+    }
+
+    #[test]
+    fn verify_compact_authenticates_a_persisted_jws_without_reconstructing_signed_receipt() {
+        let key = Es256SigningKey::generate();
+        let jwks = Jwks::from_public_key(&key.public_key());
+        let signed = ReceiptSigner::sign(sample_body(), &key).unwrap();
+
+        let verified = ReceiptVerifier::verify_compact(signed.jws_compact(), &jwks)
+            .expect("persisted compact JWS verifies");
+
+        assert_eq!(verified.body, *signed.body());
+        assert_eq!(verified.kid, key.key_id());
     }
 
     /// ARD-483: signing emits canonical low-S, so the high-S-rejecting verifier
