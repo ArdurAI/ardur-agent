@@ -1,0 +1,43 @@
+[package]
+name = "ardur-cap-token"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# `HolderId` is owned by the workspace's leaf `core-types` crate and re-exported
+# here so the cap-token, cost-gate, receipt, and memory layers share one type.
+ardur-core-types = { workspace = true }
+# Cap-tokens are Biscuits: Ed25519 issuance, offline block-append attenuation,
+# and Datalog-check verification. KeyPair/PublicKey are Ed25519, so no separate
+# ed25519 dependency is needed.
+biscuit-auth = { workspace = true }
+# issue/attenuate keep the Phase-0 anyhow::Result surface; verification uses the
+# typed CapTokenError below.
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+# The issued claims travel as JSON in the (signed) authority-block context.
+serde_json = { workspace = true }
+# Verification projects effective attenuation claims for downstream Cedar/
+# resource checks by reading each block's Datalog source through biscuit's own
+# symbol table; expiry checks render dates as RFC 3339, which chrono parses back
+# to Unix seconds. (No direct `prost`: reading biscuit's own source avoids a
+# parallel protobuf reimplementation and the biscuit-coupled prost pin.)
+chrono = { workspace = true }
+# Workspace pins v7; cap-token ids are v4 (random) per §11.14 Phase 1, so opt v4
+# in on top of the shared pin (Cargo unifies the feature set).
+uuid = { workspace = true, features = ["v4"] }
+# FileDenyList stores Biscuit revocation ids as newline-delimited hex.
+hex = { workspace = true }
+# Non-poisoning lock around the file-backed deny-list cache.
+parking_lot = { workspace = true }
+
+[dev-dependencies]
+# Throwaway deny-list files for persistence/propagation tests.
+tempfile = { workspace = true }
+# Fail-closed projection tests append raw, non-standard Biscuit blocks (checks
+# the attenuator would never emit) to assert the verifier rejects them.
+biscuit-auth = { workspace = true }

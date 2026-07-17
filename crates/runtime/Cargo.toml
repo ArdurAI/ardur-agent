@@ -1,0 +1,30 @@
+[package]
+name = "ardur-runtime"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+# The shared id/cost primitives (CostTuple, ProviderId, ReceiptId) live in the
+# workspace's leaf `core-types` crate so every crate speaks one type.
+ardur-core-types = { workspace = true }
+# `ChatRuntime::submit` is `#[async_trait]` so the trait is object-safe and its
+# future is `Send` (matching `Provider` / `CostAdmissionGate` / etc.).
+async-trait = { workspace = true }
+serde = { workspace = true }
+# `ToolCall::arguments` and the tool transcript carry raw JSON, so the runtime's
+# shared value types speak `serde_json::Value` directly.
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+# Workspace pins v7 (time-ordered session/turn ids); receipt-id placeholders
+# are v4 per §1.0 Phase 1, so opt v4 in on top of the shared pin (Cargo unifies
+# the feature set).
+uuid = { workspace = true, features = ["v4"] }
+
+[dev-dependencies]
+# `ChatRuntime::submit` returns a bare `impl Future`; the integration tests need
+# an executor to drive it, so they pull in tokio's test macro + runtime.
+tokio = { workspace = true }
