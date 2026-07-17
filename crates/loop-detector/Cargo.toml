@@ -1,0 +1,31 @@
+[package]
+name = "ardur-loop-detector"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Receipt vocabulary — the detector emits its verdicts as `verb.object.state.vN`
+# receipts (`agent.loop.detected.v1`, …) and reuses the §11.14 `CostTuple` for
+# the cost-acceleration signal + `Sha256Digest` for the args fingerprint and the
+# on-chain halt evidence payload digest.
+ardur-receipt = { workspace = true }
+# Typed detector/budget/halter failure surfaces.
+thiserror = { workspace = true }
+# Domain objects (LoopBudget, LoopEvidence, …) serialize for state persistence
+# and receipt payloads.
+serde = { workspace = true }
+# Canonical args fingerprint: tool arguments arrive as an arbitrary JSON value,
+# which is canonicalized (recursively key-sorted) and SHA-256'd so the signature
+# is stable across key-order and whitespace variation.
+serde_json = { workspace = true }
+# The args fingerprint + evidence payload digest hash with SHA-256.
+sha2 = { workspace = true }
+# Session/run ids are UUIDv4.
+uuid = { workspace = true, features = ["v4", "serde"] }
+
+[dev-dependencies]
+# Attenuation-monotonicity is a property (every field tightens, never relaxes).
+proptest = "1"

@@ -12,21 +12,10 @@ use uuid::Uuid;
 
 /// Identifier of a concrete model offered by a provider (e.g.
 /// `"claude-opus-4-8"`). Opaque to this layer — each provider validates it.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ModelId(pub String);
-
-impl ModelId {
-    /// Wrap a model name.
-    pub fn new(id: impl Into<String>) -> Self {
-        Self(id.into())
-    }
-}
-
-impl std::fmt::Display for ModelId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
+///
+/// Re-exported from `ardur-core-types` so the provider and cost-gate layers
+/// name the one `ModelId` (with the same `new`/`Display` surface).
+pub use ardur_core_types::ModelId;
 
 /// Caller-supplied correlation id for a single completion request (UUIDv4).
 ///

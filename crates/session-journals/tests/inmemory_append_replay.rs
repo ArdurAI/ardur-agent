@@ -12,7 +12,7 @@ async fn append_then_replay_preserves_count_and_order() {
         let id = journal
             .append(JournalEntry::UserMessage {
                 content: format!("message {i}"),
-                at: 1_000 + i,
+                at: ardur_session_journals::UnixTsMillis(1_000 + i),
             })
             .await
             .expect("append");
@@ -26,7 +26,7 @@ async fn append_then_replay_preserves_count_and_order() {
         match entry {
             JournalEntry::UserMessage { content, at } => {
                 assert_eq!(content, &format!("message {i}"));
-                assert_eq!(*at, 1_000 + i as u64);
+                assert_eq!(at.get(), 1_000 + i as u64);
             }
             other => panic!("unexpected entry at {i}: {other:?}"),
         }

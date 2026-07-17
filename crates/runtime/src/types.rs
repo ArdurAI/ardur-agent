@@ -41,55 +41,11 @@ impl Default for TurnId {
     }
 }
 
-/// Identifier of an emitted execution receipt.
-// TODO §1.0 Phase 2: re-export `ardur_receipt`'s receipt id instead of minting
-// a local UUID, once the runtime is wired to the receipt signer.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ReceiptId(pub Uuid);
-
-impl ReceiptId {
-    /// Mint a placeholder receipt id (UUIDv4). Phase 1 does not yet sign
-    /// receipts, so the id is unlinked to any signed body.
-    #[must_use]
-    pub fn new() -> Self {
-        Self(Uuid::new_v4())
-    }
-}
-
-impl Default for ReceiptId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// An opaque handle to the capability token authorizing a session's turns.
 // TODO §1.0 Phase 2: replace the string handle with a re-export of
 // `ardur_cap_token`'s verified-token type so the runtime can attenuate scopes.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CapTokenRef(pub String);
-
-/// Identifier of a model provider (e.g. `"anthropic"`, `"openai"`).
-// TODO §1.0 Phase 2: resolve against the provider registry rather than a bare
-// string id.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ProviderId(pub String);
-
-/// The cost of admitting and running a single turn.
-// TODO §1.0 Phase 2: re-export `ardur_receipt`'s `CostTuple` so runtime cost
-// accounting and receipt cost accounting share one type and one schema.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct CostTuple {
-    /// Prompt/input tokens billed.
-    pub tokens_in: u64,
-    /// Completion/output tokens billed.
-    pub tokens_out: u64,
-    /// Monetary cost in whole US cents.
-    pub cents: u64,
-    /// Wall-clock duration of the turn, in milliseconds.
-    pub wall_ms: u64,
-    /// Share of human attention consumed, conventionally `0.0..=1.0`.
-    pub attention_score: f64,
-}
 
 /// A model-requested tool invocation.
 ///
