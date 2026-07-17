@@ -6,8 +6,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use ardur_tool_registry::{
-    BuiltinOpts, CapTokenRef, InvocationId, ListDirTool, ReadFileTool, SessionId, ShellTool, Tool,
-    ToolContext, ToolError, ToolId, ToolRegistry, WriteFileTool,
+    BuiltinOpts, CapTokenRef, Capability, HttpFetchOpts, HttpFetchTool, InvocationId, ListDirTool,
+    ReadFileTool, SessionId, ShellTool, Tool, ToolContext, ToolError, ToolId, ToolRegistry,
+    WriteFileTool,
 };
 use serde_json::json;
 use tempfile::TempDir;
@@ -320,4 +321,116 @@ async fn register_builtins_skips_disabled_tools() {
         .expect("register shell only");
     assert!(shell_only.get(&ToolId::new(ShellTool::ID)).is_some());
     assert!(shell_only.get(&ToolId::new(ReadFileTool::ID)).is_none());
+}
+
+#[tokio::test]
+async fn register_builtins_installs_http_only_when_enabled() {
+    // `http: None` — no HTTP tool.
+    let mut none = ToolRegistry::new();
+    none.register_builtins(BuiltinOpts::default())
+        .expect("no-op");
+    assert!(none.get(&ToolId::new(HttpFetchTool::ID)).is_none());
+
+    // `http: Some { enable: false }` — still skipped.
+    let mut disabled = ToolRegistry::new();
+    disabled
+        .register_builtins(BuiltinOpts {
+            http: Some(HttpFetchOpts {
+                enable: false,
+                ..HttpFetchOpts::default()
+            }),
+            ..BuiltinOpts::default()
+        })
+        .expect("disabled http is a no-op");
+    assert!(disabled.get(&ToolId::new(HttpFetchTool::ID)).is_none());
+
+    // `http: Some { enable: true }` — registered, and it declares NetworkOut so
+    // the runtime cap-token derivation grants `cap.network_out`.
+    let mut enabled = ToolRegistry::new();
+    enabled
+        .register_builtins(BuiltinOpts {
+            http: Some(HttpFetchOpts {
+                enable: true,
+                allowlist: vec!["example.com".to_string()],
+                ..HttpFetchOpts::default()
+            }),
+            ..BuiltinOpts::default()
+        })
+        .expect("register http");
+    let http = enabled
+        .get(&ToolId::new(HttpFetchTool::ID))
+        .expect("http.fetch is registered");
+    assert!(
+        http.required_capabilities()
+            .contains(&Capability::NetworkOut),
+        "http.fetch must declare NetworkOut so `cap.network_out` is minted into the cap-token"
+    );
+}
+
+/// An operator can only ever register the *allowlisted* shell through
+/// `register_builtins` (`Some(list)`). Even an empty allowlist is fail-closed —
+/// it denies every command rather than behaving like the unrestricted shell — so
+/// there is no configuration of `register_builtins` that yields arbitrary
+/// execution.
+#[tokio::test]
+async fn register_builtins_empty_shell_allowlist_is_fail_closed() {
+    let mut registry = ToolRegistry::new();
+    registry
+        .register_builtins(BuiltinOpts {
+            enable_shell: true,
+            shell_allowlist: Some(Vec::new()),
+            ..BuiltinOpts::default()
+        })
+        .expect("register empty-allowlist shell");
+
+    let shell = registry
+        .get(&ToolId::new(ShellTool::ID))
+        .expect("shell.run is registered");
+    let denied = shell
+        .invoke(&ctx(PathBuf::from(".")), json!({ "command": "echo hello" }))
+        .await;
+    assert!(
+        matches!(denied, Err(ToolError::Denied { .. })),
+        "an empty allowlist denies every command (fail-closed), got: {denied:?}"
+    );
+}
+
+/// The hardened tools declare exactly the capabilities the server derives its
+/// runtime cap-token allowlist from (`cap.<snake_case>`), so registering them is
+/// sufficient to make them invokable. This pins that contract.
+#[tokio::test]
+async fn register_builtins_tools_declare_expected_capabilities() {
+    let root = TempDir::new().expect("tempdir");
+    let mut registry = ToolRegistry::new();
+    registry
+        .register_builtins(BuiltinOpts {
+            enable_shell: true,
+            shell_allowlist: Some(vec!["echo".to_string()]),
+            file_root: Some(root.path().to_path_buf()),
+            http: Some(HttpFetchOpts {
+                enable: true,
+                ..HttpFetchOpts::default()
+            }),
+            enable_media: false,
+        })
+        .expect("register the full hardened set");
+
+    let caps_of = |id: &str| -> Vec<String> {
+        registry
+            .get(&ToolId::new(id))
+            .expect("tool registered")
+            .required_capabilities()
+            .iter()
+            .map(Capability::as_str)
+            .collect()
+    };
+
+    // shell.run headlines ShellExec and names the fork/exec it performs.
+    let shell = caps_of(ShellTool::ID);
+    assert!(shell.contains(&"cap.shell_exec".to_string()));
+    assert!(shell.contains(&"cap.process_spawn".to_string()));
+    assert_eq!(caps_of(HttpFetchTool::ID), vec!["cap.network_out"]);
+    assert_eq!(caps_of(ReadFileTool::ID), vec!["cap.fs_read"]);
+    assert_eq!(caps_of(WriteFileTool::ID), vec!["cap.fs_write"]);
+    assert_eq!(caps_of(ListDirTool::ID), vec!["cap.fs_read"]);
 }

@@ -222,6 +222,99 @@ fn non_narrowing_budget_attenuation_cannot_widen_returned_claims() {
 }
 
 #[test]
+fn audience_attenuation_projects_and_still_verifies() {
+    // Re-pinning to the *same* audience is a recognized narrowing check; the
+    // token still verifies for that audience and the projected claims are
+    // unchanged (audience is a scalar, not an intersected set).
+    let issuer = issuer();
+    let root = issuer.public_key();
+    let parent = issuer
+        .issue(
+            HolderId("alice".to_string()),
+            scope("svc-a", ISSUE_EXPIRY, 1000, &["search", "fetch"]),
+        )
+        .expect("issue");
+
+    let child = BiscuitCapTokenAttenuator
+        .attenuate(
+            &parent,
+            AttenuationRule::RestrictAudience("svc-a".to_string()).into(),
+        )
+        .expect("attenuate audience");
+
+    let claims = verifier()
+        .verify(&child, &root, &request(NOW, "svc-a", "search", 10))
+        .expect("verify audience-attenuated child");
+    assert_eq!(claims.audience, "svc-a");
+    assert_eq!(
+        claims.tool_allowlist,
+        vec!["search".to_string(), "fetch".to_string()]
+    );
+    assert_eq!(claims.budget_remaining, 1000);
+}
+
+#[test]
+fn fail_closed_on_uninterpretable_attenuation() {
+    use biscuit_auth::macros::block;
+
+    // A holder can append *any* block, not only the four narrowing shapes the
+    // attenuator emits. Here the appended check `cost($c), $c >= 0` is
+    // satisfiable by the request (so Datalog `authorize` passes) but is not a
+    // recognized narrowing, so the projector cannot know it does not widen the
+    // claims. The verifier must reject the whole token rather than return the
+    // un-narrowed claim set.
+    let issuer = issuer();
+    let root = issuer.public_key();
+    let parent = issuer
+        .issue(
+            HolderId("alice".to_string()),
+            scope("svc-a", ISSUE_EXPIRY, 1000, &["search", "delete"]),
+        )
+        .expect("issue");
+
+    let appended = parent
+        .0
+        .append(block!(r#"check if cost($c), $c >= 0;"#))
+        .expect("append raw check");
+    let weird = CapToken(appended);
+
+    let req = request(NOW, "svc-a", "search", 10);
+    // Sanity: the appended check is satisfiable, so this is not an authorization
+    // rejection — it is specifically the fail-closed projection guard.
+    assert!(matches!(
+        verifier().verify(&weird, &root, &req),
+        Err(CapTokenError::UnprojectableAttenuation(_))
+    ));
+}
+
+#[test]
+fn fail_closed_on_added_fact_block() {
+    use biscuit_auth::macros::block;
+
+    // An attenuation block that adds a *fact* rather than a narrowing check is
+    // equally uninterpretable — reject fail-closed.
+    let issuer = issuer();
+    let root = issuer.public_key();
+    let parent = issuer
+        .issue(
+            HolderId("alice".to_string()),
+            scope("svc-a", ISSUE_EXPIRY, 1000, &["search"]),
+        )
+        .expect("issue");
+
+    let appended = parent
+        .0
+        .append(block!(r#"tool("delete");"#))
+        .expect("append raw fact");
+    let weird = CapToken(appended);
+
+    assert!(matches!(
+        verifier().verify(&weird, &root, &request(NOW, "svc-a", "search", 10)),
+        Err(CapTokenError::UnprojectableAttenuation(_))
+    ));
+}
+
+#[test]
 fn expiry_rejected() {
     let issuer = issuer();
     let root = issuer.public_key();

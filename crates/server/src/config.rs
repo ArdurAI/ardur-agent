@@ -1,6 +1,8 @@
 //! [`Config`] — the server's startup configuration, read from the environment.
 //!
-//! Every knob has an env var; the Slack credentials are always required, the
+//! Every knob has an env var; the Slack channel is auto-detected (present
+//! `SLACK_BOT_TOKEN` → all three Slack credentials required, absent → Slack
+//! disabled and the server boots HTTP-only for `/chat`), the
 //! [`anthropic_api_key`] is required only when the Anthropic backend is selected
 //! (the `ARDUR_PROVIDER` default), and the rest default. [`Config::from_env`] is
 //! the production path; tests build a [`Config`] by hand (with a tempdir
@@ -15,6 +17,7 @@ use std::fmt;
 use std::path::PathBuf;
 
 use ardur_provider_selector::{ProviderKind, SELECTOR_ENV};
+use ardur_tool_registry::{BuiltinOpts, HttpFetchOpts};
 
 /// How the process emits tracing events.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,13 +52,21 @@ pub struct Config {
     /// live Anthropic provider reads the key from the environment itself, so this
     /// field is informational — tests inject a stub provider and leave it empty.
     pub anthropic_api_key: String,
-    /// Slack bot token (`SLACK_BOT_TOKEN`) for `chat.postMessage`.
-    pub slack_bot_token: String,
-    /// Slack signing secret (`SLACK_SIGNING_SECRET`) for inbound HMAC verification.
-    pub slack_signing_secret: String,
+    /// Whether the Slack channel is enabled (auto-detected: `true` when
+    /// `SLACK_BOT_TOKEN` is present). When `false`, the server boots HTTP-only —
+    /// `/chat` works, but the `/slack/events` route is not mounted and no Slack
+    /// adapter is built. Derived from the three `slack_*` credentials being
+    /// `Some`.
+    pub slack_enabled: bool,
+    /// Slack bot token (`SLACK_BOT_TOKEN`) for `chat.postMessage`. `None` when
+    /// Slack is disabled (HTTP-only boot).
+    pub slack_bot_token: Option<String>,
+    /// Slack signing secret (`SLACK_SIGNING_SECRET`) for inbound HMAC
+    /// verification. `None` when Slack is disabled.
+    pub slack_signing_secret: Option<String>,
     /// Slack app id (`SLACK_APP_ID`) — namespaces channel ids and drops the
-    /// bot's own messages (loop-prevention).
-    pub slack_app_id: String,
+    /// bot's own messages (loop-prevention). `None` when Slack is disabled.
+    pub slack_app_id: Option<String>,
     /// Inbound Slack sender allowlist (`SLACK_ALLOWED_SENDERS`, CSV). Deny-
     /// by-default (ARD-475): empty drops every sender, so the operator must
     /// list the Slack user ids permitted to command the bot.
@@ -141,6 +152,30 @@ pub struct Config {
     /// Optional Qdrant collection override (`QDRANT_COLLECTION`). Tests can set
     /// this field directly instead of mutating process-global environment.
     pub qdrant_collection: Option<String>,
+    /// **ARD-457.** Register the hardened §6.1 `shell.run` built-in tool
+    /// (`ARDUR_ENABLE_SHELL_TOOL`, default `false`). Fail-closed: enabling it
+    /// *requires* a non-empty [`shell_allowlist`](Self::shell_allowlist) — the
+    /// server never registers the unrestricted, dev-only shell — so an
+    /// enable-without-allowlist is rejected at [`from_env`](Self::from_env).
+    pub enable_shell_tool: bool,
+    /// The command allowlist for `shell.run` (`ARDUR_SHELL_ALLOWLIST`, CSV of
+    /// `|`-separated command prefixes, e.g. `git|cargo,ls`). Empty unless
+    /// [`enable_shell_tool`](Self::enable_shell_tool) is set (and then required
+    /// to be non-empty).
+    pub shell_allowlist: Vec<String>,
+    /// **ARD-457.** Register the §6.2 `http.fetch` built-in tool
+    /// (`ARDUR_ENABLE_HTTP_TOOL`, default `false`). SSRF defense stays on
+    /// (private/internal IPs are never reachable); an empty
+    /// [`http_allowlist`](Self::http_allowlist) confines it to localhost.
+    pub enable_http_tool: bool,
+    /// Host allowlist for `http.fetch` (`ARDUR_HTTP_ALLOWLIST`, CSV; exact,
+    /// `*.example.com`, or `*`). Empty leaves the tool able to reach only
+    /// localhost. Ignored unless [`enable_http_tool`](Self::enable_http_tool).
+    pub http_allowlist: Vec<String>,
+    /// **ARD-457.** Root directory confining the `file.read`/`file.write`/
+    /// `file.list` built-in tools (`ARDUR_FILE_TOOL_ROOT`). `Some(root)`
+    /// registers all three confined to it; `None` registers no file tool.
+    pub file_tool_root: Option<PathBuf>,
 }
 
 /// A required environment variable was unset or empty.
@@ -173,10 +208,14 @@ impl fmt::Debug for Config {
                 "anthropic_api_key",
                 &redacted_present(&self.anthropic_api_key),
             )
-            .field("slack_bot_token", &redacted_present(&self.slack_bot_token))
+            .field("slack_enabled", &self.slack_enabled)
+            .field(
+                "slack_bot_token",
+                &redacted_present_opt(self.slack_bot_token.as_deref()),
+            )
             .field(
                 "slack_signing_secret",
-                &redacted_present(&self.slack_signing_secret),
+                &redacted_present_opt(self.slack_signing_secret.as_deref()),
             )
             .field("slack_app_id", &self.slack_app_id)
             .field("slack_allowed_senders", &self.slack_allowed_senders)
@@ -210,6 +249,11 @@ impl fmt::Debug for Config {
             .field("memory_backend", &self.memory_backend)
             .field("qdrant_url", &self.qdrant_url)
             .field("qdrant_collection", &self.qdrant_collection)
+            .field("enable_shell_tool", &self.enable_shell_tool)
+            .field("shell_allowlist", &self.shell_allowlist)
+            .field("enable_http_tool", &self.enable_http_tool)
+            .field("http_allowlist", &self.http_allowlist)
+            .field("file_tool_root", &self.file_tool_root)
             .finish()
     }
 }
@@ -219,6 +263,15 @@ fn redacted_present(value: &str) -> &'static str {
         "<unset>"
     } else {
         "<redacted>"
+    }
+}
+
+/// Redact an optional secret: `<redacted>` when present and non-empty, `<unset>`
+/// otherwise (mirrors [`redacted_present`] for `Option<&str>` fields).
+fn redacted_present_opt(value: Option<&str>) -> &'static str {
+    match value {
+        Some(v) if !v.is_empty() => "<redacted>",
+        _ => "<unset>",
     }
 }
 
@@ -242,10 +295,17 @@ impl Config {
     /// `ARDUR_MEMORY=hybrid` selects the §7.0c dense+sparse retriever over that
     /// same store (the default `in_memory` backend needs no Qdrant).
     ///
+    /// The Slack channel is auto-detected: when `SLACK_BOT_TOKEN` is present, all
+    /// three Slack credentials (`SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`,
+    /// `SLACK_APP_ID`) are required — a partial configuration fails closed. When
+    /// `SLACK_BOT_TOKEN` is absent, Slack is disabled and the server boots
+    /// HTTP-only (`/chat` still works; `/slack/events` is not mounted). This
+    /// mirrors the opt-in shape of the Matrix/Discord/Telegram channels.
+    ///
     /// # Errors
     /// [`MissingEnvVar`] naming the first required variable that is unset or
-    /// empty (`SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`, `SLACK_APP_ID`,
-    /// `ANTHROPIC_API_KEY` when the Anthropic backend is selected, and
+    /// empty (`SLACK_SIGNING_SECRET` or `SLACK_APP_ID` when `SLACK_BOT_TOKEN` is
+    /// present, `ANTHROPIC_API_KEY` when the Anthropic backend is selected, and
     /// `QDRANT_URL` when the Qdrant memory backend is selected).
     pub fn from_env() -> Result<Self, ConfigError> {
         // The Anthropic key gates only the Anthropic backend; under any other
@@ -313,11 +373,53 @@ impl Config {
             require("TELEGRAM_BOT_TOKEN")?;
         }
 
+        // The Slack channel is auto-detected on `SLACK_BOT_TOKEN`, mirroring the
+        // opt-in shape of the channels above: present → all three credentials are
+        // required (a partial config fails closed), absent → Slack disabled and
+        // the server boots HTTP-only for `/chat`. Slack is the sole channel that
+        // used to be unconditionally required; now nothing forces it.
+        let (slack_enabled, slack_bot_token, slack_signing_secret, slack_app_id) =
+            if optional("SLACK_BOT_TOKEN").is_some() {
+                (
+                    true,
+                    Some(require("SLACK_BOT_TOKEN")?),
+                    Some(require("SLACK_SIGNING_SECRET")?),
+                    Some(require("SLACK_APP_ID")?),
+                )
+            } else {
+                (false, None, None, None)
+            };
+
+        // ARD-457: the hardened §6.1 built-in tools are opt-in and fail-closed.
+        // Nothing registers unless the operator sets these; the default boot is
+        // behaviourally unchanged. Enabling the shell tool *requires* a non-empty
+        // allowlist — the unrestricted, dev-only shell is never registered on a
+        // server — so an enable-without-allowlist is rejected here rather than
+        // silently downgraded (mirrors the Matrix/Discord conditional-require).
+        let enable_shell_tool = optional("ARDUR_ENABLE_SHELL_TOOL")
+            .as_deref()
+            .is_some_and(is_truthy);
+        let shell_allowlist = parse_csv(optional("ARDUR_SHELL_ALLOWLIST").as_deref());
+        if enable_shell_tool && shell_allowlist.is_empty() {
+            return Err(ConfigError::Invalid {
+                var: "ARDUR_ENABLE_SHELL_TOOL",
+                reason: "enabling shell.run requires a non-empty ARDUR_SHELL_ALLOWLIST; \
+                         the unrestricted dev-only shell is never registered on a server"
+                    .to_string(),
+            });
+        }
+        let enable_http_tool = optional("ARDUR_ENABLE_HTTP_TOOL")
+            .as_deref()
+            .is_some_and(is_truthy);
+        let http_allowlist = parse_csv(optional("ARDUR_HTTP_ALLOWLIST").as_deref());
+        let file_tool_root = optional("ARDUR_FILE_TOOL_ROOT").map(PathBuf::from);
+
         Ok(Self {
             anthropic_api_key,
-            slack_bot_token: require("SLACK_BOT_TOKEN")?,
-            slack_signing_secret: require("SLACK_SIGNING_SECRET")?,
-            slack_app_id: require("SLACK_APP_ID")?,
+            slack_enabled,
+            slack_bot_token,
+            slack_signing_secret,
+            slack_app_id,
             slack_allowed_senders: parse_csv(optional("SLACK_ALLOWED_SENDERS").as_deref()),
             data_dir: optional("ARDUR_DATA_DIR")
                 .map_or_else(|| PathBuf::from("./data"), PathBuf::from),
@@ -366,7 +468,43 @@ impl Config {
             memory_backend,
             qdrant_url,
             qdrant_collection: optional("QDRANT_COLLECTION"),
+            enable_shell_tool,
+            shell_allowlist,
+            enable_http_tool,
+            http_allowlist,
+            file_tool_root,
         })
+    }
+
+    /// **ARD-457.** Map the operator's opt-ins to the [`BuiltinOpts`] that
+    /// [`register_builtins`](ardur_tool_registry::ToolRegistry::register_builtins)
+    /// consumes, preserving the fail-closed posture:
+    ///
+    /// - The shell tool is registered only with `Some(allowlist)` — never the
+    ///   unrestricted [`ShellTool::without_allowlist`](ardur_tool_registry::ShellTool::without_allowlist).
+    ///   [`from_env`](Self::from_env) already rejected an enable-without-allowlist,
+    ///   and even an (impossible) empty list is fail-closed (denies every command).
+    /// - `http.fetch` keeps SSRF defense on (`allow_private_ips: false`).
+    /// - The file tools register only when a root is configured.
+    ///
+    /// With no opt-ins set, every field is off and `register_builtins` is a no-op,
+    /// so the default boot registers no hardened tool.
+    #[must_use]
+    pub fn builtin_tool_opts(&self) -> BuiltinOpts {
+        BuiltinOpts {
+            enable_shell: self.enable_shell_tool,
+            // Always `Some` when the shell is enabled, so the unrestricted shell
+            // (`None`) is never constructed here.
+            shell_allowlist: self.enable_shell_tool.then(|| self.shell_allowlist.clone()),
+            file_root: self.file_tool_root.clone(),
+            http: self.enable_http_tool.then(|| HttpFetchOpts {
+                enable: true,
+                allowlist: self.http_allowlist.clone(),
+                // SSRF stays on and the ceilings keep their strict defaults.
+                ..HttpFetchOpts::default()
+            }),
+            enable_media: false,
+        }
     }
 }
 

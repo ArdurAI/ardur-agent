@@ -24,6 +24,7 @@ mod config;
 mod mcp;
 pub mod openapi;
 mod routes;
+pub mod security_events;
 mod state;
 
 pub use config::{Config, ConfigError, LogFormat, MemoryBackend, MissingEnvVar};

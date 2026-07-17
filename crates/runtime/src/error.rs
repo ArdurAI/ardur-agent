@@ -207,6 +207,41 @@ pub enum RuntimeError {
         actual: usize,
     },
 
+    /// A tool call was gated on human approval rather than allowed or denied
+    /// outright — a "denied-pending" outcome on the cap-token/cedar path,
+    /// distinct from a hard [`CapDenied`](RuntimeError::CapDenied)/
+    /// [`PolicyDenied`](RuntimeError::PolicyDenied): the call is neither
+    /// allowed nor rejected, it is *proposed* for an operator to decide.
+    /// Carries the id of the pending approval card the runtime created (or
+    /// found already pending, for a retried identical call) in the shared
+    /// approvals store, and the tool/reason the gate cited. The caller
+    /// surfaces this as "awaiting approval" rather than a failure; the same
+    /// tool call proceeds once an operator approves the card and the turn
+    /// is resubmitted.
+    #[error("tool `{tool}` requires approval: card `{approval_id}` is pending ({reason})")]
+    ApprovalRequired {
+        /// The id of the pending approval card.
+        approval_id: String,
+        /// The tool whose call is gated.
+        tool: String,
+        /// Why the call was gated (e.g. which capability is approval-gated).
+        reason: String,
+    },
+
+    /// A tool call's approval card was rejected by an operator. Distinct
+    /// from [`ApprovalRequired`](RuntimeError::ApprovalRequired): the call
+    /// already went through propose→decide and the decision was "no" — a
+    /// resubmitted identical call fails here rather than proposing again.
+    #[error("tool `{tool}` approval `{approval_id}` was rejected: {reason}")]
+    ApprovalRejected {
+        /// The id of the rejected approval card.
+        approval_id: String,
+        /// The tool whose call was gated.
+        tool: String,
+        /// The operator's stated reason for rejecting, if any.
+        reason: String,
+    },
+
     /// No command was registered under the dispatched name.
     #[error("command not found: {0}")]
     CommandNotFound(String),

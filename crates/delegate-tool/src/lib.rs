@@ -346,7 +346,7 @@ fn zero_cost() -> ReceiptCostTuple {
         tokens_out: 0,
         cents: 0,
         wall_ms: 0,
-        attention_score: 0.0,
+        attention_score: 0,
     }
 }
 

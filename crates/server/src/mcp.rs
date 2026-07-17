@@ -27,8 +27,9 @@ use ardur_cap_token::PublicKey;
 use ardur_delegate_tool::DelegateTaskTool;
 use ardur_media_audio::{VoiceTranscribeTool, WhisperApiTranscriptionProvider};
 use ardur_tool_registry::{
-    ArdurMcpServer, EchoTool, HealthCheckTool, RemoteMcpToolset, SkillLoader, SkillTool, Tool,
-    ToolRegistry, bearer_token_allowed, extract_bearer_token,
+    ArdurMcpServer, BuiltinOpts, EchoTool, HealthCheckTool, HttpFetchTool, ListDirTool,
+    ReadFileTool, RemoteMcpToolset, ShellTool, SkillLoader, SkillTool, Tool, ToolId, ToolRegistry,
+    WriteFileTool, bearer_token_allowed, extract_bearer_token,
 };
 
 use crate::state::AUDIENCE;
@@ -119,6 +120,56 @@ pub fn register_skills<P: AsRef<Path>>(registry: &mut ToolRegistry, skills_dirs:
     }
 }
 
+/// **ARD-457 / §6.1.** Register the operator-granted hardened built-in tools
+/// selected by `opts` into `registry`, logging each one that installs (mirroring
+/// the `voice.transcribe` info/warn logging). With no opt-ins the call is a
+/// no-op, so the default boot registers no hardened tool (fail-closed).
+///
+/// Registering a tool here is *also* what makes it invokable: the runtime
+/// cap-token allowlist is derived from the registered tool set
+/// (`tool_allowlist_for_runtime` in [`crate::state`]), so a granted tool's
+/// `cap.*` capabilities are minted into every turn's token exactly when — and
+/// only when — its tool is registered. Non-granted tools are absent, so they
+/// stay `CapDenied` even if a prompt names them.
+///
+/// An id collision (which the fixed built-in ids never cause against the example
+/// registry) is logged and the remaining registration is skipped, rather than
+/// aborting boot.
+fn register_hardened_builtins(registry: &mut ToolRegistry, opts: BuiltinOpts) {
+    // Snapshot what was requested before `opts` is moved into the installer, so
+    // the post-registration log reflects intent.
+    let want_shell = opts.enable_shell;
+    let want_files = opts.file_root.is_some();
+    let want_http = opts.http.as_ref().is_some_and(|http| http.enable);
+    if !(want_shell || want_files || want_http || opts.enable_media) {
+        // Fail-closed default: the operator opted into nothing.
+        return;
+    }
+
+    if let Err(e) = registry.register_builtins(opts) {
+        tracing::warn!(error = %e, "skipping hardened built-in tool registration (id collision)");
+        return;
+    }
+
+    // Report each hardened tool that actually installed, and — because
+    // registration is what grants invokability — that its capabilities are now
+    // minted into the runtime cap-token.
+    for id in [
+        ShellTool::ID,
+        HttpFetchTool::ID,
+        ReadFileTool::ID,
+        WriteFileTool::ID,
+        ListDirTool::ID,
+    ] {
+        if registry.get(&ToolId::new(id)).is_some() {
+            tracing::info!(
+                tool = id,
+                "registered hardened built-in tool (ARD-457 operator grant); its capabilities are minted into the runtime cap-token"
+            );
+        }
+    }
+}
+
 /// **§6.0.** Assemble the tool registry the fused runtime invokes: the local
 /// tools ([`example_registry`]), the §5.1 `delegate_task` sub-agent spawn tool,
 /// every filesystem skill under `skills_dirs` (`ARDUR_SKILLS_DIRS`, §8.X), and
@@ -136,11 +187,17 @@ pub async fn assemble_tool_registry<P: AsRef<Path>>(
     skills_dirs: &[P],
     servers: &[(String, String)],
     cap_root: PublicKey,
+    builtin_opts: BuiltinOpts,
 ) -> ToolRegistry {
     let mut registry = example_registry(provider, memory_backend);
     if let Err(e) = registry.register(Box::new(DelegateTaskTool::new(cap_root, AUDIENCE))) {
         tracing::warn!(error = %e, "skipping delegate_task tool registration");
     }
+    // ARD-457: install the operator-granted hardened built-ins before skills and
+    // remote tools so their fixed ids win any (accidental) collision, and so a
+    // granted tool's capabilities are present in the set the runtime cap-token
+    // allowlist is derived from.
+    register_hardened_builtins(&mut registry, builtin_opts);
     match WhisperApiTranscriptionProvider::from_env() {
         Ok(Some(provider)) => {
             if let Err(e) = registry.register(Box::new(VoiceTranscribeTool::new(provider))) {
