@@ -61,7 +61,7 @@ use ardur_messaging_gateway::{IncomingMessage, MessageBody, MessagingGateway};
 use ardur_provider_runtime::{ModelId, Provider};
 use ardur_receipt::Es256SigningKey;
 use ardur_runtime::{
-    CapTokenRef, ChatMessage, ChatRuntime, RuntimeError, SessionId, SubmitRequest,
+    CapTokenRef, ChatMessage, ChatRuntime, ReceiptId, RuntimeError, SessionId, SubmitRequest,
 };
 use ardur_session_journals::{FileSessionJournal, SessionJournal};
 use ardur_slack_adapter::SlackAdapter;
@@ -131,6 +131,19 @@ enum WorkItem {
     /// the HTTP body. Dropping the receiver cancels the in-flight stream before
     /// receipt/journal/memory side effects are committed.
     HttpStream(HttpStreamTurn),
+    /// **ARD-139.** Mint a signed receipt for an approval decision (approve
+    /// or reject) already durably recorded in the approvals store by the
+    /// HTTP handler — the only piece of an approval decision that needs the
+    /// `!Send` fused runtime, since the card mutation itself is plain file
+    /// I/O the axum handler already does directly.
+    ApprovalReceipt(ApprovalReceiptRequest),
+}
+
+/// A request to mint a signed receipt for an already-decided approval card.
+struct ApprovalReceiptRequest {
+    approval_id: String,
+    verb: String,
+    reply: oneshot::Sender<Result<ReceiptId, RuntimeError>>,
 }
 
 /// A synchronous chat turn submitted over `POST /chat`: the prompt, the session
@@ -798,6 +811,45 @@ impl AppState {
         }
     }
 
+    /// **ARD-139.** Mint a signed receipt for an approval decision
+    /// (`verb` is `approval.approve.accepted.v1`/
+    /// `approval.reject.accepted.v1`) already durably recorded in the
+    /// approvals store by the caller. Routed through the turn worker like
+    /// [`submit_chat`](Self::submit_chat), since the `!Send` fused runtime
+    /// that mints and chains the receipt lives there — the card mutation
+    /// itself is plain file I/O the HTTP handler already performs directly,
+    /// before calling this.
+    ///
+    /// # Errors
+    /// [`ChatSubmitError::Runtime`] if the receipt could not be minted,
+    /// [`ChatSubmitError::WorkerGone`] if the worker thread has shut down,
+    /// [`ChatSubmitError::QueueFull`] if the bounded turn queue is
+    /// saturated.
+    pub async fn mint_approval_receipt(
+        &self,
+        approval_id: String,
+        verb: String,
+    ) -> Result<ReceiptId, ChatSubmitError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let item = WorkItem::ApprovalReceipt(ApprovalReceiptRequest {
+            approval_id,
+            verb,
+            reply: reply_tx,
+        });
+        let Some(work_tx) = self.work_sender() else {
+            return Err(ChatSubmitError::WorkerGone);
+        };
+        match work_tx.try_send(item) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => return Err(ChatSubmitError::QueueFull),
+            Err(mpsc::error::TrySendError::Closed(_)) => return Err(ChatSubmitError::WorkerGone),
+        }
+        match reply_rx.await {
+            Ok(result) => result.map_err(ChatSubmitError::Runtime),
+            Err(_canceled) => Err(ChatSubmitError::WorkerGone),
+        }
+    }
+
     /// Run a streaming chat turn (the `POST /chat { stream: true }` path): hand
     /// the prompt to the turn worker and return a receiver that carries the
     /// progressive fused-runtime event feed. If the HTTP response body is
@@ -1387,7 +1439,62 @@ impl Processor {
         )?;
         Ok(token.to_base64()?)
     }
+
+    /// **ARD-139.** Mint a fresh, short-lived cap-token scoped to exactly
+    /// `tool` (rather than [`mint_session_token`](Self::mint_session_token)'s
+    /// general chat allowlist) — an approval decision's receipt is a
+    /// narrowly-scoped control-plane action, not a chat turn, so it does not
+    /// need (and should not carry) the full tool allowlist a chat session
+    /// would.
+    fn mint_scoped_token(&self, now_unix: u64, tool: &str) -> anyhow::Result<String> {
+        let token = self.issuer.issue(
+            CapHolderId(GATEWAY_SUBJECT.to_string()),
+            CapScope {
+                audience: AUDIENCE.to_string(),
+                expires_unix: now_unix.saturating_add(CAP_TTL_SECS),
+                budget_remaining: self.cap_budget_remaining,
+                tool_allowlist: vec![tool.to_string()],
+            },
+        )?;
+        Ok(token.to_base64()?)
+    }
+
+    /// **ARD-139.** Mint the signed receipt for an approval decision and
+    /// reply with its id (or the `RuntimeError` that prevented minting).
+    async fn handle_approval_receipt(&self, request: ApprovalReceiptRequest) {
+        let ApprovalReceiptRequest {
+            approval_id,
+            verb,
+            reply,
+        } = request;
+        let result = async {
+            let now_unix = now_unix();
+            let token = self
+                .mint_scoped_token(now_unix, APPROVAL_DECIDE_TOOL)
+                .map_err(|e| {
+                    RuntimeError::Internal(anyhow::anyhow!(
+                        "minting approval decision cap-token: {e}"
+                    ))
+                })?;
+            self.runtime
+                .mint_approval_decision_receipt(
+                    SessionId::new(),
+                    &CapTokenRef(token),
+                    APPROVAL_DECIDE_TOOL,
+                    &verb,
+                    &approval_id,
+                )
+                .await
+        }
+        .await;
+        let _ = reply.send(result);
+    }
 }
+
+/// **ARD-139.** The capability label an approval-decision receipt is minted
+/// under — narrower than [`TOOL`] (chat), since deciding an approval card is
+/// not a chat turn.
+const APPROVAL_DECIDE_TOOL: &str = "approval.decide";
 
 /// Spawn the worker thread: a current-thread Tokio runtime that drains the work
 /// queue, processing each message to completion in arrival order. Returns the
@@ -1427,6 +1534,12 @@ fn spawn_worker(processor: Processor) -> (mpsc::Sender<WorkItem>, std::thread::J
                             .is_err(),
                         WorkItem::HttpStream(turn) => {
                             AssertUnwindSafe(processor.handle_http_stream(turn))
+                                .catch_unwind()
+                                .await
+                                .is_err()
+                        }
+                        WorkItem::ApprovalReceipt(request) => {
+                            AssertUnwindSafe(processor.handle_approval_receipt(request))
                                 .catch_unwind()
                                 .await
                                 .is_err()

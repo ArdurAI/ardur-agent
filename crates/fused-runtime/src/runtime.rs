@@ -1145,6 +1145,46 @@ impl FusedRuntime {
     /// reservation (`cost` is the caller's actual spend — zero for a purely
     /// local operation like an approval propose). Reuses the exact
     /// durability guarantees the turn-receipt commit path gives ordinary
+    /// **ARD-139.** Mint a signed receipt for an approval **decision**
+    /// (`approval.approve.accepted.v1`/`approval.reject.accepted.v1`) made
+    /// against `approval_id`, minted under `cap_token`'s verified subject.
+    /// A thin `pub` wrapper over [`commit_control_receipt`](Self::commit_control_receipt)
+    /// for a caller that already mutated the approval card through
+    /// [`ardur_approvals::ApprovalStore::decide`] elsewhere (the actual
+    /// store mutation stays outside this runtime — the same non-turn,
+    /// non-cost-gated control-plane receipt pattern
+    /// [`checkpoint`](Self)-style operations use elsewhere in this epic).
+    ///
+    /// # Errors
+    /// Returns [`RuntimeError`] if the cap-token does not grant `tool` or
+    /// the receipt could not be minted.
+    pub async fn mint_approval_decision_receipt(
+        &self,
+        session_id: SessionId,
+        cap_token: &CapTokenRef,
+        tool: &str,
+        verb: &str,
+        approval_id: &str,
+    ) -> Result<ReceiptId, RuntimeError> {
+        let receipt = self
+            .commit_control_receipt(
+                session_id,
+                cap_token,
+                tool,
+                verb,
+                Sha256Digest::of(approval_id.as_bytes()),
+                ardur_receipt::CostTuple {
+                    tokens_in: 0,
+                    tokens_out: 0,
+                    cents: 0,
+                    wall_ms: 0,
+                    attention_score: 0,
+                },
+            )
+            .await?;
+        Ok(ReceiptId(receipt.receipt_id))
+    }
+
     /// turns — the same `commit_lock`, the same `chain_tail`, the same
     /// fsync'd receipt log — so a control-plane receipt sits in the *same*
     /// hash chain as ordinary turn receipts.
@@ -1160,7 +1200,7 @@ impl FusedRuntime {
         let claims = self.verify_cap_token_for_tool(cap_token, tool)?;
         let verb = VerbObject::new(verb)
             .map_err(|e| RuntimeError::Internal(anyhow::anyhow!("invalid receipt verb: {e}")))?;
-        let now_ms = self.clock.now_ms();
+        let now_ms = self.clock.now_ms().get();
 
         let _commit_guard = self.commit_lock.lock().await;
         let parent_hash = *self.chain_tail.lock();
@@ -1168,7 +1208,7 @@ impl FusedRuntime {
             receipt_id: uuid::Uuid::new_v4(),
             parent_hash,
             verb,
-            issued_at: now_ms,
+            issued_at: ardur_receipt::UnixTsMillis(now_ms),
             subject: ardur_receipt::HolderId(claims.subject.0.clone()),
             cap_token_id: ardur_receipt::TokenId(claims.token_id),
             payload_digest,

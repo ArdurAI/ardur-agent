@@ -90,6 +90,55 @@ pub fn openapi_spec(slack_enabled: bool) -> Value {
                     }
                 }
             },
+            "/approvals": {
+                "get": {
+                    "summary": "List approval cards",
+                    "description": "Return every approval card in the on-disk store (shared with the CLI `ardur approvals` command). Admin-bearer gated; fails closed when no admin tokens are configured.",
+                    "operationId": "approvalsList",
+                    "security": [{"BearerAuth": []}],
+                    "responses": {
+                        "200": {"description": "Approval cards", "content": {"application/json": {"schema": {"type": "array", "items": {"$ref": "#/components/schemas/ApprovalCard"}}}}},
+                        "401": {"description": "Missing or invalid admin bearer token"}
+                    }
+                }
+            },
+            "/approvals/{id}/approve": {
+                "post": {
+                    "summary": "Approve a pending approval card",
+                    "description": "Flip a pending card to `approved` and stamp `decided_at`. Admin-bearer gated; the decision is appended to the session journal as an audit entry.",
+                    "operationId": "approvalsApprove",
+                    "security": [{"BearerAuth": []}],
+                    "parameters": [
+                        {"name": "id", "in": "path", "required": true, "schema": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$"}}
+                    ],
+                    "responses": {
+                        "200": {"description": "Card approved", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ApprovalCard"}}}},
+                        "400": {"description": "Malformed approval id"},
+                        "401": {"description": "Missing or invalid admin bearer token"},
+                        "404": {"description": "Approval not found"},
+                        "409": {"description": "Approval already decided"}
+                    }
+                }
+            },
+            "/approvals/{id}/reject": {
+                "post": {
+                    "summary": "Reject a pending approval card",
+                    "description": "Flip a pending card to `denied` and stamp `decided_at`. The wire verb is `reject`; the stored status is `denied`. An optional JSON body `{\"reason\": \"…\"}` is recorded as `deny_reason`. Admin-bearer gated; the decision is appended to the session journal as an audit entry.",
+                    "operationId": "approvalsReject",
+                    "security": [{"BearerAuth": []}],
+                    "parameters": [
+                        {"name": "id", "in": "path", "required": true, "schema": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$"}}
+                    ],
+                    "requestBody": {"required": false, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ApprovalRejectRequest"}}}},
+                    "responses": {
+                        "200": {"description": "Card rejected", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ApprovalCard"}}}},
+                        "400": {"description": "Malformed approval id"},
+                        "401": {"description": "Missing or invalid admin bearer token"},
+                        "404": {"description": "Approval not found"},
+                        "409": {"description": "Approval already decided"}
+                    }
+                }
+            },
             "/openapi.json": {
                 "get": {
                     "summary": "OpenAPI document",
