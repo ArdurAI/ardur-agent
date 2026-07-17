@@ -425,6 +425,7 @@ name = "ardur-cli"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "ardur-approvals",
  "ardur-automation",
  "ardur-cap-token",
  "ardur-cedar-policy",
