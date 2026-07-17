@@ -133,6 +133,27 @@ fn redact_custom_pattern_can_be_added() {
     );
 }
 
+/// 2026-07-12 cli security sweep, finding 4: `run_redact` used to
+/// `fs::read_to_string`/`read_to_string(stdin)` with no size cap, despite
+/// this command's whole purpose being to sanitize pasted/piped,
+/// potentially untrusted content before it's shared. An oversized input
+/// must be refused outright (not silently truncated-and-redacted, which
+/// would give a false sense of security about the untouched remainder).
+#[test]
+fn redact_refuses_an_oversized_input_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let input_path = dir.path().join("huge.txt");
+    fs::write(&input_path, vec![b'a'; 26 * 1024 * 1024]).expect("write huge input");
+
+    let assert = Command::cargo_bin("ardur")
+        .expect("the `ardur` binary builds")
+        .args(["redact", "-i", input_path.to_str().unwrap()])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(stderr.contains("cap"), "{stderr}");
+}
+
 #[test]
 fn redact_input_output_files() {
     let dir = tempfile::tempdir().expect("tempdir");

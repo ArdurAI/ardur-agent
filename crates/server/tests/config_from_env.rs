@@ -53,6 +53,11 @@ const TOUCHED: &[&str] = &[
     "DISCORD_APPLICATION_ID",
     "ARDUR_CHANNEL_TELEGRAM",
     "TELEGRAM_BOT_TOKEN",
+    "ARDUR_ENABLE_SHELL_TOOL",
+    "ARDUR_SHELL_ALLOWLIST",
+    "ARDUR_ENABLE_HTTP_TOOL",
+    "ARDUR_HTTP_ALLOWLIST",
+    "ARDUR_FILE_TOOL_ROOT",
 ];
 
 fn set(key: &str, value: &str) {
@@ -147,7 +152,8 @@ fn from_env_ollama_does_not_require_anthropic_key() {
     assert_eq!(config.bind_addr, "127.0.0.1:3000");
     assert!(config.chat_bearer_tokens.is_empty());
     assert!(!config.dev_permissive_policy);
-    assert_eq!(config.slack_app_id, "A0TEST");
+    assert!(config.slack_enabled);
+    assert_eq!(config.slack_app_id.as_deref(), Some("A0TEST"));
 }
 
 #[test]
@@ -415,16 +421,141 @@ fn from_env_telegram_enabled_with_token_loads() {
     assert!(config.channel_telegram);
 }
 
+// ── ARD-457: hardened built-in tool opt-ins ─────────────────────────────────
+
 #[test]
 #[serial]
-fn from_env_still_requires_slack_credentials() {
+fn from_env_builtin_tools_off_by_default() {
+    let _guard = env_lock();
+    let _env = CleanEnv::new().with_slack();
+    set("ARDUR_PROVIDER", "ollama");
+
+    let config = Config::from_env().expect("boots with no built-in tool opt-ins");
+    assert!(!config.enable_shell_tool, "shell tool is off by default");
+    assert!(config.shell_allowlist.is_empty());
+    assert!(!config.enable_http_tool, "http tool is off by default");
+    assert!(config.http_allowlist.is_empty());
+    assert_eq!(config.file_tool_root, None, "no file tool root by default");
+
+    // The derived opts register nothing (fail-closed default).
+    let opts = config.builtin_tool_opts();
+    assert!(!opts.enable_shell);
+    assert!(opts.shell_allowlist.is_none());
+    assert!(opts.file_root.is_none());
+    assert!(opts.http.is_none());
+    assert!(!opts.enable_media);
+}
+
+#[test]
+#[serial]
+fn from_env_enable_shell_without_allowlist_errors() {
+    let _guard = env_lock();
+    let _env = CleanEnv::new().with_slack();
+    set("ARDUR_PROVIDER", "ollama");
+    set("ARDUR_ENABLE_SHELL_TOOL", "true"); // ARDUR_SHELL_ALLOWLIST deliberately unset
+
+    let err = Config::from_env()
+        .expect_err("enabling the shell tool without an allowlist must be rejected");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("ARDUR_ENABLE_SHELL_TOOL") && msg.contains("ARDUR_SHELL_ALLOWLIST"),
+        "error should name both the enable flag and the required allowlist, got: {msg}"
+    );
+}
+
+#[test]
+#[serial]
+fn from_env_enable_shell_with_allowlist_loads() {
+    let _guard = env_lock();
+    let _env = CleanEnv::new().with_slack();
+    set("ARDUR_PROVIDER", "ollama");
+    set("ARDUR_ENABLE_SHELL_TOOL", "true");
+    set("ARDUR_SHELL_ALLOWLIST", "git|cargo, ls ,echo");
+
+    let config = Config::from_env().expect("shell + allowlist loads");
+    assert!(config.enable_shell_tool);
+    assert_eq!(config.shell_allowlist, vec!["git|cargo", "ls", "echo"]);
+
+    // The derived opts carry the allowlist as `Some(..)` — never the unrestricted
+    // `None` shell.
+    let opts = config.builtin_tool_opts();
+    assert!(opts.enable_shell);
+    assert_eq!(
+        opts.shell_allowlist,
+        Some(vec![
+            "git|cargo".to_string(),
+            "ls".to_string(),
+            "echo".to_string()
+        ])
+    );
+}
+
+#[test]
+#[serial]
+fn from_env_http_and_file_tools_opt_in() {
+    let _guard = env_lock();
+    let _env = CleanEnv::new().with_slack();
+    set("ARDUR_PROVIDER", "ollama");
+    set("ARDUR_ENABLE_HTTP_TOOL", "yes");
+    set("ARDUR_HTTP_ALLOWLIST", "example.com, *.internal.test");
+    set("ARDUR_FILE_TOOL_ROOT", "/srv/ardur/workspace");
+
+    let config = Config::from_env().expect("http + file opt-ins load");
+    assert!(config.enable_http_tool);
+    assert_eq!(
+        config.http_allowlist,
+        vec!["example.com", "*.internal.test"]
+    );
+    assert_eq!(
+        config.file_tool_root.as_deref(),
+        Some(std::path::Path::new("/srv/ardur/workspace"))
+    );
+
+    // The derived HTTP opts keep SSRF defense on and pass the allowlist through.
+    let opts = config.builtin_tool_opts();
+    let http = opts.http.expect("http opts present when enabled");
+    assert!(http.enable);
+    assert!(!http.allow_private_ips, "SSRF defense stays on by default");
+    assert_eq!(http.allowlist, vec!["example.com", "*.internal.test"]);
+    assert_eq!(
+        opts.file_root.as_deref(),
+        Some(std::path::Path::new("/srv/ardur/workspace"))
+    );
+}
+
+#[test]
+#[serial]
+fn from_env_http_only_loads_without_slack() {
     let _guard = env_lock();
     let _env = CleanEnv::new(); // no slack creds, ollama selected
     set("ARDUR_PROVIDER", "ollama");
 
-    let err = Config::from_env().expect_err("slack credentials are always required");
+    // Slack is now auto-detected: with `SLACK_BOT_TOKEN` unset, the server boots
+    // HTTP-only for `/chat` rather than refusing to start.
+    let config = Config::from_env().expect("http-only boot loads without Slack credentials");
     assert!(
-        err.to_string().contains("SLACK_"),
-        "error should name a missing Slack variable, got: {err}"
+        !config.slack_enabled,
+        "Slack is disabled when SLACK_BOT_TOKEN is unset"
+    );
+    assert!(config.slack_bot_token.is_none());
+    assert!(config.slack_signing_secret.is_none());
+    assert!(config.slack_app_id.is_none());
+}
+
+#[test]
+#[serial]
+fn from_env_partial_slack_creds_fails() {
+    let _guard = env_lock();
+    let _env = CleanEnv::new();
+    set("ARDUR_PROVIDER", "ollama");
+    // Bot token present triggers the Slack requirement, but the signing secret is
+    // deliberately left unset — a partial config must fail closed.
+    set("SLACK_BOT_TOKEN", "xoxb-test");
+    set("SLACK_APP_ID", "A0TEST"); // SLACK_SIGNING_SECRET deliberately unset
+
+    let err = Config::from_env().expect_err("partial Slack config must fail closed");
+    assert!(
+        err.to_string().contains("SLACK_SIGNING_SECRET"),
+        "error should name the missing Slack signing secret, got: {err}"
     );
 }

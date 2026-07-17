@@ -355,8 +355,18 @@ fn handle_sse_line(line: &str, st: &mut StreamState) {
     );
 }
 
+/// ARD-503: ceiling on a single un-terminated SSE line. A well-formed chunk is a
+/// `data:` line at most a few KiB; an arbitrary OpenAI-compatible base URL that
+/// never emits `\n` would otherwise grow `buf` without bound. 1 MiB is far above
+/// any real event; crossing it fails the stream closed. (Base URLs here are
+/// operator-supplied and less trusted than a first-party endpoint, so the guard
+/// matters more than on a fixed provider.)
+const MAX_SSE_LINE_BYTES: usize = 1024 * 1024;
+
 /// Pull every complete line (terminated by `\n`) out of the byte buffer and
 /// dispatch it through [`handle_sse_line`], stopping early once `[DONE]` is seen.
+/// A line that grows past [`MAX_SSE_LINE_BYTES`] without a terminator ends the
+/// stream with a [`ProviderError::Upstream`] rather than buffering unboundedly.
 fn drain_lines(st: &mut StreamState) {
     while let Some(pos) = st.buf.iter().position(|&b| b == b'\n') {
         let line: Vec<u8> = st.buf.drain(..=pos).collect();
@@ -368,6 +378,13 @@ fn drain_lines(st: &mut StreamState) {
         if st.finished {
             break;
         }
+    }
+    if !st.finished && st.buf.len() > MAX_SSE_LINE_BYTES {
+        st.pending.push_back(Err(ProviderError::Upstream(format!(
+            "SSE line exceeded {MAX_SSE_LINE_BYTES} bytes without a newline"
+        ))));
+        st.buf.clear();
+        st.finished = true;
     }
 }
 

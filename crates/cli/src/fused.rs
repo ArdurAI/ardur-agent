@@ -61,6 +61,18 @@ use crate::stream::{StreamOutcome, drive_fused_turn};
 const AUDIENCE: &str = "cli";
 /// The tool/capability every chat turn exercises.
 const TOOL: &str = "chat.submit";
+/// §1.8 — the capability `/checkpoint` and `/rollback` exercise.
+const SESSION_CHECKPOINT_CAPABILITY: &str = "session.checkpoint";
+/// §1.8 — the capability `/rollback` exercises to roll back to a checkpoint.
+const SESSION_ROLLBACK_CAPABILITY: &str = "session.rollback";
+/// §1.7 — the capability `/compact` and `/compact preview` exercise.
+const CONTEXT_COMPACT_CAPABILITY: &str = "context.compact";
+/// §1.9 — the capability `/background`/`/bg`/`/btw` and `/task cancel` exercise.
+const BACKGROUND_TASK_CAPABILITY: &str = "task.background";
+/// §1.10 — the capability `/steer`/`/tell` exercise.
+const STEER_CAPABILITY: &str = "input.steer";
+/// §1.10 — the capability `/interrupt` exercises.
+const INTERRUPT_CAPABILITY: &str = "input.interrupt";
 /// The session cap-token's lifetime, in seconds (one hour from process start).
 const CAP_TTL_SECS: u64 = 3_600;
 /// The default per-turn cents ceiling when `ARDUR_CLI_PER_TURN_CENTS` is unset,
@@ -167,6 +179,12 @@ impl FusedEngine {
                         TOOL.to_string(),
                         ardur_memory::MEMORY_READ_CAPABILITY.to_string(),
                         ardur_memory::MEMORY_WRITE_CAPABILITY.to_string(),
+                        SESSION_CHECKPOINT_CAPABILITY.to_string(),
+                        SESSION_ROLLBACK_CAPABILITY.to_string(),
+                        CONTEXT_COMPACT_CAPABILITY.to_string(),
+                        BACKGROUND_TASK_CAPABILITY.to_string(),
+                        STEER_CAPABILITY.to_string(),
+                        INTERRUPT_CAPABILITY.to_string(),
                     ],
                 },
             )
@@ -387,6 +405,199 @@ impl FusedEngine {
                 "usage: /memory list [--json] | /memory show <id> | /memory forget <id>".to_string()
             }
         }
+    }
+
+    /// **§1.8.** Record a checkpoint over the session's current history.
+    ///
+    /// # Errors
+    /// Returns [`CliError`] if the session cap-token does not grant the
+    /// checkpoint capability, no journal is configured, or the journal
+    /// append fails.
+    pub async fn checkpoint(
+        &self,
+        label: Option<String>,
+    ) -> Result<ardur_fused_runtime::CheckpointOutcome, CliError> {
+        self.runtime
+            .checkpoint(
+                self.session_id,
+                &self.cap_token,
+                SESSION_CHECKPOINT_CAPABILITY,
+                label,
+            )
+            .await
+            .map_err(|e| CliError::State(format!("checkpoint failed: {e}")))
+    }
+
+    /// **§1.8.** List every checkpoint recorded in this session so far.
+    ///
+    /// # Errors
+    /// Returns [`CliError`] if no journal is configured or the replay fails.
+    pub async fn list_checkpoints(
+        &self,
+    ) -> Result<Vec<ardur_fused_runtime::CheckpointInfo>, CliError> {
+        self.runtime
+            .list_checkpoints(self.session_id)
+            .await
+            .map_err(|e| CliError::State(format!("listing checkpoints failed: {e}")))
+    }
+
+    /// **§1.8.** Roll back the session to a previously recorded checkpoint.
+    /// Returns the rollback outcome (the receipt + journal marker minted for
+    /// it) alongside the rebuilt in-memory chat history the caller should
+    /// replace its own `history: Vec<ChatMessage>` with.
+    ///
+    /// # Errors
+    /// Returns [`CliError`] if the session cap-token does not grant the
+    /// rollback capability, no journal is configured, `checkpoint_id` does
+    /// not name a checkpoint in this session, or the journal append fails.
+    pub async fn rollback(
+        &self,
+        checkpoint_id: uuid::Uuid,
+    ) -> Result<(ardur_fused_runtime::RollbackOutcome, Vec<ChatMessage>), CliError> {
+        let outcome = self
+            .runtime
+            .rollback_to_checkpoint(
+                self.session_id,
+                &self.cap_token,
+                SESSION_ROLLBACK_CAPABILITY,
+                checkpoint_id,
+            )
+            .await
+            .map_err(|e| CliError::State(format!("rollback failed: {e}")))?;
+        let history = crate::journal_entries_to_history(&outcome.retained_entries);
+        Ok((outcome, history))
+    }
+
+    /// **§1.7.** Summarize `history` and install the result as a compaction
+    /// checkpoint (restorable later with [`rollback`](Self::rollback)).
+    ///
+    /// # Errors
+    /// Returns [`CliError`] if the session cap-token does not grant the
+    /// compact capability, the provider call fails, no journal is
+    /// configured, or the journal append fails.
+    pub async fn compact(
+        &self,
+        history: &[ChatMessage],
+        focus: Option<String>,
+    ) -> Result<ardur_fused_runtime::CompactOutcome, CliError> {
+        self.runtime
+            .compact(
+                self.session_id,
+                &self.cap_token,
+                CONTEXT_COMPACT_CAPABILITY,
+                history,
+                focus,
+            )
+            .await
+            .map_err(|e| CliError::State(format!("compact failed: {e}")))
+    }
+
+    /// **§1.7.** Preview a compaction candidate without installing it: no
+    /// journal entry, no receipt.
+    ///
+    /// # Errors
+    /// Returns [`CliError`] if the session cap-token does not grant the
+    /// compact capability or the provider call fails.
+    pub async fn preview_compact(
+        &self,
+        history: &[ChatMessage],
+        focus: Option<String>,
+    ) -> Result<String, CliError> {
+        self.runtime
+            .preview_compact(&self.cap_token, CONTEXT_COMPACT_CAPABILITY, history, focus)
+            .await
+            .map_err(|e| CliError::State(format!("compact preview failed: {e}")))
+    }
+
+    /// This engine's session id, so a caller (the §1.9 task registry) can
+    /// tag a spawned background task's record with its owning session
+    /// without needing its own copy threaded through separately.
+    #[must_use]
+    pub fn session_id(&self) -> SessionId {
+        self.session_id
+    }
+
+    /// **§1.9.** Run one agent background task's prompt to completion (or
+    /// failure) and mint its terminal receipt. See
+    /// [`ardur_fused_runtime::FusedRuntime::run_background_task`] for why a
+    /// provider failure is `Ok` with `error` set rather than an `Err`.
+    ///
+    /// # Errors
+    /// Returns [`CliError`] if the session cap-token does not grant the
+    /// background-task capability or a receipt could not be minted.
+    pub async fn run_background_task(
+        &self,
+        prompt: &str,
+    ) -> Result<ardur_fused_runtime::BackgroundTaskOutcome, CliError> {
+        self.runtime
+            .run_background_task(
+                self.session_id,
+                &self.cap_token,
+                BACKGROUND_TASK_CAPABILITY,
+                prompt,
+            )
+            .await
+            .map_err(|e| CliError::State(format!("background task failed: {e}")))
+    }
+
+    /// **§1.9.** Mint the terminal receipt for a background task the user
+    /// explicitly cancelled.
+    ///
+    /// # Errors
+    /// Returns [`CliError`] if the session cap-token does not grant the
+    /// background-task capability or the receipt could not be minted.
+    pub async fn cancel_background_task(&self) -> Result<ardur_runtime::ReceiptId, CliError> {
+        self.runtime
+            .cancel_background_task(self.session_id, &self.cap_token, BACKGROUND_TASK_CAPABILITY)
+            .await
+            .map_err(|e| CliError::State(format!("cancelling background task failed: {e}")))
+    }
+
+    /// **§1.10.** Mint the receipt for a steering directive accepted against
+    /// `target_task_id`. See
+    /// [`ardur_fused_runtime::FusedRuntime::accept_steer_directive`] for why
+    /// this records evidence of the request without yet changing the
+    /// target's in-flight behavior.
+    ///
+    /// # Errors
+    /// Returns [`CliError`] if the session cap-token does not grant the
+    /// steer capability or the receipt could not be minted.
+    pub async fn accept_steer_directive(
+        &self,
+        target_task_id: uuid::Uuid,
+        message: &str,
+    ) -> Result<ardur_runtime::ReceiptId, CliError> {
+        self.runtime
+            .accept_steer_directive(
+                self.session_id,
+                &self.cap_token,
+                STEER_CAPABILITY,
+                target_task_id,
+                message,
+            )
+            .await
+            .map_err(|e| CliError::State(format!("steer failed: {e}")))
+    }
+
+    /// **§1.10.** Mint the receipt for an accepted interrupt against
+    /// `target_task_id`.
+    ///
+    /// # Errors
+    /// Returns [`CliError`] if the session cap-token does not grant the
+    /// interrupt capability or the receipt could not be minted.
+    pub async fn accept_interrupt(
+        &self,
+        target_task_id: uuid::Uuid,
+    ) -> Result<ardur_runtime::ReceiptId, CliError> {
+        self.runtime
+            .accept_interrupt(
+                self.session_id,
+                &self.cap_token,
+                INTERRUPT_CAPABILITY,
+                target_task_id,
+            )
+            .await
+            .map_err(|e| CliError::State(format!("interrupt failed: {e}")))
     }
 
     /// Run one progressive chat turn through the fused runtime's full ten-stage

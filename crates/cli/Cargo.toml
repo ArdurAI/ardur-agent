@@ -36,6 +36,9 @@ ardur-cost-gate = { workspace = true }
 # Phase-2 fused runtime — the FusedRuntime the default chat path drives through
 # its full ten-stage pipeline.
 ardur-fused-runtime = { workspace = true }
+# ARD-139 — the shared on-disk approval-card store `ardur approvals` reads
+# and decides against.
+ardur-approvals = { workspace = true }
 # §11.0 Cedar — the policy bundle the fused runtime authorizes turns against.
 ardur-cedar-policy = { workspace = true }
 # §7.0 memory — the bi-temporal sink stage 9 records each turn into.
@@ -90,8 +93,13 @@ rand = "0.10"
 # ARD-143: schedule / cron CLI.
 chrono = { workspace = true }
 ardur-cron = { workspace = true }
+# §9.4: operator-facing cron management surface.
+ardur-cron-ui = { workspace = true }
 # ARD-144/145: connector HTTP fetch.
 reqwest = { workspace = true }
+# R1: URL host parsing for the SSRF-hardened `ardur fetch` path (mirrors
+# crates/tool-registry's http.fetch host/IP classification).
+url = { workspace = true }
 # ARD-120/121/132: supply-chain audit tooling.
 ignore = { workspace = true }
 cargo-lock = { workspace = true }
@@ -99,6 +107,7 @@ cargo-lock = { workspace = true }
 [dev-dependencies]
 # Integration tests are a separate crate; they re-declare the deps they name.
 assert_cmd = { workspace = true }
+predicates = { workspace = true }
 tokio = { workspace = true }
 ardur-runtime = { workspace = true }
 ardur-cost-gate = { workspace = true }

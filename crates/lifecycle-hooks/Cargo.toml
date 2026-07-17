@@ -40,8 +40,9 @@ parking_lot = { workspace = true }
 # `serde_json::Value`.
 serde_json = { workspace = true }
 # Receipt ids are UUIDv4 (the receipt body mints v4); opt v4 in on top of the
-# workspace v7 pin (Cargo unifies the feature set).
-uuid = { workspace = true, features = ["v4"] }
+# workspace v7 pin. v5 derives a stable jti surrogate from the cap-token handle
+# (this Phase-1 runtime does not verify tokens, so it has no minted jti).
+uuid = { workspace = true, features = ["v4", "v5"] }
 
 [dev-dependencies]
 # The async `submit` / hook callbacks need an executor to drive them in the

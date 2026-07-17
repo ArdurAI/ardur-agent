@@ -94,12 +94,15 @@ pub mod streaming;
 
 pub use builder::FusedRuntimeBuilder;
 pub use receipts::{
-    PersistedReceipt, ReceiptChainError, load_persisted_chain, verify_persisted_chain,
-    verify_persisted_chain_with_jwks,
+    PersistedReceipt, ReceiptChainError, load_persisted_chain, mint_control_receipt,
+    verify_persisted_chain, verify_persisted_chain_with_jwks,
 };
 pub use reconcile::{
     ReconciliationAction, ReconciliationError, ReconciliationReport, ReconciliationStrategy,
 };
-pub use runtime::{FusedRuntime, PerRequestProvisioning};
+pub use runtime::{
+    BackgroundTaskOutcome, CheckpointInfo, CheckpointOutcome, CompactOutcome, FusedRuntime,
+    PerRequestProvisioning, RollbackOutcome,
+};
 pub use shared::{SharedBudget, SharedDenyList};
 pub use streaming::{FusedEvent, StageKind};

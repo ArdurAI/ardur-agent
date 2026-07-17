@@ -673,13 +673,15 @@ fn cron_for_frequency(frequency: &Frequency) -> CronExpression {
 
 fn parse_five_field_cron(expr: &str) -> Option<CronExpression> {
     let parts: Vec<_> = expr.split_whitespace().collect();
-    if parts.len() == 5 {
-        Some(CronExpression::new(
-            parts[0], parts[1], parts[2], parts[3], parts[4],
-        ))
-    } else {
-        None
+    if parts.len() != 5 {
+        return None;
     }
+    let candidate = CronExpression::new(parts[0], parts[1], parts[2], parts[3], parts[4]);
+    // Reject an unparseable custom expression (bad field, out-of-range value,
+    // zero step, …) so the caller falls back to a schedule that actually fires
+    // rather than installing one that silently never does.
+    candidate.validate().ok()?;
+    Some(candidate)
 }
 
 fn same_cron_minute(left: DateTime<Utc>, right: DateTime<Utc>) -> bool {

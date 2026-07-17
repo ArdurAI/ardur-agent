@@ -47,6 +47,9 @@ ardur-injection-defense = { workspace = true }
 # §6.0 — the tool registry the tool-execution stage looks up and invokes (local
 # tools plus the remote MCP toolsets).
 ardur-tool-registry = { workspace = true }
+# ARD-139 propose-half — the shared on-disk approval-card store a gated tool
+# call proposes into (and checks for an already-decided card in).
+ardur-approvals = { workspace = true }
 
 async-trait = { workspace = true }
 anyhow = { workspace = true }
