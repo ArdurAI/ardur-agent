@@ -352,6 +352,58 @@ async fn fetch_redirect_exceeds_limit_errors() {
     assert!(matches!(err, ToolError::ExecutionFailed(_)), "got {err:?}");
 }
 
+/// M8: the whole reason redirects are followed manually is to re-run the SSRF
+/// checks on each `Location`. This asserts that exact property: an allowed
+/// (loopback) host that redirects to the cloud-metadata link-local address is
+/// **refused**. Distinguishing `Denied` from a connect error matters — a
+/// regression that validated only the *initial* URL would follow the redirect
+/// and fail while dialing `169.254.169.254`, i.e. a different error variant.
+#[tokio::test]
+async fn fetch_redirect_to_metadata_ip_is_denied() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/pivot"))
+        .respond_with(
+            ResponseTemplate::new(302)
+                .insert_header("location", "http://169.254.169.254/latest/meta-data/"),
+        )
+        .mount(&server)
+        .await;
+
+    let tool = HttpFetchTool::new();
+    let err = tool
+        .invoke(&ctx(), json!({ "url": format!("{}/pivot", server.uri()) }))
+        .await
+        .expect_err("a redirect to the metadata IP must be refused");
+    assert!(
+        matches!(err, ToolError::Denied { .. }),
+        "the redirect hop must be re-validated and denied, got {err:?}"
+    );
+}
+
+/// Companion to the above for an RFC 1918 private address, so the redirect
+/// re-validation is exercised on the private-range branch too, not just
+/// link-local.
+#[tokio::test]
+async fn fetch_redirect_to_private_ip_is_denied() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/pivot"))
+        .respond_with(ResponseTemplate::new(302).insert_header("location", "http://10.0.0.1/"))
+        .mount(&server)
+        .await;
+
+    let tool = HttpFetchTool::new();
+    let err = tool
+        .invoke(&ctx(), json!({ "url": format!("{}/pivot", server.uri()) }))
+        .await
+        .expect_err("a redirect to an RFC 1918 address must be refused");
+    assert!(
+        matches!(err, ToolError::Denied { .. }),
+        "the redirect hop must be re-validated and denied, got {err:?}"
+    );
+}
+
 // ── register_builtins ────────────────────────────────────────────────────────
 
 #[tokio::test]

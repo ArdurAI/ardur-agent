@@ -16,11 +16,11 @@
 //!   ordered [`ChatMessage`] history.
 //! - [`RuntimeError`] — the crate's single typed-error surface.
 //!
-//! The newtypes [`CapTokenRef`], [`ReceiptId`], [`ProviderId`], and
-//! [`CostTuple`] are local Phase-1 placeholders; the inline
-//! `// TODO §1.0 Phase 2:` markers point at the cross-crate re-exports
-//! (cap-token, receipt) that replace them once the runtime is wired to its
-//! siblings.
+//! [`ReceiptId`], [`ProviderId`], and [`CostTuple`] are re-exported from
+//! `ardur-core-types`, the workspace's shared primitive crate, so runtime cost
+//! accounting shares one type and one schema with the receipt and cost-gate
+//! layers. [`CapTokenRef`] remains a local Phase-1 placeholder (see the inline
+//! `// TODO §1.0 Phase 2:` marker).
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
@@ -34,6 +34,8 @@ pub use command::{Command, CommandBus, CommandContext, CommandResult, InMemoryCo
 pub use error::{FlagCategory, InjectionFlag, RuntimeError};
 pub use runtime::{ChatRuntime, InMemoryRuntime, SubmitRequest, SubmitResult};
 pub use session::Session;
-pub use types::{
-    CapTokenRef, ChatMessage, CostTuple, ProviderId, ReceiptId, Role, SessionId, ToolCall, TurnId,
-};
+// CostTuple, ProviderId, and ReceiptId are owned by `ardur-core-types` and
+// re-exported here so existing `ardur_runtime::{CostTuple, ProviderId,
+// ReceiptId}` paths keep resolving to the one canonical type.
+pub use ardur_core_types::{CostTuple, ProviderId, ReceiptId};
+pub use types::{CapTokenRef, ChatMessage, Role, SessionId, ToolCall, TurnId};

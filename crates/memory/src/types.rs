@@ -7,34 +7,12 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// The subject a memory record is about — the cap-token holder identity (a
-/// session, a user, a knowledge node). A thin newtype over a string; it mirrors
-/// the identically-named newtype in `ardur-receipt`, and reconciliation with
-/// `ardur-cap-token`'s `HolderId` is a §0.0 amendment — kept local here so the
-/// memory crate stands alone in Phase 1.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct HolderId(pub String);
-
-impl<T: Into<String>> From<T> for HolderId {
-    fn from(s: T) -> Self {
-        Self(s.into())
-    }
-}
-
-/// The id of the receipt under whose authority a memory write occurred, when
-/// one exists. Wraps the receipt's UUIDv4 (`ardur_receipt::ReceiptBody::receipt_id`);
-/// wiring the two crates together is `// TODO §7.0 Phase 2`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct ReceiptId(pub Uuid);
-
-/// A wall-clock instant in milliseconds since the Unix epoch. Matches the
-/// identically-named newtype in `ardur-receipt` (reconciliation is a §0.0
-/// amendment). `Ord` makes the bi-temporal interval comparisons total.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct UnixTsMillis(pub u64);
+// The holder identity, receipt id, and unix-millis instant are owned by
+// `ardur-core-types` and re-exported here so a memory record names the same
+// `HolderId`/`ReceiptId`/`UnixTsMillis` the receipt and cost layers do. `Ord`
+// on `UnixTsMillis` (defined there) makes the bi-temporal interval comparisons
+// total.
+pub use ardur_core_types::{HolderId, ReceiptId, UnixTsMillis};
 
 /// The stable identifier of a single memory record. Phase 0 modelled this as a
 /// string newtype; Phase 1 makes it a UUIDv4 to match [`MemoryRecord::record_id`].

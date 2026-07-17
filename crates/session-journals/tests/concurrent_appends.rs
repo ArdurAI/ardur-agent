@@ -28,7 +28,7 @@ fn concurrent_appends_yield_unique_monotonic_ids() {
                         let id = journal
                             .append(JournalEntry::UserMessage {
                                 content: format!("t{t}-{i}"),
-                                at: t * 1_000 + i,
+                                at: ardur_session_journals::UnixTsMillis(t * 1_000 + i),
                             })
                             .await
                             .expect("append");
