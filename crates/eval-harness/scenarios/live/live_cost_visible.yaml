@@ -1,0 +1,15 @@
+id: live_cost_visible
+description: >
+  Live cost-tracking smoke against a real ardur-server /chat — asserts the
+  response carries a `cost_usd` field at all (any value below a generous ceiling
+  it cannot realistically exceed). Gated; see scenarios/README.md.
+prompt: "Reply with just the word: ok"
+expected:
+  contains: ["ok"]
+  # A short turn cannot approach this ceiling, so passing is equivalent to the
+  # server having reported a (non-negative) cost_usd at all — an absent field
+  # fails with an explicit "no cost_usd" reason.
+  cost_under: 1000.0
+max_tokens: 50
+max_turns: 1
+timeout_secs: 60

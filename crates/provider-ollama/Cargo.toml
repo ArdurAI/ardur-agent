@@ -1,0 +1,62 @@
+# ardur-provider-ollama — the Ollama local + cloud model backend (§3.3).
+#
+# Ollama (https://ollama.com) runs open models either locally (a daemon on
+# `http://localhost:11434`, no auth) or in Ollama's hosted cloud
+# (`https://ollama.com`, Bearer auth). Both speak the same native
+# `POST /api/chat` endpoint, so a single crate covers both deployments — the
+# only difference is the base URL and whether an API key is sent. This crate is
+# a peer backend to the Anthropic provider (§3.1, a module in
+# `ardur-provider-runtime`) and the OpenRouter gateway (§3.2): it implements the
+# same `Provider` trait, so it slots into the generic `ProviderRegistry` with no
+# catalog change.
+#
+# §18.8 keeps this PR scoped to `crates/provider-ollama/**` plus the E2E
+# scenario and the root manifest.
+
+[package]
+name = "ardur-provider-ollama"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The §3.0 provider abstraction this backend implements — the `Provider` trait,
+# the request/response/usage envelopes, the `RateCard`, and the typed
+# `ProviderError`. We depend on it (one direction); the registry it owns stays
+# generic, so wiring Ollama in is just `registry.register(Arc::new(..))`.
+ardur-provider-runtime = { workspace = true }
+# Shared value types the provider call speaks in — `CostTuple` (the billed
+# cost), `ProviderId` (the registry key), and `Role` (the prompt turn kind).
+ardur-runtime = { workspace = true }
+# Retry+backoff+jitter and circuit-breaker wrapping outbound HTTP calls — the
+# shared resilience layer for external call boundaries.
+ardur-resilience = { workspace = true }
+# Object-safe async `Provider::complete`.
+async-trait = { workspace = true }
+# Live Ollama HTTP client. rustls-tls matches the other backends (no
+# OpenSSL/native-tls system dependency); `json` carries the serde bodies. The
+# `stream` feature (additive over the workspace default) enables
+# `Response::bytes_stream`, which §3.4b's NDJSON token streaming reads chunk by
+# chunk.
+reqwest = { workspace = true, features = ["stream"] }
+# `StreamExt`/`unfold` build the NDJSON line stream over the raw byte stream;
+# dropping that `Stream` is how a caller cancels an in-flight generation (§3.4b).
+futures = { workspace = true }
+serde = { workspace = true }
+# Request/response bodies and the retained raw upstream JSON.
+serde_json = { workspace = true }
+# `tokio::time::timeout` bounds the streaming handshake (`send()`) so a peer that
+# accepts the TCP connection but never sends response headers cannot hang the
+# turn. Only the `time` driver is needed here; reqwest already pulls tokio in.
+tokio = { workspace = true, features = ["time"] }
+
+[dev-dependencies]
+# Stands in for the Ollama endpoint so the round-trip is asserted without a
+# running daemon or a cloud key (matches the workspace's HTTP-mock convention).
+wiremock = { workspace = true }
+serde_json = { workspace = true }
+# `StreamExt`/`stream::iter` drive the NDJSON chunk stream in the streaming
+# tests (collecting tokens, asserting the done marker, feeding synthetic chunks).
+futures = { workspace = true }

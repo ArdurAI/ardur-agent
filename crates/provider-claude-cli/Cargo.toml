@@ -1,0 +1,51 @@
+# ardur-provider-claude-cli — the Claude Code CLI subscription backend (§3.3c).
+#
+# Like the §3.3b Codex backend, this provider does not call a REST endpoint with
+# an API key. It wraps the locally-installed `claude` (Claude Code) CLI as a
+# subprocess and runs it non-interactively (`claude -p --output-format json`),
+# inheriting the user's logged-in Anthropic subscription (`claude login`) — so
+# dogfooding spends the subscription's Agent SDK Credit pool, not a metered API
+# key. The subprocess emits a JSON event stream on stdout; we parse the final
+# `result` object for the answer text and the reported token usage.
+#
+# It implements the same §3.0 `Provider` trait as the HTTP backends, so it slots
+# into the generic `ProviderRegistry` with no catalog change.
+#
+# §18.8 keeps this PR scoped to `crates/provider-claude-cli/**` plus the selector
+# wiring, the E2E scenario, the env/runbook docs, and the root manifest.
+
+[package]
+name = "ardur-provider-claude-cli"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The §3.0 provider abstraction this backend implements — the `Provider` trait,
+# the request/response/usage envelopes, the `RateCard`, and the typed
+# `ProviderError`. One-directional dep; the registry stays generic, so wiring
+# this in is just `registry.register(Arc::new(..))`.
+ardur-provider-runtime = { workspace = true }
+# Shared value types the provider call speaks in — `CostTuple` (always zeroed
+# cents here: the call is paid by subscription, not per-token), `ProviderId`
+# (the registry key), and `Role` (the prompt turn kind).
+ardur-runtime = { workspace = true }
+# Object-safe async `Provider::complete`.
+async-trait = { workspace = true }
+# Async subprocess (`tokio::process::Command`) + the wall-clock `timeout` that
+# bounds a `claude -p` run. The workspace pins tokio with `features = ["full"]`,
+# which covers `process`, `time`, and `io-util`.
+tokio = { workspace = true }
+# Parsing the JSON event stream `claude -p --output-format json` writes to
+# stdout, and retaining the decoded value as the raw audit body.
+serde_json = { workspace = true }
+
+[dev-dependencies]
+# The async `complete` calls need a runtime to poll them.
+tokio = { workspace = true }
+# The subprocess tests write a tiny executable shim that stands in for the real
+# `claude` binary (emitting known JSON / failing on purpose), so the spawn +
+# parse round-trip is asserted with no claude install and no subscription spend.
+tempfile = { workspace = true }

@@ -1,0 +1,10 @@
+id: factual_recall
+description: Agent should answer a basic factual question correctly.
+prompt: "What is the capital of France? Answer in one word."
+expected:
+  contains: ["Paris"]
+  not_contains: ["London", "Berlin"]
+  regex: "(?i)\\bparis\\b"
+max_tokens: 100
+max_turns: 1
+timeout_secs: 30
