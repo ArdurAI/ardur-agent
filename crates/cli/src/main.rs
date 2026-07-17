@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 mod audit;
+mod cron_ui;
 mod device_mesh;
 mod marketplace;
 mod persona;
@@ -26,6 +27,7 @@ use ardur_session_journals::{
 };
 use audit::{AuditArgs, run_audit};
 use clap::{Args, Parser, Subcommand};
+use cron_ui::{CronArgs, run_cron};
 use device_mesh::{NodesArgs, run_nodes};
 use marketplace::{MarketplaceArgs, run_marketplace};
 use persona::{PersonaArgs, run_persona};
@@ -87,6 +89,8 @@ enum Commands {
     Nodes(NodesArgs),
     /// Manage scheduled automation jobs.
     Schedule(ScheduleArgs),
+    /// Inspect and manage scheduled crons (list, show, create, pause, delete).
+    Cron(CronArgs),
     /// Manage messaging channel adapters.
     Channel(ChannelArgs),
     /// Import or export state from Hermes / OpenClaw.
@@ -375,6 +379,7 @@ fn main() -> ExitCode {
         Commands::Redact(args) => run_redact(args),
         Commands::Nodes(args) => run_nodes(args),
         Commands::Schedule(args) => run_schedule(args),
+        Commands::Cron(args) => run_cron(args),
         Commands::Channel(args) => run_channel(args),
         Commands::Migrate(args) => run_migrate(args),
         Commands::Persona(args) => run_persona(args),
