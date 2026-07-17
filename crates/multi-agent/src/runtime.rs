@@ -312,7 +312,7 @@ impl<R: ChatRuntime> MultiAgentRuntime for InMemoryMultiAgentRuntime<R> {
             tokens_out: 0,
             cents: u64::from(sub.cents_used()),
             wall_ms: 0,
-            attention_score: 0.0,
+            attention_score: 0,
         };
 
         Ok(TerminationReceipt {

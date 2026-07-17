@@ -24,5 +24,5 @@ mod client;
 mod server;
 
 pub use bearer::{bearer_token_allowed, extract_bearer_token};
-pub use client::{MCP_CAPABILITY, RemoteMcpTool, RemoteMcpToolset};
+pub use client::{MCP_CAPABILITY, McpResilienceConfig, RemoteMcpTool, RemoteMcpToolset};
 pub use server::ArdurMcpServer;
