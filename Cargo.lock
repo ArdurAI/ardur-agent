@@ -889,6 +889,7 @@ name = "ardur-provider-ollama"
 version = "0.0.1"
 dependencies = [
  "ardur-provider-runtime",
+ "ardur-resilience",
  "ardur-runtime",
  "async-trait",
  "futures",
@@ -1146,6 +1147,7 @@ name = "ardur-tool-registry"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "ardur-resilience",
  "ardur-runtime",
  "async-trait",
  "axum 0.8.9",
