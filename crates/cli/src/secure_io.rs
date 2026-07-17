@@ -55,6 +55,25 @@ fn open_directory_at(parent: &File, name: &OsStr, create: bool) -> io::Result<Fi
     }
 }
 
+/// Splits `path` into a parent directory handle (opened relative to a
+/// caller-relied-on-descriptor) and the final filename, guarding against
+/// symlink substitution at the boundary a local attacker could realistically
+/// exploit.
+///
+/// Every component of `parent` is checked up front and a literal `..` or
+/// path prefix is rejected outright, regardless of how it would otherwise
+/// resolve. Beyond that, only the *immediate* containing directory (the
+/// last component of `parent`) is opened with `O_NOFOLLOW` here — the exact
+/// boundary a local attacker could plant a symlink at to redirect one
+/// specific write (see `atomic_write_rejects_symlinked_parent_directory`).
+/// Everything above that is resolved through ordinary path resolution
+/// (`fs::canonicalize`), since it's outside that boundary: ordinary OS
+/// structure such as macOS's `/var` -> `/private/var` (which a literal
+/// per-component `O_NOFOLLOW` walk starting at `/` would otherwise refuse
+/// to traverse, since NOFOLLOW can't distinguish "an ordinary system
+/// symlink two levels above where I actually need to guard" from "a
+/// symlink planted at my target"), or a caller-supplied prefix this
+/// function has no basis to distrust.
 #[cfg(unix)]
 fn open_parent_directory(path: &Path, create: bool) -> io::Result<(File, OsString)> {
     let file_name = path.file_name().ok_or_else(|| {
@@ -63,18 +82,11 @@ fn open_parent_directory(path: &Path, create: bool) -> io::Result<(File, OsStrin
             format!("path has no file name: {}", path.display()),
         )
     })?;
-    let mut current = if path.is_absolute() {
-        File::open("/")?
-    } else {
-        File::open(".")?
-    };
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
+
     for component in parent.components() {
         match component {
-            Component::RootDir | Component::CurDir => {}
-            Component::Normal(name) => {
-                current = open_directory_at(&current, name, create)?;
-            }
+            Component::RootDir | Component::CurDir | Component::Normal(_) => {}
             Component::ParentDir => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -89,6 +101,43 @@ fn open_parent_directory(path: &Path, create: bool) -> io::Result<(File, OsStrin
             }
         }
     }
+
+    let (grandparent, immediate_name) = match parent.file_name() {
+        Some(name) => {
+            let grandparent = parent.parent().unwrap_or_else(|| Path::new("."));
+            let grandparent = if grandparent.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                grandparent
+            };
+            (grandparent.to_path_buf(), Some(name.to_os_string()))
+        }
+        None => {
+            let parent = if parent.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                parent
+            };
+            (parent.to_path_buf(), None)
+        }
+    };
+
+    if create {
+        std::fs::create_dir_all(&grandparent)?;
+    }
+    let grandparent = std::fs::canonicalize(&grandparent)?;
+    let grandparent_file = File::open(&grandparent)?;
+    if !grandparent_file.metadata()?.file_type().is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotADirectory,
+            format!("{} is not a directory", grandparent.display()),
+        ));
+    }
+
+    let current = match immediate_name {
+        Some(name) => open_directory_at(&grandparent_file, &name, create)?,
+        None => grandparent_file,
+    };
     Ok((current, file_name.to_os_string()))
 }
 
@@ -412,6 +461,37 @@ mod tests {
         assert!(
             !outside.join("metadata.json").exists(),
             "the symlink target must remain untouched"
+        );
+    }
+
+    /// 2026-07-12 fix: a symlink *above* the immediate parent directory
+    /// (e.g. macOS's `/var` -> `/private/var`, which every `TMPDIR`-based
+    /// tempdir path traverses) must be followed normally, not rejected —
+    /// only the immediate parent (see the test above) and the final
+    /// filename are the boundary this module guards. Before this fix,
+    /// `open_parent_directory`'s per-component `O_NOFOLLOW` walk from `/`
+    /// refused to traverse *any* symlinked ancestor, so every write under a
+    /// `/var/folders/...`-style HOME failed with `ENOTDIR` regardless of
+    /// whether the symlink had anything to do with the target file.
+    #[test]
+    fn atomic_write_succeeds_through_a_symlinked_grandparent_ancestor() {
+        let base = tempfile::tempdir().expect("base tempdir");
+        let base = base.path().canonicalize().expect("canonical base");
+        let real = base.join("real");
+        std::fs::create_dir(&real).expect("real dir");
+        let link = base.join("link");
+        symlink(&real, &link).expect("grandparent symlink");
+
+        // "sub" doesn't exist yet under either `link` or `real` — proves
+        // the create=true path also works through the resolved ancestor.
+        let target = link.join("sub/file.json");
+        write_private_file_atomic_no_follow(&target, b"ok")
+            .expect("a symlinked grandparent ancestor must be followed, not rejected");
+
+        assert_eq!(
+            std::fs::read(real.join("sub/file.json")).expect("file via the real path"),
+            b"ok",
+            "the write must have landed through the resolved symlink"
         );
     }
 

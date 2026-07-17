@@ -19,7 +19,7 @@ use std::process::ExitCode;
 use ardur_cli::{
     ChatArgs, CliError, Config, SessionMetadata, StateDirs, directory_modified_no_follow,
     list_directory_names_no_follow, read_string_no_follow, remove_directory_tree_no_follow,
-    run_chat, write_private_file_no_follow,
+    run_chat, write_private_file_atomic_no_follow, write_private_file_no_follow,
 };
 use ardur_session_journals::JournalEntry;
 use audit::{AuditArgs, run_audit};
@@ -401,7 +401,7 @@ fn run_config(args: ConfigArgs) -> Result<(), CliError> {
 fn run_logs(args: LogsArgs) -> Result<(), CliError> {
     let root = state_root(args.dir)?;
     let log_path = root.join("logs").join("ardur.log");
-    let contents = match std::fs::read_to_string(&log_path) {
+    let contents = match read_string_no_follow(&log_path) {
         Ok(contents) => contents,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             println!("no logs found at {}", log_path.display());
@@ -641,12 +641,7 @@ fn write_config(path: &Path, config: &Config) -> Result<(), CliError> {
         escape_toml_string(&config.model),
         config.budget_cents
     );
-    std::fs::write(path, contents)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    }
+    write_private_file_atomic_no_follow(path, contents.as_bytes())?;
     Ok(())
 }
 
@@ -706,7 +701,7 @@ fn redact_plain(line: &str) -> String {
 }
 
 fn count_lines(path: &Path) -> Result<usize, CliError> {
-    match std::fs::read_to_string(path) {
+    match read_string_no_follow(path) {
         Ok(contents) => Ok(contents.lines().count()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
         Err(e) => Err(CliError::Io(e)),
@@ -1737,7 +1732,7 @@ fn run_policy(args: PolicyArgs) -> Result<(), CliError> {
             let requested_caps: Vec<&str> = caps.split(',').map(|s| s.trim()).collect();
             let cedar_path = root.join("cedar.policies");
             let policy_text = if cedar_path.is_file() {
-                std::fs::read_to_string(&cedar_path)?
+                read_string_no_follow(&cedar_path)?
             } else {
                 "// No cedar.policies file found. All capabilities default to allow.".to_string()
             };
@@ -1760,7 +1755,7 @@ fn run_policy(args: PolicyArgs) -> Result<(), CliError> {
                 println!("no cedar.policies file found at {}", cedar_path.display());
                 return Ok(());
             }
-            let policy_text = std::fs::read_to_string(&cedar_path)?;
+            let policy_text = read_string_no_follow(&cedar_path)?;
             let mut warnings = 0;
             let lines: Vec<&str> = policy_text.lines().collect();
             for (i, line) in lines.iter().enumerate() {
@@ -1841,7 +1836,7 @@ fn run_approvals(args: ApprovalsArgs) -> Result<(), CliError> {
             if let Ok(entries) = std::fs::read_dir(&approvals_dir) {
                 for entry in entries.flatten() {
                     if entry.path().extension().is_some_and(|e| e == "json") {
-                        if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                        if let Ok(content) = read_string_no_follow(&entry.path()) {
                             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
                                 let status = v
                                     .get("status")
@@ -1871,7 +1866,7 @@ fn run_approvals(args: ApprovalsArgs) -> Result<(), CliError> {
                 return Err(CliError::State(format!("approval `{id}` not found")));
             }
             let mut approval: serde_json::Value =
-                serde_json::from_str(&std::fs::read_to_string(&path)?)
+                serde_json::from_str(&read_string_no_follow(&path)?)
                     .map_err(|e| CliError::State(e.to_string()))?;
             approval["status"] = json!("approved");
             approval["decided_at"] = json!(
@@ -1882,7 +1877,7 @@ fn run_approvals(args: ApprovalsArgs) -> Result<(), CliError> {
             );
             let json_str = serde_json::to_string_pretty(&approval)
                 .map_err(|e| CliError::State(e.to_string()))?;
-            std::fs::write(&path, json_str)?;
+            write_private_file_atomic_no_follow(&path, json_str.as_bytes())?;
             println!("approved {id}");
         }
         ApprovalsAction::Deny { id, reason } => {
@@ -1892,7 +1887,7 @@ fn run_approvals(args: ApprovalsArgs) -> Result<(), CliError> {
                 return Err(CliError::State(format!("approval `{id}` not found")));
             }
             let mut approval: serde_json::Value =
-                serde_json::from_str(&std::fs::read_to_string(&path)?)
+                serde_json::from_str(&read_string_no_follow(&path)?)
                     .map_err(|e| CliError::State(e.to_string()))?;
             approval["status"] = json!("denied");
             approval["deny_reason"] = json!(reason.unwrap_or_default());
@@ -1904,7 +1899,7 @@ fn run_approvals(args: ApprovalsArgs) -> Result<(), CliError> {
             );
             let json_str = serde_json::to_string_pretty(&approval)
                 .map_err(|e| CliError::State(e.to_string()))?;
-            std::fs::write(&path, json_str)?;
+            write_private_file_atomic_no_follow(&path, json_str.as_bytes())?;
             println!("denied {id}");
         }
     }
@@ -2033,7 +2028,7 @@ fn read_schedules(root: &Path) -> Result<Vec<ScheduleRecord>, CliError> {
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for entry in entries.flatten() {
             if entry.path().extension().is_some_and(|e| e == "json") {
-                if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                if let Ok(content) = read_string_no_follow(&entry.path()) {
                     if let Ok(v) = serde_json::from_str::<ScheduleRecord>(&content) {
                         records.push(v);
                     }
@@ -2108,10 +2103,11 @@ fn run_schedule(args: ScheduleArgs) -> Result<(), CliError> {
                     .unwrap_or(0),
                 enabled: true,
             };
-            std::fs::write(
-                schedules_dir.join(format!("{id}.json")),
+            write_private_file_atomic_no_follow(
+                &schedules_dir.join(format!("{id}.json")),
                 serde_json::to_string_pretty(&record)
-                    .map_err(|e| CliError::State(e.to_string()))?,
+                    .map_err(|e| CliError::State(e.to_string()))?
+                    .as_bytes(),
             )?;
             println!("created schedule {id}");
             let next = next_fire_times(&record.pattern, 1)?;
@@ -2249,10 +2245,11 @@ fn run_token(args: TokenArgs) -> Result<(), CliError> {
                     .unwrap_or(0),
                 "revoked": false,
             });
-            std::fs::write(
-                tokens_dir.join(format!("{token_id}.json")),
+            write_private_file_atomic_no_follow(
+                &tokens_dir.join(format!("{token_id}.json")),
                 serde_json::to_string_pretty(&record)
-                    .map_err(|e| CliError::State(e.to_string()))?,
+                    .map_err(|e| CliError::State(e.to_string()))?
+                    .as_bytes(),
             )?;
             println!("created token {token_id}");
             println!("value: {token_value}");
@@ -2263,7 +2260,7 @@ fn run_token(args: TokenArgs) -> Result<(), CliError> {
             if let Ok(entries) = std::fs::read_dir(&tokens_dir) {
                 for entry in entries.flatten() {
                     if entry.path().extension().is_some_and(|e| e == "json") {
-                        if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                        if let Ok(content) = read_string_no_follow(&entry.path()) {
                             if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&content) {
                                 // Never display the actual hash in list view.
                                 v.as_object_mut()
@@ -2290,7 +2287,7 @@ fn run_token(args: TokenArgs) -> Result<(), CliError> {
                 return Err(CliError::State(format!("token `{id}` not found")));
             }
             let mut token: serde_json::Value =
-                serde_json::from_str(&std::fs::read_to_string(&path)?)
+                serde_json::from_str(&read_string_no_follow(&path)?)
                     .map_err(|e| CliError::State(e.to_string()))?;
             token["revoked"] = json!(true);
             token["revoked_at"] = json!(
@@ -2299,9 +2296,11 @@ fn run_token(args: TokenArgs) -> Result<(), CliError> {
                     .map(|d| d.as_secs())
                     .unwrap_or(0)
             );
-            std::fs::write(
+            write_private_file_atomic_no_follow(
                 &path,
-                serde_json::to_string_pretty(&token).map_err(|e| CliError::State(e.to_string()))?,
+                serde_json::to_string_pretty(&token)
+                    .map_err(|e| CliError::State(e.to_string()))?
+                    .as_bytes(),
             )?;
             println!("revoked token {id}");
         }
@@ -2518,7 +2517,7 @@ fn read_memory_cards(root: &Path) -> Result<Vec<serde_json::Value>, CliError> {
     if let Ok(entries) = std::fs::read_dir(&memory_dir) {
         for entry in entries.flatten() {
             if entry.path().extension().is_some_and(|e| e == "json") {
-                if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                if let Ok(content) = read_string_no_follow(&entry.path()) {
                     if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
                         cards.push(v);
                     }
@@ -2647,7 +2646,7 @@ fn run_memory(args: MemoryArgs) -> Result<(), CliError> {
                 "reason": reason,
             });
             let json_str = serde_json::to_string_pretty(&tombstone).expect("tombstone serialises");
-            std::fs::write(&tombstone_path, json_str)?;
+            write_private_file_atomic_no_follow(&tombstone_path, json_str.as_bytes())?;
             println!("tombstoned memory card {id} (reason: {reason})");
             println!("note: the card is not deleted — it is marked invalid for future recall");
         }
@@ -2839,7 +2838,7 @@ fn run_fetch(args: FetchArgs) -> Result<(), CliError> {
     let mut allowlist: Vec<String> = Vec::new();
     let allowlist_path = root.join("http_allowlist.txt");
     if allowlist_path.is_file() {
-        let content = std::fs::read_to_string(&allowlist_path)?;
+        let content = read_string_no_follow(&allowlist_path)?;
         allowlist.extend(
             content
                 .lines()
@@ -3038,7 +3037,7 @@ fn read_channels(root: &Path) -> Result<Vec<ChannelRecord>, CliError> {
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for entry in entries.flatten() {
             if entry.path().extension().is_some_and(|e| e == "json") {
-                if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                if let Ok(content) = read_string_no_follow(&entry.path()) {
                     if let Ok(v) = serde_json::from_str::<ChannelRecord>(&content) {
                         records.push(v);
                     }
@@ -3101,10 +3100,11 @@ fn run_channel(args: ChannelArgs) -> Result<(), CliError> {
                     prefix = default_env_prefix(&channel_type, &name)
                 ),
             };
-            std::fs::write(
+            write_private_file_atomic_no_follow(
                 &path,
                 serde_json::to_string_pretty(&record)
-                    .map_err(|e| CliError::State(e.to_string()))?,
+                    .map_err(|e| CliError::State(e.to_string()))?
+                    .as_bytes(),
             )?;
             println!("added channel {name} ({channel_type})");
             println!("  env prefix: {}", record.env_prefix);
@@ -3140,14 +3140,15 @@ fn run_channel(args: ChannelArgs) -> Result<(), CliError> {
             if !path.is_file() {
                 return Err(CliError::State(format!("channel `{name}` not found")));
             }
-            let content = std::fs::read_to_string(&path)?;
+            let content = read_string_no_follow(&path)?;
             let mut record: ChannelRecord =
                 serde_json::from_str(&content).map_err(|e| CliError::State(e.to_string()))?;
             record.enabled = status == "enabled";
-            std::fs::write(
+            write_private_file_atomic_no_follow(
                 &path,
                 serde_json::to_string_pretty(&record)
-                    .map_err(|e| CliError::State(e.to_string()))?,
+                    .map_err(|e| CliError::State(e.to_string()))?
+                    .as_bytes(),
             )?;
             println!("channel {name} is now {status}");
         }
