@@ -1,0 +1,58 @@
+<section id="quickstart" class="py-24 md:py-28">
+  <div class="container-content">
+    <div class="reveal mx-auto max-w-2xl text-center">
+      <h2 class="text-3xl font-bold tracking-tight md:text-4xl">Get started</h2>
+      <p class="mt-4 text-ink-muted">
+        Build the <code class="text-accent-cyan">ardur</code> CLI from the workspace,
+        point it at a provider, and take your first turn. The full operator
+        runbook covers the server, channels, and every knob.
+      </p>
+    </div>
+
+    <div class="mt-12 grid gap-6 md:grid-cols-3">
+      {{/* Step 1 — install */}}
+      <div class="reveal card p-6" style="--i:0">
+        <p class="text-xs font-semibold uppercase tracking-wide text-accent-cyan">Step 1</p>
+        <h3 class="mt-2 font-semibold">Build the CLI</h3>
+        <pre class="mt-3 overflow-x-auto rounded-lg border border-[var(--border)] bg-[var(--bg)] p-3 font-mono text-xs leading-relaxed text-ink-muted"><code>cargo install \
+  --path crates/cli</code></pre>
+        <p class="mt-3 text-sm text-ink-faint">
+          Or <code class="text-accent-cyan">cargo build --release</code> and run
+          <code class="text-accent-cyan">./target/release/ardur</code>.
+        </p>
+      </div>
+
+      {{/* Step 2 — configure */}}
+      <div class="reveal card p-6" style="--i:1">
+        <p class="text-xs font-semibold uppercase tracking-wide text-accent-violet">Step 2</p>
+        <h3 class="mt-2 font-semibold">Pick a provider</h3>
+        <pre class="mt-3 overflow-x-auto rounded-lg border border-[var(--border)] bg-[var(--bg)] p-3 font-mono text-xs leading-relaxed text-ink-muted"><code>export ARDUR_PROVIDER=anthropic
+export ANTHROPIC_API_KEY=sk-ant-…</code></pre>
+        <p class="mt-3 text-sm text-ink-faint">
+          Or run fully local: <code class="text-accent-cyan">ARDUR_PROVIDER=ollama</code>,
+          no key required.
+        </p>
+      </div>
+
+      {{/* Step 3 — run */}}
+      <div class="reveal card p-6" style="--i:2">
+        <p class="text-xs font-semibold uppercase tracking-wide text-accent-blue">Step 3</p>
+        <h3 class="mt-2 font-semibold">Take a turn</h3>
+        <pre class="mt-3 overflow-x-auto rounded-lg border border-[var(--border)] bg-[var(--bg)] p-3 font-mono text-xs leading-relaxed text-ink-muted"><code>ardur chat</code></pre>
+        <p class="mt-3 text-sm text-ink-faint">
+          Watch the reply stream in as Markdown, and the cost line land
+          token-by-token when the turn closes.
+        </p>
+      </div>
+    </div>
+
+    <div class="reveal mx-auto mt-10 max-w-3xl text-center">
+      <a href="{{ .Site.Params.runbook }}" class="btn btn-ghost">Read the full runbook (RUN.md)</a>
+      <p class="mt-4 text-sm text-ink-faint">
+        Provider matrix · Qdrant / hybrid memory · Slack, Matrix, Discord &amp;
+        Telegram setup · MCP · skills · OpenTelemetry · the
+        <code class="text-accent-cyan">/chat</code> HTTP surface.
+      </p>
+    </div>
+  </div>
+</section>

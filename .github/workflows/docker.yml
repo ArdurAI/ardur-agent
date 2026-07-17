@@ -1,0 +1,136 @@
+# Validates the production Docker image path documented in RUN.md, including the
+# image contract, SBOM generation, vulnerability scanning, and provenance
+# attestation on trusted pushes.
+#
+# Keep this as a separate Ubuntu-only workflow: the release Docker build is
+# materially more expensive than the Rust fmt/clippy/check/test gauntlet and
+# Docker is not available on the macOS runner in the same way.
+
+name: docker
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+  security-events: write
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-healthcheck-scan:
+    name: build-healthcheck-scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+
+      - name: Build production image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          load: true
+          pull: true
+          tags: ardur-agent:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Inspect image contract
+        id: inspect
+        run: |
+          set -euo pipefail
+          docker image inspect ardur-agent:ci \
+            --format 'id={{.Id}} user={{.Config.User}} entrypoint={{json .Config.Entrypoint}} healthcheck={{json .Config.Healthcheck.Test}}' \
+            | tee image-contract.txt
+          image_id="$(docker image inspect ardur-agent:ci --format '{{.Id}}')"
+          case "${image_id}" in
+            sha256:*) ;;
+            *) echo "unexpected image id: ${image_id}" >&2; exit 1 ;;
+          esac
+          echo "image_id=${image_id}" >> "${GITHUB_OUTPUT}"
+
+      - name: Attest image provenance
+        if: github.event_name == 'push'
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-name: ardur-agent
+          subject-digest: ${{ steps.inspect.outputs.image_id }}
+
+      - name: Generate SPDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          image: ardur-agent:ci
+          format: spdx-json
+          output-file: ardur-agent.spdx.json
+          upload-artifact: false
+
+      - name: Trivy vulnerability scan (SARIF)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ardur-agent:ci
+          format: sarif
+          output: trivy-results.sarif
+          vuln-type: os,library
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: '0'
+
+      - name: Upload Trivy SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@7188fc363630916deb702c7fdcf4e481b751f97a # v4
+        with:
+          sarif_file: trivy-results.sarif
+
+      - name: Trivy vulnerability gate
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ardur-agent:ci
+          format: table
+          vuln-type: os,library
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: '1'
+
+      - name: Smoke /healthz through container healthcheck
+        run: |
+          set -euo pipefail
+
+          trap 'docker logs --tail 80 ardur-ci-smoke || true; docker rm -f ardur-ci-smoke >/dev/null 2>&1 || true' EXIT
+
+          docker run -d --name ardur-ci-smoke \
+            --health-interval=2s \
+            --health-timeout=2s \
+            --health-start-period=2s \
+            --health-retries=5 \
+            -e SLACK_BOT_TOKEN=dummy \
+            -e SLACK_SIGNING_SECRET=dummy \
+            -e SLACK_APP_ID=dummy \
+            -e ARDUR_PROVIDER=ollama \
+            ardur-agent:ci
+
+          for _ in $(seq 1 15); do
+            state="$(docker inspect ardur-ci-smoke --format '{{.State.Status}} {{.State.Health.Status}}')"
+            echo "${state}"
+            case "${state}" in
+              "running healthy")
+                exit 0
+                ;;
+              exited*|dead*)
+                exit 1
+                ;;
+            esac
+            sleep 2
+          done
+
+          docker inspect ardur-ci-smoke --format '{{json .State.Health}}'
+          exit 1
