@@ -26,6 +26,75 @@ fn audit_secrets_finds_pattern() {
     assert!(stdout.contains("potential_secret"), "{stdout}");
 }
 
+/// 2026-07-12 cli security sweep, finding 3: `scan_file` used to
+/// `fs::read_to_string` unconditionally and propagate any UTF-8 decode
+/// error with `?`, so the very first binary file `ignore::Walk` encountered
+/// aborted the *entire* scan — in practice near-guaranteed on a real
+/// checkout with images, compiled objects, or `node_modules`. A directory
+/// with a binary file alongside a file that actually contains a secret must
+/// still report that secret, not error out on the binary file first.
+#[test]
+fn audit_secrets_skips_binary_files_instead_of_aborting_the_scan() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(&src).expect("create src");
+    // Invalid UTF-8 (a lone continuation byte) — this used to hard-error
+    // the whole `read_to_string` walk.
+    std::fs::write(src.join("blob.bin"), [0xffu8, 0xfe, 0x00, 0x01, 0x02])
+        .expect("write binary file");
+    std::fs::write(
+        src.join("config.rs"),
+        "let api_key = \"sk-1234567890abcdef\";\n",
+    )
+    .expect("write config");
+
+    let output = Command::cargo_bin("ardur")
+        .expect("the `ardur` binary builds")
+        .env("HOME", dir.path())
+        .args(["audit", "secrets", src.to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(output).expect("stdout utf8");
+    assert!(
+        stdout.contains("potential_secret") && stdout.contains("config.rs"),
+        "the scan should still find the secret in config.rs despite the binary file: {stdout}"
+    );
+}
+
+/// A file over the scan's size cap is skipped (not read into memory), while
+/// scanning continues and still finds a secret elsewhere in the directory.
+#[test]
+fn audit_secrets_skips_oversized_files_instead_of_buffering_them() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(&src).expect("create src");
+    std::fs::write(src.join("huge.txt"), vec![b'a'; 11 * 1024 * 1024])
+        .expect("write huge file");
+    std::fs::write(
+        src.join("config.rs"),
+        "let api_key = \"sk-1234567890abcdef\";\n",
+    )
+    .expect("write config");
+
+    let output = Command::cargo_bin("ardur")
+        .expect("the `ardur` binary builds")
+        .env("HOME", dir.path())
+        .args(["audit", "secrets", src.to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(output).expect("stdout utf8");
+    assert!(
+        stdout.contains("potential_secret") && stdout.contains("config.rs"),
+        "the scan should still find the secret despite the oversized file: {stdout}"
+    );
+}
+
 #[test]
 fn audit_sbom_from_lockfile() {
     let dir = tempfile::tempdir().expect("tempdir");
