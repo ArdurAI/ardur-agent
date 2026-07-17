@@ -97,7 +97,7 @@ impl Forwarder {
             body: MessageBody::Text(msg.content.clone()),
             // serenity's `Timestamp` exposes whole-second Unix time; scale to the
             // gateway's millisecond convention.
-            received_at: (msg.timestamp.unix_timestamp().max(0) as u64) * 1000,
+            received_at: UnixTsMillis((msg.timestamp.unix_timestamp().max(0) as u64) * 1000),
             thread_id: None,
         };
 
@@ -296,10 +296,12 @@ impl MessagingGateway for DiscordChannel {
 
 /// Current wall-clock time in Unix milliseconds (saturating to 0 before the epoch).
 fn now_millis() -> UnixTsMillis {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+    UnixTsMillis(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0),
+    )
 }
 
 #[cfg(test)]

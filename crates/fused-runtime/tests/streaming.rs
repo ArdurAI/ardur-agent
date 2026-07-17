@@ -31,7 +31,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use ardur_cost_gate::{CostEnvelope, CostTuple as GateCostTuple, ManualClock};
+use ardur_cost_gate::{CostEnvelope, CostTuple as GateCostTuple, ManualClock, UnixTsMillis};
 use ardur_fused_runtime::{FusedEvent, StageKind, load_persisted_chain, verify_persisted_chain};
 use ardur_injection_defense::{FilterRegistry, PatternBasedFilter};
 use ardur_lifecycle_hooks::HookRegistry;
@@ -296,7 +296,7 @@ fn tool_call_with_usage(
             tokens_out: u64::from(usage.tokens_out),
             cents: usage.cost_cents.unwrap_or_default(),
             wall_ms: 0,
-            attention_score: 0.0,
+            attention_score: 0,
         },
         raw_provider_response: None,
     }
@@ -372,7 +372,7 @@ fn envelope_for(cost: CostTuple) -> CostEnvelope {
         tokens_out_max: cost.tokens_out as u32,
         cents_max: cost.cents as u32,
         wall_ms_max: cost.wall_ms as u32,
-        attention_score_max: cost.attention_score.ceil() as u32,
+        attention_score_max: cost.attention_score as u32,
     }
 }
 
@@ -541,21 +541,21 @@ async fn fused_stream_post_receipt_hook_cost_matches_combined_receipt_cost_for_t
         tokens_out: 3,
         cents: 5,
         wall_ms: 0,
-        attention_score: 0.0,
+        attention_score: 0,
     };
     let tool_cost = CostTuple {
         tokens_in: 11,
         tokens_out: 13,
         cents: 17,
         wall_ms: 19,
-        attention_score: 0.5,
+        attention_score: 500,
     };
     let expected = CostTuple {
         tokens_in: 13,
         tokens_out: 16,
         cents: 22,
         wall_ms: 19,
-        attention_score: 0.5,
+        attention_score: 500,
     };
     let tool_name = "priced.tool";
     let provider = Arc::new(ScriptedProvider::new(
@@ -762,9 +762,18 @@ async fn fused_stream_dropped_refunds_reservation() {
     );
 }
 
+/// ARD-501: a streaming turn whose provider is slower than the reservation TTL
+/// must not be discarded. The lease is refreshed as provider events arrive, so
+/// the turn settles normally and commits its receipt and journal — the user saw
+/// the streamed content, so it is billed and recorded.
+///
+/// (Supersedes the earlier test that asserted the *pre-fix* behavior — a
+/// finalize failure with no durable commit when the clock jumped past the TTL
+/// mid-stream. The finalize-before-commit ordering is unchanged; this stream
+/// simply no longer fails to finalize.)
 #[tokio::test]
 async fn fused_stream_finalize_failure_commits_neither_receipt_nor_journal() {
-    let clock = Arc::new(ManualClock::new(support::NOW_MS));
+    let clock = Arc::new(ManualClock::new(UnixTsMillis(support::NOW_MS)));
     let provider = Arc::new(ExpiringStreamProvider {
         clock: clock.clone(),
         rate_card: RateCard::anthropic_2026_q2_v1(),
@@ -783,33 +792,35 @@ async fn fused_stream_finalize_failure_commits_neither_receipt_nor_journal() {
 
     let events = collect_stream(
         &runtime,
-        request_for("expire after provider", &valid_token(), session_id),
+        request_for("slow stream survives", &valid_token(), session_id),
     )
     .await;
 
-    assert!(has_failed_stage(&events, StageKind::CostGateFinalize));
-    assert!(matches!(
-        terminal_error(&events),
-        Some(RuntimeError::CostCeilingExceeded)
-    ));
     assert!(
-        !events
+        !has_failed_stage(&events, StageKind::CostGateFinalize),
+        "the refreshed reservation finalizes rather than expiring"
+    );
+    assert!(terminal_error(&events).is_none(), "the turn does not error");
+    assert!(
+        events
             .iter()
             .any(|event| matches!(event, Ok(FusedEvent::Receipt { .. }))),
-        "failed settlement must not emit a durable receipt"
+        "the completed turn emits its receipt"
     );
-    assert!(
+    assert_eq!(
         load_persisted_chain(&receipt_log)
-            .expect("empty receipt log loads")
-            .is_empty()
+            .expect("receipt log loads")
+            .len(),
+        1,
+        "the completed turn commits exactly one durable receipt"
     );
     assert!(
-        journal
+        !journal
             .replay(session_id)
             .await
             .expect("journal replays")
             .is_empty(),
-        "failed settlement must not retain user or assistant history"
+        "the completed turn commits its journal history"
     );
 }
 

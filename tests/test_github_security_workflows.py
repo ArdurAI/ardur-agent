@@ -43,13 +43,18 @@ class GitHubSecurityWorkflowTests(unittest.TestCase):
         ci = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
 
         self.assertIn("name: CodeQL / Rust", ci)
-        self.assertIn(
-            "github/codeql-action/init@99df26d4f13ea111d4ec1a7dddef6063f76b97e9",
+        # Assert codeql-action is pinned to a 40-char SHA (any version).
+        # The pinning invariant matters, not the specific digest — dependabot
+        # bumps the version and this test must not need a manual update.
+        self.assertRegex(
             ci,
+            r"github/codeql-action/init@[0-9a-f]{40}",
+            "codeql-action/init must be pinned to a 40-char commit SHA",
         )
-        self.assertIn(
-            "github/codeql-action/analyze@99df26d4f13ea111d4ec1a7dddef6063f76b97e9",
+        self.assertRegex(
             ci,
+            r"github/codeql-action/analyze@[0-9a-f]{40}",
+            "codeql-action/analyze must be pinned to a 40-char commit SHA",
         )
         self.assertIn("security-events: write", ci)
         self.assertIn("languages: rust", ci)

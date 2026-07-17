@@ -10,6 +10,7 @@ mod device_mesh;
 mod marketplace;
 mod persona;
 mod project_surface;
+mod state_id;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -18,9 +19,11 @@ use std::process::ExitCode;
 use ardur_cli::{
     ChatArgs, CliError, Config, SessionMetadata, StateDirs, directory_modified_no_follow,
     list_directory_names_no_follow, read_string_no_follow, remove_directory_tree_no_follow,
-    run_chat, write_private_file_no_follow,
+    run_chat, write_private_file_atomic_no_follow, write_private_file_no_follow,
 };
-use ardur_session_journals::JournalEntry;
+use ardur_session_journals::{
+    JournalEntry, default_secret_patterns, redact_entries_default, redact_text,
+};
 use audit::{AuditArgs, run_audit};
 use clap::{Args, Parser, Subcommand};
 use device_mesh::{NodesArgs, run_nodes};
@@ -29,6 +32,7 @@ use persona::{PersonaArgs, run_persona};
 use project_surface::{ProjectArgs, run_project};
 use serde_json::json;
 use sha2::Digest;
+use state_id::sanitize_state_id;
 
 /// Ardur — a capability-secure, cost-metered agent runtime.
 #[derive(Parser)]
@@ -69,6 +73,8 @@ enum Commands {
     Receipts(ReceiptsArgs),
     /// Browse capability tokens and grants.
     Caps(CapsArgs),
+    /// Grant a hardened built-in tool and record a signed grant receipt (ARD-457).
+    Grant(GrantArgs),
     /// Dry-run and inspect Cedar policy decisions.
     Policy(PolicyArgs),
     /// Manage pending approval requests.
@@ -259,6 +265,37 @@ enum CapsAction {
     },
 }
 
+/// Arguments to `ardur grant` (ARD-457).
+#[derive(Args)]
+struct GrantArgs {
+    #[command(subcommand)]
+    action: GrantAction,
+}
+
+/// Subcommands for `ardur grant`.
+#[derive(Subcommand)]
+enum GrantAction {
+    /// Record an operator grant allowing a hardened built-in tool, and emit a
+    /// signed `tool.grant.allow.v1` receipt into the local chain.
+    ///
+    /// The grant is appended to `~/.ardur/grants.json` as a durable operator
+    /// ledger, and an audit receipt is chained into `~/.ardur/receipts/` so the
+    /// decision is tamper-evident. (Server-side enforcement is via the
+    /// `ARDUR_ENABLE_SHELL_TOOL` / `ARDUR_ENABLE_HTTP_TOOL` / `ARDUR_FILE_TOOL_ROOT`
+    /// opt-ins; this records and audits the operator's intent.)
+    Allow {
+        /// The built-in tool id to grant: `shell.run`, `http.fetch`,
+        /// `file.read`, `file.write`, or `file.list`.
+        tool: String,
+        /// Optional scope note recorded with the grant (e.g. a shell allowlist
+        /// `"git|cargo"` or a file root path).
+        #[arg(long)]
+        scope: Option<String>,
+    },
+    /// List the operator grants recorded in `~/.ardur/grants.json`.
+    List,
+}
+
 /// Arguments to `ardur policy`.
 #[derive(Args)]
 struct PolicyArgs {
@@ -331,6 +368,7 @@ fn main() -> ExitCode {
         Commands::Session(args) => run_session(args),
         Commands::Receipts(args) => run_receipts(args),
         Commands::Caps(args) => run_caps(args),
+        Commands::Grant(args) => run_grant(args),
         Commands::Policy(args) => run_policy(args),
         Commands::Approvals(args) => run_approvals(args),
         Commands::Token(args) => run_token(args),
@@ -399,7 +437,7 @@ fn run_config(args: ConfigArgs) -> Result<(), CliError> {
 fn run_logs(args: LogsArgs) -> Result<(), CliError> {
     let root = state_root(args.dir)?;
     let log_path = root.join("logs").join("ardur.log");
-    let contents = match std::fs::read_to_string(&log_path) {
+    let contents = match read_string_no_follow(&log_path) {
         Ok(contents) => contents,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             println!("no logs found at {}", log_path.display());
@@ -639,12 +677,7 @@ fn write_config(path: &Path, config: &Config) -> Result<(), CliError> {
         escape_toml_string(&config.model),
         config.budget_cents
     );
-    std::fs::write(path, contents)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    }
+    write_private_file_atomic_no_follow(path, contents.as_bytes())?;
     Ok(())
 }
 
@@ -704,7 +737,7 @@ fn redact_plain(line: &str) -> String {
 }
 
 fn count_lines(path: &Path) -> Result<usize, CliError> {
-    match std::fs::read_to_string(path) {
+    match read_string_no_follow(path) {
         Ok(contents) => Ok(contents.lines().count()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
         Err(e) => Err(CliError::Io(e)),
@@ -868,6 +901,10 @@ fn run_session(args: SessionArgs) -> Result<(), CliError> {
                         reason,
                         ..
                     } => println!("INVALIDATED entry {target_entry_id}: {reason}"),
+                    JournalEntry::Rollback {
+                        target_checkpoint_id,
+                        ..
+                    } => println!("ROLLBACK to checkpoint {target_checkpoint_id}"),
                 }
             }
             println!("continuing session {id} in chat...");
@@ -880,7 +917,7 @@ fn run_session(args: SessionArgs) -> Result<(), CliError> {
             let id = validated_session_id(&id)?;
             let journal_path = session_journal_path(&sessions_dir, &id);
             let entries = require_session_entries(&journal_path, &id)?;
-            let redacted_entries = redact_session_entries(&entries);
+            let redacted_entries = redact_entries_default(&entries);
             let receipts = session_receipts(&redacted_entries);
             let receipt_inventory = load_session_receipt_inventory(&root);
             let receipt_status = receipt_inventory.status_for(&receipts, &id);
@@ -1214,7 +1251,8 @@ fn journal_entry_timestamp(entry: &JournalEntry) -> u64 {
         | JournalEntry::ToolInvocation { at, .. }
         | JournalEntry::CostFinalized { at, .. }
         | JournalEntry::Checkpoint { at, .. }
-        | JournalEntry::Invalidation { at, .. } => *at,
+        | JournalEntry::Invalidation { at, .. }
+        | JournalEntry::Rollback { at, .. } => at.get(),
     }
 }
 
@@ -1252,7 +1290,7 @@ mod session_cost_tests {
         let receipt_ids = vec![receipt_id.to_string()];
         let entries = vec![JournalEntry::AssistantMessage {
             content: "done".to_string(),
-            at: 1,
+            at: ardur_cost_gate::UnixTsMillis(1),
             receipt_id: ardur_runtime::ReceiptId(receipt_id),
         }];
         let mut inventory = SessionReceiptInventory::default();
@@ -1281,7 +1319,7 @@ mod session_cost_tests {
         let entries = vec![
             JournalEntry::AssistantMessage {
                 content: "done".to_string(),
-                at: 1,
+                at: ardur_cost_gate::UnixTsMillis(1),
                 receipt_id: ardur_runtime::ReceiptId(receipt_id),
             },
             JournalEntry::CostFinalized {
@@ -1297,7 +1335,7 @@ mod session_cost_tests {
                     wall_ms: 0,
                     attention_score: 0,
                 },
-                at: 2,
+                at: ardur_cost_gate::UnixTsMillis(2),
             },
         ];
         let inventory = SessionReceiptInventory {
@@ -1315,27 +1353,6 @@ mod session_cost_tests {
             None
         );
     }
-}
-
-fn redact_session_entries(entries: &[JournalEntry]) -> Vec<JournalEntry> {
-    let patterns = default_secret_patterns();
-    let mut redacted = entries.to_vec();
-    for entry in &mut redacted {
-        match entry {
-            JournalEntry::UserMessage { content, .. }
-            | JournalEntry::AssistantMessage { content, .. } => {
-                *content = redact_text(content, &patterns);
-            }
-            JournalEntry::Checkpoint { summary, .. } => {
-                *summary = redact_text(summary, &patterns);
-            }
-            JournalEntry::Invalidation { reason, .. } => {
-                *reason = redact_text(reason, &patterns);
-            }
-            JournalEntry::ToolInvocation { .. } | JournalEntry::CostFinalized { .. } => {}
-        }
-    }
-    redacted
 }
 
 fn write_private_session_export(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
@@ -1543,6 +1560,17 @@ fn render_session_markdown(
                     reason
                 ));
             }
+            JournalEntry::Rollback {
+                target_checkpoint_id,
+                receipt_id,
+                ..
+            } => {
+                md.push_str(&format!(
+                    "### {}. Rollback\n\nTarget checkpoint: `{target_checkpoint_id}`\nReceipt: `{}`\n\n",
+                    i + 1,
+                    receipt_id.0
+                ));
+            }
         }
     }
     md
@@ -1723,6 +1751,171 @@ fn run_caps(args: CapsArgs) -> Result<(), CliError> {
 }
 
 // ---------------------------------------------------------------------------
+// ARD-457: Operator tool-grant flow (`ardur grant`)
+// ---------------------------------------------------------------------------
+
+/// The `cap.*` capabilities each hardened built-in tool requires — the same
+/// snake-cased `Capability` labels the server derives its runtime cap-token
+/// allowlist from. Grants are recorded against these so the ledger and receipt
+/// name exactly what the operator authorized.
+fn tool_grant_capabilities(tool: &str) -> Option<Vec<&'static str>> {
+    match tool {
+        "shell.run" => Some(vec!["cap.shell_exec", "cap.process_spawn"]),
+        "http.fetch" => Some(vec!["cap.network_out"]),
+        "file.read" | "file.list" => Some(vec!["cap.fs_read"]),
+        "file.write" => Some(vec!["cap.fs_write"]),
+        _ => None,
+    }
+}
+
+/// The operator grant ledger file.
+fn grants_path(dirs: &StateDirs) -> PathBuf {
+    dirs.root.join("grants.json")
+}
+
+/// Read the recorded grants (a JSON array), returning an empty list when the
+/// ledger does not exist yet.
+fn read_grants(dirs: &StateDirs) -> Result<Vec<serde_json::Value>, CliError> {
+    match read_string_no_follow(&grants_path(dirs)) {
+        Ok(raw) if raw.trim().is_empty() => Ok(Vec::new()),
+        Ok(raw) => serde_json::from_str(&raw)
+            .map_err(|e| CliError::State(format!("parsing {}: {e}", grants_path(dirs).display()))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(CliError::Io(e)),
+    }
+}
+
+/// Run `ardur grant` subcommands.
+fn run_grant(args: GrantArgs) -> Result<(), CliError> {
+    let dirs = StateDirs::resolve()?;
+    match args.action {
+        GrantAction::Allow { tool, scope } => {
+            let caps = tool_grant_capabilities(&tool).ok_or_else(|| {
+                CliError::State(format!(
+                    "unknown tool `{tool}`; expected one of shell.run, http.fetch, file.read, file.write, file.list"
+                ))
+            })?;
+            // Materialize the state tree so `receipts/` and `keys/` exist before
+            // we chain a receipt into them.
+            dirs.create()?;
+
+            let subject = dirs.local_subject();
+            let granted_at_ms = unix_now_ms();
+            // The canonical grant payload the receipt commits to (by digest).
+            let payload = json!({
+                "tool": tool,
+                "capabilities": caps,
+                "scope": scope,
+                "subject": subject,
+                "granted_at_ms": granted_at_ms,
+            });
+            let receipt_id = append_grant_receipt(&dirs, &subject, granted_at_ms, &payload)?;
+
+            // Append the grant to the durable operator ledger.
+            let mut grants = read_grants(&dirs)?;
+            let mut record = payload;
+            record["receipt_id"] = json!(receipt_id.to_string());
+            grants.push(record);
+            let serialized = serde_json::to_vec_pretty(&grants).expect("grants ledger serializes");
+            write_private_file_atomic_no_follow(&grants_path(&dirs), &serialized)
+                .map_err(CliError::Io)?;
+
+            println!(
+                "granted `{tool}` ({}) — receipt {receipt_id}",
+                caps.join(", ")
+            );
+            Ok(())
+        }
+        GrantAction::List => {
+            let grants = read_grants(&dirs)?;
+            if grants.is_empty() {
+                println!("no grants recorded at {}", grants_path(&dirs).display());
+                return Ok(());
+            }
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!(grants)).expect("grants serialise")
+            );
+            Ok(())
+        }
+    }
+}
+
+/// Build, sign, and chain a `tool.grant.allow.v1` receipt committing to `payload`
+/// (by SHA-256 digest), returning the new receipt id. The receipt links onto the
+/// existing `~/.ardur/receipts/chain.jsonl` tail and is signed with the same
+/// ES256 key the chat runtime uses, so `ardur receipts verify` stays green.
+fn append_grant_receipt(
+    dirs: &StateDirs,
+    subject: &str,
+    issued_at_ms: u64,
+    payload: &serde_json::Value,
+) -> Result<uuid::Uuid, CliError> {
+    let signing_key = dirs.load_or_create_receipt_key()?;
+    let receipt_log = dirs.receipt_log();
+
+    // Link onto the current chain tail (genesis when the chain is empty). The
+    // parent hash is SHA-256 of the prior receipt's compact JWS — exactly what
+    // the chain verifier recomputes.
+    let chain = ardur_fused_runtime::load_persisted_chain(&receipt_log)
+        .map_err(|e| CliError::State(format!("loading receipt chain: {e}")))?;
+    let parent_hash = chain
+        .last()
+        .map(|tail| ardur_receipt::Sha256Digest::of(tail.jws_compact.as_bytes()));
+
+    let payload_bytes = serde_json::to_vec(payload).expect("grant receipt payload serializes");
+    let body = ardur_receipt::ReceiptBody {
+        receipt_id: uuid::Uuid::new_v4(),
+        parent_hash,
+        verb: ardur_receipt::VerbObject::new("tool.grant.allow.v1")
+            .map_err(|e| CliError::State(format!("invalid grant verb: {e}")))?,
+        issued_at: ardur_receipt::UnixTsMillis(issued_at_ms),
+        subject: ardur_receipt::HolderId(subject.to_string()),
+        // Operator grants are not made under a session cap-token; use a fixed
+        // sentinel token id (a stable, self-documenting UUID) rather than
+        // borrowing a turn's token id. `TokenId` is a `Uuid` newtype (H5), so a
+        // 16-byte ASCII label stands in for the absent session token.
+        cap_token_id: ardur_receipt::TokenId(uuid::Uuid::from_bytes(*b"ardur-op-grant!!")),
+        payload_digest: ardur_receipt::Sha256Digest::of(&payload_bytes),
+        session_id: None,
+        // A grant costs nothing — it is an authorization record, not a turn.
+        cost: ardur_receipt::CostTuple {
+            tokens_in: 0,
+            tokens_out: 0,
+            cents: 0,
+            wall_ms: 0,
+            attention_score: 0,
+        },
+        tool_calls: Vec::new(),
+        provider: None,
+    };
+    let receipt_id = body.receipt_id;
+    let signed = ardur_receipt::ReceiptSigner::sign(body, &signing_key)
+        .map_err(|e| CliError::State(format!("signing grant receipt: {e}")))?;
+
+    append_receipt_line(&receipt_log, signed.jws_compact())?;
+    Ok(receipt_id)
+}
+
+/// Append one compact-JWS receipt line to the chain log, preserving the
+/// newline-delimited format `load_persisted_chain` reads. Rewrites the file
+/// atomically (the local chain is small) rather than opening in append mode, so
+/// a crash mid-write cannot leave a torn tail.
+fn append_receipt_line(receipt_log: &Path, jws_compact: &str) -> Result<(), CliError> {
+    let mut contents = match read_string_no_follow(receipt_log) {
+        Ok(existing) => existing,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(CliError::Io(e)),
+    };
+    if !contents.is_empty() && !contents.ends_with('\n') {
+        contents.push('\n');
+    }
+    contents.push_str(jws_compact);
+    contents.push('\n');
+    write_private_file_atomic_no_follow(receipt_log, contents.as_bytes()).map_err(CliError::Io)
+}
+
+// ---------------------------------------------------------------------------
 // ARD-142: Policy Debugger
 // ---------------------------------------------------------------------------
 
@@ -1735,7 +1928,7 @@ fn run_policy(args: PolicyArgs) -> Result<(), CliError> {
             let requested_caps: Vec<&str> = caps.split(',').map(|s| s.trim()).collect();
             let cedar_path = root.join("cedar.policies");
             let policy_text = if cedar_path.is_file() {
-                std::fs::read_to_string(&cedar_path)?
+                read_string_no_follow(&cedar_path)?
             } else {
                 "// No cedar.policies file found. All capabilities default to allow.".to_string()
             };
@@ -1758,7 +1951,7 @@ fn run_policy(args: PolicyArgs) -> Result<(), CliError> {
                 println!("no cedar.policies file found at {}", cedar_path.display());
                 return Ok(());
             }
-            let policy_text = std::fs::read_to_string(&cedar_path)?;
+            let policy_text = read_string_no_follow(&cedar_path)?;
             let mut warnings = 0;
             let lines: Vec<&str> = policy_text.lines().collect();
             for (i, line) in lines.iter().enumerate() {
@@ -1839,7 +2032,7 @@ fn run_approvals(args: ApprovalsArgs) -> Result<(), CliError> {
             if let Ok(entries) = std::fs::read_dir(&approvals_dir) {
                 for entry in entries.flatten() {
                     if entry.path().extension().is_some_and(|e| e == "json") {
-                        if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                        if let Ok(content) = read_string_no_follow(&entry.path()) {
                             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
                                 let status = v
                                     .get("status")
@@ -1863,12 +2056,13 @@ fn run_approvals(args: ApprovalsArgs) -> Result<(), CliError> {
             }
         }
         ApprovalsAction::Approve { id } => {
+            sanitize_state_id(&id)?;
             let path = approvals_dir.join(format!("{id}.json"));
             if !path.is_file() {
                 return Err(CliError::State(format!("approval `{id}` not found")));
             }
             let mut approval: serde_json::Value =
-                serde_json::from_str(&std::fs::read_to_string(&path)?)
+                serde_json::from_str(&read_string_no_follow(&path)?)
                     .map_err(|e| CliError::State(e.to_string()))?;
             approval["status"] = json!("approved");
             approval["decided_at"] = json!(
@@ -1879,16 +2073,17 @@ fn run_approvals(args: ApprovalsArgs) -> Result<(), CliError> {
             );
             let json_str = serde_json::to_string_pretty(&approval)
                 .map_err(|e| CliError::State(e.to_string()))?;
-            std::fs::write(&path, json_str)?;
+            write_private_file_atomic_no_follow(&path, json_str.as_bytes())?;
             println!("approved {id}");
         }
         ApprovalsAction::Deny { id, reason } => {
+            sanitize_state_id(&id)?;
             let path = approvals_dir.join(format!("{id}.json"));
             if !path.is_file() {
                 return Err(CliError::State(format!("approval `{id}` not found")));
             }
             let mut approval: serde_json::Value =
-                serde_json::from_str(&std::fs::read_to_string(&path)?)
+                serde_json::from_str(&read_string_no_follow(&path)?)
                     .map_err(|e| CliError::State(e.to_string()))?;
             approval["status"] = json!("denied");
             approval["deny_reason"] = json!(reason.unwrap_or_default());
@@ -1900,7 +2095,7 @@ fn run_approvals(args: ApprovalsArgs) -> Result<(), CliError> {
             );
             let json_str = serde_json::to_string_pretty(&approval)
                 .map_err(|e| CliError::State(e.to_string()))?;
-            std::fs::write(&path, json_str)?;
+            write_private_file_atomic_no_follow(&path, json_str.as_bytes())?;
             println!("denied {id}");
         }
     }
@@ -2029,7 +2224,7 @@ fn read_schedules(root: &Path) -> Result<Vec<ScheduleRecord>, CliError> {
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for entry in entries.flatten() {
             if entry.path().extension().is_some_and(|e| e == "json") {
-                if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                if let Ok(content) = read_string_no_follow(&entry.path()) {
                     if let Ok(v) = serde_json::from_str::<ScheduleRecord>(&content) {
                         records.push(v);
                     }
@@ -2041,7 +2236,10 @@ fn read_schedules(root: &Path) -> Result<Vec<ScheduleRecord>, CliError> {
 }
 
 /// Parse a 5-field cron string into a CronExpression.
-/// Supported: * (any), n (exact), n-m (range), a,b (list), */n (step).
+/// Supported: `*` (any), `n` (exact), `n-m` (range), `a,b` (list), `*/n` (step),
+/// `a-b/n` (range step), and `JAN`/`MON` names — validated up front so an
+/// unparseable or out-of-range expression is rejected rather than silently
+/// scheduling something that never fires.
 fn cron_to_expression(cron: &str) -> Result<ardur_cron::CronExpression, CliError> {
     let fields: Vec<&str> = cron.split_whitespace().collect();
     if fields.len() != 5 {
@@ -2050,9 +2248,11 @@ fn cron_to_expression(cron: &str) -> Result<ardur_cron::CronExpression, CliError
             fields.len()
         )));
     }
-    Ok(ardur_cron::CronExpression::new(
-        fields[0], fields[1], fields[2], fields[3], fields[4],
-    ))
+    let expr =
+        ardur_cron::CronExpression::new(fields[0], fields[1], fields[2], fields[3], fields[4]);
+    expr.validate()
+        .map_err(|e| CliError::State(format!("invalid cron: {e}")))?;
+    Ok(expr)
 }
 
 /// Compute next N fire times from a cron expression (UTC).
@@ -2061,15 +2261,18 @@ fn next_fire_times(
     count: usize,
 ) -> Result<Vec<chrono::DateTime<chrono::Utc>>, CliError> {
     let expr = cron_to_expression(cron)?;
-    let now = chrono::Utc::now();
+    // Compile once and jump minute-boundary to minute-boundary rather than
+    // probing every minute; this also honors step/list/named fields and the
+    // day-of-month/day-of-week OR rule that `is_due` now implements.
     let mut fires = Vec::with_capacity(count);
-    let mut probe = now;
-    // Safety guard: stop searching after 1 year of minutes.
-    let cutoff = now + chrono::Duration::days(366);
-    while fires.len() < count && probe < cutoff {
-        probe += chrono::Duration::minutes(1);
-        if expr.is_due(probe) {
-            fires.push(probe);
+    let mut from = chrono::Utc::now();
+    for _ in 0..count {
+        match expr.next_after(from) {
+            Ok(next) => {
+                fires.push(next);
+                from = next;
+            }
+            Err(_) => break,
         }
     }
     Ok(fires)
@@ -2104,10 +2307,11 @@ fn run_schedule(args: ScheduleArgs) -> Result<(), CliError> {
                     .unwrap_or(0),
                 enabled: true,
             };
-            std::fs::write(
-                schedules_dir.join(format!("{id}.json")),
+            write_private_file_atomic_no_follow(
+                &schedules_dir.join(format!("{id}.json")),
                 serde_json::to_string_pretty(&record)
-                    .map_err(|e| CliError::State(e.to_string()))?,
+                    .map_err(|e| CliError::State(e.to_string()))?
+                    .as_bytes(),
             )?;
             println!("created schedule {id}");
             let next = next_fire_times(&record.pattern, 1)?;
@@ -2155,6 +2359,7 @@ fn run_schedule(args: ScheduleArgs) -> Result<(), CliError> {
             }
         }
         ScheduleAction::Delete { id } => {
+            sanitize_state_id(&id)?;
             let path = schedules_dir.join(format!("{id}.json"));
             if !path.is_file() {
                 return Err(CliError::State(format!("schedule `{id}` not found")));
@@ -2244,10 +2449,11 @@ fn run_token(args: TokenArgs) -> Result<(), CliError> {
                     .unwrap_or(0),
                 "revoked": false,
             });
-            std::fs::write(
-                tokens_dir.join(format!("{token_id}.json")),
+            write_private_file_atomic_no_follow(
+                &tokens_dir.join(format!("{token_id}.json")),
                 serde_json::to_string_pretty(&record)
-                    .map_err(|e| CliError::State(e.to_string()))?,
+                    .map_err(|e| CliError::State(e.to_string()))?
+                    .as_bytes(),
             )?;
             println!("created token {token_id}");
             println!("value: {token_value}");
@@ -2258,7 +2464,7 @@ fn run_token(args: TokenArgs) -> Result<(), CliError> {
             if let Ok(entries) = std::fs::read_dir(&tokens_dir) {
                 for entry in entries.flatten() {
                     if entry.path().extension().is_some_and(|e| e == "json") {
-                        if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                        if let Ok(content) = read_string_no_follow(&entry.path()) {
                             if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&content) {
                                 // Never display the actual hash in list view.
                                 v.as_object_mut()
@@ -2279,13 +2485,13 @@ fn run_token(args: TokenArgs) -> Result<(), CliError> {
             }
         }
         TokenAction::Revoke { id } => {
+            sanitize_state_id(&id)?;
             let path = tokens_dir.join(format!("{id}.json"));
             if !path.is_file() {
                 return Err(CliError::State(format!("token `{id}` not found")));
             }
-            let mut token: serde_json::Value =
-                serde_json::from_str(&std::fs::read_to_string(&path)?)
-                    .map_err(|e| CliError::State(e.to_string()))?;
+            let mut token: serde_json::Value = serde_json::from_str(&read_string_no_follow(&path)?)
+                .map_err(|e| CliError::State(e.to_string()))?;
             token["revoked"] = json!(true);
             token["revoked_at"] = json!(
                 std::time::SystemTime::now()
@@ -2293,9 +2499,11 @@ fn run_token(args: TokenArgs) -> Result<(), CliError> {
                     .map(|d| d.as_secs())
                     .unwrap_or(0)
             );
-            std::fs::write(
+            write_private_file_atomic_no_follow(
                 &path,
-                serde_json::to_string_pretty(&token).map_err(|e| CliError::State(e.to_string()))?,
+                serde_json::to_string_pretty(&token)
+                    .map_err(|e| CliError::State(e.to_string()))?
+                    .as_bytes(),
             )?;
             println!("revoked token {id}");
         }
@@ -2322,41 +2530,6 @@ struct RedactArgs {
     /// If set, treat input as JSON and redact string values recursively.
     #[arg(long)]
     json: bool,
-}
-
-/// Default secret patterns: API keys, tokens, passwords, private keys, etc.
-fn default_secret_patterns() -> Vec<regex::Regex> {
-    let patterns = [
-        // OpenAI / Anthropic / OpenRouter API keys, including segmented
-        // prefixes such as `sk-ant-...` and `sk-or-...`.
-        r"(?i)\bsk-[a-z0-9_-]{16,}",
-        // Generic secret-looking tokens
-        r"(?i)bearer\s+[a-z0-9_\-\.]{20,}",
-        r"(?i)token[a-z0-9_\-]*[:=]\s*[a-z0-9_\-\.]{8,}",
-        r"(?i)api[_\-]?key[a-z0-9_\-]*[:=]\s*[a-z0-9_\-\.]{8,}",
-        // Natural-language password/secret leakage
-        r"(?i)pass(?:word)?\s*(?:is|=|:)\s*\S+",
-        r"(?i)secret(?:\s+is|=|:)\s*\S+",
-        // AWS-style access keys
-        r"AKIA[0-9A-Z]{16}",
-        // Private keys / certs
-        r"-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----[\s\S]*?-----END",
-        // GitHub tokens
-        r"gh[pousr]_[A-Za-z0-9_]{36,}",
-    ];
-    patterns
-        .iter()
-        .filter_map(|p| regex::Regex::new(p).ok())
-        .collect()
-}
-
-/// Redact secrets in a plain string.
-fn redact_text(text: &str, patterns: &[regex::Regex]) -> String {
-    let mut out = text.to_string();
-    for re in patterns {
-        out = re.replace_all(&out, "<REDACTED>").to_string();
-    }
-    out
 }
 
 /// Recursively redact string values in a JSON object.
@@ -2394,6 +2567,25 @@ fn redact_json_value(value: &mut serde_json::Value, patterns: &[regex::Regex]) {
 }
 
 /// Run `ardur redact`.
+/// Ceiling on `ardur redact`'s input size (file or stdin), checked while
+/// reading rather than after. This command exists to sanitize pasted/piped
+/// content — logs, API responses, anything potentially untrusted — before
+/// it's shared, so silently truncating oversized input would be actively
+/// dangerous: the caller would believe the whole input was redacted when
+/// only a prefix was. Refuse outright instead of truncating.
+const MAX_REDACT_INPUT_BYTES: u64 = 25 * 1024 * 1024; // 25 MiB
+
+fn read_bounded(reader: impl std::io::Read, max: u64, source: &str) -> Result<String, CliError> {
+    let mut buf = Vec::new();
+    std::io::Read::read_to_end(&mut reader.take(max + 1), &mut buf)?;
+    if buf.len() as u64 > max {
+        return Err(CliError::State(format!(
+            "{source} exceeds the {max}-byte redact input cap; split the input and retry"
+        )));
+    }
+    String::from_utf8(buf).map_err(|e| CliError::State(format!("{source} is not valid UTF-8: {e}")))
+}
+
 fn run_redact(args: RedactArgs) -> Result<(), CliError> {
     let mut patterns = default_secret_patterns();
     for p in args.patterns {
@@ -2403,12 +2595,15 @@ fn run_redact(args: RedactArgs) -> Result<(), CliError> {
     }
 
     let input = match args.input {
-        Some(path) => std::fs::read_to_string(&path)?,
-        None => {
-            let mut buf = String::new();
-            std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
-            buf
+        Some(path) => {
+            let file = std::fs::File::open(&path)?;
+            read_bounded(
+                file,
+                MAX_REDACT_INPUT_BYTES,
+                &format!("input file {}", path.display()),
+            )?
         }
+        None => read_bounded(std::io::stdin(), MAX_REDACT_INPUT_BYTES, "stdin")?,
     };
 
     let output = if args.json {
@@ -2489,7 +2684,7 @@ fn read_memory_cards(root: &Path) -> Result<Vec<serde_json::Value>, CliError> {
     if let Ok(entries) = std::fs::read_dir(&memory_dir) {
         for entry in entries.flatten() {
             if entry.path().extension().is_some_and(|e| e == "json") {
-                if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                if let Ok(content) = read_string_no_follow(&entry.path()) {
                     if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
                         cards.push(v);
                     }
@@ -2606,6 +2801,7 @@ fn run_memory(args: MemoryArgs) -> Result<(), CliError> {
             }
         }
         MemoryAction::Forget { id, reason } => {
+            sanitize_state_id(&id)?;
             let memory_dir = root.join("memory");
             let tombstone_path = memory_dir.join(format!("{id}.tombstone.json"));
             let tombstone = json!({
@@ -2617,7 +2813,7 @@ fn run_memory(args: MemoryArgs) -> Result<(), CliError> {
                 "reason": reason,
             });
             let json_str = serde_json::to_string_pretty(&tombstone).expect("tombstone serialises");
-            std::fs::write(&tombstone_path, json_str)?;
+            write_private_file_atomic_no_follow(&tombstone_path, json_str.as_bytes())?;
             println!("tombstoned memory card {id} (reason: {reason})");
             println!("note: the card is not deleted — it is marked invalid for future recall");
         }
@@ -2658,16 +2854,158 @@ struct SearchArgs {
     limit: usize,
 }
 
+/// Maximum redirect hops `ardur fetch` follows before giving up. Each hop is
+/// re-validated against the allowlist and the SSRF IP blocklist below — this
+/// only bounds how long that loop can run.
+const FETCH_REDIRECT_LIMIT: usize = 5;
+
+/// Whether `host` denotes localhost — the bare name or any loopback IP
+/// literal. Mirrors `ardur_tool_registry::builtins::http::host_is_localhost`.
+fn fetch_host_is_localhost(host: &url::Host<&str>) -> bool {
+    match host {
+        url::Host::Domain(d) => d.eq_ignore_ascii_case("localhost"),
+        url::Host::Ipv4(ip) => ip.is_loopback(),
+        url::Host::Ipv6(ip) => ip.is_loopback(),
+    }
+}
+
+/// Whether `ip` is an internal/non-routable address `ardur fetch` must not be
+/// allowed to reach (the SSRF blocklist). Mirrors
+/// `ardur_tool_registry::builtins::http::is_internal_ip` — see that function's
+/// docs for the full range rationale (RFC 1918, link-local, CGNAT, 6to4,
+/// NAT64, IPv4-mapped/-compatible IPv6, and friends).
+fn fetch_is_internal_ip(ip: std::net::IpAddr) -> bool {
+    use std::net::{IpAddr, Ipv4Addr};
+    match ip {
+        IpAddr::V4(v4) => {
+            let octets = v4.octets();
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || octets[0] == 0
+                || (octets[0] == 198 && (octets[1] & 0xFE) == 18)
+                || (octets[0] == 100 && (octets[1] & 0xC0) == 64)
+                || (octets[0] == 192 && octets[1] == 0 && (octets[2] == 0 || octets[2] == 2))
+                || (octets[0] == 198 && octets[1] == 51 && octets[2] == 100)
+                || (octets[0] == 203 && octets[1] == 0 && octets[2] == 113)
+                || v4.is_multicast()
+                || v4.is_broadcast()
+                || octets[0] >= 240
+        }
+        IpAddr::V6(v6) => {
+            if v6.is_loopback() {
+                return true;
+            }
+            if let Some(mapped) = v6.to_ipv4_mapped() {
+                return fetch_is_internal_ip(IpAddr::V4(mapped));
+            }
+            let segs = v6.segments();
+            let v4_from_segments = |hi: u16, lo: u16| {
+                Ipv4Addr::new(
+                    (hi >> 8) as u8,
+                    (hi & 0xFF) as u8,
+                    (lo >> 8) as u8,
+                    (lo & 0xFF) as u8,
+                )
+            };
+            if segs[0] == 0
+                && segs[1] == 0
+                && segs[2] == 0
+                && segs[3] == 0
+                && segs[4] == 0
+                && segs[5] == 0
+            {
+                let v4 = v4_from_segments(segs[6], segs[7]);
+                return fetch_is_internal_ip(IpAddr::V4(v4));
+            }
+            if segs[0] == 0x0064
+                && segs[1] == 0xff9b
+                && segs[2] == 0
+                && segs[3] == 0
+                && segs[4] == 0
+                && segs[5] == 0
+            {
+                let v4 = v4_from_segments(segs[6], segs[7]);
+                return fetch_is_internal_ip(IpAddr::V4(v4));
+            }
+            if segs[0] == 0x2002 {
+                let v4 = v4_from_segments(segs[1], segs[2]);
+                return fetch_is_internal_ip(IpAddr::V4(v4));
+            }
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || (segs[0] & 0xffc0) == 0xfe80
+                || (segs[0] & 0xfe00) == 0xfc00
+        }
+    }
+}
+
+/// Check `host`/`host_str` against the allowlist (Gate A), resolve to socket
+/// addresses, and reject any that land on an internal/private address unless
+/// the target genuinely is localhost (Gate B). Returns the vetted addresses
+/// so the caller can pin the connection to them (closes the DNS-rebind
+/// window between this check and the actual connect).
+async fn fetch_check_and_resolve(
+    host: &url::Host<&str>,
+    host_str: &str,
+    port: u16,
+    allowlist: &[String],
+) -> Result<Vec<std::net::SocketAddr>, CliError> {
+    if !allowlist.iter().any(|h| h.eq_ignore_ascii_case(host_str)) {
+        return Err(CliError::State(format!(
+            "host `{host_str}` is not in the allowlist; add it to ~/.ardur/http_allowlist.txt or use --allow-host"
+        )));
+    }
+
+    let is_localhost = fetch_host_is_localhost(host);
+
+    let addrs: Vec<std::net::SocketAddr> = match host {
+        url::Host::Ipv4(ip) => vec![std::net::SocketAddr::new(std::net::IpAddr::V4(*ip), port)],
+        url::Host::Ipv6(ip) => vec![std::net::SocketAddr::new(std::net::IpAddr::V6(*ip), port)],
+        url::Host::Domain(d) => tokio::net::lookup_host((*d, port))
+            .await
+            .map_err(|e| CliError::State(format!("could not resolve `{d}`: {e}")))?
+            .collect(),
+    };
+
+    if addrs.is_empty() {
+        return Err(CliError::State(format!(
+            "host `{host_str}` resolved to no addresses"
+        )));
+    }
+
+    if !is_localhost {
+        for addr in &addrs {
+            if fetch_is_internal_ip(addr.ip()) {
+                return Err(CliError::State(format!(
+                    "host `{host_str}` resolves to a private/internal address ({}); refusing to fetch (SSRF defence)",
+                    addr.ip()
+                )));
+            }
+        }
+    }
+
+    Ok(addrs)
+}
+
 /// Run `ardur fetch`.
+///
+/// Hardened against SSRF: every hop (including redirect targets) is
+/// re-validated against the host allowlist and the internal-IP blocklist,
+/// the vetted addresses are pinned into the request so DNS cannot rebind
+/// between the check and the connect, redirects are followed manually
+/// (auto-redirect disabled) so each hop re-runs both gates, and the response
+/// body is read incrementally and stopped at `--max-bytes` rather than fully
+/// buffered first.
 fn run_fetch(args: FetchArgs) -> Result<(), CliError> {
-    let url = args.url;
     let root = StateDirs::resolve()?.root;
 
     // Read allowlist from config if present.
     let mut allowlist: Vec<String> = Vec::new();
     let allowlist_path = root.join("http_allowlist.txt");
     if allowlist_path.is_file() {
-        let content = std::fs::read_to_string(&allowlist_path)?;
+        let content = read_string_no_follow(&allowlist_path)?;
         allowlist.extend(
             content
                 .lines()
@@ -2677,10 +3015,12 @@ fn run_fetch(args: FetchArgs) -> Result<(), CliError> {
     }
     allowlist.extend(args.allow_hosts);
 
-    // Safety check: refuse non-HTTP(S) schemes.
-    if !url.starts_with("http://") && !url.starts_with("https://") {
+    // Safety check: refuse non-HTTP(S) schemes before anything else, matching
+    // the pre-hardening error message.
+    if !args.url.starts_with("http://") && !args.url.starts_with("https://") {
         return Err(CliError::State(format!(
-            "only http:// and https:// URLs are supported, got `{url}`"
+            "only http:// and https:// URLs are supported, got `{}`",
+            args.url
         )));
     }
 
@@ -2690,34 +3030,87 @@ fn run_fetch(args: FetchArgs) -> Result<(), CliError> {
         ));
     }
 
-    let host = url
-        .split('/')
-        .nth(2)
-        .unwrap_or("")
-        .split(':')
-        .next()
-        .unwrap_or("")
-        .to_lowercase();
-    if !allowlist.iter().any(|h| h.to_lowercase() == host) {
-        return Err(CliError::State(format!(
-            "host `{host}` is not in the allowlist; add it to {} or use --allow-host",
-            allowlist_path.display()
-        )));
-    }
+    let mut current = url::Url::parse(&args.url)
+        .map_err(|e| CliError::State(format!("invalid url `{}`: {e}", args.url)))?;
+
+    let max_bytes = args.max_bytes;
 
     let rt = tokio::runtime::Runtime::new()?;
-    let body = rt.block_on(async {
-        let client = reqwest::Client::new();
-        let response = client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| CliError::State(format!("request failed: {e}")))?;
-        let text = response
-            .text()
-            .await
-            .map_err(|e| CliError::State(format!("read failed: {e}")))?;
-        Ok::<String, CliError>(text.chars().take(args.max_bytes).collect())
+    let body: Vec<u8> = rt.block_on(async {
+        let mut redirects = 0usize;
+        loop {
+            // Re-checked on every hop (including redirect targets), since a
+            // 3xx Location can point at any scheme.
+            let scheme = current.scheme();
+            if scheme != "http" && scheme != "https" {
+                return Err(CliError::State(format!(
+                    "scheme `{scheme}` is not permitted; only http and https"
+                )));
+            }
+
+            let host = current
+                .host()
+                .ok_or_else(|| CliError::State(format!("url `{current}` has no host")))?;
+            let host_str = current
+                .host_str()
+                .ok_or_else(|| CliError::State(format!("url `{current}` has no host")))?
+                .to_string();
+            let port = current.port_or_known_default().ok_or_else(|| {
+                CliError::State(format!("url `{current}` has no port and no known default"))
+            })?;
+
+            let addrs = fetch_check_and_resolve(&host, &host_str, port, &allowlist).await?;
+
+            let client = reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .resolve_to_addrs(&host_str, &addrs)
+                .build()
+                .map_err(|e| CliError::State(format!("failed to build http client: {e}")))?;
+
+            let mut resp = client
+                .get(current.clone())
+                .send()
+                .await
+                .map_err(|e| CliError::State(format!("request to `{current}` failed: {e}")))?;
+
+            let status = resp.status();
+            if status.is_redirection() {
+                if let Some(location) = resp
+                    .headers()
+                    .get(reqwest::header::LOCATION)
+                    .and_then(|v| v.to_str().ok())
+                {
+                    redirects += 1;
+                    if redirects > FETCH_REDIRECT_LIMIT {
+                        return Err(CliError::State(format!(
+                            "too many redirects (exceeded limit of {FETCH_REDIRECT_LIMIT})"
+                        )));
+                    }
+                    current = current.join(location).map_err(|e| {
+                        CliError::State(format!("invalid redirect target `{location}`: {e}"))
+                    })?;
+                    continue;
+                }
+            }
+
+            let mut body = Vec::new();
+            loop {
+                let chunk = resp.chunk().await.map_err(|e| {
+                    CliError::State(format!("reading body of `{current}` failed: {e}"))
+                })?;
+                let Some(chunk) = chunk else { break };
+                let remaining = max_bytes.saturating_sub(body.len());
+                if chunk.len() > remaining {
+                    body.extend_from_slice(&chunk[..remaining]);
+                    break;
+                }
+                body.extend_from_slice(&chunk);
+                if body.len() >= max_bytes {
+                    break;
+                }
+            }
+            return Ok(body);
+        }
     })?;
 
     match args.output {
@@ -2725,7 +3118,7 @@ fn run_fetch(args: FetchArgs) -> Result<(), CliError> {
             std::fs::write(&path, &body)?;
             println!("wrote {} bytes to {}", body.len(), path.display());
         }
-        None => println!("{body}"),
+        None => println!("{}", String::from_utf8_lossy(&body)),
     }
     Ok(())
 }
@@ -2810,7 +3203,7 @@ fn read_channels(root: &Path) -> Result<Vec<ChannelRecord>, CliError> {
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for entry in entries.flatten() {
             if entry.path().extension().is_some_and(|e| e == "json") {
-                if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                if let Ok(content) = read_string_no_follow(&entry.path()) {
                     if let Ok(v) = serde_json::from_str::<ChannelRecord>(&content) {
                         records.push(v);
                     }
@@ -2856,6 +3249,7 @@ fn run_channel(args: ChannelArgs) -> Result<(), CliError> {
             }
         }
         ChannelAction::Add { channel_type, name } => {
+            sanitize_state_id(&name)?;
             let path = dir.join(format!("{name}.json"));
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -2872,10 +3266,11 @@ fn run_channel(args: ChannelArgs) -> Result<(), CliError> {
                     prefix = default_env_prefix(&channel_type, &name)
                 ),
             };
-            std::fs::write(
+            write_private_file_atomic_no_follow(
                 &path,
                 serde_json::to_string_pretty(&record)
-                    .map_err(|e| CliError::State(e.to_string()))?,
+                    .map_err(|e| CliError::State(e.to_string()))?
+                    .as_bytes(),
             )?;
             println!("added channel {name} ({channel_type})");
             println!("  env prefix: {}", record.env_prefix);
@@ -2897,6 +3292,7 @@ fn run_channel(args: ChannelArgs) -> Result<(), CliError> {
             }
         }
         ChannelAction::Remove { name } => {
+            sanitize_state_id(&name)?;
             let path = dir.join(format!("{name}.json"));
             if !path.is_file() {
                 return Err(CliError::State(format!("channel `{name}` not found")));
@@ -2905,18 +3301,20 @@ fn run_channel(args: ChannelArgs) -> Result<(), CliError> {
             println!("removed channel {name}");
         }
         ChannelAction::Set { name, status } => {
+            sanitize_state_id(&name)?;
             let path = dir.join(format!("{name}.json"));
             if !path.is_file() {
                 return Err(CliError::State(format!("channel `{name}` not found")));
             }
-            let content = std::fs::read_to_string(&path)?;
+            let content = read_string_no_follow(&path)?;
             let mut record: ChannelRecord =
                 serde_json::from_str(&content).map_err(|e| CliError::State(e.to_string()))?;
             record.enabled = status == "enabled";
-            std::fs::write(
+            write_private_file_atomic_no_follow(
                 &path,
                 serde_json::to_string_pretty(&record)
-                    .map_err(|e| CliError::State(e.to_string()))?,
+                    .map_err(|e| CliError::State(e.to_string()))?
+                    .as_bytes(),
             )?;
             println!("channel {name} is now {status}");
         }

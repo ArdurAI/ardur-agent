@@ -13,7 +13,10 @@ p256 = { workspace = true }
 # OsRng for key generation — p256's `SigningKey::random` needs a CSPRNG;
 # signing itself is deterministic (RFC 6979), so no RNG on the hot path.
 rand_core = { workspace = true }
-sha2 = { workspace = true }
+# The shared cost/id/digest primitives (CostTuple, HolderId, UnixTsMillis,
+# Sha256Digest) are owned by the workspace's leaf `core-types` crate; the
+# digest's SHA-256 hashing rides in there, so `sha2` is no longer a direct dep.
+ardur-core-types = { workspace = true }
 base64 = { workspace = true }
 regex = { workspace = true }
 once_cell = { workspace = true }
