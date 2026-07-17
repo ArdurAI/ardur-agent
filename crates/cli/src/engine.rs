@@ -151,9 +151,7 @@ impl ChatEngine {
 
         // Stage 4: finalize the actual cost and refund the unspent delta.
         let used_cents = result.cost.cents;
-        self.gate
-            .finalize(reservation, runtime_cost_to_gate(&result.cost))
-            .await?;
+        self.gate.finalize(reservation, result.cost).await?;
 
         // Decrement the displayed budget by the turn's actual cost, saturating
         // at zero.
@@ -172,17 +170,5 @@ impl ChatEngine {
             used_cents,
             remaining_cents: remaining,
         })
-    }
-}
-
-/// Widen the runtime's [`CostTuple`](ardur_runtime::CostTuple) into the cost
-/// gate's, mapping the fractional attention score onto the gate's integer axis.
-fn runtime_cost_to_gate(cost: &ardur_runtime::CostTuple) -> GateCostTuple {
-    GateCostTuple {
-        tokens_in: cost.tokens_in,
-        tokens_out: cost.tokens_out,
-        cents: cost.cents,
-        wall_ms: cost.wall_ms,
-        attention_score: cost.attention_score as u64,
     }
 }

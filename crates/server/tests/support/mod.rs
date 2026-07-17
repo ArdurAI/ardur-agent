@@ -53,9 +53,10 @@ pub fn sign(timestamp: &str, body: &str) -> String {
 pub fn test_config(data_dir: &TempDir, slack_base: Option<String>) -> Config {
     Config {
         anthropic_api_key: String::new(),
-        slack_bot_token: BOT_TOKEN.to_string(),
-        slack_signing_secret: SIGNING_SECRET.to_string(),
-        slack_app_id: APP_ID.to_string(),
+        slack_enabled: true,
+        slack_bot_token: Some(BOT_TOKEN.to_string()),
+        slack_signing_secret: Some(SIGNING_SECRET.to_string()),
+        slack_app_id: Some(APP_ID.to_string()),
         slack_allowed_senders: vec!["U4242".to_string()],
         data_dir: data_dir.path().to_path_buf(),
         bind_addr: "127.0.0.1:0".to_string(),
@@ -78,6 +79,27 @@ pub fn test_config(data_dir: &TempDir, slack_base: Option<String>) -> Config {
         memory_backend: MemoryBackend::InMemory,
         qdrant_url: None,
         qdrant_collection: None,
+        enable_shell_tool: false,
+        shell_allowlist: Vec::new(),
+        enable_http_tool: false,
+        http_allowlist: Vec::new(),
+        file_tool_root: None,
+    }
+}
+
+/// A [`Config`] like [`test_config`] but with the Slack channel disabled — the
+/// HTTP-only boot mode. The three `slack_*` credentials are `None`, so
+/// [`AppState::boot`] builds no Slack adapter and [`build_router`] omits the
+/// `/slack/events` route. `/chat` still works.
+#[must_use]
+pub fn test_config_http_only(data_dir: &TempDir) -> Config {
+    Config {
+        slack_enabled: false,
+        slack_bot_token: None,
+        slack_signing_secret: None,
+        slack_app_id: None,
+        slack_allowed_senders: Vec::new(),
+        ..test_config(data_dir, None)
     }
 }
 

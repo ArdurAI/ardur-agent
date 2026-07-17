@@ -417,15 +417,49 @@ impl QdrantMemoryRuntime {
     /// `pub(crate)` so the sibling [`HybridMemoryRetriever`](crate::HybridMemoryRetriever)
     /// can bridge its async recall onto this owned runtime when serving the
     /// synchronous `MemoryRuntime::search` (§7.0c).
-    pub(crate) fn block_on<F: std::future::Future>(&self, fut: F) -> F::Output {
-        match tokio::runtime::Handle::try_current() {
-            // Inside an ambient runtime: tell it we are about to block this
-            // worker, then drive `fut` on our own runtime. Requires the ambient
-            // runtime to be multi-threaded (the server's `#[tokio::main]` and the
-            // gated tests use a multi-thread flavor).
-            Ok(_) => tokio::task::block_in_place(|| self.rt.block_on(fut)),
-            Err(_) => self.rt.block_on(fut),
+    pub(crate) fn block_on<F>(&self, fut: F) -> F::Output
+    where
+        F: std::future::Future + Send,
+        F::Output: Send,
+    {
+        block_on_runtime(&self.rt, fut)
+    }
+}
+
+/// Drive `fut` to completion on the owned `rt`, cooperating with whatever
+/// ambient Tokio runtime the caller is on.
+///
+/// The subtlety is `block_in_place`: it is only legal under a **multi-thread**
+/// runtime and **panics** under a current-thread one (M0c). The previous code
+/// always used it when an ambient runtime was present, so a caller on
+/// `#[tokio::main(flavor = "current_thread")]` turned every sync memory op into
+/// a panic. Dispatch on the flavor: block-in-place under multi-thread, and under
+/// a current-thread ambient runtime fall back to a dedicated scoped thread
+/// (calling `self.rt.block_on` on the ambient thread would itself panic —
+/// "cannot start a runtime from within a runtime").
+fn block_on_runtime<F>(rt: &tokio::runtime::Runtime, fut: F) -> F::Output
+where
+    F: std::future::Future + Send,
+    F::Output: Send,
+{
+    use tokio::runtime::RuntimeFlavor;
+
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(|| rt.block_on(fut))
         }
+        // Current-thread (or any non-multi-thread) ambient runtime: run on a
+        // dedicated thread that owns no ambient runtime, so `rt.block_on` is
+        // legal there. `scope` lets the thread borrow `rt` and `fut` without a
+        // `'static` bound.
+        Ok(_) => std::thread::scope(|scope| {
+            scope
+                .spawn(|| rt.block_on(fut))
+                .join()
+                .expect("memory block_on worker thread panicked")
+        }),
+        // No ambient runtime: drive directly.
+        Err(_) => rt.block_on(fut),
     }
 }
 
@@ -618,6 +652,44 @@ fn now_ms() -> u64 {
 mod tests {
     use super::*;
     use ardur_memory::{HolderId, RecordKind};
+
+    fn owned_multi_thread_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("owned runtime builds")
+    }
+
+    /// M0c: a sync memory op under a **current-thread** ambient runtime must not
+    /// panic. The old `block_in_place` path panicked here; the flavor-aware
+    /// fallback drives the future on a dedicated thread instead.
+    #[test]
+    fn block_on_runtime_survives_a_current_thread_ambient_runtime() {
+        let owned = owned_multi_thread_runtime();
+        let ambient = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread ambient runtime builds");
+        let out = ambient.block_on(async { block_on_runtime(&owned, async { 21 * 2 }) });
+        assert_eq!(out, 42);
+    }
+
+    /// The multi-thread ambient path (production) still drives the future.
+    #[test]
+    fn block_on_runtime_works_under_a_multi_thread_ambient_runtime() {
+        let owned = owned_multi_thread_runtime();
+        let ambient = owned_multi_thread_runtime();
+        let out = ambient.block_on(async { block_on_runtime(&owned, async { 7 + 35 }) });
+        assert_eq!(out, 42);
+    }
+
+    /// And with no ambient runtime at all it drives directly.
+    #[test]
+    fn block_on_runtime_works_with_no_ambient_runtime() {
+        let owned = owned_multi_thread_runtime();
+        assert_eq!(block_on_runtime(&owned, async { 40 + 2 }), 42);
+    }
 
     fn fact(
         subject: &str,

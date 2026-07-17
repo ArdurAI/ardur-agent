@@ -92,6 +92,9 @@ chrono = { workspace = true }
 ardur-cron = { workspace = true }
 # ARD-144/145: connector HTTP fetch.
 reqwest = { workspace = true }
+# R1: URL host parsing for the SSRF-hardened `ardur fetch` path (mirrors
+# crates/tool-registry's http.fetch host/IP classification).
+url = { workspace = true }
 # ARD-120/121/132: supply-chain audit tooling.
 ignore = { workspace = true }
 cargo-lock = { workspace = true }
@@ -99,6 +102,7 @@ cargo-lock = { workspace = true }
 [dev-dependencies]
 # Integration tests are a separate crate; they re-declare the deps they name.
 assert_cmd = { workspace = true }
+predicates = { workspace = true }
 tokio = { workspace = true }
 ardur-runtime = { workspace = true }
 ardur-cost-gate = { workspace = true }
