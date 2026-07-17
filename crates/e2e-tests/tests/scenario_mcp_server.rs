@@ -28,6 +28,13 @@ use serde_json::json;
 /// port. Returns the base MCP endpoint URL (`http://addr/mcp/ardur`).
 async fn spawn_server(bearer: &str) -> String {
     let data_dir = tempfile::tempdir().expect("tempdir");
+    // macOS tempdirs live under /var/folders/... (where /var symlinks to
+    // /private/var); the schema-migration guard refuses symlinks in trusted
+    // state paths, so canonicalize the data_dir before passing it to the server.
+    let canonical_data_dir = data_dir
+        .path()
+        .canonicalize()
+        .expect("canonicalize tempdir");
     let config = Config {
         anthropic_api_key: String::new(),
         enable_shell_tool: false,
@@ -40,7 +47,7 @@ async fn spawn_server(bearer: &str) -> String {
         slack_signing_secret: Some("e2e-signing-secret-0000000000".to_string()),
         slack_app_id: Some("A0E2EMCP".to_string()),
         slack_allowed_senders: Vec::new(),
-        data_dir: data_dir.path().to_path_buf(),
+        data_dir: canonical_data_dir,
         bind_addr: "127.0.0.1:0".to_string(),
         chat_bearer_tokens: vec!["e2e-chat-token".to_string()],
         admin_bearer_tokens: Vec::new(),

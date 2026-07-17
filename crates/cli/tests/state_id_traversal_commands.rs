@@ -16,9 +16,15 @@ use assert_cmd::Command;
 /// it would mean the sanitizer was bypassed.
 fn assert_id_rejected(args: &[&str], evil_id: &str) {
     let dir = tempfile::tempdir().expect("tempdir");
+    // macOS tempdirs live under /var/folders/... where /var is a symlink to
+    // /private/var; the state schema-migration guard refuses symlinks in the
+    // trusted state path, so canonicalize to strip the symlink before the
+    // binary resolves HOME — otherwise the traversal assertion never runs
+    // and the test fails on the symlink guard instead.
+    let canonical_home = dir.path().canonicalize().expect("canonicalize tempdir");
     let output = Command::cargo_bin("ardur")
         .expect("the `ardur` binary builds")
-        .env("HOME", dir.path())
+        .env("HOME", &canonical_home)
         .args(args)
         .assert()
         .failure()
@@ -100,9 +106,10 @@ fn marketplace_remove_rejects_traversal_id() {
 #[test]
 fn ordinary_ids_still_work_end_to_end() {
     let dir = tempfile::tempdir().expect("tempdir");
+    let canonical_home = dir.path().canonicalize().expect("canonicalize tempdir");
     Command::cargo_bin("ardur")
         .expect("the `ardur` binary builds")
-        .env("HOME", dir.path())
+        .env("HOME", &canonical_home)
         .args(["channel", "add", "discord", "support-bot.v2"])
         .assert()
         .success();
