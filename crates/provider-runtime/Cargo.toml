@@ -12,6 +12,9 @@ repository.workspace = true
 # (the billed cost). We re-export rather than redefine so the runtime and the
 # provider layer never drift into two incompatible schemas.
 ardur-runtime = { workspace = true }
+# `ModelId` is owned by the workspace's leaf `core-types` crate and re-exported
+# here so the provider and cost-gate layers share one model-id type.
+ardur-core-types = { workspace = true }
 # Object-safe `Provider::complete` — async-trait boxes the returned future so
 # `dyn Provider` works as a registry value (§3.0).
 async-trait = { workspace = true }

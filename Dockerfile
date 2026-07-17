@@ -7,7 +7,7 @@
 # binary, so the runtime image does not need curl/wget/shell packages.
 # ARD-303: Docker build is validated in CI with a /healthz smoke test.
 
-FROM rust:1.96-slim@sha256:31ee7fc65186be7e0e0ccb3f2ca305f14e4739e7642a1ae65753aa5d7b874523 AS builder
+FROM rust:1.97-slim@sha256:14c4fe50ea427dc42381a1a09a9a839c1d2346a2e508cd491bf02c659dbc0ed7 AS builder
 
 # pkg-config + libssl-dev cover openssl-sys transitive dependencies. g++ provides
 # libstdc++ for native ML/search dependencies at the final link step.
@@ -26,7 +26,7 @@ COPY . .
 RUN cargo build --release --bin ardur-server --bin ardur-healthcheck
 RUN mkdir -p /ardur-data
 
-FROM gcr.io/distroless/cc-debian13:nonroot@sha256:aded2458d026e046cb68199db0e5793e1028ffa143f7258f3c4278253e20add7
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:d97bc0a941b8d4be647dc0ee75b264ddbb772f1ac5ba690a4309c00723b23775
 
 COPY --from=builder /build/target/release/ardur-server /usr/local/bin/ardur-server
 COPY --from=builder /build/target/release/ardur-healthcheck /usr/local/bin/ardur-healthcheck
