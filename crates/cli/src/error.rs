@@ -39,6 +39,15 @@ pub enum CliError {
     State(String),
 }
 
+/// Cron-UI errors (§9.4) surface as CLI state errors. A refused mutation
+/// (missing cap-token scope) and a not-found cron both land here with their
+/// operator-facing message preserved.
+impl From<ardur_cron_ui::CronUiError> for CliError {
+    fn from(e: ardur_cron_ui::CronUiError) -> Self {
+        CliError::State(e.to_string())
+    }
+}
+
 /// Cost-admission failures surface as runtime failures: admitting a turn is part
 /// of running it. A denied or exhausted budget maps onto
 /// [`RuntimeError::CostCeilingExceeded`]; anything else is an internal runtime

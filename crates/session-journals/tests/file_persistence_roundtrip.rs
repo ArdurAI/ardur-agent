@@ -17,7 +17,7 @@ async fn file_journal_roundtrips_across_a_drop() {
             journal
                 .append(JournalEntry::UserMessage {
                     content: format!("persisted {i}"),
-                    at: 42 + i,
+                    at: ardur_session_journals::UnixTsMillis(42 + i),
                 })
                 .await
                 .expect("append");
@@ -34,7 +34,7 @@ async fn file_journal_roundtrips_across_a_drop() {
         match entry {
             JournalEntry::UserMessage { content, at } => {
                 assert_eq!(content, &format!("persisted {i}"));
-                assert_eq!(*at, 42 + i as u64);
+                assert_eq!(at.get(), 42 + i as u64);
             }
             other => panic!("unexpected entry at {i}: {other:?}"),
         }
@@ -44,7 +44,7 @@ async fn file_journal_roundtrips_across_a_drop() {
     let next = reopened
         .append(JournalEntry::UserMessage {
             content: "after reopen".into(),
-            at: 99,
+            at: ardur_session_journals::UnixTsMillis(99),
         })
         .await
         .expect("append after reopen");
@@ -60,7 +60,7 @@ async fn file_journal_drops_and_truncates_torn_trailing_line() {
     journal
         .append(JournalEntry::UserMessage {
             content: "before crash".into(),
-            at: 1,
+            at: ardur_session_journals::UnixTsMillis(1),
         })
         .await
         .expect("append first");
@@ -81,7 +81,7 @@ async fn file_journal_drops_and_truncates_torn_trailing_line() {
     let next = reopened
         .append(JournalEntry::UserMessage {
             content: "after repair".into(),
-            at: 2,
+            at: ardur_session_journals::UnixTsMillis(2),
         })
         .await
         .expect("append after repair");

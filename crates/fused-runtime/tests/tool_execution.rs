@@ -29,7 +29,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use ardur_cedar_policy::{CedarPolicyBundle, PolicyBundle, PolicySource};
-use ardur_cost_gate::{CostEnvelope, ManualClock};
+use ardur_cost_gate::{CostEnvelope, ManualClock, UnixTsMillis};
 use ardur_fused_runtime::{load_persisted_chain, verify_persisted_chain};
 use ardur_injection_defense::{FilterRegistry, PatternBasedFilter};
 use ardur_lifecycle_hooks::HookRegistry;
@@ -187,7 +187,7 @@ fn envelope_for(cost: CostTuple) -> CostEnvelope {
         tokens_out_max: cost.tokens_out as u32,
         cents_max: cost.cents as u32,
         wall_ms_max: cost.wall_ms as u32,
-        attention_score_max: cost.attention_score.ceil() as u32,
+        attention_score_max: cost.attention_score as u32,
     }
 }
 
@@ -449,7 +449,7 @@ async fn single_round_trip() {
 #[tokio::test]
 async fn tool_cap_token_expiry_is_rechecked_at_tool_invocation_time() {
     let invocations = Arc::new(AtomicUsize::new(0));
-    let clock = Arc::new(ManualClock::new(support::NOW_MS));
+    let clock = Arc::new(ManualClock::new(UnixTsMillis(support::NOW_MS)));
     let provider = Arc::new(ClockAdvancingProvider::new(
         vec![tool_call("call_1", "echo", json!({}))],
         stop("default"),
@@ -741,21 +741,21 @@ async fn post_receipt_hook_cost_matches_combined_receipt_cost_for_tool_turn() {
         tokens_out: 3,
         cents: 5,
         wall_ms: 7,
-        attention_score: 0.25,
+        attention_score: 250,
     };
     let tool_cost = CostTuple {
         tokens_in: 11,
         tokens_out: 13,
         cents: 17,
         wall_ms: 19,
-        attention_score: 0.5,
+        attention_score: 500,
     };
     let expected = CostTuple {
         tokens_in: 13,
         tokens_out: 16,
         cents: 22,
         wall_ms: 26,
-        attention_score: 0.75,
+        attention_score: 750,
     };
     let tool_name = "priced.tool";
     let provider = Arc::new(ScriptedProvider::new(

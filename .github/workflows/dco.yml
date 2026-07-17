@@ -26,6 +26,12 @@ jobs:
         run: |
           set -uo pipefail
 
+          # Dependabot commits are exempt — the bot cannot sign off.
+          if [ "${{ github.event.pull_request.user.login }}" = "dependabot[bot]" ]; then
+            echo "SKIP (dependabot): all commits exempt from DCO"
+            exit 0
+          fi
+
           # Load exempt short-SHAs (drop comments and blank lines, take 1st field).
           EXEMPT="$(grep -vE '^[[:space:]]*(#|$)' .github/dco-exempt-shas.txt | awk '{print $1}')"
 
