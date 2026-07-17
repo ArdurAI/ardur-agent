@@ -783,6 +783,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "ardur-media-video"
+version = "0.0.1"
+dependencies = [
+ "ardur-injection-defense",
+ "ardur-media-decode",
+ "ardur-receipt",
+ "ardur-runtime",
+ "ardur-tool-registry",
+ "async-trait",
+ "base64 0.22.1",
+ "hex",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror 2.0.18",
+ "tokio",
+ "url",
+ "uuid",
+ "wiremock",
+]
+
+[[package]]
 name = "ardur-memory"
 version = "0.0.1"
 dependencies = [
@@ -1047,6 +1070,7 @@ dependencies = [
  "ardur-fused-runtime",
  "ardur-hooks-openclaw-compat",
  "ardur-media-audio",
+ "ardur-media-video",
  "ardur-memory",
  "ardur-memory-qdrant",
  "ardur-messaging-gateway",
