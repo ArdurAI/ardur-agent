@@ -72,7 +72,7 @@ use std::time::Duration;
 
 use ardur_provider_runtime::{
     CompletionRequest, CompletionResponse, FinishReason, ModelId, Provider, ProviderError,
-    ProviderStream, RateCard, StreamEvent, Usage,
+    ProviderStream, RateCard, StreamEvent, Usage, parse_retry_after_ms,
 };
 use ardur_runtime::{CostTuple, ProviderId, Role};
 use async_trait::async_trait;
@@ -552,17 +552,6 @@ fn role_str(role: Role) -> &'static str {
     }
 }
 
-/// Parse the `retry-after` header (whole seconds) into milliseconds, defaulting
-/// to `0` when absent or unparseable.
-fn parse_retry_after_ms(headers: &reqwest::header::HeaderMap) -> u64 {
-    headers
-        .get(reqwest::header::RETRY_AFTER)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.trim().parse::<u64>().ok())
-        .map(|secs| secs.saturating_mul(1000))
-        .unwrap_or(0)
-}
-
 /// Map a reqwest send failure onto the crate's error taxonomy. A connection
 /// refusal is the common "the daemon isn't running" case, so it surfaces as an
 /// [`Upstream`](ProviderError::Upstream) error with a hint pointing at the base
@@ -851,7 +840,22 @@ where
             }
             // Pull more bytes.
             match state.stream.next().await {
-                Some(Ok(bytes)) => state.buf.extend_from_slice(bytes.as_ref()),
+                Some(Ok(bytes)) => {
+                    state.buf.extend_from_slice(bytes.as_ref());
+                    // ARD-503: a well-formed NDJSON line is a small JSON object;
+                    // an endpoint that never emits `\n` would otherwise grow the
+                    // carry buffer without bound. Cap it and fail closed.
+                    if state.buf.len() > MAX_NDJSON_LINE_BYTES {
+                        state.buf.clear();
+                        state.finished = true;
+                        return Some((
+                            Err(ProviderError::Upstream(format!(
+                                "NDJSON line exceeded {MAX_NDJSON_LINE_BYTES} bytes without a newline"
+                            ))),
+                            state,
+                        ));
+                    }
+                }
                 Some(Err(e)) => {
                     state.finished = true;
                     return Some((Err(e), state));
@@ -862,6 +866,11 @@ where
     })
     .boxed()
 }
+
+/// ARD-503: ceiling on a single un-terminated NDJSON line from Ollama (1 MiB —
+/// far above any real streamed object) before the carry buffer is treated as a
+/// malformed, unbounded stream.
+const MAX_NDJSON_LINE_BYTES: usize = 1024 * 1024;
 
 /// Strip a single trailing `\n` and/or `\r` from a buffered line.
 fn trim_line(line: &[u8]) -> &[u8] {
