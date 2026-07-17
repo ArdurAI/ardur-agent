@@ -1,0 +1,11 @@
+id: multi_turn
+description: Agent should retain context across turns on a shared session id.
+prompt: "My favourite colour is teal. Remember that."
+follow_ups:
+  - "What did I just tell you my favourite colour was? Answer in one word."
+expected:
+  contains: ["teal"]
+  regex: "(?i)\\bteal\\b"
+max_tokens: 200
+max_turns: 2
+timeout_secs: 60

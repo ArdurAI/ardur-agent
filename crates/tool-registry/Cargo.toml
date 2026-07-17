@@ -1,0 +1,71 @@
+[package]
+name = "ardur-tool-registry"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The §1.0 runtime owns the shared value types a tool call speaks in —
+# CapTokenRef (the authorizing token), SessionId (the owning session), and
+# CostTuple (the billed cost). We re-export rather than redefine so the runtime
+# and the tool layer never drift into two incompatible schemas (§6.0).
+ardur-runtime = { workspace = true }
+# Object-safe `Tool::invoke` — async-trait boxes the returned future so
+# `dyn Tool` works as a registry value (§6.0).
+async-trait = { workspace = true }
+# §6.1 — the built-in shell/file tools run child processes and touch the
+# filesystem off the async runtime: `tokio::process::Command` (timeout-wrapped
+# and `kill_on_drop`), `tokio::time::timeout`, and `tokio::fs`.
+tokio = { workspace = true }
+serde = { workspace = true }
+# Tool input/output payloads and JSON-Schema documents are untyped JSON.
+serde_json = { workspace = true }
+# §8.X — SKILL.md frontmatter is YAML; parsed into `SkillFrontmatter`.
+serde_yaml = { workspace = true }
+# §8.X — the skill loader warns (not fails) on a malformed SKILL.md so one bad
+# skill never blocks the rest.
+tracing = { workspace = true }
+thiserror = { workspace = true }
+# `ToolError::Internal` carries an opaque execution failure verbatim.
+anyhow = { workspace = true }
+# Workspace pins v7 (time-ordered ids); per-call invocation-correlation ids are
+# v4 (random) per §6.0 Phase 1, so opt v4 in on top of the shared pin (Cargo
+# unifies the feature set).
+uuid = { workspace = true, features = ["v4"] }
+# §6.0 Phase 2 — the MCP bridge: `ArdurMcpServer` (server `ServerHandler`) and
+# `RemoteMcpToolset` (Streamable-HTTP client). Pinned at the workspace root.
+rmcp = { workspace = true }
+# Timeout + retry/backoff + circuit-breaker wrapping the MCP client's connect/
+# tools-list/tools-call network boundary — the shared resilience layer.
+ardur-resilience = { workspace = true }
+# Constant-time bearer-token comparison for the MCP HTTP admission allowlist.
+subtle = { workspace = true }
+# §6.2 — the built-in `http.fetch` tool's HTTP(S) client. `resolve_to_addrs`
+# pins the connection to the SSRF-vetted IPs; the manual redirect follower
+# (Policy::none) re-checks every hop.
+reqwest = { workspace = true }
+# §6.2 — typed URL parsing + host classification (domain vs IPv4/IPv6 literal)
+# backing the `http.fetch` allowlist and SSRF checks.
+url = { workspace = true }
+# §6.0 — destructive-command detection for the shell tool's defence-in-depth.
+regex = { workspace = true }
+once_cell = { workspace = true }
+
+[dev-dependencies]
+# Integration tests are a separate crate; the async `invoke` calls need a
+# runtime to poll them.
+tokio = { workspace = true }
+serde_json = { workspace = true }
+# The MCP client round-trip test serves an `ArdurMcpServer` over a real TCP
+# listener via the rmcp Streamable-HTTP tower service mounted on axum, then
+# connects a `RemoteMcpToolset` back to it.
+axum = { workspace = true }
+# §8.X — the skill-loader integration tests stage SKILL.md trees in a throwaway
+# directory.
+tempfile = { workspace = true }
+# §6.2 — a mock HTTP origin for the `http.fetch` integration tests: 200/500
+# bodies, long bodies for truncation, slow responses for the timeout, and
+# 302 chains for redirect following.
+wiremock = { workspace = true }

@@ -1,0 +1,47 @@
+[package]
+name = "ardur-multi-agent"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The §1.0 runtime owns the child `ChatRuntime` a sub-agent wraps, plus the
+# shared value types a turn speaks in — `ChatMessage`, `SessionId`,
+# `CapTokenRef` (the authorizing token handle), and `ReceiptId`. We re-export
+# rather than redefine so the parent and sub-agent layers never drift into two
+# incompatible schemas (§5.0).
+ardur-runtime = { workspace = true }
+# §11.14 cap-tokens — a sub-agent's authority is the parent token narrowed by
+# `AttenuationRule`s (offline Biscuit attenuation), verified against the issuer
+# root. The attenuation + verification surface is the core of sub-agent
+# isolation.
+ardur-cap-token = { workspace = true }
+# §11.14 receipt vocab — `CostTuple` and `UnixTsMillis` are the receipt-facing
+# cost/timestamp types the termination receipt and per-ask response report in
+# (§5.7 subagent receipt vocab, ADR-Phase3-234..237).
+ardur-receipt = { workspace = true }
+# §11.14 cost-gate — `CostEnvelope` is the per-sub-agent lifetime budget ceiling
+# the runtime reserves each ask against.
+ardur-cost-gate = { workspace = true }
+# Object-safe async `MultiAgentRuntime`; `(?Send)` because the §1.0
+# `ChatRuntime::submit` future carries no Send guarantee (it is return-position
+# `impl Future`), so the boxed runtime futures are not required to be Send.
+async-trait = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+# `MultiAgentError::Internal` carries an opaque attenuation/runtime failure
+# verbatim.
+anyhow = { workspace = true }
+# Non-poisoning lock over the in-memory agent registry.
+parking_lot = { workspace = true }
+# Termination receipt ids are random per-event (UUIDv4); the workspace pins v7,
+# so opt v4 in on top (Cargo unifies the feature set).
+uuid = { workspace = true, features = ["v4"] }
+
+[dev-dependencies]
+# The trait surface is async; tests drive it on a Tokio runtime. `futures` joins
+# the concurrent sub-agent asks without spawning (the runtime is `?Send`).
+tokio = { workspace = true }
+futures = { workspace = true }
