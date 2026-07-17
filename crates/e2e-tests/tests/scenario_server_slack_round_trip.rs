@@ -77,9 +77,15 @@ async fn server_routes_signed_slack_message_through_runtime_to_chat_post_message
     let data_dir = tempfile::tempdir().expect("tempdir");
     let config = Config {
         anthropic_api_key: String::new(),
-        slack_bot_token: BOT_TOKEN.to_string(),
-        slack_signing_secret: SIGNING_SECRET.to_string(),
-        slack_app_id: APP_ID.to_string(),
+        enable_shell_tool: false,
+        shell_allowlist: Vec::new(),
+        enable_http_tool: false,
+        http_allowlist: Vec::new(),
+        file_tool_root: None,
+        slack_enabled: true,
+        slack_bot_token: Some(BOT_TOKEN.to_string()),
+        slack_signing_secret: Some(SIGNING_SECRET.to_string()),
+        slack_app_id: Some(APP_ID.to_string()),
         slack_allowed_senders: vec!["U0DEPLOY".to_string()],
         data_dir: data_dir.path().to_path_buf(),
         bind_addr: "127.0.0.1:0".to_string(),
@@ -167,17 +173,29 @@ async fn server_routes_signed_slack_message_through_runtime_to_chat_post_message
     );
 
     // Boot persisted the receipt chain + journal — the deployment is durable.
-    //
-    // The worker sends the final `chat.update` mid-stream, from inside the
-    // fused-runtime generator's `ProviderStream` stage; receipt minting
-    // (`ReceiptMint`, including the `sync_all`-backed `persist_receipt`) is a
-    // *later* stage of the same turn and only runs once the worker resumes
-    // polling the stream after `edit_reply` returns. So the second Slack call
-    // completing is not evidence the receipt file already exists — poll for
-    // it the same way we poll for the Slack posts, instead of asserting
-    // immediately.
-    let receipt_path = data_dir.path().join("receipts/chain.jsonl");
-    wait_for_file(&receipt_path, Duration::from_secs(10)).await;
+    // The worker persists the receipt chain asynchronously and can lag the final
+    // Slack post it precedes, so poll for the file (as the reply wait does) rather
+    // than checking it the instant the posts land — an instant check races the
+    // write under CI load (macOS runner flake).
+    let receipt_chain = data_dir.path().join("receipts/chain.jsonl");
+    assert!(
+        wait_for_file(&receipt_chain, Duration::from_secs(10)).await,
+        "the turn's receipt was persisted"
+    );
+}
+
+/// Poll for `path` to become a file, up to `timeout`; `true` once it exists.
+async fn wait_for_file(path: &std::path::Path, timeout: Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if path.is_file() {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
 }
 
 /// Poll the mock until it has recorded at least `count` requests, or `timeout`
@@ -196,26 +214,6 @@ async fn wait_for_posts(
         }
         if tokio::time::Instant::now() >= deadline {
             panic!("timed out waiting for the worker's progressive Slack calls");
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-}
-
-/// Poll for `path` to appear as a regular file, or panic once `timeout`
-/// elapses — the receipt commit that creates it runs after the final Slack
-/// call returns, so it is not yet guaranteed to exist the instant the mock
-/// observes that call.
-async fn wait_for_file(path: &std::path::Path, timeout: Duration) {
-    let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-        if path.is_file() {
-            return;
-        }
-        if tokio::time::Instant::now() >= deadline {
-            panic!(
-                "timed out waiting for the turn's receipt chain to be persisted at {}",
-                path.display()
-            );
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }

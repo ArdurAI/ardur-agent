@@ -6,7 +6,9 @@
 
 use std::path::PathBuf;
 
-use ardur_admin::config::{Cli, DEFAULT_BIND, is_loopback, resolve_bind_addr, validate_bind};
+use ardur_admin::config::{
+    Cli, DEFAULT_BIND, is_loopback, resolve_bind_addr, validate_approvals_auth, validate_bind,
+};
 
 /// Build a `Cli` with only the required paths set, simulating defaults for
 /// everything else.
@@ -16,8 +18,12 @@ fn minimal_cli() -> Cli {
         receipt_store: PathBuf::from("/tmp/receipts"),
         qdrant_url: None,
         qdrant_collection: "ardur_memory".to_string(),
+        policy_bundle: None,
+        server_url: None,
+        server_admin_token: None,
         port: 8090,
         basic_auth: None,
+        bearer_tokens: None,
         bind_addr: None,
         unsafe_bind: false,
     }
@@ -57,6 +63,26 @@ fn non_loopback_bind_with_auth_is_allowed() {
 }
 
 #[test]
+fn non_loopback_bind_with_bearer_tokens_is_allowed() {
+    let mut cli = minimal_cli();
+    cli.bind_addr = Some("0.0.0.0".to_string());
+    cli.bearer_tokens = Some("secret-token".to_string());
+    let addr = resolve_bind_addr(&cli).expect("0.0.0.0 parses");
+    validate_bind(&cli, &addr).expect("non-loopback with bearer tokens should be allowed");
+}
+
+#[test]
+fn non_loopback_bind_with_blank_bearer_tokens_is_rejected() {
+    // A whitespace-only value must not count as "configured" — parse_bearer_tokens
+    // drops it, so this should behave identically to no auth at all.
+    let mut cli = minimal_cli();
+    cli.bind_addr = Some("0.0.0.0".to_string());
+    cli.bearer_tokens = Some(" , ,".to_string());
+    let addr = resolve_bind_addr(&cli).expect("0.0.0.0 parses");
+    validate_bind(&cli, &addr).expect_err("blank bearer-tokens value should not satisfy the gate");
+}
+
+#[test]
 fn non_loopback_bind_with_unsafe_flag_is_allowed() {
     let mut cli = minimal_cli();
     cli.bind_addr = Some("0.0.0.0".to_string());
@@ -89,4 +115,38 @@ fn invalid_bind_address_errors() {
     cli.bind_addr = Some("not-an-address".to_string());
     let err = resolve_bind_addr(&cli).expect_err("garbage should not parse");
     assert!(err.contains("invalid bind address"));
+}
+
+#[test]
+fn approvals_proxy_without_admin_ui_auth_is_rejected() {
+    let mut cli = minimal_cli();
+    cli.server_url = Some("http://127.0.0.1:3000".to_string());
+    cli.server_admin_token = Some("token".to_string());
+    let err = validate_approvals_auth(&cli)
+        .expect_err("approvals proxy without --basic-auth/--bearer-tokens should fail");
+    assert!(err.contains("--basic-auth") || err.contains("--bearer-tokens"));
+}
+
+#[test]
+fn approvals_proxy_with_bearer_tokens_is_allowed() {
+    let mut cli = minimal_cli();
+    cli.server_url = Some("http://127.0.0.1:3000".to_string());
+    cli.server_admin_token = Some("token".to_string());
+    cli.bearer_tokens = Some("secret-token".to_string());
+    validate_approvals_auth(&cli).expect("bearer auth should satisfy the gate");
+}
+
+#[test]
+fn approvals_proxy_with_basic_auth_is_allowed() {
+    let mut cli = minimal_cli();
+    cli.server_url = Some("http://127.0.0.1:3000".to_string());
+    cli.server_admin_token = Some("token".to_string());
+    cli.basic_auth = Some("admin:secret".to_string());
+    validate_approvals_auth(&cli).expect("basic auth should satisfy the gate");
+}
+
+#[test]
+fn no_approvals_proxy_configured_needs_no_admin_ui_auth() {
+    let cli = minimal_cli();
+    validate_approvals_auth(&cli).expect("unconfigured approvals proxy has nothing to gate");
 }

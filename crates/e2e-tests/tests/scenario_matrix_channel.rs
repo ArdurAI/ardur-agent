@@ -36,7 +36,7 @@ use ardur_channel_matrix::{MatrixChannel, MatrixConfig};
 use ardur_fused_runtime::FusedRuntime;
 use ardur_messaging_gateway::{
     ChannelId, ChannelRef, IncomingMessage, MessageBody, MessageTarget, MessagingGateway,
-    OutgoingMessage, SenderRef,
+    OutgoingMessage, SenderRef, UnixTsMillis,
 };
 use ardur_runtime::{CapTokenRef, ChatMessage, ChatRuntime, SessionId, SubmitRequest};
 
@@ -53,7 +53,7 @@ fn matrix_incoming(room: &str, sender: &str, text: &str) -> IncomingMessage {
         channel_id: ChannelId(format!("matrix://{BOT_USER}/{room}")),
         sender: SenderRef(sender.to_string()),
         body: MessageBody::Text(text.to_string()),
-        received_at: 1_750_000_000_000,
+        received_at: UnixTsMillis(1_750_000_000_000),
         thread_id: None,
     }
 }

@@ -6,7 +6,7 @@ use ardur_media_audio::{
     ContentClass, DiarizationMode, LocalSpeechToTextProvider, LocalSttConfig,
     LocalTextToSpeechProvider, LocalTtsConfig, MediaProvider, MissionId, TextToSpeechProvider,
     TextToSpeechRequest, TranscribeFileRequest, TranscriptFormat, TranscriptionProvider,
-    VoiceSpeakTool,
+    UnixTsMillis, VoiceSpeakTool,
 };
 use ardur_media_decode::AudioFormat;
 use ardur_runtime::{CapTokenRef, SessionId};
@@ -45,7 +45,7 @@ fn request(provider_id: AudioProviderId, model_id: AudioModelId) -> TranscribeFi
         max_speakers: None,
         export_format: TranscriptFormat::Json,
         mission_id: MissionId::new("mission.local-voice-test"),
-        requested_at: 1,
+        requested_at: UnixTsMillis(1),
     }
 }
 
@@ -140,7 +140,7 @@ async fn local_tts_provider_uses_stdout_audio_and_records_receipt_hash() {
             format: AudioFormat::Wav,
             model_id: provider.default_model_id().clone(),
             mission_id: MissionId::new("mission.local-tts-test"),
-            requested_at: 1,
+            requested_at: UnixTsMillis(1),
         })
         .await
         .expect("local TTS succeeds");
@@ -197,7 +197,7 @@ async fn local_tts_rejects_empty_text_before_spawning() {
             format: AudioFormat::Wav,
             model_id: provider.default_model_id().clone(),
             mission_id: MissionId::new("mission.local-tts-test"),
-            requested_at: 1,
+            requested_at: UnixTsMillis(1),
         })
         .await
         .expect_err("empty text rejected locally");

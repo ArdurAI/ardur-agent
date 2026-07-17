@@ -37,6 +37,9 @@ uuid = { workspace = true, features = ["v4"] }
 # §6.0 Phase 2 — the MCP bridge: `ArdurMcpServer` (server `ServerHandler`) and
 # `RemoteMcpToolset` (Streamable-HTTP client). Pinned at the workspace root.
 rmcp = { workspace = true }
+# Timeout + retry/backoff + circuit-breaker wrapping the MCP client's connect/
+# tools-list/tools-call network boundary — the shared resilience layer.
+ardur-resilience = { workspace = true }
 # Constant-time bearer-token comparison for the MCP HTTP admission allowlist.
 subtle = { workspace = true }
 # §6.2 — the built-in `http.fetch` tool's HTTP(S) client. `resolve_to_addrs`

@@ -1,19 +1,23 @@
-//! The read-only HTTP surface.
+//! The HTTP surface.
 //!
-//! Every route is a `GET`. There is deliberately **no** `POST`/`PUT`/`DELETE`/
-//! `PATCH` handler anywhere — the binary cannot mutate the artifacts it reads.
-//! [`build_router`] assembles the routes and, when configured, the Basic-auth
-//! gate.
+//! Every route under `/api/*` other than `/api/operator/*` is a `GET` — the
+//! binary cannot mutate the artifacts it reads directly. The one deliberate
+//! exception is `/api/operator/approvals*`, which proxies approve/reject
+//! decisions to ardur-server's own admin-bearer-gated `/approvals` API (see
+//! [`crate::approvals`]) when `--server-url`/`--server-admin-token` are
+//! configured; unconfigured, those routes return `503`. [`build_router`]
+//! assembles the routes and, when configured, the Basic/Bearer-auth gate.
 
 use axum::Json;
 use axum::Router;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use maud::Markup;
 use serde::{Deserialize, Serialize};
 
+use crate::approvals::{self, Decision};
 use crate::costs::{self, CostsReport};
 use crate::journal::{self, JournalPage, SessionSummary};
 use crate::memory::{self, MemoryRecent};
@@ -59,7 +63,32 @@ async fn dashboard(State(state): State<SharedState>) -> Result<Markup, ApiError>
     let sessions = journal::list_sessions(&state.journal_dir)?;
     let recent = receipts::recent(&state.receipt_store, 50)?;
     let receipt_summaries: Vec<ReceiptSummary> = recent.iter().map(ReceiptSummary::from).collect();
-    Ok(html::dashboard(&report, &sessions, &receipt_summaries))
+    let wallet = trust::wallet(&state.capabilities, now_ms() / 1000);
+    let chain = trust::verify_receipts(&state.receipt_store)?;
+    Ok(html::dashboard(
+        &report,
+        &sessions,
+        &receipt_summaries,
+        &wallet,
+        &chain,
+        state.policies.is_some(),
+        state.approvals_server.is_some(),
+    ))
+}
+
+/// `GET /operator/approvals` — the HTML fragment `#approvals-list` loads.
+/// Fetches the live list from ardur-server on every call (no caching); a
+/// failed proxy call renders an inline error rather than a `5xx`, since the
+/// rest of the dashboard is unaffected by ardur-server being unreachable.
+async fn operator_approvals_html(State(state): State<SharedState>) -> Markup {
+    match &state.approvals_server {
+        Some(config) => match approvals::list(config).await {
+            Ok(serde_json::Value::Array(cards)) => html::approvals_list_fragment(Ok(&cards)),
+            Ok(_) => html::approvals_list_fragment(Err("unexpected response shape")),
+            Err(e) => html::approvals_list_fragment(Err(&e.to_string())),
+        },
+        None => html::approvals_list_fragment(Err("approvals proxy not configured")),
+    }
 }
 
 /// `GET /api/sessions`
@@ -173,8 +202,117 @@ async fn trust_policy_debug(
     }
 }
 
-/// Assemble the read-only router, layering the Basic-auth gate (a no-op unless
-/// `AppState::basic_auth` is set).
+/// An optional JSON body for the reject endpoint: `{ "reason": "..." }`.
+/// Absent/empty is valid — mirrors ardur-server's own tolerant parsing (the
+/// operator console's UI sends no body for a reason-less reject).
+#[derive(Debug, Default, Deserialize)]
+struct RejectBody {
+    #[serde(default)]
+    reason: String,
+}
+
+/// Turn an [`approvals::ApprovalsError`] into the HTTP response admin-ui
+/// itself returns. Distinct from [`ApiError`]: a `502` here means the proxied
+/// call to ardur-server failed, not that admin-ui itself errored, so the
+/// operator can tell "ardur-server is unreachable" apart from "admin-ui is
+/// broken." A `401` from ardur-server (a stale/wrong configured token) also
+/// maps to `502`, not `401` — admin-ui's own `401` means *its* Basic/Bearer
+/// gate rejected the caller, and conflating the two would be misleading.
+fn approvals_error_response(error: approvals::ApprovalsError) -> Response {
+    use approvals::ApprovalsError as E;
+    match error {
+        E::InvalidId => (StatusCode::BAD_REQUEST, "invalid approval id").into_response(),
+        E::Transport(msg) => (
+            StatusCode::BAD_GATEWAY,
+            format!("could not reach ardur-server: {msg}"),
+        )
+            .into_response(),
+        E::Unauthorized => (
+            StatusCode::BAD_GATEWAY,
+            "ardur-server rejected the configured admin token — check --server-admin-token",
+        )
+            .into_response(),
+        E::InvalidResponse { status } => (
+            StatusCode::BAD_GATEWAY,
+            format!("ardur-server returned a non-JSON response ({status})"),
+        )
+            .into_response(),
+        E::ServerError { status, body } => {
+            let code = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
+            (code, Json(body)).into_response()
+        }
+    }
+}
+
+/// `GET /api/operator/approvals` — list every pending/decided approval card,
+/// proxied from ardur-server. `503` when the proxy is not configured.
+async fn operator_approvals_list(State(state): State<SharedState>) -> Response {
+    match &state.approvals_server {
+        Some(config) => match approvals::list(config).await {
+            Ok(body) => Json(body).into_response(),
+            Err(e) => approvals_error_response(e),
+        },
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "approvals proxy not configured",
+        )
+            .into_response(),
+    }
+}
+
+/// Header name HTMX listens for out of the box: a comma/space-separated (here,
+/// single) list of client-side event names to fire on `document.body` once
+/// the response arrives. The Approvals section's `#approvals-list` container
+/// listens for this exact event (`hx-trigger="load, approvalsChanged
+/// from:body"`) to refresh itself after a decision, without any fixed poll.
+const HX_TRIGGER_HEADER: &str = "HX-Trigger";
+const APPROVALS_CHANGED_EVENT: &str = "approvalsChanged";
+
+/// `POST /api/operator/approvals/{id}/approve` — proxies to ardur-server.
+async fn operator_approvals_approve(
+    State(state): State<SharedState>,
+    Path(id): Path<String>,
+) -> Response {
+    match &state.approvals_server {
+        Some(config) => match approvals::decide(config, &id, Decision::Approve).await {
+            Ok(body) => {
+                ([(HX_TRIGGER_HEADER, APPROVALS_CHANGED_EVENT)], Json(body)).into_response()
+            }
+            Err(e) => approvals_error_response(e),
+        },
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "approvals proxy not configured",
+        )
+            .into_response(),
+    }
+}
+
+/// `POST /api/operator/approvals/{id}/reject` — proxies to ardur-server, with
+/// an optional JSON body `{ "reason": "..." }`.
+async fn operator_approvals_reject(
+    State(state): State<SharedState>,
+    Path(id): Path<String>,
+    body: Option<Json<RejectBody>>,
+) -> Response {
+    let reason = body.map(|Json(b)| b.reason).unwrap_or_default();
+    match &state.approvals_server {
+        Some(config) => match approvals::decide(config, &id, Decision::Reject { reason }).await {
+            Ok(body) => {
+                ([(HX_TRIGGER_HEADER, APPROVALS_CHANGED_EVENT)], Json(body)).into_response()
+            }
+            Err(e) => approvals_error_response(e),
+        },
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "approvals proxy not configured",
+        )
+            .into_response(),
+    }
+}
+
+/// Assemble the router, layering the Basic/Bearer-auth gate (a no-op unless
+/// `AppState::basic_auth` or `AppState::bearer_auth` is set).
 pub fn build_router(state: SharedState) -> Router {
     Router::new()
         .route("/", get(dashboard))
@@ -188,6 +326,16 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/api/trust/wallet", get(trust_wallet))
         .route("/api/trust/receipts/verify", get(trust_receipts_verify))
         .route("/api/trust/policy/debug", get(trust_policy_debug))
+        .route("/operator/approvals", get(operator_approvals_html))
+        .route("/api/operator/approvals", get(operator_approvals_list))
+        .route(
+            "/api/operator/approvals/{id}/approve",
+            post(operator_approvals_approve),
+        )
+        .route(
+            "/api/operator/approvals/{id}/reject",
+            post(operator_approvals_reject),
+        )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth::require_auth,
