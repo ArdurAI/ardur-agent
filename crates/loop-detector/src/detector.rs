@@ -343,9 +343,7 @@ impl LoopDetector for InMemoryLoopDetector {
         }
 
         // --- Signal 3: cost acceleration (record cost first) ---
-        state
-            .cost_window
-            .push_back((record.turn, record.cost.clone()));
+        state.cost_window.push_back((record.turn, record.cost));
         // Keep the window bounded; the check only needs a small lookback.
         while state.cost_window.len() > 16 {
             state.cost_window.pop_front();
