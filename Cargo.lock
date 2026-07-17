@@ -283,6 +283,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ardur-approvals"
+version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
 name = "ardur-automation"
 version = "0.0.1"
 dependencies = [
@@ -605,6 +616,7 @@ name = "ardur-fused-runtime"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "ardur-approvals",
  "ardur-cap-token",
  "ardur-cedar-policy",
  "ardur-cost-gate",
