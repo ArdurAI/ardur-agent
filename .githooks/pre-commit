@@ -1,0 +1,17 @@
+#!/bin/sh
+# Git pre-commit hook: scan for secrets with gitleaks
+# Install: cp .githooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+
+if command -v gitleaks >/dev/null 2>&1; then
+    gitleaks detect --source . --verbose --redact
+    if [ $? -ne 0 ]; then
+        echo "❌ gitleaks detected potential secrets. Commit blocked."
+        echo "   If this is a false positive, use 'git commit --no-verify'"
+        exit 1
+    fi
+else
+    echo "⚠️  gitleaks not installed. Skipping secret scan."
+    echo "   Install: brew install gitleaks  (or see https://github.com/gitleaks/gitleaks)"
+fi
+
+exit 0

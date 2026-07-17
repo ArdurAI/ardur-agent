@@ -1,0 +1,123 @@
+# ardur-server — the first deployable Ardur binary.
+#
+# Listens for Slack Events-API webhooks, routes each user message through the
+# fused Phase-2 runtime (cap-token → cedar → cost-gate → provider → receipt →
+# journal → memory), and posts the assistant's reply back to the channel via the
+# Slack adapter. The HTTP surface is two routes: `POST /slack/events` and
+# `GET /healthz`.
+#
+# §18.8 keeps this PR scoped to `crates/server/**`, the cross-crate scenario in
+# `crates/e2e-tests/**`, and the root manifest.
+
+[package]
+name = "ardur-server"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# A library (the boot sequence, the wired `AppState`, and the axum router) plus
+# the thin binary that boots it. Tests drive the library's `build_router` via
+# `tower::ServiceExt::oneshot` — no real socket required.
+[lib]
+name = "ardur_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ardur-server"
+path = "src/bin/ardur-server.rs"
+
+[dependencies]
+# The boot sequence wires every Phase-1/2 substrate crate behind the fused
+# runtime, then fronts it with the Slack adapter.
+ardur-acp = { workspace = true }
+ardur-fused-runtime = { workspace = true }
+ardur-slack-adapter = { workspace = true }
+# The §4.X Matrix channel adapter — a second `MessagingGateway` backend the boot
+# sequence wires alongside Slack when `ARDUR_CHANNEL_MATRIX=true`.
+ardur-channel-matrix = { workspace = true }
+# The §4.Y Discord + Telegram channel adapters — further `MessagingGateway`
+# backends wired alongside Slack when `ARDUR_CHANNEL_DISCORD` /
+# `ARDUR_CHANNEL_TELEGRAM` are set.
+ardur-channel-discord = { workspace = true }
+ardur-channel-telegram = { workspace = true }
+ardur-provider-runtime = { workspace = true }
+# §3.0 provider selection — reads ARDUR_PROVIDER and boxes the chosen backend
+# (anthropic | openrouter | openai-compat | ollama | codex | claude-cli) the
+# bin hands to AppState::boot.
+ardur-provider-selector = { workspace = true }
+ardur-cap-token = { workspace = true }
+ardur-cedar-policy = { workspace = true }
+ardur-cost-gate = { workspace = true }
+ardur-memory = { workspace = true }
+# The durable Qdrant memory backend, selected at boot via `ARDUR_MEMORY=qdrant`.
+ardur-memory-qdrant = { workspace = true }
+ardur-session-journals = { workspace = true }
+ardur-receipt = { workspace = true }
+ardur-runtime = { workspace = true }
+ardur-messaging-gateway = { workspace = true }
+# Optional Whisper-backed voice.transcribe tool registration; missing API keys
+# degrade gracefully at boot.
+ardur-media-audio = { workspace = true }
+# §6.0 Phase 2 — the tool registry + its MCP bridge. The server exposes ardur's
+# tools over MCP (`ArdurMcpServer` mounted on the Streamable-HTTP transport) and
+# gates the surface with the registry's bearer-token allowlist helpers.
+ardur-tool-registry = { workspace = true }
+rmcp = { workspace = true }
+# ARD-426: OpenClaw hook compatibility — register_openclaw_hooks at boot when
+# ARDUR_HOOKS_DIRS contains an OpenClaw-format hook directory.
+ardur-hooks-openclaw-compat = { workspace = true }
+# ARD-426: automation — the task-flow orchestrator trait for `ardur task`
+# commands surfaced through the server's API.
+ardur-automation = { workspace = true }
+
+# `ardur-cap-token` re-exports `KeyPair`/`PublicKey` but not `PrivateKey`, and
+# loading the persisted issuer key needs `PrivateKey::from_bytes_hex`. Pulled
+# directly, as `crates/e2e-tests` does for the same reason.
+biscuit-auth = { workspace = true }
+# Descriptor-relative, no-follow access to persisted server key material on Unix.
+rustix = { workspace = true }
+uuid = { workspace = true }
+
+# HTTP server + the Slack bot-token / signing-secret custody type.
+axum = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+secrecy = { workspace = true }
+
+# Structured logging (env-driven `RUST_LOG`; JSON when `ARDUR_LOG_FORMAT=json`).
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+# Constant-time comparison for bearer-token authentication (timing-attack defence).
+subtle = { workspace = true }
+
+[dev-dependencies]
+# The integration tests drive the router in-process with `oneshot`, mock
+# `chat.postMessage` with wiremock, and recompute a genuine `v0=` Slack
+# signature so the signed-request path is exercised without a live workspace.
+tower = { workspace = true }
+wiremock = { workspace = true }
+secrecy = { workspace = true }
+# The `/chat` tests inject scripted `Provider` impls (an erroring backend, a
+# tool-using backend, a cost-reporting backend) to exercise the runtime-error,
+# tools-called, and token/cost paths without a live model. The trait is
+# `async-trait`-based, so implementing it in a test needs the attribute macro.
+# (`ardur-runtime` / `ardur-provider-runtime` are already normal dependencies and
+# so are reachable from the integration tests.)
+async-trait = { workspace = true }
+assert_cmd = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+# Serial test execution for env-mutating integration tests (config_from_env,
+# boot_hybrid) — prevents races on process-global environment variables.
+serial_test = { workspace = true }
