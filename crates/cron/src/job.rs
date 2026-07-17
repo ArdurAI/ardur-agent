@@ -175,8 +175,12 @@ mod tests {
 
     #[test]
     fn test_cron_expression_range() {
+        use chrono::TimeZone;
+
         let expr = CronExpression::new("0", "9-17", "*", "*", "1-5");
-        let now = Utc::now().with_hour(12).unwrap().with_minute(0).unwrap();
+        // Fixed reference date: 2026-01-05 is a Monday, so this is stable
+        // regardless of the day the test suite happens to run on.
+        let now = Utc.with_ymd_and_hms(2026, 1, 5, 12, 0, 0).unwrap();
         assert!(expr.is_due(now));
     }
 }

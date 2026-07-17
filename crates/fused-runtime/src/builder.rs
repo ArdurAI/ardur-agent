@@ -332,6 +332,19 @@ impl FusedRuntimeBuilder {
         self
     }
 
+    /// Install the built-in injection-defense signature set into stage 4.5 — the
+    /// fail-closed default the shipped server and CLI boot with (ARD-H1).
+    ///
+    /// The library default is an empty registry (opt-in, so tests and embedders
+    /// are unaffected), but a product that faces untrusted prompts should call
+    /// this so the stage actually scans rather than passing everything through.
+    /// Equivalent to `with_injection_filters(FilterRegistry::with_builtin_defaults())`;
+    /// callers wanting extra filters can build their own registry instead.
+    #[must_use]
+    pub fn with_default_injection_filters(self) -> Self {
+        self.with_injection_filters(FilterRegistry::with_builtin_defaults())
+    }
+
     /// **§6.0.** Wire the tool registry the tool-execution stage advertises to the
     /// provider and invokes. Defaults to an **empty** registry, which makes the
     /// loop run exactly once — so a runtime that does not opt into tools behaves

@@ -13,7 +13,9 @@ use ardur_cap_token::{
     BiscuitCapTokenIssuer, CapScope, CapTokenIssuer, HolderId as CapHolderId, KeyPair, PublicKey,
 };
 use ardur_cedar_policy::{CedarPolicyBundle, PolicyBundle, PolicySource};
-use ardur_cost_gate::{Clock, CostTuple as GateCostTuple, HolderId as GateHolderId, ManualClock};
+use ardur_cost_gate::{
+    Clock, CostTuple as GateCostTuple, HolderId as GateHolderId, ManualClock, UnixTsMillis,
+};
 use ardur_fused_runtime::FusedRuntimeBuilder;
 use ardur_lifecycle_hooks::{
     HookDecision, HookError, HookId, LifecycleHook, PostReceiptCtx, PreSubmitCtx,
@@ -152,7 +154,7 @@ pub fn gate_holder_for(subject: &str) -> GateHolderId {
 
 /// A deterministic manual clock pinned at [`NOW_MS`].
 pub fn manual_clock() -> Arc<dyn Clock> {
-    Arc::new(ManualClock::new(NOW_MS))
+    Arc::new(ManualClock::new(UnixTsMillis(NOW_MS)))
 }
 
 /// A budget that comfortably covers the default envelope.
@@ -324,7 +326,7 @@ impl Provider for BillingProvider {
                 tokens_out: 0,
                 cents: self.cents,
                 wall_ms: 0,
-                attention_score: 0.0,
+                attention_score: 0,
             },
             raw_provider_response: None,
         })
@@ -381,7 +383,7 @@ impl LifecycleHook for CapturingPostReceiptCostHook {
     async fn on_post_receipt(&self, ctx: &PostReceiptCtx<'_>) -> Result<(), HookError> {
         self.observed.lock().push(ObservedPostReceiptCost {
             ctx_cost: ctx.cost,
-            receipt_cost: ctx.receipt.cost.clone(),
+            receipt_cost: ctx.receipt.cost,
             response_cost: ctx.response.cost,
         });
         Ok(())

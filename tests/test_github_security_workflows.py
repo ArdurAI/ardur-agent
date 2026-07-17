@@ -60,7 +60,7 @@ class GitHubSecurityWorkflowTests(unittest.TestCase):
         self.assertIn("if: github.event_name == 'pull_request'", ci)
         self.assertIn("pull-requests: read", ci)
         self.assertIn(
-            "actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48",
+            "actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294",
             ci,
         )
         self.assertIn("fail-on-severity: high", ci)
