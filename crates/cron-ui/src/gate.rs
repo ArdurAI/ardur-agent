@@ -188,7 +188,7 @@ impl ReceiptSink for Es256ReceiptSink {
             verb: VerbObject::new(event.verb).map_err(|e| CronUiError::Receipt(e.to_string()))?,
             issued_at: UnixTsMillis(now_millis()),
             subject: HolderId(event.subject.to_string()),
-            cap_token_id: TokenId(event.token_id.to_string()),
+            cap_token_id: TokenId(Uuid::parse_str(&event.token_id).map_err(|e| CronUiError::Receipt(e.to_string()))?),
             payload_digest: Sha256Digest::of(event.payload),
             session_id: None,
             cost: CostTuple {
@@ -196,7 +196,7 @@ impl ReceiptSink for Es256ReceiptSink {
                 tokens_out: 0,
                 cents: 0,
                 wall_ms: 0,
-                attention_score: 0.0,
+                attention_score: 0,
             },
             tool_calls: Vec::new(),
             provider: None,
