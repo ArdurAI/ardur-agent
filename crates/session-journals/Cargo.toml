@@ -1,0 +1,59 @@
+[package]
+name = "ardur-session-journals"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# `Sha256Digest` (which owns the SHA-256 hashing) is re-exported from the
+# workspace's leaf `core-types` crate, so `sha2` is no longer a direct dep.
+ardur-core-types = { workspace = true }
+# §1.0 owns the session identity a journal is keyed on and the receipt id an
+# assistant turn / tool call folds into; re-exported so the journal and the
+# runtime never drift into two incompatible schemas (§7.10).
+ardur-runtime = { workspace = true }
+# §11.14's cost-admission layer owns the cost vocabulary a `CostFinalized`
+# entry records — `CostTuple` (the actual billed cost), `CostDelta` (the
+# refund), and `UnixTsMillis` (the millisecond wall-clock stamp).
+ardur-cost-gate = { workspace = true }
+# §6.0 owns `ToolId`; a `ToolInvocation` entry names the tool it journals.
+ardur-tool-registry = { workspace = true }
+# Object-safe async `SessionJournal` — async-trait boxes the returned futures
+# so `dyn SessionJournal` works as a registry value (§7.10).
+async-trait = { workspace = true }
+serde = { workspace = true }
+# Journal entries serialize to one JSON object per JSONL line.
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+# `JournalError::Io`/`Serde` carry the underlying failure verbatim; `anyhow`
+# backs opaque construction errors.
+anyhow = { workspace = true }
+# Non-poisoning mutex guarding the append-only file handle, and the registry's
+# id→journal map (§7.10).
+parking_lot = { workspace = true }
+# Torn-tail recovery logs when it drops a crash-fragment from the append-only
+# JSONL file.
+tracing = { workspace = true }
+# Workspace pins v7 (time-ordered ids); the locally-defined `ReservationId`
+# placeholder mints v4 (random), so opt v4 in on top of the shared pin.
+uuid = { workspace = true, features = ["v4"] }
+# Descriptor-relative no-follow traversal protects append-only journals from
+# parent and final-component symlink races.
+rustix = { workspace = true }
+# Secret-shaped-pattern matching backing `redact::redact_text` — the same
+# patterns `ardur-cli`'s `redact` command uses, now shared so any consumer of
+# `JournalEntry` (e.g. `ardur-admin`) can redact free-text fields before
+# displaying them outside the originating session's trust boundary.
+regex = { workspace = true }
+
+[dev-dependencies]
+# The async trait methods need a runtime to poll them; the concurrency test
+# spawns OS threads but uses tokio's current-thread runtime per assertion.
+tokio = { workspace = true }
+serde_json = { workspace = true }
+# `FileSessionJournal` persistence tests write into a throwaway directory.
+tempfile = { workspace = true }
+# Tests mint `Checkpoint` ids directly; v4 for the random ids.
+uuid = { workspace = true, features = ["v4"] }
