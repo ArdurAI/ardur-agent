@@ -11,8 +11,9 @@ name: docker
 on:
   push:
     branches: [main, dev]
-  pull_request:
-    branches: [main, dev]
+  # PRs intentionally excluded: the image build + Trivy gate is the slowest
+  # check (8-15 min) and rarely catches issues cargo check/clippy/test miss.
+  # Push coverage on dev/main retains the security gate before releases.
 
 permissions:
   contents: read
