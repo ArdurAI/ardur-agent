@@ -59,6 +59,11 @@ use ardur_provider_runtime::{
     CompletionRequest, CompletionResponse, FinishReason, ModelId, Provider, ProviderError,
     ProviderStream, RateCard, ToolCall, Usage, parse_retry_after_ms,
 };
+use ardur_resilience::{
+    CircuitBreakerConfig, RetryPolicy,
+    circuit_breaker::{CircuitBreaker, CircuitError},
+    retry::retry_with_backoff,
+};
 use ardur_runtime::{ChatMessage, CostTuple, ProviderId, Role};
 use async_trait::async_trait;
 use futures::Stream;
@@ -93,6 +98,8 @@ pub struct OpenRouterConfig {
     referer: String,
     title: String,
     request_timeout: Duration,
+    retry_policy: RetryPolicy,
+    circuit_breaker: CircuitBreakerConfig,
 }
 
 impl fmt::Debug for OpenRouterConfig {
@@ -125,6 +132,8 @@ impl OpenRouterConfig {
             referer: DEFAULT_REFERER.to_string(),
             title: DEFAULT_TITLE.to_string(),
             request_timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+            retry_policy: RetryPolicy::default(),
+            circuit_breaker: CircuitBreakerConfig::default(),
         }
     }
 
@@ -168,6 +177,24 @@ impl OpenRouterConfig {
         self
     }
 
+    /// Override the retry/backoff policy applied to transient failures
+    /// (network errors, `429`, `5xx`). The default retries twice with
+    /// exponential backoff + full jitter (`RetryPolicy::default()`); pass
+    /// [`RetryPolicy::none`] to disable retrying entirely.
+    #[must_use]
+    pub fn retry_policy(mut self, retry_policy: RetryPolicy) -> Self {
+        self.retry_policy = retry_policy;
+        self
+    }
+
+    /// Override the circuit breaker that trips after repeated failures and
+    /// fails fast (without hitting the network) until it cools down.
+    #[must_use]
+    pub fn circuit_breaker(mut self, circuit_breaker: CircuitBreakerConfig) -> Self {
+        self.circuit_breaker = circuit_breaker;
+        self
+    }
+
     /// The `chat/completions` endpoint URL for this config's base.
     fn completions_url(&self) -> String {
         format!("{}/chat/completions", self.base_url.trim_end_matches('/'))
@@ -186,17 +213,23 @@ pub struct OpenRouterProvider {
     model_id: ModelId,
     rate_card: RateCard,
     client: reqwest::Client,
+    /// Shared across every call this provider makes — a run of failures on
+    /// `complete` also trips the breaker `stream`/`stream_chat` see, since
+    /// they all hit the same upstream endpoint.
+    breaker: CircuitBreaker,
 }
 
 impl OpenRouterProvider {
     /// Build a live provider from `config` with a default `model_id`.
     #[must_use]
     pub fn new(config: OpenRouterConfig, model_id: ModelId) -> Self {
+        let breaker = CircuitBreaker::new(config.circuit_breaker.clone());
         Self {
             config,
             model_id,
             rate_card: openrouter_passthrough_rate_card(),
             client: reqwest::Client::new(),
+            breaker,
         }
     }
 
@@ -244,8 +277,42 @@ impl OpenRouterProvider {
             return error_stream(err);
         }
 
-        let body = build_stream_request_body(&req);
-        let send = self
+        match self.resilient_stream_handshake(&req).await {
+            Ok(resp) => Box::pin(streaming::into_chunk_stream(resp)),
+            Err(err) => error_stream(err),
+        }
+    }
+
+    /// Runs [`Self::stream_handshake`] through the shared retry policy +
+    /// circuit breaker: a network blip, `429`, or `5xx` on the connect-time
+    /// handshake is retried (no bytes have streamed yet, so a resend is
+    /// safe); an open breaker fails fast without hitting the network at all.
+    async fn resilient_stream_handshake(
+        &self,
+        req: &CompletionRequest,
+    ) -> Result<reqwest::Response, ProviderError> {
+        self.breaker
+            .call(|| {
+                retry_with_backoff(
+                    &self.config.retry_policy,
+                    |a: &AttemptError| a.retryable,
+                    || self.stream_handshake(req),
+                )
+            })
+            .await
+            .map_err(circuit_error_to_provider_error)
+    }
+
+    /// One attempt at the streaming handshake (`POST .../chat/completions`
+    /// with `stream: true`): returns the still-unconsumed [`reqwest::Response`]
+    /// on a `2xx` status so the caller can drain it as an SSE byte stream, or
+    /// an [`AttemptError`] classifying whether the failure is worth retrying.
+    async fn stream_handshake(
+        &self,
+        req: &CompletionRequest,
+    ) -> Result<reqwest::Response, AttemptError> {
+        let body = build_stream_request_body(req);
+        let resp = self
             .client
             .post(self.config.completions_url())
             .bearer_auth(&self.config.api_key)
@@ -254,23 +321,110 @@ impl OpenRouterProvider {
             .timeout(self.config.request_timeout)
             .json(&body)
             .send()
-            .await;
-
-        let resp = match send {
-            Ok(resp) => resp,
-            Err(e) => return error_stream(ProviderError::NetworkFailure(e.to_string())),
-        };
+            .await
+            .map_err(|e| AttemptError::retryable(ProviderError::NetworkFailure(e.to_string())))?;
 
         let status = resp.status();
         if status.is_success() {
-            return Box::pin(streaming::into_chunk_stream(resp));
+            return Ok(resp);
         }
 
         // Drain the error body and map it through the same taxonomy as `complete`.
         let retry_after_ms = parse_retry_after_ms(resp.headers());
         let code = status.as_u16();
+        let retryable = is_retryable_status(code);
         let body = resp.text().await.unwrap_or_default();
-        error_stream(map_http_error(code, retry_after_ms, &body, &req.model))
+        Err(AttemptError::new(
+            map_http_error(code, retry_after_ms, &body, &req.model),
+            retryable,
+        ))
+    }
+
+    /// One attempt at the non-streaming `complete` call: sends the request,
+    /// parses a `2xx` body into a [`CompletionResponse`], or classifies a
+    /// failure as retryable/permanent the same way [`Self::stream_handshake`]
+    /// does.
+    async fn send_completion(
+        &self,
+        req: &CompletionRequest,
+        body: &serde_json::Value,
+    ) -> Result<CompletionResponse, AttemptError> {
+        let resp = self
+            .client
+            .post(self.config.completions_url())
+            .bearer_auth(&self.config.api_key)
+            .header("HTTP-Referer", &self.config.referer)
+            .header("X-Title", &self.config.title)
+            .timeout(self.config.request_timeout)
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| AttemptError::retryable(ProviderError::NetworkFailure(e.to_string())))?;
+
+        let status = resp.status();
+        if status.is_success() {
+            let value: serde_json::Value = resp.json().await.map_err(|e| {
+                AttemptError::new(
+                    ProviderError::Upstream(format!("decoding response body: {e}")),
+                    false,
+                )
+            })?;
+            let parsed: ChatCompletion = serde_json::from_value(value.clone()).map_err(|e| {
+                AttemptError::new(
+                    ProviderError::Upstream(format!("unexpected response shape: {e}")),
+                    false,
+                )
+            })?;
+            return Ok(parsed.into_completion(value));
+        }
+
+        // Pull the back-off hint before the body consumes `resp`.
+        let retry_after_ms = parse_retry_after_ms(resp.headers());
+        let code = status.as_u16();
+        let retryable = is_retryable_status(code);
+        let body_text = resp.text().await.unwrap_or_default();
+        Err(AttemptError::new(
+            map_http_error(code, retry_after_ms, &body_text, &req.model),
+            retryable,
+        ))
+    }
+}
+
+/// A single failed attempt at an OpenRouter HTTP call, classifying whether
+/// [`retry_with_backoff`] should retry it (a transient network error, `429`,
+/// or `5xx`) or stop immediately (`401`/`403`/`400`/`404` — resending an
+/// unauthorized or malformed request cannot succeed).
+struct AttemptError {
+    error: ProviderError,
+    retryable: bool,
+}
+
+impl AttemptError {
+    fn new(error: ProviderError, retryable: bool) -> Self {
+        Self { error, retryable }
+    }
+
+    fn retryable(error: ProviderError) -> Self {
+        Self::new(error, true)
+    }
+}
+
+/// `429` (rate limited) and any `5xx` (upstream/transient server fault) are
+/// worth retrying; anything else (auth, malformed request, unknown model) is
+/// permanent and retrying would just repeat the same failure.
+fn is_retryable_status(code: u16) -> bool {
+    code == 429 || (500..=599).contains(&code)
+}
+
+/// Maps the breaker's own `Open` state onto the same [`ProviderError`]
+/// taxonomy the underlying HTTP failures use, and unwraps a passed-through
+/// inner failure.
+fn circuit_error_to_provider_error(err: CircuitError<AttemptError>) -> ProviderError {
+    match err {
+        CircuitError::Open => ProviderError::Upstream(
+            "circuit breaker open: too many recent OpenRouter failures".to_string(),
+        ),
+        CircuitError::Inner(attempt) => attempt.error,
     }
 }
 
@@ -316,34 +470,16 @@ impl Provider for OpenRouterProvider {
 
         let body = build_request_body(&req);
 
-        let resp = self
-            .client
-            .post(self.config.completions_url())
-            .bearer_auth(&self.config.api_key)
-            .header("HTTP-Referer", &self.config.referer)
-            .header("X-Title", &self.config.title)
-            .timeout(self.config.request_timeout)
-            .json(&body)
-            .send()
+        self.breaker
+            .call(|| {
+                retry_with_backoff(
+                    &self.config.retry_policy,
+                    |a: &AttemptError| a.retryable,
+                    || self.send_completion(&req, &body),
+                )
+            })
             .await
-            .map_err(|e| ProviderError::NetworkFailure(e.to_string()))?;
-
-        let status = resp.status();
-        if status.is_success() {
-            let value: serde_json::Value = resp
-                .json()
-                .await
-                .map_err(|e| ProviderError::Upstream(format!("decoding response body: {e}")))?;
-            let parsed: ChatCompletion = serde_json::from_value(value.clone())
-                .map_err(|e| ProviderError::Upstream(format!("unexpected response shape: {e}")))?;
-            return Ok(parsed.into_completion(value));
-        }
-
-        // Pull the back-off hint before the body consumes `resp`.
-        let retry_after_ms = parse_retry_after_ms(resp.headers());
-        let code = status.as_u16();
-        let body = resp.text().await.unwrap_or_default();
-        Err(map_http_error(code, retry_after_ms, &body, &req.model))
+            .map_err(circuit_error_to_provider_error)
     }
 
     /// Stream the completion as shared [`StreamEvent`](ardur_provider_runtime::StreamEvent)s
@@ -367,28 +503,7 @@ impl Provider for OpenRouterProvider {
         }
         validate_base_url(&self.config.base_url)?;
 
-        let body = build_stream_request_body(&req);
-        let resp = self
-            .client
-            .post(self.config.completions_url())
-            .bearer_auth(&self.config.api_key)
-            .header("HTTP-Referer", &self.config.referer)
-            .header("X-Title", &self.config.title)
-            .timeout(self.config.request_timeout)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| ProviderError::NetworkFailure(e.to_string()))?;
-
-        let status = resp.status();
-        if !status.is_success() {
-            // Drain the error body and map it through the same taxonomy as `complete`.
-            let retry_after_ms = parse_retry_after_ms(resp.headers());
-            let code = status.as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(map_http_error(code, retry_after_ms, &body, &req.model));
-        }
-
+        let resp = self.resilient_stream_handshake(&req).await?;
         let chunks = streaming::into_chunk_stream(resp);
         Ok(Box::pin(streaming::into_provider_events(chunks)))
     }
