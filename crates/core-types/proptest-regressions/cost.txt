@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 315d689e76db06a8b39fa2924c7ca91478da616146d1065830310c414747e155 # shrinks to reserved = CostTuple { tokens_in: 0, tokens_out: 0, cents: 0, wall_ms: 0, attention_score: 0 }, actual = CostTuple { tokens_in: 1, tokens_out: 0, cents: 0, wall_ms: 0, attention_score: 0 }
+cc d2785c84f27eb398db028368918ff1c537e9e1a948aad0d04d40a769e05fa4da # shrinks to reserved = CostTuple { tokens_in: 2813244707850385668, tokens_out: 0, cents: 0, wall_ms: 0, attention_score: 0 }, actual = CostTuple { tokens_in: 0, tokens_out: 0, cents: 0, wall_ms: 0, attention_score: 0 }
+cc 35365fbb1b46a2c7d3d8b2c75452e5188d70c80d799f9396544a7fb443ca2a28 # shrinks to reserved = CostTuple { tokens_in: 1790024532735514377, tokens_out: 1683808069480517284, cents: 5624814730578094453, wall_ms: 1391550347587700179, attention_score: 569887279788272848 }, actual = CostTuple { tokens_in: 0, tokens_out: 0, cents: 0, wall_ms: 0, attention_score: 0 }

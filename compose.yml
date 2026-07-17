@@ -1,0 +1,12 @@
+services:
+  ardur:
+    build: .
+    ports:
+      - "3000:3000"
+    env_file: .env
+    volumes:
+      - ardur-data:/var/lib/ardur
+    restart: unless-stopped
+
+volumes:
+  ardur-data:
