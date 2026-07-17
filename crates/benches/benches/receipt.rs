@@ -30,7 +30,9 @@ fn sample_body(seq: u64) -> ReceiptBody {
         verb: VerbObject::new("cost.admission.allow.v1").unwrap(),
         issued_at: UnixTsMillis(1_700_000_000_000 + seq),
         subject: HolderId("spiffe://ardur/user/alice".to_string()),
-        cap_token_id: TokenId("jti-0001".to_string()),
+        cap_token_id: TokenId(
+            uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap(),
+        ),
         payload_digest: Sha256Digest::of(b"event-payload"),
         session_id: None,
         cost: CostTuple {
@@ -38,7 +40,7 @@ fn sample_body(seq: u64) -> ReceiptBody {
             tokens_out: 50,
             cents: 2,
             wall_ms: 1_200,
-            attention_score: 0.5,
+            attention_score: 500,
         },
         tool_calls: Vec::new(),
         provider: None,
