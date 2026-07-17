@@ -1,0 +1,220 @@
+//! Scenario §4.1 — `server_slack_round_trip`.
+//!
+//! The full deployment loop, end to end, without a live Slack workspace: a
+//! genuinely HMAC-signed Slack `message` event is POSTed to the real
+//! [`ardur_server`] axum router (driven in-process via
+//! `tower::ServiceExt::oneshot`), routed through the real [`AppState`] →
+//! [`FusedRuntime`](ardur_fused_runtime::FusedRuntime) pipeline over a stub
+//! provider, and the assistant's reply is observed as progressive Slack delivery:
+//! a wiremock `chat.postMessage` placeholder followed by `chat.update`.
+//!
+//! Unlike the per-crate suite in `crates/server/tests`, this scenario lives in
+//! the cross-crate host — proving the binary's wiring composes with the rest of
+//! the substrate exactly as deployed.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use ardur_provider_runtime::{AnthropicProvider, ModelId, Provider};
+use ardur_server::{AppState, Config, LogFormat, MemoryBackend, build_router};
+
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use hmac::{Hmac, KeyInit, Mac};
+use sha2::Sha256;
+use tower::ServiceExt as _;
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
+
+type HmacSha256 = Hmac<Sha256>;
+
+const BOT_TOKEN: &str = "xoxb-e2e-server-token";
+const SIGNING_SECRET: &str = "e2e-server-signing-secret-0000abcd";
+const APP_ID: &str = "A0E2ESERVER";
+
+/// Recompute the genuine Slack `v0=<hex>` request signature.
+fn sign(timestamp: &str, body: &str) -> String {
+    let basestring = format!("v0:{timestamp}:{body}");
+    let mut mac =
+        HmacSha256::new_from_slice(SIGNING_SECRET.as_bytes()).expect("hmac accepts any key length");
+    mac.update(basestring.as_bytes());
+    format!("v0={}", hex::encode(mac.finalize().into_bytes()))
+}
+
+/// Current Unix seconds as a string — a fresh, non-replayed request timestamp.
+fn now_unix_string() -> String {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_secs()
+        .to_string()
+}
+
+#[tokio::test]
+async fn server_routes_signed_slack_message_through_runtime_to_chat_post_message() {
+    // Mock Slack's progressive outbound delivery.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat.postMessage"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "ok": true,
+            "ts": "1700000000.000900",
+            "channel": "C0DEPLOY"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/chat.update"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "ok": true,
+            "ts": "1700000000.000900",
+            "channel": "C0DEPLOY"
+        })))
+        .mount(&server)
+        .await;
+
+    // Boot the *real* server state over a stub provider + tempdir.
+    let data_dir = tempfile::tempdir().expect("tempdir");
+    let config = Config {
+        anthropic_api_key: String::new(),
+        enable_shell_tool: false,
+        shell_allowlist: Vec::new(),
+        enable_http_tool: false,
+        http_allowlist: Vec::new(),
+        file_tool_root: None,
+        slack_enabled: true,
+        slack_bot_token: Some(BOT_TOKEN.to_string()),
+        slack_signing_secret: Some(SIGNING_SECRET.to_string()),
+        slack_app_id: Some(APP_ID.to_string()),
+        slack_allowed_senders: vec!["U0DEPLOY".to_string()],
+        data_dir: data_dir.path().to_path_buf(),
+        bind_addr: "127.0.0.1:0".to_string(),
+        chat_bearer_tokens: vec!["e2e-chat-token".to_string()],
+        admin_bearer_tokens: Vec::new(),
+        dev_permissive_policy: true,
+        model: "claude-opus-4-8".to_string(),
+        cost_budget_cents: 10_000,
+        cedar_policy_path: None,
+        slack_base_url: Some(server.uri()),
+        channel_matrix: false,
+        channel_discord: false,
+        channel_telegram: false,
+        log_format: LogFormat::Text,
+        mcp_enabled: false,
+        mcp_bearer_tokens: Vec::new(),
+        mcp_path_prefix: "/mcp".to_string(),
+        mcp_remote_servers: Vec::new(),
+        skills_dirs: Vec::new(),
+        memory_backend: MemoryBackend::InMemory,
+        qdrant_url: None,
+        qdrant_collection: None,
+    };
+    let provider: Arc<dyn Provider> =
+        Arc::new(AnthropicProvider::stub(ModelId::new(&config.model)));
+    let tools = Arc::new(ardur_server::example_registry("stub", "in-memory"));
+    let state = AppState::boot(&config, provider, tools)
+        .await
+        .expect("the server boots");
+    let router = build_router(state);
+
+    // A genuine, signed inbound user message.
+    let ts = now_unix_string();
+    let body = serde_json::json!({
+        "type": "event_callback",
+        "event": {
+            "type": "message",
+            "user": "U0DEPLOY",
+            "text": "is the deployment loop alive?",
+            "channel": "C0DEPLOY",
+            "ts": "1700000000.000100"
+        }
+    })
+    .to_string();
+    let signature = sign(&ts, &body);
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/slack/events")
+        .header("X-Slack-Signature", signature)
+        .header("X-Slack-Request-Timestamp", ts)
+        .header("content-type", "application/json")
+        .body(Body::from(body))
+        .expect("request builds");
+
+    // The webhook acks immediately; the worker processes + posts asynchronously.
+    let response = router.oneshot(request).await.expect("router responds");
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "the webhook acks the event"
+    );
+
+    // The progressive reply lands on the mocked Slack within the deadline.
+    let sent = wait_for_posts(&server, 2, Duration::from_secs(10)).await;
+    assert_eq!(sent.len(), 2, "placeholder post plus final update");
+
+    let posted: serde_json::Value =
+        serde_json::from_slice(&sent[0].body).expect("posted body is JSON");
+    assert_eq!(
+        posted["channel"], "C0DEPLOY",
+        "reply targets the source channel"
+    );
+    assert_eq!(posted["text"], "…", "the placeholder is posted immediately");
+    let updated: serde_json::Value =
+        serde_json::from_slice(&sent[1].body).expect("updated body is JSON");
+    assert_eq!(updated["channel"], "C0DEPLOY");
+    assert_eq!(
+        updated["ts"], "1700000000.000900",
+        "the update targets the placeholder message"
+    );
+    assert_eq!(
+        updated["text"], "[anthropic stub]",
+        "the runtime's streamed response crosses the wire as the final edit"
+    );
+
+    // Boot persisted the receipt chain + journal — the deployment is durable.
+    // The worker persists the receipt chain asynchronously and can lag the final
+    // Slack post it precedes, so poll for the file (as the reply wait does) rather
+    // than checking it the instant the posts land — an instant check races the
+    // write under CI load (macOS runner flake).
+    let receipt_chain = data_dir.path().join("receipts/chain.jsonl");
+    assert!(
+        wait_for_file(&receipt_chain, Duration::from_secs(10)).await,
+        "the turn's receipt was persisted"
+    );
+}
+
+/// Poll for `path` to become a file, up to `timeout`; `true` once it exists.
+async fn wait_for_file(path: &std::path::Path, timeout: Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if path.is_file() {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+/// Poll the mock until it has recorded at least `count` requests, or `timeout`
+/// elapses (panicking — the worker should always post within it).
+async fn wait_for_posts(
+    server: &MockServer,
+    count: usize,
+    timeout: Duration,
+) -> Vec<wiremock::Request> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if let Some(requests) = server.received_requests().await {
+            if requests.len() >= count {
+                return requests;
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!("timed out waiting for the worker's progressive Slack calls");
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}

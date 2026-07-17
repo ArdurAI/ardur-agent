@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{ .Title }}</title>
+  <meta name="description" content="{{ .Site.Params.description }}" />
+  <meta property="og:title" content="{{ .Title }}" />
+  <meta property="og:description" content="{{ .Site.Params.description }}" />
+  <meta property="og:type" content="website" />
+  <meta name="theme-color" content="#0a0e17" />
+
+  {{/* Set the stored theme before paint to avoid a flash. */}}
+  <script>
+    try {
+      var t = localStorage.getItem("ardur-theme");
+      if (t) document.documentElement.setAttribute("data-theme", t);
+    } catch (e) {}
+  </script>
+
+  {{/* Preload the primary fonts. */}}
+  <link rel="preload" href="/fonts/inter-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin />
+  <link rel="preload" href="/fonts/inter-latin-700-normal.woff2" as="font" type="font/woff2" crossorigin />
+
+  {{/* Tailwind compiled through Hugo's PostCSS pipeline (no separate Node build step at deploy time). */}}
+  {{ $css := resources.Get "css/main.css" | css.PostCSS }}
+  {{ if hugo.IsProduction }}
+    {{ $css = $css | minify | fingerprint }}
+  {{ end }}
+  <link rel="stylesheet" href="{{ $css.RelPermalink }}"{{ with $css.Data.Integrity }} integrity="{{ . }}"{{ end }} />
+</head>
+<body>
+  {{ partial "nav.html" . }}
+
+  <main>
+    {{ partial "hero.html" . }}
+    {{ partial "differentiators.html" . }}
+    {{ partial "audiences.html" . }}
+    {{ partial "table-stakes.html" . }}
+    {{ partial "capabilities.html" . }}
+    {{ partial "architecture.html" . }}
+    {{ partial "quickstart.html" . }}
+    {{ partial "why-open-source.html" . }}
+    {{ partial "get-involved.html" . }}
+  </main>
+
+  {{ partial "footer.html" . }}
+
+  {{/* Progressive enhancement: reveal, counters, nav, theme toggle, demo terminal. */}}
+  {{ $js := resources.Get "js/observer.js" }}
+  {{ if hugo.IsProduction }}
+    {{ $js = $js | minify | fingerprint }}
+  {{ end }}
+  <script src="{{ $js.RelPermalink }}" defer></script>
+
+  {{/* Mermaid renders the architecture diagram. Theme follows the page theme. */}}
+  <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+    var dark = document.documentElement.getAttribute("data-theme") !== "light";
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: dark ? "dark" : "neutral",
+      themeVariables: { fontFamily: "JetBrains Mono, monospace" },
+      securityLevel: "strict",
+    });
+  </script>
+</body>
+</html>

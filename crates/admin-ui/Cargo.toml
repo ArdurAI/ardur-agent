@@ -1,0 +1,83 @@
+# ardur-admin — an observability + operator-console dashboard for an
+# ardur-server deployment (§13.X).
+#
+# It reads the artifacts ardur-server persists on disk — session journals
+# (`<journal-dir>/sessions/<id>/journal.jsonl`) and the receipt chain
+# (`<receipt-store>/chain.jsonl`) — plus, optionally, the Qdrant memory
+# collection, and serves them over a small HTTP dashboard on its own port. It
+# is decoupled from ardur-server: separate process, separate port, no shared
+# boot config. Every route it serves is read-only against its OWN on-disk
+# artifacts, with one narrow, explicit exception: when `--server-url` +
+# `--server-admin-token` are configured, it proxies approve/reject decisions
+# to ardur-server's own admin-bearer-gated `/approvals` API (never writing to
+# any on-disk store itself). See `README.md`.
+[package]
+name = "ardur-admin"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "ardur-admin"
+path = "src/main.rs"
+
+[dependencies]
+# CLI flags — all configuration is via clap; ardur-admin reads NO env vars and
+# never touches ardur-server's `Config`.
+clap = { workspace = true }
+# The read-only HTTP surface + the static dashboard.
+axum = { workspace = true }
+maud = { workspace = true }
+# Async runtime backing the axum server.
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# Receipt parsing: a persisted receipt line is a compact JWS whose payload
+# segment base64url-decodes to an `ardur_receipt::ReceiptBody`. We reuse that
+# type read-only and decode the body the same way the fused runtime does — we
+# never re-sign or mutate a receipt.
+ardur-receipt = { workspace = true }
+base64 = { workspace = true }
+# Journal parsing: each journal line deserializes into the canonical
+# `ardur_session_journals::JournalEntry`, so the admin-ui and the writer can
+# never drift into two schemas.
+ardur-session-journals = { workspace = true }
+# Optional memory queries: when `--qdrant-url` is set we scroll the memory
+# collection read-only, reusing `ardur-memory-qdrant`'s record type and the
+# `qdrant-client` the durable store already depends on.
+ardur-memory-qdrant = { workspace = true }
+# Trust-center APIs: capability wallet and policy debugger reuse the same cap
+# claims and Cedar evaluator the runtime enforces on turns.
+ardur-cap-token = { workspace = true }
+ardur-cedar-policy = { workspace = true }
+qdrant-client = { workspace = true }
+# Millisecond-epoch → calendar-day conversion for the cost-by-day aggregation.
+chrono = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+subtle = { workspace = true }
+# Outbound client for the approvals proxy: admin-ui calls ardur-server's own
+# admin-bearer-gated /approvals API rather than writing to any store itself.
+reqwest = { workspace = true }
+
+[dev-dependencies]
+# Stands in for ardur-server in the approvals-proxy tests.
+wiremock = { workspace = true }
+# In-process router driver for the endpoint tests.
+axum-test = { workspace = true }
+tokio = { workspace = true }
+# Throwaway journal/receipt directories for the fixture-backed tests.
+tempfile = { workspace = true }
+serde_json = { workspace = true }
+# Base64url-encode synthetic receipt JWS payloads in the fixtures.
+base64 = { workspace = true }
+# Build fixture journal entries from the canonical typed constructors (and the
+# cost/id types it re-exports), so the on-disk bytes the tests write match
+# exactly what ardur-server writes.
+ardur-session-journals = { workspace = true }
+# Trust-center fixtures construct deterministic cap-token ids.
+uuid = { workspace = true }
