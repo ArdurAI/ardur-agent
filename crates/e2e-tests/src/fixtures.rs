@@ -13,7 +13,9 @@ use ardur_cap_token::{
     BiscuitCapTokenIssuer, CapScope, CapTokenIssuer, HolderId as CapHolderId, KeyPair,
 };
 use ardur_cedar_policy::{CedarPolicyBundle, PolicyBundle, PolicySource};
-use ardur_cost_gate::{Clock, CostTuple as GateCostTuple, HolderId as GateHolderId, ManualClock};
+use ardur_cost_gate::{
+    Clock, CostTuple as GateCostTuple, HolderId as GateHolderId, ManualClock, UnixTsMillis,
+};
 use ardur_fused_runtime::FusedRuntimeBuilder;
 use ardur_provider_runtime::{AnthropicProvider, ModelId, Provider};
 use ardur_receipt::Es256SigningKey;
@@ -115,7 +117,7 @@ pub fn permissive_policies() -> CedarPolicyBundle {
 /// reservation expiry and the cap-token `now` caveat are race-free.
 #[must_use]
 pub fn dev_clock() -> Arc<dyn Clock> {
-    Arc::new(ManualClock::new(NOW_MS))
+    Arc::new(ManualClock::new(UnixTsMillis(NOW_MS)))
 }
 
 /// Mint a cap-token (base64) for [`TEST_HOLDER`], scoped to [`AUDIENCE`] /

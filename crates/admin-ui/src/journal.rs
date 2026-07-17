@@ -9,7 +9,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use ardur_session_journals::JournalEntry;
+use ardur_session_journals::{JournalEntry, redact_entries_default};
 use serde::Serialize;
 
 /// A one-line summary of a session, for the sessions list + dashboard table.
@@ -66,7 +66,8 @@ fn entry_at(entry: &JournalEntry) -> u64 {
         | JournalEntry::ToolInvocation { at, .. }
         | JournalEntry::CostFinalized { at, .. }
         | JournalEntry::Checkpoint { at, .. }
-        | JournalEntry::Invalidation { at, .. } => *at,
+        | JournalEntry::Invalidation { at, .. }
+        | JournalEntry::Rollback { at, .. } => at.get(),
     }
 }
 
@@ -155,6 +156,12 @@ pub fn list_sessions(journal_dir: &Path) -> anyhow::Result<Vec<SessionSummary>> 
 /// With no explicit `offset`, the page is the journal's **tail** — the last
 /// `limit` entries — matching the dashboard's "recent activity" default. An
 /// explicit `offset` pages forward from the start of the journal instead.
+///
+/// Free-text fields (`UserMessage`/`AssistantMessage` content, `Checkpoint`
+/// summaries, `Invalidation` reasons) are redacted for secret-shaped
+/// patterns before the page is returned — this is the only place a
+/// journal's raw content leaves the process, so redaction happens here
+/// rather than at each caller.
 pub fn page(
     journal_dir: &Path,
     session_id: &str,
@@ -169,7 +176,7 @@ pub fn page(
         None => total.saturating_sub(limit),
     };
     let end = start.saturating_add(limit).min(total);
-    let window = entries[start..end].to_vec();
+    let window = redact_entries_default(&entries[start..end]);
     Ok(JournalPage {
         session_id: session_id.to_string(),
         total,

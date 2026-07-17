@@ -62,6 +62,20 @@ async fn metrics_are_prometheus_parseable_and_do_not_leak_tokens() {
     assert!(metrics.contains("ardur_server_receipts_total"));
     assert!(metrics.contains("ardur_server_admin_bearer_tokens_configured"));
 
+    // Receipt-chain aggregates and turn/denial counters are exposed too. On a
+    // fresh boot they are all zero, but the series (with HELP/TYPE headers) must
+    // be present so scrapers see a stable schema, not an appearing-on-first-use
+    // metric.
+    assert!(metrics.contains("# TYPE ardur_server_receipt_chain_verified gauge"));
+    assert!(metrics.contains("ardur_server_receipt_cost_cents_total 0"));
+    assert!(metrics.contains("ardur_server_tool_calls_total 0"));
+    assert!(metrics.contains("ardur_server_sessions_total 0"));
+    assert!(metrics.contains("ardur_server_turns_ok_total 0"));
+    assert!(metrics.contains("ardur_server_turns_denied_total{gate=\"injection\"} 0"));
+    assert!(metrics.contains("ardur_server_turns_denied_total{gate=\"policy\"} 0"));
+    assert!(metrics.contains("ardur_server_turns_denied_total{gate=\"cost\"} 0"));
+    assert!(metrics.contains("ardur_server_turns_errored_total 0"));
+
     for secret in [
         support::BOT_TOKEN,
         support::SIGNING_SECRET,
@@ -112,6 +126,13 @@ async fn admin_runtime_requires_auth_and_returns_redacted_state() {
     assert_eq!(json["cap_tokens"]["gateway_subject"], "ardur:slack-gateway");
     assert_eq!(json["gates"]["cost_budget_cents"], 10_000);
     assert!(json["receipts"]["count"].is_u64());
+    assert_eq!(json["receipts"]["chain_verified"], true);
+    assert!(json["receipts"]["cost_cents_total"].is_u64());
+    assert!(json["receipts"]["distinct_sessions"].is_u64());
+    assert_eq!(json["turns"]["ok"], 0);
+    assert_eq!(json["turns"]["denied"]["injection"], 0);
+    assert_eq!(json["turns"]["denied"]["policy"], 0);
+    assert_eq!(json["turns"]["denied"]["cost"], 0);
     assert!(
         json["tools"]["allowlist_count"]
             .as_u64()

@@ -15,9 +15,13 @@
 //! carries `None`.
 
 use std::io::Read as _;
+use std::io::Write as _;
 use std::path::Path;
 
-use ardur_receipt::{Jwks, ReceiptBody, ReceiptError, ReceiptVerifier, Sha256Digest};
+use ardur_receipt::{
+    CostTuple, Es256SigningKey, HolderId, Jwks, ReceiptBody, ReceiptError, ReceiptSigner,
+    ReceiptVerifier, Sha256Digest, TokenId, UnixTsMillis, VerbObject,
+};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 
@@ -66,6 +70,66 @@ pub enum ReceiptChainError {
         /// Index into the loaded chain at which the mismatch was found.
         at: usize,
     },
+    /// Signing the receipt body failed.
+    #[error("receipt signing failed: {0}")]
+    SignFailed(String),
+}
+
+/// Mint, sign, and durably append a control-plane receipt directly against a
+/// receipt log path — no provider call, no cost-gate reservation, no
+/// `FusedRuntime` instance required. This gives a one-shot caller that does
+/// not hold a running runtime (e.g. the CLI's `ardur approvals
+/// approve`/`deny`, minting `approval.approve.accepted.v1`/
+/// `approval.reject.accepted.v1`) the same append-only, fsync'd durability
+/// contract turn receipts get, chained onto the *same* log a `FusedRuntime`
+/// over the same path appends to.
+///
+/// Unlike [`FusedRuntime`](crate::FusedRuntime)'s internal
+/// `commit_control_receipt` (which reads the chain tail from an in-memory
+/// cache under a commit lock, safe under concurrent turns), this re-reads
+/// the whole persisted chain on every call to find the parent hash — the
+/// right tradeoff for an infrequent one-shot CLI invocation with no
+/// concurrent writer to race against, not for a hot path.
+///
+/// # Errors
+/// [`ReceiptChainError::Io`]/[`Malformed`](ReceiptChainError::Malformed) if
+/// the existing chain cannot be loaded, or
+/// [`ReceiptChainError::SignFailed`] if signing fails.
+#[allow(clippy::too_many_arguments)]
+pub fn mint_control_receipt(
+    log_path: &Path,
+    receipt_key: &Es256SigningKey,
+    verb: VerbObject,
+    payload_digest: Sha256Digest,
+    subject: HolderId,
+    cap_token_id: TokenId,
+    session_id: Option<uuid::Uuid>,
+    cost: CostTuple,
+    issued_at_ms: u64,
+) -> Result<ReceiptBody, ReceiptChainError> {
+    let chain = load_persisted_chain(log_path)?;
+    let parent_hash = chain
+        .last()
+        .map(|r| Sha256Digest::of(r.jws_compact.as_bytes()));
+    let body = ReceiptBody {
+        receipt_id: uuid::Uuid::new_v4(),
+        parent_hash,
+        verb,
+        issued_at: UnixTsMillis(issued_at_ms),
+        subject,
+        cap_token_id,
+        payload_digest,
+        session_id,
+        cost,
+        tool_calls: Vec::new(),
+        provider: None,
+    };
+    let signed = ReceiptSigner::sign(body, receipt_key)
+        .map_err(|e| ReceiptChainError::SignFailed(e.to_string()))?;
+    let mut file = open_append_no_follow(log_path)?;
+    writeln!(file, "{}", signed.jws_compact())?;
+    file.sync_all()?;
+    Ok(signed.body().clone())
 }
 
 /// Decode the [`ReceiptBody`] out of a compact JWS's payload (middle) segment.
@@ -399,7 +463,7 @@ mod tests {
             verb: VerbObject::new("cost.admission.allow.v1").expect("valid verb"),
             issued_at: UnixTsMillis(1_700_000_000_000),
             subject: HolderId("spiffe://ardur/test".to_string()),
-            cap_token_id: TokenId("test-token".to_string()),
+            cap_token_id: TokenId(uuid::Uuid::from_u128(0x7e57)),
             payload_digest: Sha256Digest::of(b"payload"),
             session_id: None,
             cost: CostTuple {
@@ -407,7 +471,7 @@ mod tests {
                 tokens_out: 0,
                 cents: 0,
                 wall_ms: 0,
-                attention_score: 0.0,
+                attention_score: 0,
             },
             tool_calls: Vec::new(),
             provider: Some("test-provider".to_string()),
