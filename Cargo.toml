@@ -9,6 +9,7 @@
 resolver = "2"
 members = [
     "crates/acp",
+    "crates/approvals",
     "crates/core-types",
     "crates/cap-token",
     "crates/embeddings",
@@ -256,6 +257,7 @@ russh = { version = "0.62", default-features = false, features = ["flate2", "aws
 #     cross-crate wiring in Phase 1 references `{ workspace = true }`. ---
 ardur-core-types = { path = "crates/core-types" }
 ardur-cap-token = { path = "crates/cap-token" }
+ardur-approvals = { path = "crates/approvals" }
 ardur-embeddings = { path = "crates/embeddings" }
 ardur-bm25-index = { path = "crates/bm25-index" }
 ardur-fusion = { path = "crates/fusion" }
