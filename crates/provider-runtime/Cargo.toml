@@ -1,0 +1,66 @@
+[package]
+name = "ardur-provider-runtime"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The §1.0 runtime owns the shared value types a provider call speaks in —
+# ChatMessage/Role (the prompt), ProviderId (the registry key), and CostTuple
+# (the billed cost). We re-export rather than redefine so the runtime and the
+# provider layer never drift into two incompatible schemas.
+ardur-runtime = { workspace = true }
+# `ModelId` is owned by the workspace's leaf `core-types` crate and re-exported
+# here so the provider and cost-gate layers share one model-id type.
+ardur-core-types = { workspace = true }
+# Object-safe `Provider::complete` — async-trait boxes the returned future so
+# `dyn Provider` works as a registry value (§3.0).
+async-trait = { workspace = true }
+# Live Anthropic Messages-API HTTP client (§3.1). rustls-tls keeps TLS
+# pure-Rust; `json` carries the serde request/response bodies. `stream` adds
+# `Response::bytes_stream()`, the byte source the §3.1b SSE parser reads from.
+reqwest = { workspace = true, features = ["stream"] }
+# Parse the HTTP-date form of the `Retry-After` header (RFC 7231 §7.1.3).
+httpdate = "1"
+serde = { workspace = true }
+# §3.1b streaming: `futures::Stream` is the type `Provider::stream` returns, and
+# `stream::{iter, unfold}` build the event streams (default-impl + SSE parser).
+futures = { workspace = true }
+# §3.1b: parses the Messages-API `event: …\ndata: …\n\n` server-sent-event frames
+# out of the raw byte stream, so the provider only handles decoded SSE events.
+eventsource-stream = "0.2"
+# `raw_provider_response` carries the untouched upstream JSON; tool-call
+# arguments are JSON too.
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+# Workspace pins v7; provider request-correlation ids are v4 (random) per §3.0
+# Phase 1, so opt v4 in on top of the shared pin (Cargo unifies the feature set).
+uuid = { workspace = true, features = ["v4"] }
+# OpenTelemetry GenAI semconv emission. `tracing` opens the per-call
+# `provider.send` span (carrying the `gen_ai.*` attributes); `telemetry.rs`
+# installs the OTLP exporter and bridges the tracing spans onto the
+# OpenTelemetry SDK via `tracing-opentelemetry`. `tracing-subscriber`'s
+# `env-filter` + `registry` build the layered subscriber the bridge plugs into.
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+tracing-opentelemetry = { workspace = true }
+opentelemetry = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+opentelemetry-otlp = { workspace = true }
+
+[dev-dependencies]
+# Integration tests are a separate crate, so they re-declare the deps they name
+# directly. The async `complete` calls need a runtime to poll them.
+tokio = { workspace = true }
+serde_json = { workspace = true }
+# The `genai_spans` integration test captures the emitted `provider.send` span
+# with an in-memory `tracing-subscriber` layer and asserts its `gen_ai.*` fields.
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+# `streaming` test: `wiremock` stands in for the Messages API and serves a
+# canned `text/event-stream` body; `futures::StreamExt` drains the returned
+# `Provider::stream` into the asserted `StreamEvent` sequence.
+wiremock = { workspace = true }
+futures = { workspace = true }

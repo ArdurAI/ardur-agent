@@ -1,0 +1,42 @@
+[package]
+name = "ardur-media-audio"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# `UnixTsMillis` is the workspace-canonical timestamp newtype, owned by the leaf
+# `core-types` crate and re-exported here instead of a local `u64` alias.
+ardur-core-types = { workspace = true }
+# The decode crate owns shared audio format declarations used by this domain
+# crate and later sandboxed decode phases.
+ardur-media-decode = { workspace = true }
+# Audio operations are authorized by the same capability token handle the
+# runtime uses for turns and tools.
+ardur-runtime = { workspace = true }
+# The voice.transcribe tool exposes transcription through the shared tool layer
+# so fused-runtime cap-token + Cedar enforcement gates every invocation.
+ardur-tool-registry = { workspace = true }
+# Object-safe async trait methods for future provider adapters.
+async-trait = { workspace = true }
+base64 = { workspace = true }
+hex = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+url = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
+# M0: the local STT/TTS providers run the external command and its temp-file I/O
+# through `tokio::process`/`tokio::fs` so an `async fn` never parks a runtime
+# worker for the (up to 4h) command duration.
+tokio = { workspace = true, features = ["process", "fs"] }
+
+[dev-dependencies]
+# Receipt constants are tested against the current canonical receipt grammar.
+ardur-receipt = { workspace = true }
+tempfile = { workspace = true }
+wiremock = { workspace = true }

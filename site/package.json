@@ -1,0 +1,17 @@
+{
+  "name": "ardur-site",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Hugo landing site for Ardur — built with Tailwind via Hugo's PostCSS pipeline.",
+  "license": "Apache-2.0",
+  "scripts": {
+    "dev": "hugo server -D",
+    "build": "hugo --gc --minify"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.3.2",
+    "postcss": "^8.4.49",
+    "postcss-cli": "^11.0.0",
+    "tailwindcss": "^4.3.2"
+  }
+}
