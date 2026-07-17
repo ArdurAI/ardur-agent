@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Ardur">
+  <rect width="512" height="512" rx="112" fill="#101827"/>
+  <path d="M256 72 88 162v188l168 90 168-90V162L256 72Z" fill="#38bdf8" opacity=".18"/>
+  <path d="M256 112 128 181v142l128 69 128-69V181l-128-69Zm0 64 72 39v78l-72 39-72-39v-78l72-39Z" fill="#7dd3fc"/>
+  <circle cx="256" cy="254" r="42" fill="#f8fafc"/>
+</svg>

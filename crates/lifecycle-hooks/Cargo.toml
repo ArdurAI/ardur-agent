@@ -1,0 +1,62 @@
+[package]
+name = "ardur-lifecycle-hooks"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# §1.0 owns the runtime contract this crate plugs into: the `ChatRuntime` trait
+# `HookedRuntime` implements, the `SubmitRequest`/`SubmitResult` envelopes, the
+# shared ids (`SessionId`/`CapTokenRef`/`ReceiptId`), `CostTuple`, and the
+# `RuntimeError` surface (incl. the §11.17 `VetoedByHook` variant a pre-submit
+# veto surfaces). Putting the hook framework here rather than inside
+# `ardur-runtime` keeps the dependency graph acyclic: provider-runtime,
+# receipt, and memory all depend on runtime, so the place that wires all four
+# together behind a hook substrate must sit *above* them.
+ardur-runtime = { workspace = true }
+# §3.0 — the `Provider` a turn dispatches through, plus the
+# `CompletionRequest`/`CompletionResponse` envelopes the pre-submit / post-
+# receipt contexts give hooks an (immutable, or replaceable) view of.
+ardur-provider-runtime = { workspace = true }
+# §11.14 — the signed receipt minted per turn that `on_post_receipt`
+# observes. The carried body records the *post-redaction* payload digest, not
+# the original prompt.
+ardur-receipt = { workspace = true }
+# §7.0 — the bi-temporal memory the turn record is written to *after*
+# `on_post_receipt` runs, so an observer sees the receipt before the write.
+ardur-memory = { workspace = true }
+# Object-safe async hook trait — async-trait boxes the returned future so the
+# registry can hold `Arc<dyn LifecycleHook>`.
+async-trait = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+# `RecordingHook` stores callbacks behind a non-poisoning mutex so a panicking
+# hook in one test cannot wedge the shared event log.
+parking_lot = { workspace = true }
+# Receipt payloads + memory records are JSON; the turn record's payload is a
+# `serde_json::Value`.
+serde_json = { workspace = true }
+# Receipt ids are UUIDv4 (the receipt body mints v4); opt v4 in on top of the
+# workspace v7 pin. v5 derives a stable jti surrogate from the cap-token handle
+# (this Phase-1 runtime does not verify tokens, so it has no minted jti).
+uuid = { workspace = true, features = ["v4", "v5"] }
+
+[dev-dependencies]
+# The async `submit` / hook callbacks need an executor to drive them in the
+# integration tests.
+tokio = { workspace = true }
+serde_json = { workspace = true }
+# Integration tests are a separate crate, so they re-declare the deps they name
+# directly (the project convention — see provider-runtime's manifest): the stub
+# providers implement `ardur_provider_runtime::Provider`, the E2E asserts on
+# `ardur_receipt` digests, the scenario writes/reads `ardur_memory`, and the
+# request builders speak `ardur_runtime`'s envelopes.
+ardur-runtime = { workspace = true }
+ardur-provider-runtime = { workspace = true }
+ardur-receipt = { workspace = true }
+ardur-memory = { workspace = true }
+async-trait = { workspace = true }
+parking_lot = { workspace = true }

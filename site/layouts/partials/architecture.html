@@ -1,0 +1,40 @@
+<section id="architecture" class="parallax-bg relative py-24 md:py-28">
+  <div class="container-content relative z-10">
+    <div class="reveal mx-auto max-w-2xl text-center">
+      <h2 class="text-3xl font-bold tracking-tight md:text-4xl">Architecture at a glance</h2>
+      <p class="mt-4 text-ink-muted">
+        You reach the agent through a channel; the gateway hands off to the runtime;
+        the runtime coordinates providers, memory, tools, and skills. Cap-tokens,
+        receipts, and cost-tuples thread through every edge.
+      </p>
+    </div>
+
+    <div class="reveal card mx-auto mt-12 max-w-4xl p-6 md:p-8">
+      <pre class="mermaid">
+flowchart TD
+  U["You<br/>terminal · Slack · Matrix · Discord · Telegram"] --> G["Gateway<br/>channels · auth · allowlists"]
+  G --> R["FusedRuntime<br/>10-stage turn pipeline"]
+  R --> P["Providers<br/>Anthropic · OpenRouter · Ollama · Codex · Claude-CLI"]
+  R --> M["Memory<br/>bi-temporal · hybrid recall"]
+  R --> T["Tools<br/>shell · file · http · MCP"]
+  R --> S["Skills<br/>SKILL.md"]
+  R --> H["Hooks<br/>policy · injection defense"]
+
+  R -.emits.-> CT["Cap-tokens<br/>scoped · revocable"]
+  R -.emits.-> RC["Receipt-chain<br/>signed · replayable"]
+  R -.emits.-> CO["Cost-tuples<br/>tokens · $ · time · risk"]
+
+  CT -.guards.-> T
+  CO -.bounds.-> P
+      </pre>
+    </div>
+
+    <p class="reveal mx-auto mt-6 max-w-2xl text-center text-sm text-ink-faint">
+      A turn runs ten stages in order — cap-token, Cedar policy, cost-gate,
+      hooks, injection scan, provider, receipt, hooks, cost finalize, memory,
+      journal — short-circuiting on the first failure. Cap-tokens guard what
+      tools can run; cost-tuples bound what providers can spend; receipts record
+      all of it.
+    </p>
+  </div>
+</section>

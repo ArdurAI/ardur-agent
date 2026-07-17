@@ -1,0 +1,63 @@
+# cargo-deny configuration for Ardur Agent.
+#
+# ARD-423: license + duplicate detection.
+# Allows Apache-2.0, MIT, BSD, ISC (the common Rust ecosystem licenses).
+# Denies GPL/AGPL unless already depended on transitively.
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+    "Unlicense",
+    "0BSD",
+    "BSL-1.0",
+    "MPL-2.0",
+    "NCSA",
+    "CDLA-Permissive-2.0",
+]
+# Any license absent from the allow list fails the license check; this keeps
+# GPL/AGPL/LGPL/SSPL families excluded without using cargo-deny's removed
+# `licenses.deny` key.
+# Allow specific crates that have non-standard but acceptable licenses
+exceptions = []
+# Confidence threshold for license detection
+confidence-threshold = 0.8
+
+[advisories]
+# Ignore advisories that have no fix available. Each ignored advisory is a
+# transitive unmaintained-crate notice with no patched version currently exposed
+# through the dependency tree; vulnerability advisories must be upgraded instead
+# of ignored.
+ignore = [
+    { id = "RUSTSEC-2025-0141", reason = "bincode 1.3.3 is pulled by syntect; advisory is unmaintained/no safe upgrade, not an active vulnerability" },
+    { id = "RUSTSEC-2024-0436", reason = "paste is pulled transitively by fastembed/tokenizers/rav1e; no safe drop-in upgrade exposed here" },
+    { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2 is transitive via Matrix/Teloxide/Biscuit; no direct replacement in this workspace" },
+    { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile is transitive via qdrant-client/tonic; no patched direct upgrade available" },
+]
+# Require cargo-audit advisories db to be up to date
+db-urls = ["https://github.com/rustsec/advisory-db"]
+
+[bans]
+# Deny duplicate versions of the same crate
+multiple-versions = "warn"
+# Allow specific duplicate versions
+allow = []
+# Highlight crates that should never be duplicated
+deny = []
+# Skip certain crates from duplicate detection
+skip = []
+
+[sources]
+# Only allow crates from crates.io, no unknown registries
+unknown-registry = "deny"
+unknown-git = "warn"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

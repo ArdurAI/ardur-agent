@@ -1,0 +1,126 @@
+# ardur-e2e-tests — the workspace's cross-crate end-to-end scenario host.
+#
+# Phase 2.E (§19 / architect/backlog/e2e-test-coverage-gaps.md). Unlike the
+# per-crate integration suites — which only prove a crate speaks its own
+# contract — the scenarios here drive a single request through the *fused*
+# Phase-1 substrate (cap-token → cedar → cost-gate → provider → runtime →
+# receipt → journal → memory). This is an internal-only test crate: it ships no
+# public API and is never published.
+#
+# §18.8 keeps this PR scoped to `crates/e2e-tests/**` plus the root manifest.
+
+[package]
+name = "ardur-e2e-tests"
+version = "0.0.0"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# `src/lib.rs` exists only to host the shared `fixtures` module that the
+# `tests/scenario_NN_*.rs` integration targets pull in. The path-deps below back
+# those fixtures and the scenarios; every Phase-1 crate currently on `dev` is
+# listed so a new scenario can wire any of them without touching this manifest.
+[dependencies]
+ardur-acp = { workspace = true }
+ardur-automation = { workspace = true }
+ardur-cap-token = { workspace = true }
+ardur-cedar-policy = { workspace = true }
+# `ardur-cli` is a binary crate and is *not* declared in `[workspace.dependencies]`
+# (it is no other crate's library dep), so it is pulled in by an explicit path.
+ardur-cli = { path = "../cli" }
+ardur-cost-gate = { workspace = true }
+ardur-fused-runtime = { workspace = true }
+ardur-lifecycle-hooks = { workspace = true }
+ardur-memory = { workspace = true }
+ardur-media-audio = { workspace = true }
+ardur-media-decode = { workspace = true }
+ardur-hooks-openclaw-compat = { workspace = true }
+# The durable Qdrant memory backend — the `scenario_qdrant_memory_persistence`
+# scenario drives a fused turn through it, then reconnects to prove durability.
+ardur-memory-qdrant = { workspace = true }
+# The retrieval-quality eval harness + its deterministic embedder — the
+# `scenario_memory_retrieval_eval` scenario measures the hybrid baseline
+# hermetically (Finding 5 recall harness).
+ardur-memory-eval = { workspace = true }
+ardur-embeddings = { workspace = true }
+ardur-messaging-gateway = { workspace = true }
+ardur-multi-agent = { workspace = true }
+ardur-provider-runtime = { workspace = true }
+ardur-receipt = { workspace = true }
+ardur-runtime = { workspace = true }
+ardur-session-journals = { workspace = true }
+ardur-tool-registry = { workspace = true }
+ardur-injection-defense = { workspace = true }
+ardur-slack-adapter = { workspace = true }
+# `ardur-server` is a binary+library crate and is *not* declared in
+# `[workspace.dependencies]`; the §4.1 server scenario boots its real `AppState`
+# + router, so it is pulled in by an explicit path (as `ardur-cli` is above).
+ardur-server = { path = "../server" }
+
+# `fixtures.rs` is compiled as part of the library, so the helpers it builds
+# (`tempfile::TempDir`, the deterministic biscuit root key) need their crates as
+# regular dependencies rather than dev-dependencies.
+# TODO §E1: `biscuit-auth` is pulled directly because `ardur-cap-token` re-exports
+# `KeyPair`/`PublicKey` but not `PrivateKey`, and a deterministic root key needs
+# `PrivateKey::from_bytes`. Drop this once cap-token exposes a seeded-key
+# constructor.
+biscuit-auth = { workspace = true }
+tempfile = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+futures = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+parking_lot = { workspace = true }
+# The §3.2 scenario drives the live-HTTP OpenRouter provider against a wiremock
+# stand-in for OpenRouter's OpenAI-compatible endpoint.
+ardur-provider-openrouter = { workspace = true }
+# The §12.5 scenario drives the generic OpenAI-compatible provider against a
+# wiremock stand-in for `/chat/completions`.
+ardur-provider-openai-compat = { workspace = true }
+# The §3.3 scenario drives the live-HTTP Ollama provider against a wiremock
+# stand-in for Ollama's native `/api/chat` endpoint.
+ardur-provider-ollama = { workspace = true }
+# The §3.3b scenario drives the subprocess Codex provider against an executable
+# shim standing in for the real `codex` CLI — no install, no subscription spend.
+ardur-provider-codex = { workspace = true }
+# The §3.3c scenario drives the subprocess Claude CLI provider against an
+# executable shim standing in for the real `claude` CLI — no install, no
+# subscription spend.
+ardur-provider-claude-cli = { workspace = true }
+# The fused-runtime scenarios implement `Provider` stubs in `tests/support`.
+async-trait = { workspace = true }
+# The OTel scenario captures the GenAI `provider.send` span with an in-memory
+# `tracing-subscriber` layer and asserts its hierarchy + `gen_ai.*` attributes.
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+# `uuid` builds the genesis receipt's `receipt_id` and is the type behind several
+# substrate ids the scenarios assert on.
+uuid = { workspace = true }
+assert_matches = "1"
+# The §4.1 Slack scenario mocks `chat.postMessage`, wraps the test credentials
+# in `SecretString`, and recomputes a genuine `v0=` event signature.
+wiremock = { workspace = true }
+secrecy = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+# The §4.1 server scenario drives `ardur-server`'s real axum router in-process
+# via `tower::ServiceExt::oneshot` — no socket needed.
+axum = { workspace = true }
+tower = { workspace = true }
+# The §6.0 MCP scenario serves the real `ardur-server` router over a loopback
+# socket and exercises the bearer gate with a raw `reqwest` POST (the no-token
+# 401 path); the `RemoteMcpToolset` client drives the authorized tools/list +
+# tools/call round-trip.
+reqwest = { workspace = true }
+# The §4.X Matrix scenario drives a fused turn from a Matrix-shaped inbound
+# message; its gated-live half connects a real `MatrixChannel`.
+ardur-channel-matrix = { workspace = true }
+# The §4.Y Discord + Telegram scenarios drive a fused turn from a channel-shaped
+# inbound message; their gated-live halves connect the real adapters.
+ardur-channel-discord = { workspace = true }
+ardur-channel-telegram = { workspace = true }
