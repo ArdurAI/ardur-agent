@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#101827" />
+    <title>Ardur Agent</title>
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="hero">
+        <p class="eyebrow">Ardur consumer surface</p>
+        <h1>Private chat, approvals, and voice-ready controls.</h1>
+        <p>
+          Streams replies from <code>/chat</code>, keeps bearer tokens local to
+          this browser session, and exposes push-approval hooks for the approval
+          gate surface.
+        </p>
+      </header>
+
+      <section class="card settings" aria-labelledby="settings-heading">
+        <h2 id="settings-heading">Connection</h2>
+        <label>
+          Server base URL
+          <input id="server-url" type="url" value="http://127.0.0.1:3000" autocomplete="url" />
+        </label>
+        <label>
+          Chat bearer token
+          <input id="bearer-token" type="password" placeholder="Paste token for this session" autocomplete="off" />
+        </label>
+        <div class="actions">
+          <button id="install-button" type="button" disabled>Install PWA</button>
+          <button id="enable-push" type="button">Enable approval pushes</button>
+        </div>
+        <p id="push-status" class="muted" role="status">Push not enabled.</p>
+      </section>
+
+      <section class="card chat" aria-labelledby="chat-heading">
+        <h2 id="chat-heading">Chat</h2>
+        <ol id="transcript" class="transcript" aria-live="polite"></ol>
+        <form id="chat-form" class="composer">
+          <label class="sr-only" for="message">Message</label>
+          <textarea id="message" rows="3" placeholder="Ask Ardur…" required></textarea>
+          <button type="submit">Send</button>
+        </form>
+      </section>
+
+      <section class="card approvals" aria-labelledby="approvals-heading">
+        <h2 id="approvals-heading">Approval hooks</h2>
+        <p class="muted">
+          Approval pushes can deep-link here with <code>?approval_id=...</code>.
+          The buttons call configurable approval endpoints without exposing the
+          bearer token beyond this browser session.
+        </p>
+        <div id="approval-panel" hidden>
+          <p>Approval request: <strong id="approval-id"></strong></p>
+          <div class="actions">
+            <button id="approve-button" type="button">Approve</button>
+            <button id="reject-button" type="button" class="danger">Reject</button>
+          </div>
+          <p id="approval-status" class="muted" role="status"></p>
+        </div>
+      </section>
+    </main>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

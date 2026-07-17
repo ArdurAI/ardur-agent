@@ -1,0 +1,9 @@
+id: tool_use_basic
+description: Agent should invoke a tool to answer a question it cannot answer from memory.
+prompt: "Use your tools to look up the current weather in Tokyo, then tell me the temperature."
+expected:
+  tool_called: web_search
+  contains: ["Tokyo"]
+max_tokens: 500
+max_turns: 1
+timeout_secs: 60

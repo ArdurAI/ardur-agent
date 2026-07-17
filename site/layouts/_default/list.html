@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{ .Title }} — Ardur</title>
+  <meta name="description" content="{{ .Site.Params.description }}" />
+  <meta property="og:title" content="{{ .Title }} — Ardur" />
+  <meta property="og:description" content="{{ .Site.Params.description }}" />
+  <meta property="og:type" content="website" />
+  <meta name="theme-color" content="#0a0e17" />
+
+  <script>
+    try {
+      var t = localStorage.getItem("ardur-theme");
+      if (t) document.documentElement.setAttribute("data-theme", t);
+    } catch (e) {}
+  </script>
+
+  <link rel="preload" href="/fonts/inter-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin />
+  <link rel="preload" href="/fonts/inter-latin-700-normal.woff2" as="font" type="font/woff2" crossorigin />
+
+  {{ $css := resources.Get "css/main.css" | css.PostCSS }}
+  {{ if hugo.IsProduction }}
+    {{ $css = $css | minify | fingerprint }}
+  {{ end }}
+  <link rel="stylesheet" href="{{ $css.RelPermalink }}"{{ with $css.Data.Integrity }} integrity="{{ . }}"{{ end }} />
+</head>
+<body>
+  {{ partial "nav.html" . }}
+
+  <main class="pt-32 pb-24 md:pt-40">
+    <div class="container-content">
+      <div class="mx-auto max-w-2xl">
+        <p class="text-sm text-ink-faint">
+          <a href="{{ "" | relURL }}" class="hover:text-ink transition">Ardur</a>
+          <span class="mx-1.5">/</span>Posts
+        </p>
+        <h1 class="mt-4 text-3xl font-bold tracking-tight md:text-4xl">{{ .Title }}</h1>
+        <p class="mt-3 text-ink-muted">Status checkpoints and notes from building Ardur in the open.</p>
+
+        <ul class="mt-10 space-y-4">
+          {{ range .Pages.ByDate.Reverse }}
+          <li>
+            <a href="{{ .RelPermalink }}" class="card block p-6">
+              <h2 class="text-lg font-semibold">{{ .Title }}</h2>
+              {{ with .Date }}<p class="mt-1 text-sm text-ink-faint">{{ .Format "January 2, 2006" }}</p>{{ end }}
+              {{ with .Description }}<p class="mt-3 text-sm text-ink-muted">{{ . }}</p>{{ end }}
+            </a>
+          </li>
+          {{ else }}
+          <li class="text-ink-muted">No posts yet.</li>
+          {{ end }}
+        </ul>
+
+        <p class="mt-14 border-t border-[var(--border)] pt-6 text-sm">
+          <a href="{{ "" | relURL }}" class="text-accent-cyan hover:underline">← Back home</a>
+        </p>
+      </div>
+    </div>
+  </main>
+
+  {{ partial "footer.html" . }}
+
+  {{ $js := resources.Get "js/observer.js" }}
+  {{ if hugo.IsProduction }}
+    {{ $js = $js | minify | fingerprint }}
+  {{ end }}
+  <script src="{{ $js.RelPermalink }}" defer></script>
+</body>
+</html>

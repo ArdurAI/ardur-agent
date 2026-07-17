@@ -1,0 +1,17 @@
+# Directory is `crates/cedar-policy` (↔ §11.0) but the package is named
+# `ardur-cedar-policy` so it does not collide with the external `cedar-policy`
+# engine crate it wraps (`use cedar_policy::…` stays unambiguous).
+[package]
+name = "ardur-cedar-policy"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+cedar-policy = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
