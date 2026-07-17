@@ -28,8 +28,10 @@ pub use local_voice::{
 };
 pub use whisper::{VoiceTranscribeTool, WhisperApiConfig, WhisperApiTranscriptionProvider};
 
-/// Unix timestamp in milliseconds since the epoch.
-pub type UnixTsMillis = u64;
+/// Unix timestamp in milliseconds since the epoch — the workspace-canonical
+/// newtype, re-exported from `ardur-core-types` (its wire form is the bare
+/// millisecond integer, so audio request/creation timestamps are unchanged).
+pub use ardur_core_types::UnixTsMillis;
 
 macro_rules! string_newtype {
     ($(#[$meta:meta])* $name:ident) => {
@@ -946,7 +948,7 @@ mod tests {
             max_speakers: None,
             export_format: TranscriptFormat::Json,
             mission_id: MissionId::new("mission"),
-            requested_at: 1,
+            requested_at: UnixTsMillis(1),
         };
 
         assert!(matches!(
@@ -967,7 +969,7 @@ mod tests {
             expected_duration_seconds_upper_bound: 60,
             sample_cadence_seconds: 0,
             mission_id: MissionId::new("mission"),
-            requested_at: 1,
+            requested_at: UnixTsMillis(1),
         };
 
         assert!(matches!(

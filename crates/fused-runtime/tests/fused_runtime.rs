@@ -436,7 +436,7 @@ async fn memory_write_expiry_is_rechecked_after_provider_work() {
     let recorder = Arc::new(RecordingHook::new("rec"));
     let mut registry = HookRegistry::new();
     registry.register(recorder.clone());
-    let clock = Arc::new(ManualClock::new(NOW_MS));
+    let clock = Arc::new(ManualClock::new(UnixTsMillis(NOW_MS)));
 
     let runtime = Arc::new(
         runtime_builder(provider.clone())
@@ -760,13 +760,19 @@ async fn concurrent_turns_serialize_receipt_chain() {
     verify_persisted_chain(&chain).expect("the concurrent receipt chain verifies");
 }
 
-/// ARD-489: cost-gate finalization must happen before the receipt/journal commit
-/// boundary. If a reservation expires during provider execution, the turn fails
-/// without leaving a durable receipt or journal entry.
+/// ARD-501: a provider call slower than the reservation TTL must not discard a
+/// completed turn. The reservation lease is refreshed once the provider returns,
+/// so the turn finalizes normally and commits its receipt and journal — the user
+/// saw the response, so it is billed and recorded, not silently dropped.
+///
+/// (This supersedes the earlier ARD-489 test that asserted the *pre-fix*
+/// behavior — a >30 s turn returning `CostCeilingExceeded` with no durable
+/// commit. The finalize-before-commit ordering ARD-489 guards is unchanged: this
+/// turn still finalizes before it commits; it just no longer fails to finalize.)
 #[tokio::test]
-async fn expired_reservation_does_not_commit_receipt_or_journal() {
+async fn slow_provider_turn_survives_reservation_ttl_and_commits() {
     let provider = Arc::new(PausingProvider::new());
-    let clock = Arc::new(ManualClock::new(NOW_MS));
+    let clock = Arc::new(ManualClock::new(UnixTsMillis(NOW_MS)));
     let journal_dir = tempfile::tempdir().expect("journal dir");
     let session_id = SessionId::new();
     let journal =
@@ -786,32 +792,33 @@ async fn expired_reservation_does_not_commit_receipt_or_journal() {
         let runtime = runtime.clone();
         tokio::spawn(async move {
             runtime
-                .submit(request_for("expires in provider", &token, session_id))
+                .submit(request_for("slow provider turn", &token, session_id))
                 .await
         })
     };
     provider.wait_started().await;
+    // The provider takes longer than the 30 s reservation TTL to respond.
     clock.advance(31_000);
     provider.resume();
 
-    let err = submit
+    submit
         .await
         .expect("submit task joins")
-        .expect_err("expired reservation fails before durable commit");
-    assert!(matches!(err, RuntimeError::CostCeilingExceeded));
-    assert!(
+        .expect("a slow-but-completed turn finalizes rather than being discarded");
+    assert_eq!(
         load_persisted_chain(receipt_log.path())
             .expect("chain loads")
-            .is_empty(),
-        "no receipt should be durable after finalize rejects the turn"
+            .len(),
+        1,
+        "the completed turn commits exactly one durable receipt"
     );
     assert!(
-        journal
+        !journal
             .replay(session_id)
             .await
             .expect("journal replays")
             .is_empty(),
-        "no journal entry should be durable after finalize rejects the turn"
+        "the completed turn commits a durable journal entry"
     );
 }
 

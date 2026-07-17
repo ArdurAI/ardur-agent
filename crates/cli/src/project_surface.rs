@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use ardur_cli::CliError;
+use ardur_cli::{CliError, read_string_no_follow, write_private_file_atomic_no_follow};
 use clap::{Args, Subcommand};
 use serde::{Deserialize, Serialize};
 
@@ -92,7 +92,7 @@ fn surface_path(root: &Path) -> PathBuf {
 }
 
 fn load_surface(path: &Path) -> Result<ProjectSurface, CliError> {
-    let contents = match std::fs::read_to_string(path) {
+    let contents = match read_string_no_follow(path) {
         Ok(contents) => contents,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(ProjectSurface::default()),
         Err(e) => return Err(CliError::Io(e)),
@@ -105,12 +105,12 @@ fn save_surface(path: &Path, surface: &ProjectSurface) -> Result<(), CliError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(
-        &tmp,
-        serde_json::to_string_pretty(surface).map_err(|e| CliError::State(e.to_string()))?,
+    write_private_file_atomic_no_follow(
+        path,
+        serde_json::to_string_pretty(surface)
+            .map_err(|e| CliError::State(e.to_string()))?
+            .as_bytes(),
     )?;
-    std::fs::rename(tmp, path)?;
     Ok(())
 }
 

@@ -415,7 +415,7 @@ impl Provider for CodexProvider {
             // is no per-call monetary cost to attribute onto the turn.
             cents: 0,
             wall_ms: 0,
-            attention_score: 0.0,
+            attention_score: 0,
         };
 
         Ok(CompletionResponse {

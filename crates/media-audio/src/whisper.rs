@@ -17,7 +17,7 @@ use crate::{
     DiarizationMode, DiarizationOutcome, DiarizationRequest, LanguageTag, MediaProvider, MissionId,
     ModelVersionPin, ReceiptHash, SegmentId, SpeakerLabel, StreamHandle, TranscribeFileRequest,
     TranscribeStreamRequest, Transcript, TranscriptFormat, TranscriptHash, TranscriptSegment,
-    TranscriptionCapabilitySurface, TranscriptionProvider,
+    TranscriptionCapabilitySurface, TranscriptionProvider, UnixTsMillis,
 };
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1/";
@@ -774,11 +774,13 @@ fn sanitize_upstream_error(body: &[u8]) -> String {
     message.replace(|ch: char| ch.is_control() && ch != '\n' && ch != '\t', " ")
 }
 
-fn unix_millis_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
-        .unwrap_or(0)
+fn unix_millis_now() -> UnixTsMillis {
+    UnixTsMillis(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+            .unwrap_or(0),
+    )
 }
 
 fn voice_transcribe_schema() -> ardur_tool_registry::ToolSchema {

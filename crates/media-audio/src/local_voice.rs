@@ -889,11 +889,13 @@ fn sanitize_command_output(body: &[u8]) -> String {
     message.replace(|ch: char| ch.is_control() && ch != '\n' && ch != '\t', " ")
 }
 
-fn unix_millis_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
-        .unwrap_or(0)
+fn unix_millis_now() -> UnixTsMillis {
+    UnixTsMillis(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+            .unwrap_or(0),
+    )
 }
 
 fn voice_speak_schema() -> ardur_tool_registry::ToolSchema {

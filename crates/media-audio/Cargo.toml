@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+# `UnixTsMillis` is the workspace-canonical timestamp newtype, owned by the leaf
+# `core-types` crate and re-exported here instead of a local `u64` alias.
+ardur-core-types = { workspace = true }
 # The decode crate owns shared audio format declarations used by this domain
 # crate and later sandboxed decode phases.
 ardur-media-decode = { workspace = true }

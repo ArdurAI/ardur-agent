@@ -84,6 +84,68 @@ pub fn registry_with_examples() -> Arc<ToolRegistry> {
     Arc::new(registry)
 }
 
+/// A tool that sleeps for a fixed duration before returning — stands in for a
+/// hung/slow remote tool so the client-side `tools/call` timeout (and, on
+/// repeated failure, the circuit breaker) can be exercised deterministically.
+pub struct SlowTool {
+    id: ToolId,
+    delay: std::time::Duration,
+    schema: ToolSchema,
+}
+
+impl SlowTool {
+    pub fn new(id: &str, delay: std::time::Duration) -> Self {
+        Self {
+            id: ToolId::new(id),
+            delay,
+            schema: ToolSchema {
+                description: "sleeps before responding".to_string(),
+                input_schema: json!({ "type": "object" }),
+                output_schema: json!({ "type": "object" }),
+                examples: vec![],
+            },
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for SlowTool {
+    fn id(&self) -> ToolId {
+        self.id.clone()
+    }
+
+    fn schema(&self) -> &ToolSchema {
+        &self.schema
+    }
+
+    async fn invoke(
+        &self,
+        _ctx: &ToolContext,
+        _args: serde_json::Value,
+    ) -> Result<ToolOutput, ToolError> {
+        tokio::time::sleep(self.delay).await;
+        Ok(ToolOutput {
+            content: json!({}),
+            cost: CostTuple::default(),
+            receipt_data: json!({}),
+        })
+    }
+
+    fn required_capabilities(&self) -> &[Capability] {
+        &[]
+    }
+}
+
+/// A registry holding one [`SlowTool`] (id `"slow"`) that sleeps `delay`
+/// before responding.
+pub fn registry_with_slow_tool(delay: std::time::Duration) -> Arc<ToolRegistry> {
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(Box::new(SlowTool::new("slow", delay)))
+        .expect("register slow");
+    Arc::new(registry)
+}
+
 /// Mount `registry` behind an [`ArdurMcpServer`] on a Streamable-HTTP transport,
 /// serve it over an ephemeral loopback port, and return the MCP endpoint URL.
 ///
