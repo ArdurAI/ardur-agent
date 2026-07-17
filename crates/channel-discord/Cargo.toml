@@ -1,0 +1,74 @@
+# ardur-channel-discord — a Discord channel adapter behind the §4.0
+# `MessagingGateway` contract (alongside the Slack and Matrix adapters).
+#
+# Plan family: §4.Y (Discord + Telegram channel adapters Phase 1). Phase 1 =
+# bot-style gateway-token auth, a `serenity` gateway client whose `message`
+# event handler forwards inbound text through the gateway, plaintext outbound
+# `ChannelId::say`, a channel-id allowlist, and self-echo loop prevention (the
+# bot's own user id == its application id, so an inbound message authored by the
+# application id is dropped). Slash commands, threads, and attachment upload are
+# later phases.
+#
+# §18.8 keeps this PR scoped to `crates/channel-discord/**`, the sibling
+# `crates/channel-telegram/**`, the boot wiring in `crates/server/**`, the
+# cross-crate scenarios in `crates/e2e-tests/**`, the `.env.example` / `RUN.md`
+# docs, and the root manifest.
+
+[package]
+name = "ardur-channel-discord"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The §4.0 gateway owns every value type a delivery speaks in — the
+# `MessagingGateway` trait this adapter implements, plus `OutgoingMessage` /
+# `IncomingMessage` / `MessageReceipt` / `GatewayError` / `MessageTarget` /
+# `MessageBody`. Re-use rather than redefine so the adapter and the gateway
+# never drift into two schemas.
+ardur-messaging-gateway = { workspace = true }
+# The serenity Discord gateway + HTTP client. Pinned to 0.12 (0.12.5 is the
+# latest as of 2026-06). We select `default_native_tls` (default feature set
+# minus `rustls_backend`, plus `native_tls_backend`) instead of the default
+# `rustls_backend`: serenity 0.12's rustls backend rides tokio-tungstenite 0.21
+# → tokio-rustls 0.25 → rustls 0.22 → rustls-webpki 0.102, which carries the
+# DoS / cert-validation advisories GHSA-82j2-j2ch-gfr8 (high), GHSA-pwjx-qhcg-rvj4
+# (medium), GHSA-xgp8-3hg3-c2mh / GHSA-965h-392x-2mh5 (low) and has no patched
+# 0.102 release — serenity 0.12.5 is the latest and pins rustls 0.22, so there is
+# no in-line upgrade path. native-tls (openssl-sys) is already a hard build dep of
+# this workspace via fastembed/hf-hub and reqwest/hyper-tls, so this swaps the
+# gateway WSS handshake onto the TLS stack already linked into the binary and adds
+# no new system dependency. Revert to `rustls_backend` once serenity adopts rustls
+# 0.23+ (rustls-webpki 0.103). `voice` stays off. The brief named `poise` 0.6
+# alongside serenity, but poise is an application-command (slash-command)
+# framework — a plain message-forwarding bot uses serenity's `EventHandler`
+# directly, exactly as the Matrix adapter wraps `matrix-sdk` directly, so Phase 1
+# omits poise. See the crate docs' adapt-points note.
+serenity = { version = "0.12", default-features = false, features = ["default_native_tls"] }
+# `send_message` / `receive` are async trait methods; `async-trait` boxes the
+# futures so `DiscordChannel` stays object-safe behind `dyn MessagingGateway`.
+async-trait = { workspace = true }
+# The gateway loop is spawned onto Tokio; the inbound queue is a Tokio mpsc.
+tokio = { workspace = true }
+# Structured logging for the gateway lifecycle and dropped messages.
+tracing = { workspace = true }
+# `DiscordError` is the crate's typed config/connect/send failure surface.
+thiserror = { workspace = true }
+# `DiscordError::into_gateway_error` lowers config-time failures onto
+# `GatewayError::Internal(#[from] anyhow::Error)`.
+anyhow = { workspace = true }
+# Mirrors the other adapters: the gateway value types derive serde, and the
+# config struct is serde-friendly for callers that load it from a file.
+serde = { workspace = true }
+# A parsed inbound message is assigned a fresh v4 correlation id (the workspace
+# pin is v7; opt v4 in on top, as the other adapters do).
+uuid = { workspace = true, features = ["v4"] }
+# The bot token is held as `SecretString` so it never leaks through
+# `Debug`/logs — same custody pattern as the Slack/Matrix tokens.
+secrecy = { workspace = true }
+
+[dev-dependencies]
+# The trait methods are async; unit tests that touch them run on a Tokio runtime.
+tokio = { workspace = true }
