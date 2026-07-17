@@ -192,7 +192,7 @@ rustyline = "18"
 # (not its HTML/ANSI formatters), so `default-features = false` drops the CLI,
 # xdg, syntect-bridge, and shortcode features we don't use and keeps just the
 # parser + node arena.
-comrak = { version = "0.53", default-features = false }
+comrak = { version = "0.54", default-features = false }
 # Syntax highlighting for fenced code blocks. `regex-fancy` is the pure-Rust
 # regex engine (avoids the `onig` C dependency in CI); `default-syntaxes` +
 # `default-themes` bundle the Sublime grammars + themes we map languages and
