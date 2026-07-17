@@ -426,7 +426,7 @@ async fn drive_delegation(
             TerminationReason::Completed,
             true,
             resp.message.content.clone(),
-            resp.cost_used.clone(),
+            resp.cost_used,
         ),
         Err(e) => (
             TerminationReason::ErrorOccurred(e.to_string()),
