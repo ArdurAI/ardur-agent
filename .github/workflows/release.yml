@@ -1,0 +1,117 @@
+# Release supply-chain gate for ARD-309.
+#
+# Release publication must produce SBOMs, checksums, signed provenance, and
+# signed release assets. PR-facing security gates live in ci.yml; Docker image
+# SBOM/Trivy/provenance gates live in docker.yml.
+
+name: release-supply-chain
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: release-supply-chain-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RELEASE_TAG: ${{ github.event.release.tag_name }}
+
+jobs:
+  release-artifacts:
+    name: release-sbom-sign
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          fetch-depth: 0
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.96.1 --profile minimal
+
+      - name: Build release binaries
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cargo build --workspace --bins --release --locked
+
+          mapfile -d '' bins < <(find target/release -maxdepth 1 -type f -perm -111 -print0 | sort -z)
+          if [ "${#bins[@]}" -eq 0 ]; then
+            echo "::error::no executable release binaries found under target/release"
+            exit 1
+          fi
+
+          for bin in "${bins[@]}"; do
+            name="$(basename "${bin}")"
+            package_dir="dist/${name}-${RELEASE_TAG}-x86_64-unknown-linux-gnu"
+            mkdir -p "${package_dir}"
+            cp "${bin}" "${package_dir}/${name}"
+            tar -C "${package_dir}" -czf "${package_dir}.tar.gz" "${name}"
+            rm -rf "${package_dir}"
+          done
+
+          find dist -maxdepth 1 -type f -name '*.tar.gz' -print | sort
+
+      - name: Generate release SPDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          path: .
+          format: spdx-json
+          output-file: dist/ardur-agent-${{ env.RELEASE_TAG }}.spdx.json
+          upload-artifact: false
+
+      - name: Generate SHA256SUMS
+        run: |
+          set -euo pipefail
+          cd dist
+          find . -maxdepth 1 -type f ! -name 'SHA256SUMS' -print0 \
+            | sort -z \
+            | xargs -0 sha256sum \
+            > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Attest release artifact provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: dist/*
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Sign release assets with keyless cosign
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          set -euo pipefail
+          cd dist
+          shopt -s nullglob
+          release_assets=( *.tar.gz *.spdx.json SHA256SUMS )
+          if [ "${#release_assets[@]}" -eq 0 ]; then
+            echo "::error::no release assets found to sign"
+            exit 1
+          fi
+
+          for artifact in "${release_assets[@]}"; do
+            cosign sign-blob --yes \
+              --output-signature "${artifact}.sig" \
+              --output-certificate "${artifact}.pem" \
+              --bundle "${artifact}.bundle" \
+              "${artifact}"
+          done
+
+          find . -maxdepth 1 -type f -print | sort
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release upload "${RELEASE_TAG}" dist/* --repo "${GITHUB_REPOSITORY}" --clobber

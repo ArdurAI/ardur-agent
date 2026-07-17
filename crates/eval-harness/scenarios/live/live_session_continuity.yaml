@@ -1,0 +1,13 @@
+id: live_session_continuity
+description: >
+  Live multi-turn against a real ardur-server /chat — the agent must retain a
+  fact across turns on the server-minted session id. Gated; see
+  scenarios/README.md.
+prompt: "My name is Quillon. Remember it."
+follow_ups:
+  - "What's my name? Reply with just the name."
+expected:
+  contains: ["Quillon"]
+max_tokens: 200
+max_turns: 2
+timeout_secs: 90

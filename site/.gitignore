@@ -1,0 +1,11 @@
+# Node deps for the Tailwind/PostCSS pipeline
+node_modules/
+
+# Hugo build artifacts
+public/
+resources/
+.hugo_build.lock
+
+# Generated Tailwind build-stats files
+assets/jsconfig.json
+hugo_stats.json
