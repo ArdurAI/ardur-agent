@@ -1,0 +1,32 @@
+[package]
+name = "ardur-cost-gate"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The CostAdmissionGate / BudgetStore traits are async (Phase 2 swaps the
+# in-memory store for a persistent backend behind the same surface).
+async-trait = { workspace = true }
+# Typed admission/budget failure surfaces.
+thiserror = { workspace = true }
+# Reservation ids are random per-request (UUIDv4); the workspace pins v7, so opt
+# v4 in on top (Cargo unifies the feature set).
+uuid = { workspace = true, features = ["v4"] }
+# AdmissionRequest / Reservation / RefundReceipt are serializable for receipts.
+serde = { workspace = true }
+# Non-poisoning locks for the in-memory budget store + reservation table.
+parking_lot = { workspace = true }
+# Internal-error escape hatch.
+anyhow = { workspace = true }
+# The cost tuple/envelope/delta, the id newtypes (TokenId, ProviderId, ModelId,
+# HolderId), and the request digest (`Sha256Digest`, which owns the SHA-256
+# hashing) are re-exported from the workspace's leaf `core-types` crate.
+ardur-core-types = { workspace = true }
+
+[dev-dependencies]
+# The trait surface is async; tests drive it on a Tokio runtime (multi-thread
+# for the concurrent-reserve race test).
+tokio = { workspace = true }

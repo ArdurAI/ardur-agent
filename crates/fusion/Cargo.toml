@@ -1,0 +1,13 @@
+[package]
+name = "ardur-fusion"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Rank/score fusion for hybrid retrieval — reciprocal-rank, relative-score, and distance-score fusion ported from LlamaIndex."
+
+[dependencies]
+# `ScoredDoc` is serializable so fused result lists can ride a receipt / cross a
+# crate boundary. No other runtime dependency — this is a pure-std algorithm port.
+serde = { workspace = true }

@@ -1,0 +1,37 @@
+[package]
+name = "ardur-messaging-gateway"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# `UnixTsMillis` is the workspace-canonical timestamp newtype, owned by the leaf
+# `core-types` crate and re-exported here instead of a local `u64` alias.
+ardur-core-types = { workspace = true }
+# The §1.0 runtime owns `CapTokenRef` (the capability handle a turn is
+# authorized by). An outgoing message carries the same handle, so we re-export
+# rather than redefine — the runtime and the gateway must not drift into two
+# incompatible capability schemas.
+ardur-runtime = { workspace = true }
+# Object-safe `MessagingGateway` — async-trait boxes the returned futures so
+# `dyn MessagingGateway` works as a registry value (§4.0).
+async-trait = { workspace = true }
+# `MessageBody` / `MessageTarget` / the message envelopes are serializable so a
+# receipt (§11.14) can record exactly what was delivered.
+serde = { workspace = true }
+# Typed delivery/registration failure surfaces.
+thiserror = { workspace = true }
+# Message and receipt correlation ids are random per-message (UUIDv4); the
+# workspace pins v7, so opt v4 in on top (Cargo unifies the feature set).
+uuid = { workspace = true, features = ["v4"] }
+# The in-process channel is a `tokio::sync::mpsc` pair; `receive` guards the
+# receiver behind a `tokio::sync::Mutex` so the trait method can take `&self`.
+tokio = { workspace = true }
+# Internal-error escape hatch for `GatewayError::Internal`.
+anyhow = { workspace = true }
+
+[dev-dependencies]
+# The serde round-trip test serializes each `MessageBody` variant to JSON.
+serde_json = { workspace = true }

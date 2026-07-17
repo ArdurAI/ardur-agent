@@ -1,0 +1,80 @@
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    target-branch: "dev"
+    labels:
+      - "dependencies"
+      - "ci"
+    groups:
+      gha-minor-patch:
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    target-branch: "dev"
+    labels:
+      - "dependencies"
+      - "rust"
+    groups:
+      # Keep the OpenTelemetry stack in one PR. `provider-runtime` wires
+      # `opentelemetry`, `opentelemetry_sdk`, `opentelemetry-otlp`, and
+      # `tracing-opentelemetry` through one API surface; a single-crate bump left
+      # `dev` red when the SDK advanced without matching API/exporter crates.
+      otel-stack:
+        applies-to: version-updates
+        patterns:
+          - "opentelemetry*"
+          - "tracing-opentelemetry"
+        update-types:
+          - "minor"
+          - "patch"
+      cargo-minor-patch:
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      # rmcp 2.2.0 calls SseStream::from_bytes_stream, which our locked
+      # sse-stream (0.2.3) doesn't expose (only from_byte_stream) — E0599 on
+      # every platform. Held at 2.0.0 in Cargo.toml; re-enable once
+      # sse-stream ships the renamed method.
+      - dependency-name: "rmcp"
+      # prost is biscuit-auth's own transitive dependency for cap-token's
+      # protobuf decode (crates/cap-token/src/verify.rs); biscuit-auth 6.0.0
+      # pulls prost 0.10, so bumping our direct prost to 0.14 makes
+      # `Message` a different trait than biscuit's generated types implement
+      # and breaks the build. Held until biscuit-auth ships a prost 0.14
+      # major. See the 2026-07-12 deep code review, finding H6.
+      - dependency-name: "prost"
+
+  - package-ecosystem: "npm"
+    directory: "/site"
+    schedule:
+      interval: "weekly"
+    target-branch: "dev"
+    labels:
+      - "dependencies"
+      - "site"
+    groups:
+      site-minor-patch:
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    target-branch: "dev"
+    labels:
+      - "dependencies"
+      - "docker"
