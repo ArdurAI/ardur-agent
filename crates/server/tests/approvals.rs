@@ -215,3 +215,68 @@ async fn list_returns_cards_and_fails_closed_without_admin_tokens() {
     assert!(ids.contains(&"card-list-a"));
     assert!(ids.contains(&"card-list-b"));
 }
+
+/// **ARD-139.** `POST /approvals/{id}/approve` mints a real signed
+/// `approval.approve.accepted.v1` receipt, chained onto the same
+/// `<data_dir>/receipts/chain.jsonl` a chat turn over the same data dir
+/// would append to, and echoes the minted `receipt_id` in the response.
+#[tokio::test]
+async fn approve_mints_a_signed_receipt() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let id = "card-receipt-001";
+    seed_pending(dir.path(), id);
+
+    let config = support::test_config_with_admin(&dir, None, vec![ADMIN_TOKEN.to_string()]);
+    let router = support::boot_router(&config).await;
+
+    let request = Request::builder()
+        .method("POST")
+        .uri(format!("/approvals/{id}/approve"))
+        .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+        .body(Body::empty())
+        .expect("request builds");
+    let (status, body) = support::oneshot(router, request).await;
+    assert_eq!(status, StatusCode::OK);
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body is JSON");
+    let receipt_id = json["receipt_id"]
+        .as_str()
+        .expect("the response echoes a minted receipt_id");
+
+    let chain =
+        ardur_fused_runtime::load_persisted_chain(dir.path().join("receipts").join("chain.jsonl"))
+            .expect("chain loads");
+    assert_eq!(
+        chain.len(),
+        1,
+        "exactly one receipt minted for this decision"
+    );
+    assert_eq!(chain[0].body.verb.as_str(), "approval.approve.accepted.v1");
+    assert_eq!(chain[0].body.receipt_id.to_string(), receipt_id);
+    ardur_fused_runtime::verify_persisted_chain(&chain).expect("the chain verifies");
+}
+
+/// A reject also mints its own receipt verb.
+#[tokio::test]
+async fn reject_mints_a_signed_receipt() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let id = "card-receipt-002";
+    seed_pending(dir.path(), id);
+
+    let config = support::test_config_with_admin(&dir, None, vec![ADMIN_TOKEN.to_string()]);
+    let router = support::boot_router(&config).await;
+
+    let request = Request::builder()
+        .method("POST")
+        .uri(format!("/approvals/{id}/reject"))
+        .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+        .body(Body::empty())
+        .expect("request builds");
+    let (status, _body) = support::oneshot(router, request).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let chain =
+        ardur_fused_runtime::load_persisted_chain(dir.path().join("receipts").join("chain.jsonl"))
+            .expect("chain loads");
+    assert_eq!(chain.len(), 1);
+    assert_eq!(chain[0].body.verb.as_str(), "approval.reject.accepted.v1");
+}

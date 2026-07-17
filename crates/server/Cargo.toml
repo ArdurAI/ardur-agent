@@ -60,9 +60,7 @@ ardur-messaging-gateway = { workspace = true }
 # Optional Whisper-backed voice.transcribe tool registration; missing API keys
 # degrade gracefully at boot.
 ardur-media-audio = { workspace = true }
-# §5.1 — the delegate_task tool, registered unconditionally (no external
-# credentials needed; it wraps the in-process ardur-multi-agent substrate).
-ardur-delegate-tool = { workspace = true }
+ardur-media-video = { workspace = true }
 # §6.0 Phase 2 — the tool registry + its MCP bridge. The server exposes ardur's
 # tools over MCP (`ArdurMcpServer` mounted on the Streamable-HTTP transport) and
 # gates the surface with the registry's bearer-token allowlist helpers.
