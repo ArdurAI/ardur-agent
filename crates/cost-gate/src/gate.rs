@@ -181,7 +181,7 @@ impl<B: BudgetStore> InMemoryCostAdmissionGate<B> {
         let mut reservations = self.reservations.write();
         match reservations.get_mut(&reservation_id) {
             Some(record) if !record.finalizing => {
-                record.expires_at = now.saturating_add(self.ttl_ms);
+                record.expires_at = now.saturating_add_ms(self.ttl_ms);
                 true
             }
             _ => false,
@@ -353,7 +353,7 @@ impl<B: BudgetStore> CostAdmissionGate for InMemoryCostAdmissionGate<B> {
             cap_token_id: req.cap_token_id,
             envelope,
             reserved_at: now,
-            expires_at: now.saturating_add(self.ttl_ms),
+            expires_at: now.saturating_add_ms(self.ttl_ms),
             status: ReservationStatus::Active,
         };
         self.reservations.write().insert(
@@ -491,7 +491,7 @@ mod tests {
         HolderId,
         TokenId,
     ) {
-        let clock = Arc::new(ManualClock::new(0));
+        let clock = Arc::new(ManualClock::new(UnixTsMillis(0)));
         let budget = InMemoryBudgetStore::new();
         let gate = InMemoryCostAdmissionGate::with_clock(budget, clock.clone());
         let holder = HolderId("test".to_string());
@@ -740,7 +740,7 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_double_finalize_credits_refund_once() {
-        let clock = Arc::new(ManualClock::new(0));
+        let clock = Arc::new(ManualClock::new(UnixTsMillis(0)));
         let budget = DelayedRefundBudgetStore::new();
         let first_refund_started = budget.first_refund_started.clone();
         let refund_calls = budget.refund_calls.clone();

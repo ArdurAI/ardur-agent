@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+# `HolderId` is owned by the workspace's leaf `core-types` crate and re-exported
+# here so the cap-token, cost-gate, receipt, and memory layers share one type.
+ardur-core-types = { workspace = true }
 # Cap-tokens are Biscuits: Ed25519 issuance, offline block-append attenuation,
 # and Datalog-check verification. KeyPair/PublicKey are Ed25519, so no separate
 # ed25519 dependency is needed.

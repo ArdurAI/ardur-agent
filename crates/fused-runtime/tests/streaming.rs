@@ -31,7 +31,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use ardur_cost_gate::{CostEnvelope, CostTuple as GateCostTuple, ManualClock};
+use ardur_cost_gate::{CostEnvelope, CostTuple as GateCostTuple, ManualClock, UnixTsMillis};
 use ardur_fused_runtime::{FusedEvent, StageKind, load_persisted_chain, verify_persisted_chain};
 use ardur_injection_defense::{FilterRegistry, PatternBasedFilter};
 use ardur_lifecycle_hooks::HookRegistry;
@@ -296,7 +296,7 @@ fn tool_call_with_usage(
             tokens_out: u64::from(usage.tokens_out),
             cents: usage.cost_cents.unwrap_or_default(),
             wall_ms: 0,
-            attention_score: 0.0,
+            attention_score: 0,
         },
         raw_provider_response: None,
     }
@@ -372,7 +372,7 @@ fn envelope_for(cost: CostTuple) -> CostEnvelope {
         tokens_out_max: cost.tokens_out as u32,
         cents_max: cost.cents as u32,
         wall_ms_max: cost.wall_ms as u32,
-        attention_score_max: cost.attention_score.ceil() as u32,
+        attention_score_max: cost.attention_score as u32,
     }
 }
 
@@ -541,21 +541,21 @@ async fn fused_stream_post_receipt_hook_cost_matches_combined_receipt_cost_for_t
         tokens_out: 3,
         cents: 5,
         wall_ms: 0,
-        attention_score: 0.0,
+        attention_score: 0,
     };
     let tool_cost = CostTuple {
         tokens_in: 11,
         tokens_out: 13,
         cents: 17,
         wall_ms: 19,
-        attention_score: 0.5,
+        attention_score: 500,
     };
     let expected = CostTuple {
         tokens_in: 13,
         tokens_out: 16,
         cents: 22,
         wall_ms: 19,
-        attention_score: 0.5,
+        attention_score: 500,
     };
     let tool_name = "priced.tool";
     let provider = Arc::new(ScriptedProvider::new(
@@ -772,10 +772,8 @@ async fn fused_stream_dropped_refunds_reservation() {
 /// mid-stream. The finalize-before-commit ordering is unchanged; this stream
 /// simply no longer fails to finalize.)
 #[tokio::test]
-async fn fused_stream_slow_provider_survives_ttl_and_commits() {
-    let clock = Arc::new(ManualClock::new(support::NOW_MS));
-    // This provider jumps the clock ~1000 s (far past the 30 s TTL) before its
-    // first event — a very slow generation.
+async fn fused_stream_finalize_failure_commits_neither_receipt_nor_journal() {
+    let clock = Arc::new(ManualClock::new(UnixTsMillis(support::NOW_MS)));
     let provider = Arc::new(ExpiringStreamProvider {
         clock: clock.clone(),
         rate_card: RateCard::anthropic_2026_q2_v1(),

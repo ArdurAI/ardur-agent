@@ -186,11 +186,14 @@ pub enum ChatSubmitError {
 /// The wired application state shared (behind an [`Arc`]) across request handlers.
 ///
 /// Holds only what the HTTP layer needs: the Slack adapter (inbound signature
-/// verification), the channel onto the turn-processing worker, the journal
-/// handle (for graceful shutdown), and the data directory. The fused runtime and
-/// the cap-token issuer live on the worker thread (see the module docs).
+/// verification) when Slack is enabled, the channel onto the turn-processing
+/// worker, the journal handle (for graceful shutdown), and the data directory.
+/// The fused runtime and the cap-token issuer live on the worker thread (see the
+/// module docs).
 pub struct AppState {
-    slack: Arc<SlackAdapter>,
+    /// The Slack adapter for inbound `/slack/events` verification. `None` when
+    /// Slack is disabled (HTTP-only boot); the route is then never mounted.
+    slack: Option<Arc<SlackAdapter>>,
     work_tx: Arc<Mutex<Option<mpsc::Sender<WorkItem>>>>,
     /// The OS-thread handle for the turn worker — used by [`shutdown`](Self::shutdown)
     /// to join the worker after closing the work channel. `None` in test harnesses
@@ -260,7 +263,14 @@ impl AppState {
         let journals_dir = data_dir.join("journals");
         let receipts_dir = data_dir.join("receipts");
         let keys_dir = data_dir.join("keys");
-        for dir in [&memory_dir, &journals_dir, &receipts_dir, &keys_dir] {
+        let approvals_dir = data_dir.join("approvals");
+        for dir in [
+            &memory_dir,
+            &journals_dir,
+            &receipts_dir,
+            &keys_dir,
+            &approvals_dir,
+        ] {
             std::fs::create_dir_all(dir)
                 .map_err(|e| anyhow::anyhow!("creating {}: {e}", dir.display()))?;
         }
@@ -353,6 +363,10 @@ impl AppState {
         .with_memory(memory)
         .with_journal(journal.clone())
         .with_tools(tools.clone())
+        // ARD-H1: the server faces untrusted channel input, so install the
+        // built-in injection-defense signatures rather than shipping stage 4.5
+        // inert (an empty registry passes everything through).
+        .with_default_injection_filters()
         .receipt_log(&receipt_log)
         .build_reconciled()
         .await
@@ -366,16 +380,41 @@ impl AppState {
         }
 
         // 6. The Slack adapter (base URL overridable so tests point at a mock).
-        let mut slack = SlackAdapter::new(
-            SecretString::from(config.slack_bot_token.clone()),
-            SecretString::from(config.slack_signing_secret.clone()),
-            config.slack_app_id.clone(),
-        )
-        .with_allowed_senders(config.slack_allowed_senders.clone());
-        if let Some(base) = &config.slack_base_url {
-            slack = slack.with_base_url(base.clone());
-        }
-        let slack = Arc::new(slack);
+        //    Auto-detected: built only when Slack is enabled (all three
+        //    credentials present). HTTP-only boots leave it `None`, and the
+        //    `/slack/events` route is not mounted (see `build_router`).
+        let slack = if config.slack_enabled {
+            match (
+                &config.slack_bot_token,
+                &config.slack_signing_secret,
+                &config.slack_app_id,
+            ) {
+                (Some(bot_token), Some(signing_secret), Some(app_id)) => {
+                    let mut slack = SlackAdapter::new(
+                        SecretString::from(bot_token.clone()),
+                        SecretString::from(signing_secret.clone()),
+                        app_id.clone(),
+                    )
+                    .with_allowed_senders(config.slack_allowed_senders.clone());
+                    if let Some(base) = &config.slack_base_url {
+                        slack = slack.with_base_url(base.clone());
+                    }
+                    Some(Arc::new(slack))
+                }
+                // `slack_enabled` is derived from all three credentials being
+                // present, so this is unreachable via `Config::from_env`; guard
+                // it anyway rather than unwrap a hand-built inconsistent config.
+                _ => {
+                    return Err(anyhow::anyhow!(
+                        "slack_enabled is set but one or more Slack credentials \
+                         are missing (bot token, signing secret, app id)"
+                    ));
+                }
+            }
+        } else {
+            tracing::info!("Slack channel disabled; booting HTTP-only (/chat)");
+            None
+        };
 
         // 7. The turn-processing worker (see module docs on why a thread). The
         //    Matrix slot is shared with the worker so a Matrix-origin turn can be
@@ -538,9 +577,11 @@ impl AppState {
     }
 
     /// The Slack adapter, for inbound event verification in the HTTP handler.
+    /// `None` when Slack is disabled (HTTP-only boot); the router then omits the
+    /// `/slack/events` route entirely, so a handler never sees `None`.
     #[must_use]
-    pub fn slack(&self) -> &SlackAdapter {
-        &self.slack
+    pub fn slack(&self) -> Option<&SlackAdapter> {
+        self.slack.as_deref()
     }
 
     /// Hand a verified inbound message to the processing worker. Returns `false`
@@ -631,6 +672,16 @@ impl AppState {
         &self.data_dir
     }
 
+    /// The on-disk approval-card store (`<data_dir>/approvals`).
+    ///
+    /// This is the same directory the CLI's `ardur approvals` subcommand
+    /// reads/writes (`<state_root>/approvals/<id>.json`), so the HTTP decide
+    /// endpoints and the CLI operate over a single source of truth.
+    #[must_use]
+    pub fn approvals_dir(&self) -> PathBuf {
+        self.data_dir.join("approvals")
+    }
+
     /// Signal the background worker to drain, then join its OS thread.
     ///
     /// Taking the only long-lived sender closes the queue after any in-flight
@@ -694,7 +745,11 @@ fn tool_allowlist_for_runtime(tools: &ToolRegistry) -> Vec<String> {
 /// fused-runtime pipeline and posts the reply.
 struct Processor {
     runtime: FusedRuntime,
-    slack: Arc<SlackAdapter>,
+    /// The Slack adapter, shared with [`AppState`]; `None` when Slack is disabled.
+    /// Used to post the reply when a turn originated on Slack (`slack://…`) — an
+    /// origin that only occurs when a `/slack/events` route exists, which in turn
+    /// requires the adapter to be present.
+    slack: Option<Arc<SlackAdapter>>,
     /// The Matrix channel, shared with [`AppState`]; `None` until attached. Used
     /// to post the reply when a turn originated on Matrix (`matrix://…`).
     matrix: Arc<OnceLock<Arc<MatrixChannel>>>,
@@ -1030,11 +1085,15 @@ impl Processor {
         text: &str,
     ) -> anyhow::Result<String> {
         match origin {
-            Origin::Slack => self
-                .slack
-                .post_message(channel, text, None)
-                .await
-                .map_err(|e| anyhow::anyhow!(e.to_string())),
+            Origin::Slack => {
+                let slack = self.slack.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("slack reply requested but Slack is disabled")
+                })?;
+                slack
+                    .post_message(channel, text, None)
+                    .await
+                    .map_err(|e| anyhow::anyhow!(e.to_string()))
+            }
             Origin::Matrix => {
                 let matrix = self.matrix.get().ok_or_else(|| {
                     anyhow::anyhow!("matrix reply requested but no channel attached")
@@ -1075,11 +1134,16 @@ impl Processor {
         text: &str,
     ) -> anyhow::Result<String> {
         match origin {
-            Origin::Slack => self
-                .slack
-                .update_message(channel, message_id, text, None)
-                .await
-                .map_err(|e| anyhow::anyhow!(e.to_string())),
+            Origin::Slack => {
+                let slack = self
+                    .slack
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("slack edit requested but Slack is disabled"))?;
+                slack
+                    .update_message(channel, message_id, text, None)
+                    .await
+                    .map_err(|e| anyhow::anyhow!(e.to_string()))
+            }
             Origin::Matrix => {
                 let matrix = self.matrix.get().ok_or_else(|| {
                     anyhow::anyhow!("matrix edit requested but no channel attached")
@@ -1542,11 +1606,11 @@ mod tests {
 
         let tempdir = tempfile::tempdir().expect("tempdir");
         let state = AppState {
-            slack: Arc::new(SlackAdapter::new(
+            slack: Some(Arc::new(SlackAdapter::new(
                 SecretString::from("xoxb-test".to_string()),
                 SecretString::from("signing-secret".to_string()),
                 "A123".to_string(),
-            )),
+            ))),
             work_tx: Arc::new(Mutex::new(Some(work_tx))),
             worker_handle: Mutex::new(Some(worker_handle)),
             journal: Arc::new(InMemorySessionJournal::new(SessionId::new())),

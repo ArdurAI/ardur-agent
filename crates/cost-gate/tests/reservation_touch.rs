@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use ardur_cost_gate::{
     AdmissionRequest, CostAdmissionGate, CostEnvelope, CostTuple, HolderId, InMemoryBudgetStore,
-    InMemoryCostAdmissionGate, ManualClock, ModelId, ProviderId, Sha256Digest, TokenId,
+    InMemoryCostAdmissionGate, ManualClock, ModelId, ProviderId, Sha256Digest, TokenId, UnixTsMillis,
 };
 use uuid::Uuid;
 
@@ -16,7 +16,7 @@ async fn touched_reservation_survives_past_original_ttl() {
     let store = InMemoryBudgetStore::new();
     store.set_balance(holder.clone(), CostTuple::cents(1000));
 
-    let clock = Arc::new(ManualClock::new(0));
+    let clock = Arc::new(ManualClock::new(UnixTsMillis(0)));
     let gate = InMemoryCostAdmissionGate::with_clock(store, clock.clone()).with_ttl_ms(1_000);
     let token = TokenId(Uuid::new_v4());
     gate.bind_token(token, holder);
@@ -56,7 +56,7 @@ async fn touch_is_a_noop_for_a_finalized_reservation() {
     let store = InMemoryBudgetStore::new();
     store.set_balance(holder.clone(), CostTuple::cents(1000));
 
-    let clock = Arc::new(ManualClock::new(0));
+    let clock = Arc::new(ManualClock::new(UnixTsMillis(0)));
     let gate = InMemoryCostAdmissionGate::with_clock(store, clock.clone()).with_ttl_ms(1_000);
     let token = TokenId(Uuid::new_v4());
     gate.bind_token(token, holder);
