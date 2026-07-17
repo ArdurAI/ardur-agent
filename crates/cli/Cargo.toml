@@ -36,6 +36,9 @@ ardur-cost-gate = { workspace = true }
 # Phase-2 fused runtime — the FusedRuntime the default chat path drives through
 # its full ten-stage pipeline.
 ardur-fused-runtime = { workspace = true }
+# ARD-139 — the shared on-disk approval-card store `ardur approvals` reads
+# and decides against.
+ardur-approvals = { workspace = true }
 # §11.0 Cedar — the policy bundle the fused runtime authorizes turns against.
 ardur-cedar-policy = { workspace = true }
 # §7.0 memory — the bi-temporal sink stage 9 records each turn into.
@@ -90,7 +93,8 @@ rand = "0.10"
 # ARD-143: schedule / cron CLI.
 chrono = { workspace = true }
 ardur-cron = { workspace = true }
-# §9.7: operator webhook surface.
+# §9.4: operator-facing cron management surface.
+ardur-cron-ui = { workspace = true }
 ardur-webhook = { workspace = true }
 # ARD-144/145: connector HTTP fetch.
 reqwest = { workspace = true }

@@ -24,6 +24,9 @@ use rmcp::transport::streamable_http_server::session::local::LocalSessionManager
 use rmcp::transport::{StreamableHttpServerConfig, StreamableHttpService};
 
 use ardur_media_audio::{VoiceTranscribeTool, WhisperApiTranscriptionProvider};
+use ardur_media_video::{
+    GeminiVideoAnalyzeProvider, VideoAnalyzeTool, VideoDescribeTool, VideoGenerateTool,
+};
 use ardur_tool_registry::{
     ArdurMcpServer, BuiltinOpts, EchoTool, HealthCheckTool, HttpFetchTool, ListDirTool,
     ReadFileTool, RemoteMcpToolset, ShellTool, SkillLoader, SkillTool, Tool, ToolId, ToolRegistry,
@@ -88,6 +91,65 @@ pub async fn connect_remote_tools(servers: &[(String, String)]) -> Vec<Box<dyn T
         }
     }
     tools
+}
+
+/// **§10.2.** Register the video tools (`video.analyze`, `video.describe`,
+/// `video.generate`) backed by the Gemini video-input provider, when
+/// `GEMINI_API_KEY` is configured. `video.generate` is default-deny: it is only
+/// opted in when `ARDUR_VIDEO_GENERATE_OPT_IN` is truthy, and its per-request
+/// duration ceiling comes from `ARDUR_VIDEO_MAX_DURATION_SECONDS` (default 30).
+/// A missing key degrades gracefully — the tools are simply not registered.
+fn register_video_tools(registry: &mut ToolRegistry) {
+    let provider = match GeminiVideoAnalyzeProvider::from_env() {
+        Ok(Some(provider)) => provider,
+        Ok(None) => {
+            tracing::debug!("GEMINI_API_KEY unset; video.* tools not registered");
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Gemini video provider config invalid; video.* tools disabled");
+            return;
+        }
+    };
+
+    let opted_in = std::env::var("ARDUR_VIDEO_GENERATE_OPT_IN")
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false);
+    let max_duration_seconds = std::env::var("ARDUR_VIDEO_MAX_DURATION_SECONDS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .unwrap_or(VideoGenerateTool::DEFAULT_MAX_DURATION_SECONDS);
+
+    let registrations: Vec<(&str, Box<dyn Tool>)> = vec![
+        (
+            VideoAnalyzeTool::ID,
+            Box::new(VideoAnalyzeTool::new(provider.clone())),
+        ),
+        (
+            VideoDescribeTool::ID,
+            Box::new(VideoDescribeTool::new(provider.clone())),
+        ),
+        (
+            VideoGenerateTool::ID,
+            Box::new(VideoGenerateTool::new(
+                provider.clone(),
+                opted_in,
+                max_duration_seconds,
+            )),
+        ),
+    ];
+    for (id, tool) in registrations {
+        if let Err(e) = registry.register(tool) {
+            tracing::warn!(tool = id, error = %e, "skipping video tool registration");
+        } else {
+            tracing::info!(tool = id, "registered Gemini video tool");
+        }
+    }
+    tracing::info!(
+        video_generate_opted_in = opted_in,
+        video_max_duration_seconds = max_duration_seconds,
+        "video generation opt-in posture"
+    );
 }
 
 /// **§8.X.** Load every filesystem `SKILL.md` skill under each directory in
@@ -204,6 +266,7 @@ pub async fn assemble_tool_registry<P: AsRef<Path>>(
             tracing::warn!(error = %e, "Whisper voice transcription config invalid; tool disabled")
         }
     }
+    register_video_tools(&mut registry);
     register_skills(&mut registry, skills_dirs);
     for tool in connect_remote_tools(servers).await {
         let id = tool.id();

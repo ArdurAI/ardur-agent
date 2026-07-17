@@ -425,11 +425,13 @@ name = "ardur-cli"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "ardur-approvals",
  "ardur-automation",
  "ardur-cap-token",
  "ardur-cedar-policy",
  "ardur-cost-gate",
  "ardur-cron",
+ "ardur-cron-ui",
  "ardur-fused-runtime",
  "ardur-memory",
  "ardur-provider-runtime",
@@ -522,6 +524,22 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "ardur-cron-ui"
+version = "0.0.1"
+dependencies = [
+ "ardur-cap-token",
+ "ardur-cron",
+ "ardur-receipt",
+ "chrono",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
  "uuid",
 ]
 
@@ -734,6 +752,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ardur-loop-detector"
+version = "0.0.1"
+dependencies = [
+ "ardur-receipt",
+ "proptest",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
 name = "ardur-media-audio"
 version = "0.0.1"
 dependencies = [
@@ -763,6 +794,29 @@ version = "0.0.1"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "ardur-media-video"
+version = "0.0.1"
+dependencies = [
+ "ardur-injection-defense",
+ "ardur-media-decode",
+ "ardur-receipt",
+ "ardur-runtime",
+ "ardur-tool-registry",
+ "async-trait",
+ "base64 0.22.1",
+ "hex",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror 2.0.18",
+ "tokio",
+ "url",
+ "uuid",
+ "wiremock",
 ]
 
 [[package]]
@@ -1030,6 +1084,7 @@ dependencies = [
  "ardur-fused-runtime",
  "ardur-hooks-openclaw-compat",
  "ardur-media-audio",
+ "ardur-media-video",
  "ardur-memory",
  "ardur-memory-qdrant",
  "ardur-messaging-gateway",
