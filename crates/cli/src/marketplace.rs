@@ -18,7 +18,7 @@
 
 use std::path::{Component, Path, PathBuf};
 
-use ardur_cli::CliError;
+use ardur_cli::{CliError, read_string_no_follow};
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use clap::{Args, Subcommand};
@@ -27,6 +27,7 @@ use p256::pkcs8::{DecodePrivateKey, DecodePublicKey};
 use sha2::{Digest, Sha256};
 
 use crate::StateDirs;
+use crate::state_id::sanitize_state_id;
 
 /// Manifest byte-size ceiling (256 KiB) — refused before parsing.
 const MAX_MANIFEST_BYTES: u64 = 256 * 1024;
@@ -236,7 +237,7 @@ fn read_skills(root: &Path) -> Result<Vec<SkillRecord>, CliError> {
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for entry in entries.flatten() {
             if entry.path().extension().is_some_and(|e| e == "json") {
-                if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                if let Ok(content) = read_string_no_follow(&entry.path()) {
                     if let Ok(v) = serde_json::from_str::<SkillRecord>(&content) {
                         records.push(v);
                     }
@@ -247,15 +248,19 @@ fn read_skills(root: &Path) -> Result<Vec<SkillRecord>, CliError> {
     Ok(records)
 }
 
-fn read_manifest(path: &Path) -> Result<CapabilityManifest, CliError> {
-    let meta = std::fs::metadata(path)?;
-    if meta.len() > MAX_MANIFEST_BYTES {
+fn check_file_size(path: &Path, max: u64, what: &str) -> Result<(), CliError> {
+    let len = std::fs::metadata(path)?.len();
+    if len > max {
         return Err(CliError::State(format!(
-            "manifest {} is {} bytes, exceeding the {MAX_MANIFEST_BYTES}-byte ceiling",
-            path.display(),
-            meta.len()
+            "{what} {} is {len} bytes, exceeding the {max}-byte cap",
+            path.display()
         )));
     }
+    Ok(())
+}
+
+fn read_manifest(path: &Path) -> Result<CapabilityManifest, CliError> {
+    check_file_size(path, MAX_MANIFEST_BYTES, "manifest")?;
     let content = std::fs::read_to_string(path)?;
     serde_json::from_str(&content).map_err(|e| {
         CliError::State(format!(
@@ -463,15 +468,7 @@ fn verify_artifacts(manifest_path: &Path, manifest: &CapabilityManifest) -> Resu
     let base = manifest_path.parent().unwrap_or_else(|| Path::new("."));
     for artifact in &manifest.artifacts {
         let path = safe_artifact_path(base, &artifact.path)?;
-        let meta = std::fs::metadata(&path)
-            .map_err(|e| CliError::State(format!("reading artifact {}: {e}", path.display())))?;
-        if meta.len() > MAX_ARTIFACT_BYTES {
-            return Err(CliError::State(format!(
-                "artifact `{}` is {} bytes, exceeding the {MAX_ARTIFACT_BYTES}-byte ceiling",
-                artifact.path,
-                meta.len()
-            )));
-        }
+        check_file_size(&path, MAX_ARTIFACT_BYTES, "artifact")?;
         let bytes = std::fs::read(&path)
             .map_err(|e| CliError::State(format!("reading artifact {}: {e}", path.display())))?;
         let actual = hex::encode(Sha256::digest(&bytes));
@@ -640,8 +637,12 @@ fn record_from_manifest(
     manifest: &CapabilityManifest,
     source: &str,
     verified: bool,
-) -> SkillRecord {
-    SkillRecord {
+) -> Result<SkillRecord, CliError> {
+    // The manifest id becomes the filename of the installed record
+    // (`<skills_dir>/{id}.json`) — refuse traversal/absolute ids outright
+    // rather than writing outside the skills directory.
+    sanitize_state_id(&manifest.id)?;
+    Ok(SkillRecord {
         skill_id: manifest.id.clone(),
         name: manifest.name.clone(),
         version: manifest.version.clone(),
@@ -652,7 +653,7 @@ fn record_from_manifest(
         signature: manifest.signature.value.clone(),
         verified,
         runtime_claims: manifest.runtime_claims.clone(),
-    }
+    })
 }
 
 fn write_record(dir: &Path, record: &SkillRecord) -> Result<(), CliError> {
@@ -718,7 +719,7 @@ pub fn run_marketplace(args: MarketplaceArgs) -> Result<(), CliError> {
             let path = Path::new(&source);
             let (manifest, verified) =
                 resolve_install_manifest(path, key.as_ref(), allow_unsigned)?;
-            let record = record_from_manifest(&manifest, &source, verified);
+            let record = record_from_manifest(&manifest, &source, verified)?;
             write_record(&dir, &record)?;
             let synced = sync_skill_markdown(&root, path, &manifest)?;
 
@@ -833,7 +834,8 @@ pub fn run_marketplace(args: MarketplaceArgs) -> Result<(), CliError> {
                 .filter(|c| !new_manifest.capabilities.contains(c))
                 .collect();
 
-            let record = record_from_manifest(&new_manifest, &manifest.to_string_lossy(), verified);
+            let record =
+                record_from_manifest(&new_manifest, &manifest.to_string_lossy(), verified)?;
             write_record(&dir, &record)?;
             sync_skill_markdown(&root, &manifest, &new_manifest)?;
 
@@ -909,6 +911,7 @@ pub fn run_marketplace(args: MarketplaceArgs) -> Result<(), CliError> {
             );
         }
         MarketplaceAction::Uninstall { id } => {
+            sanitize_state_id(&id)?;
             let path = dir.join(format!("{id}.json"));
             if !path.is_file() {
                 return Err(CliError::State(format!("skill `{id}` not found")));

@@ -10,6 +10,7 @@ mod device_mesh;
 mod marketplace;
 mod persona;
 mod project_surface;
+mod state_id;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -31,6 +32,7 @@ use persona::{PersonaArgs, run_persona};
 use project_surface::{ProjectArgs, run_project};
 use serde_json::json;
 use sha2::Digest;
+use state_id::sanitize_state_id;
 
 /// Ardur — a capability-secure, cost-metered agent runtime.
 #[derive(Parser)]
@@ -435,7 +437,7 @@ fn run_config(args: ConfigArgs) -> Result<(), CliError> {
 fn run_logs(args: LogsArgs) -> Result<(), CliError> {
     let root = state_root(args.dir)?;
     let log_path = root.join("logs").join("ardur.log");
-    let contents = match std::fs::read_to_string(&log_path) {
+    let contents = match read_string_no_follow(&log_path) {
         Ok(contents) => contents,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             println!("no logs found at {}", log_path.display());
@@ -675,12 +677,7 @@ fn write_config(path: &Path, config: &Config) -> Result<(), CliError> {
         escape_toml_string(&config.model),
         config.budget_cents
     );
-    std::fs::write(path, contents)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    }
+    write_private_file_atomic_no_follow(path, contents.as_bytes())?;
     Ok(())
 }
 
@@ -740,7 +737,7 @@ fn redact_plain(line: &str) -> String {
 }
 
 fn count_lines(path: &Path) -> Result<usize, CliError> {
-    match std::fs::read_to_string(path) {
+    match read_string_no_follow(path) {
         Ok(contents) => Ok(contents.lines().count()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
         Err(e) => Err(CliError::Io(e)),
@@ -1931,7 +1928,7 @@ fn run_policy(args: PolicyArgs) -> Result<(), CliError> {
             let requested_caps: Vec<&str> = caps.split(',').map(|s| s.trim()).collect();
             let cedar_path = root.join("cedar.policies");
             let policy_text = if cedar_path.is_file() {
-                std::fs::read_to_string(&cedar_path)?
+                read_string_no_follow(&cedar_path)?
             } else {
                 "// No cedar.policies file found. All capabilities default to allow.".to_string()
             };
@@ -1954,7 +1951,7 @@ fn run_policy(args: PolicyArgs) -> Result<(), CliError> {
                 println!("no cedar.policies file found at {}", cedar_path.display());
                 return Ok(());
             }
-            let policy_text = std::fs::read_to_string(&cedar_path)?;
+            let policy_text = read_string_no_follow(&cedar_path)?;
             let mut warnings = 0;
             let lines: Vec<&str> = policy_text.lines().collect();
             for (i, line) in lines.iter().enumerate() {
@@ -2035,7 +2032,7 @@ fn run_approvals(args: ApprovalsArgs) -> Result<(), CliError> {
             if let Ok(entries) = std::fs::read_dir(&approvals_dir) {
                 for entry in entries.flatten() {
                     if entry.path().extension().is_some_and(|e| e == "json") {
-                        if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                        if let Ok(content) = read_string_no_follow(&entry.path()) {
                             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
                                 let status = v
                                     .get("status")
@@ -2059,12 +2056,13 @@ fn run_approvals(args: ApprovalsArgs) -> Result<(), CliError> {
             }
         }
         ApprovalsAction::Approve { id } => {
+            sanitize_state_id(&id)?;
             let path = approvals_dir.join(format!("{id}.json"));
             if !path.is_file() {
                 return Err(CliError::State(format!("approval `{id}` not found")));
             }
             let mut approval: serde_json::Value =
-                serde_json::from_str(&std::fs::read_to_string(&path)?)
+                serde_json::from_str(&read_string_no_follow(&path)?)
                     .map_err(|e| CliError::State(e.to_string()))?;
             approval["status"] = json!("approved");
             approval["decided_at"] = json!(
@@ -2075,16 +2073,17 @@ fn run_approvals(args: ApprovalsArgs) -> Result<(), CliError> {
             );
             let json_str = serde_json::to_string_pretty(&approval)
                 .map_err(|e| CliError::State(e.to_string()))?;
-            std::fs::write(&path, json_str)?;
+            write_private_file_atomic_no_follow(&path, json_str.as_bytes())?;
             println!("approved {id}");
         }
         ApprovalsAction::Deny { id, reason } => {
+            sanitize_state_id(&id)?;
             let path = approvals_dir.join(format!("{id}.json"));
             if !path.is_file() {
                 return Err(CliError::State(format!("approval `{id}` not found")));
             }
             let mut approval: serde_json::Value =
-                serde_json::from_str(&std::fs::read_to_string(&path)?)
+                serde_json::from_str(&read_string_no_follow(&path)?)
                     .map_err(|e| CliError::State(e.to_string()))?;
             approval["status"] = json!("denied");
             approval["deny_reason"] = json!(reason.unwrap_or_default());
@@ -2096,7 +2095,7 @@ fn run_approvals(args: ApprovalsArgs) -> Result<(), CliError> {
             );
             let json_str = serde_json::to_string_pretty(&approval)
                 .map_err(|e| CliError::State(e.to_string()))?;
-            std::fs::write(&path, json_str)?;
+            write_private_file_atomic_no_follow(&path, json_str.as_bytes())?;
             println!("denied {id}");
         }
     }
@@ -2225,7 +2224,7 @@ fn read_schedules(root: &Path) -> Result<Vec<ScheduleRecord>, CliError> {
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for entry in entries.flatten() {
             if entry.path().extension().is_some_and(|e| e == "json") {
-                if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                if let Ok(content) = read_string_no_follow(&entry.path()) {
                     if let Ok(v) = serde_json::from_str::<ScheduleRecord>(&content) {
                         records.push(v);
                     }
@@ -2300,10 +2299,11 @@ fn run_schedule(args: ScheduleArgs) -> Result<(), CliError> {
                     .unwrap_or(0),
                 enabled: true,
             };
-            std::fs::write(
-                schedules_dir.join(format!("{id}.json")),
+            write_private_file_atomic_no_follow(
+                &schedules_dir.join(format!("{id}.json")),
                 serde_json::to_string_pretty(&record)
-                    .map_err(|e| CliError::State(e.to_string()))?,
+                    .map_err(|e| CliError::State(e.to_string()))?
+                    .as_bytes(),
             )?;
             println!("created schedule {id}");
             let next = next_fire_times(&record.pattern, 1)?;
@@ -2351,6 +2351,7 @@ fn run_schedule(args: ScheduleArgs) -> Result<(), CliError> {
             }
         }
         ScheduleAction::Delete { id } => {
+            sanitize_state_id(&id)?;
             let path = schedules_dir.join(format!("{id}.json"));
             if !path.is_file() {
                 return Err(CliError::State(format!("schedule `{id}` not found")));
@@ -2440,10 +2441,11 @@ fn run_token(args: TokenArgs) -> Result<(), CliError> {
                     .unwrap_or(0),
                 "revoked": false,
             });
-            std::fs::write(
-                tokens_dir.join(format!("{token_id}.json")),
+            write_private_file_atomic_no_follow(
+                &tokens_dir.join(format!("{token_id}.json")),
                 serde_json::to_string_pretty(&record)
-                    .map_err(|e| CliError::State(e.to_string()))?,
+                    .map_err(|e| CliError::State(e.to_string()))?
+                    .as_bytes(),
             )?;
             println!("created token {token_id}");
             println!("value: {token_value}");
@@ -2454,7 +2456,7 @@ fn run_token(args: TokenArgs) -> Result<(), CliError> {
             if let Ok(entries) = std::fs::read_dir(&tokens_dir) {
                 for entry in entries.flatten() {
                     if entry.path().extension().is_some_and(|e| e == "json") {
-                        if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                        if let Ok(content) = read_string_no_follow(&entry.path()) {
                             if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&content) {
                                 // Never display the actual hash in list view.
                                 v.as_object_mut()
@@ -2475,13 +2477,13 @@ fn run_token(args: TokenArgs) -> Result<(), CliError> {
             }
         }
         TokenAction::Revoke { id } => {
+            sanitize_state_id(&id)?;
             let path = tokens_dir.join(format!("{id}.json"));
             if !path.is_file() {
                 return Err(CliError::State(format!("token `{id}` not found")));
             }
-            let mut token: serde_json::Value =
-                serde_json::from_str(&std::fs::read_to_string(&path)?)
-                    .map_err(|e| CliError::State(e.to_string()))?;
+            let mut token: serde_json::Value = serde_json::from_str(&read_string_no_follow(&path)?)
+                .map_err(|e| CliError::State(e.to_string()))?;
             token["revoked"] = json!(true);
             token["revoked_at"] = json!(
                 std::time::SystemTime::now()
@@ -2489,9 +2491,11 @@ fn run_token(args: TokenArgs) -> Result<(), CliError> {
                     .map(|d| d.as_secs())
                     .unwrap_or(0)
             );
-            std::fs::write(
+            write_private_file_atomic_no_follow(
                 &path,
-                serde_json::to_string_pretty(&token).map_err(|e| CliError::State(e.to_string()))?,
+                serde_json::to_string_pretty(&token)
+                    .map_err(|e| CliError::State(e.to_string()))?
+                    .as_bytes(),
             )?;
             println!("revoked token {id}");
         }
@@ -2555,6 +2559,25 @@ fn redact_json_value(value: &mut serde_json::Value, patterns: &[regex::Regex]) {
 }
 
 /// Run `ardur redact`.
+/// Ceiling on `ardur redact`'s input size (file or stdin), checked while
+/// reading rather than after. This command exists to sanitize pasted/piped
+/// content — logs, API responses, anything potentially untrusted — before
+/// it's shared, so silently truncating oversized input would be actively
+/// dangerous: the caller would believe the whole input was redacted when
+/// only a prefix was. Refuse outright instead of truncating.
+const MAX_REDACT_INPUT_BYTES: u64 = 25 * 1024 * 1024; // 25 MiB
+
+fn read_bounded(reader: impl std::io::Read, max: u64, source: &str) -> Result<String, CliError> {
+    let mut buf = Vec::new();
+    std::io::Read::read_to_end(&mut reader.take(max + 1), &mut buf)?;
+    if buf.len() as u64 > max {
+        return Err(CliError::State(format!(
+            "{source} exceeds the {max}-byte redact input cap; split the input and retry"
+        )));
+    }
+    String::from_utf8(buf).map_err(|e| CliError::State(format!("{source} is not valid UTF-8: {e}")))
+}
+
 fn run_redact(args: RedactArgs) -> Result<(), CliError> {
     let mut patterns = default_secret_patterns();
     for p in args.patterns {
@@ -2564,12 +2587,15 @@ fn run_redact(args: RedactArgs) -> Result<(), CliError> {
     }
 
     let input = match args.input {
-        Some(path) => std::fs::read_to_string(&path)?,
-        None => {
-            let mut buf = String::new();
-            std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
-            buf
+        Some(path) => {
+            let file = std::fs::File::open(&path)?;
+            read_bounded(
+                file,
+                MAX_REDACT_INPUT_BYTES,
+                &format!("input file {}", path.display()),
+            )?
         }
+        None => read_bounded(std::io::stdin(), MAX_REDACT_INPUT_BYTES, "stdin")?,
     };
 
     let output = if args.json {
@@ -2650,7 +2676,7 @@ fn read_memory_cards(root: &Path) -> Result<Vec<serde_json::Value>, CliError> {
     if let Ok(entries) = std::fs::read_dir(&memory_dir) {
         for entry in entries.flatten() {
             if entry.path().extension().is_some_and(|e| e == "json") {
-                if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                if let Ok(content) = read_string_no_follow(&entry.path()) {
                     if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
                         cards.push(v);
                     }
@@ -2767,6 +2793,7 @@ fn run_memory(args: MemoryArgs) -> Result<(), CliError> {
             }
         }
         MemoryAction::Forget { id, reason } => {
+            sanitize_state_id(&id)?;
             let memory_dir = root.join("memory");
             let tombstone_path = memory_dir.join(format!("{id}.tombstone.json"));
             let tombstone = json!({
@@ -2778,7 +2805,7 @@ fn run_memory(args: MemoryArgs) -> Result<(), CliError> {
                 "reason": reason,
             });
             let json_str = serde_json::to_string_pretty(&tombstone).expect("tombstone serialises");
-            std::fs::write(&tombstone_path, json_str)?;
+            write_private_file_atomic_no_follow(&tombstone_path, json_str.as_bytes())?;
             println!("tombstoned memory card {id} (reason: {reason})");
             println!("note: the card is not deleted — it is marked invalid for future recall");
         }
@@ -2819,16 +2846,158 @@ struct SearchArgs {
     limit: usize,
 }
 
+/// Maximum redirect hops `ardur fetch` follows before giving up. Each hop is
+/// re-validated against the allowlist and the SSRF IP blocklist below — this
+/// only bounds how long that loop can run.
+const FETCH_REDIRECT_LIMIT: usize = 5;
+
+/// Whether `host` denotes localhost — the bare name or any loopback IP
+/// literal. Mirrors `ardur_tool_registry::builtins::http::host_is_localhost`.
+fn fetch_host_is_localhost(host: &url::Host<&str>) -> bool {
+    match host {
+        url::Host::Domain(d) => d.eq_ignore_ascii_case("localhost"),
+        url::Host::Ipv4(ip) => ip.is_loopback(),
+        url::Host::Ipv6(ip) => ip.is_loopback(),
+    }
+}
+
+/// Whether `ip` is an internal/non-routable address `ardur fetch` must not be
+/// allowed to reach (the SSRF blocklist). Mirrors
+/// `ardur_tool_registry::builtins::http::is_internal_ip` — see that function's
+/// docs for the full range rationale (RFC 1918, link-local, CGNAT, 6to4,
+/// NAT64, IPv4-mapped/-compatible IPv6, and friends).
+fn fetch_is_internal_ip(ip: std::net::IpAddr) -> bool {
+    use std::net::{IpAddr, Ipv4Addr};
+    match ip {
+        IpAddr::V4(v4) => {
+            let octets = v4.octets();
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || octets[0] == 0
+                || (octets[0] == 198 && (octets[1] & 0xFE) == 18)
+                || (octets[0] == 100 && (octets[1] & 0xC0) == 64)
+                || (octets[0] == 192 && octets[1] == 0 && (octets[2] == 0 || octets[2] == 2))
+                || (octets[0] == 198 && octets[1] == 51 && octets[2] == 100)
+                || (octets[0] == 203 && octets[1] == 0 && octets[2] == 113)
+                || v4.is_multicast()
+                || v4.is_broadcast()
+                || octets[0] >= 240
+        }
+        IpAddr::V6(v6) => {
+            if v6.is_loopback() {
+                return true;
+            }
+            if let Some(mapped) = v6.to_ipv4_mapped() {
+                return fetch_is_internal_ip(IpAddr::V4(mapped));
+            }
+            let segs = v6.segments();
+            let v4_from_segments = |hi: u16, lo: u16| {
+                Ipv4Addr::new(
+                    (hi >> 8) as u8,
+                    (hi & 0xFF) as u8,
+                    (lo >> 8) as u8,
+                    (lo & 0xFF) as u8,
+                )
+            };
+            if segs[0] == 0
+                && segs[1] == 0
+                && segs[2] == 0
+                && segs[3] == 0
+                && segs[4] == 0
+                && segs[5] == 0
+            {
+                let v4 = v4_from_segments(segs[6], segs[7]);
+                return fetch_is_internal_ip(IpAddr::V4(v4));
+            }
+            if segs[0] == 0x0064
+                && segs[1] == 0xff9b
+                && segs[2] == 0
+                && segs[3] == 0
+                && segs[4] == 0
+                && segs[5] == 0
+            {
+                let v4 = v4_from_segments(segs[6], segs[7]);
+                return fetch_is_internal_ip(IpAddr::V4(v4));
+            }
+            if segs[0] == 0x2002 {
+                let v4 = v4_from_segments(segs[1], segs[2]);
+                return fetch_is_internal_ip(IpAddr::V4(v4));
+            }
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || (segs[0] & 0xffc0) == 0xfe80
+                || (segs[0] & 0xfe00) == 0xfc00
+        }
+    }
+}
+
+/// Check `host`/`host_str` against the allowlist (Gate A), resolve to socket
+/// addresses, and reject any that land on an internal/private address unless
+/// the target genuinely is localhost (Gate B). Returns the vetted addresses
+/// so the caller can pin the connection to them (closes the DNS-rebind
+/// window between this check and the actual connect).
+async fn fetch_check_and_resolve(
+    host: &url::Host<&str>,
+    host_str: &str,
+    port: u16,
+    allowlist: &[String],
+) -> Result<Vec<std::net::SocketAddr>, CliError> {
+    if !allowlist.iter().any(|h| h.eq_ignore_ascii_case(host_str)) {
+        return Err(CliError::State(format!(
+            "host `{host_str}` is not in the allowlist; add it to ~/.ardur/http_allowlist.txt or use --allow-host"
+        )));
+    }
+
+    let is_localhost = fetch_host_is_localhost(host);
+
+    let addrs: Vec<std::net::SocketAddr> = match host {
+        url::Host::Ipv4(ip) => vec![std::net::SocketAddr::new(std::net::IpAddr::V4(*ip), port)],
+        url::Host::Ipv6(ip) => vec![std::net::SocketAddr::new(std::net::IpAddr::V6(*ip), port)],
+        url::Host::Domain(d) => tokio::net::lookup_host((*d, port))
+            .await
+            .map_err(|e| CliError::State(format!("could not resolve `{d}`: {e}")))?
+            .collect(),
+    };
+
+    if addrs.is_empty() {
+        return Err(CliError::State(format!(
+            "host `{host_str}` resolved to no addresses"
+        )));
+    }
+
+    if !is_localhost {
+        for addr in &addrs {
+            if fetch_is_internal_ip(addr.ip()) {
+                return Err(CliError::State(format!(
+                    "host `{host_str}` resolves to a private/internal address ({}); refusing to fetch (SSRF defence)",
+                    addr.ip()
+                )));
+            }
+        }
+    }
+
+    Ok(addrs)
+}
+
 /// Run `ardur fetch`.
+///
+/// Hardened against SSRF: every hop (including redirect targets) is
+/// re-validated against the host allowlist and the internal-IP blocklist,
+/// the vetted addresses are pinned into the request so DNS cannot rebind
+/// between the check and the connect, redirects are followed manually
+/// (auto-redirect disabled) so each hop re-runs both gates, and the response
+/// body is read incrementally and stopped at `--max-bytes` rather than fully
+/// buffered first.
 fn run_fetch(args: FetchArgs) -> Result<(), CliError> {
-    let url = args.url;
     let root = StateDirs::resolve()?.root;
 
     // Read allowlist from config if present.
     let mut allowlist: Vec<String> = Vec::new();
     let allowlist_path = root.join("http_allowlist.txt");
     if allowlist_path.is_file() {
-        let content = std::fs::read_to_string(&allowlist_path)?;
+        let content = read_string_no_follow(&allowlist_path)?;
         allowlist.extend(
             content
                 .lines()
@@ -2838,10 +3007,12 @@ fn run_fetch(args: FetchArgs) -> Result<(), CliError> {
     }
     allowlist.extend(args.allow_hosts);
 
-    // Safety check: refuse non-HTTP(S) schemes.
-    if !url.starts_with("http://") && !url.starts_with("https://") {
+    // Safety check: refuse non-HTTP(S) schemes before anything else, matching
+    // the pre-hardening error message.
+    if !args.url.starts_with("http://") && !args.url.starts_with("https://") {
         return Err(CliError::State(format!(
-            "only http:// and https:// URLs are supported, got `{url}`"
+            "only http:// and https:// URLs are supported, got `{}`",
+            args.url
         )));
     }
 
@@ -2851,34 +3022,87 @@ fn run_fetch(args: FetchArgs) -> Result<(), CliError> {
         ));
     }
 
-    let host = url
-        .split('/')
-        .nth(2)
-        .unwrap_or("")
-        .split(':')
-        .next()
-        .unwrap_or("")
-        .to_lowercase();
-    if !allowlist.iter().any(|h| h.to_lowercase() == host) {
-        return Err(CliError::State(format!(
-            "host `{host}` is not in the allowlist; add it to {} or use --allow-host",
-            allowlist_path.display()
-        )));
-    }
+    let mut current = url::Url::parse(&args.url)
+        .map_err(|e| CliError::State(format!("invalid url `{}`: {e}", args.url)))?;
+
+    let max_bytes = args.max_bytes;
 
     let rt = tokio::runtime::Runtime::new()?;
-    let body = rt.block_on(async {
-        let client = reqwest::Client::new();
-        let response = client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| CliError::State(format!("request failed: {e}")))?;
-        let text = response
-            .text()
-            .await
-            .map_err(|e| CliError::State(format!("read failed: {e}")))?;
-        Ok::<String, CliError>(text.chars().take(args.max_bytes).collect())
+    let body: Vec<u8> = rt.block_on(async {
+        let mut redirects = 0usize;
+        loop {
+            // Re-checked on every hop (including redirect targets), since a
+            // 3xx Location can point at any scheme.
+            let scheme = current.scheme();
+            if scheme != "http" && scheme != "https" {
+                return Err(CliError::State(format!(
+                    "scheme `{scheme}` is not permitted; only http and https"
+                )));
+            }
+
+            let host = current
+                .host()
+                .ok_or_else(|| CliError::State(format!("url `{current}` has no host")))?;
+            let host_str = current
+                .host_str()
+                .ok_or_else(|| CliError::State(format!("url `{current}` has no host")))?
+                .to_string();
+            let port = current.port_or_known_default().ok_or_else(|| {
+                CliError::State(format!("url `{current}` has no port and no known default"))
+            })?;
+
+            let addrs = fetch_check_and_resolve(&host, &host_str, port, &allowlist).await?;
+
+            let client = reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .resolve_to_addrs(&host_str, &addrs)
+                .build()
+                .map_err(|e| CliError::State(format!("failed to build http client: {e}")))?;
+
+            let mut resp = client
+                .get(current.clone())
+                .send()
+                .await
+                .map_err(|e| CliError::State(format!("request to `{current}` failed: {e}")))?;
+
+            let status = resp.status();
+            if status.is_redirection() {
+                if let Some(location) = resp
+                    .headers()
+                    .get(reqwest::header::LOCATION)
+                    .and_then(|v| v.to_str().ok())
+                {
+                    redirects += 1;
+                    if redirects > FETCH_REDIRECT_LIMIT {
+                        return Err(CliError::State(format!(
+                            "too many redirects (exceeded limit of {FETCH_REDIRECT_LIMIT})"
+                        )));
+                    }
+                    current = current.join(location).map_err(|e| {
+                        CliError::State(format!("invalid redirect target `{location}`: {e}"))
+                    })?;
+                    continue;
+                }
+            }
+
+            let mut body = Vec::new();
+            loop {
+                let chunk = resp.chunk().await.map_err(|e| {
+                    CliError::State(format!("reading body of `{current}` failed: {e}"))
+                })?;
+                let Some(chunk) = chunk else { break };
+                let remaining = max_bytes.saturating_sub(body.len());
+                if chunk.len() > remaining {
+                    body.extend_from_slice(&chunk[..remaining]);
+                    break;
+                }
+                body.extend_from_slice(&chunk);
+                if body.len() >= max_bytes {
+                    break;
+                }
+            }
+            return Ok(body);
+        }
     })?;
 
     match args.output {
@@ -2886,7 +3110,7 @@ fn run_fetch(args: FetchArgs) -> Result<(), CliError> {
             std::fs::write(&path, &body)?;
             println!("wrote {} bytes to {}", body.len(), path.display());
         }
-        None => println!("{body}"),
+        None => println!("{}", String::from_utf8_lossy(&body)),
     }
     Ok(())
 }
@@ -2971,7 +3195,7 @@ fn read_channels(root: &Path) -> Result<Vec<ChannelRecord>, CliError> {
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for entry in entries.flatten() {
             if entry.path().extension().is_some_and(|e| e == "json") {
-                if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                if let Ok(content) = read_string_no_follow(&entry.path()) {
                     if let Ok(v) = serde_json::from_str::<ChannelRecord>(&content) {
                         records.push(v);
                     }
@@ -3017,6 +3241,7 @@ fn run_channel(args: ChannelArgs) -> Result<(), CliError> {
             }
         }
         ChannelAction::Add { channel_type, name } => {
+            sanitize_state_id(&name)?;
             let path = dir.join(format!("{name}.json"));
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -3033,10 +3258,11 @@ fn run_channel(args: ChannelArgs) -> Result<(), CliError> {
                     prefix = default_env_prefix(&channel_type, &name)
                 ),
             };
-            std::fs::write(
+            write_private_file_atomic_no_follow(
                 &path,
                 serde_json::to_string_pretty(&record)
-                    .map_err(|e| CliError::State(e.to_string()))?,
+                    .map_err(|e| CliError::State(e.to_string()))?
+                    .as_bytes(),
             )?;
             println!("added channel {name} ({channel_type})");
             println!("  env prefix: {}", record.env_prefix);
@@ -3058,6 +3284,7 @@ fn run_channel(args: ChannelArgs) -> Result<(), CliError> {
             }
         }
         ChannelAction::Remove { name } => {
+            sanitize_state_id(&name)?;
             let path = dir.join(format!("{name}.json"));
             if !path.is_file() {
                 return Err(CliError::State(format!("channel `{name}` not found")));
@@ -3066,18 +3293,20 @@ fn run_channel(args: ChannelArgs) -> Result<(), CliError> {
             println!("removed channel {name}");
         }
         ChannelAction::Set { name, status } => {
+            sanitize_state_id(&name)?;
             let path = dir.join(format!("{name}.json"));
             if !path.is_file() {
                 return Err(CliError::State(format!("channel `{name}` not found")));
             }
-            let content = std::fs::read_to_string(&path)?;
+            let content = read_string_no_follow(&path)?;
             let mut record: ChannelRecord =
                 serde_json::from_str(&content).map_err(|e| CliError::State(e.to_string()))?;
             record.enabled = status == "enabled";
-            std::fs::write(
+            write_private_file_atomic_no_follow(
                 &path,
                 serde_json::to_string_pretty(&record)
-                    .map_err(|e| CliError::State(e.to_string()))?,
+                    .map_err(|e| CliError::State(e.to_string()))?
+                    .as_bytes(),
             )?;
             println!("channel {name} is now {status}");
         }

@@ -563,6 +563,71 @@ fn marketplace_validate_verifies_signature_and_artifact_digest() {
         .failure();
 }
 
+/// R1-sibling finding from the 2026-07-12 cli security sweep: `install`
+/// used to trust `manifest.id` unsanitized as the filename for the
+/// installed record (`<skills_dir>/{id}.json`), so a manifest whose `id`
+/// was a path-traversal or absolute path could write outside the skills
+/// directory. `install_record` now runs the id through the same sanitizer
+/// as every other id-derived state path and refuses to install rather than
+/// silently substituting a different identity.
+#[test]
+fn marketplace_install_refuses_a_manifest_with_a_traversal_id() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let manifest_path = dir.path().join("evil.json");
+    std::fs::write(
+        &manifest_path,
+        json!({
+            "schema_version": 1,
+            "kind": "skill",
+            "id": "../../../etc/passwd",
+            "name": "evil",
+            "version": "1.0.0",
+            "signature": {"alg": "ES256", "value": "deadbeef"}
+        })
+        .to_string(),
+    )
+    .expect("write manifest");
+
+    Command::cargo_bin("ardur")
+        .expect("the `ardur` binary builds")
+        .env("HOME", dir.path())
+        .args(["marketplace", "install"])
+        .arg(&manifest_path)
+        .arg("--allow-unsigned")
+        .assert()
+        .failure();
+
+    // No skill record should have been written anywhere under the state
+    // dir — neither at the traversal target nor under a substituted id.
+    let skills_dir = dir.path().join(".ardur").join("skills");
+    if skills_dir.is_dir() {
+        let count = std::fs::read_dir(&skills_dir)
+            .expect("read skills dir")
+            .count();
+        assert_eq!(count, 0, "no skill record should have been installed");
+    }
+}
+
+/// A manifest file over the 1 MiB cap is rejected before being buffered
+/// into memory, rather than read in full first.
+#[test]
+fn marketplace_install_refuses_an_oversized_manifest() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let manifest_path = dir.path().join("huge.json");
+    // Content doesn't need to be valid JSON — the size cap is checked
+    // before the file is even opened for reading.
+    std::fs::write(&manifest_path, vec![b'a'; 2 * 1024 * 1024]).expect("write huge manifest");
+
+    Command::cargo_bin("ardur")
+        .expect("the `ardur` binary builds")
+        .env("HOME", dir.path())
+        .args(["marketplace", "install"])
+        .arg(&manifest_path)
+        .arg("--allow-unsigned")
+        .assert()
+        .failure(); // oversize is refused before any read, even with --allow-unsigned
+}
+
 #[allow(clippy::too_many_arguments)]
 fn canonical_payload(
     schema_version: u32,
