@@ -1,0 +1,14 @@
+[package]
+name = "ardur-media-decode"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Decode requests and format declarations are persisted in receipts/journals, so
+# the Phase 1 skeleton keeps them serde-compatible even before FFmpeg wiring.
+serde = { workspace = true }
+# Typed refusal surface for the future sandboxed FFmpeg bridge.
+thiserror = { workspace = true }

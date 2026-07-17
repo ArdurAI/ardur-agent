@@ -1,0 +1,117 @@
+[package]
+name = "ardur-cli"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# The `ardur` binary; the crate also exposes a library so the chat engine and
+# command handlers are unit/integration-testable without spawning a process.
+[[bin]]
+name = "ardur"
+path = "src/main.rs"
+
+[lib]
+name = "ardur_cli"
+path = "src/lib.rs"
+
+[dependencies]
+# §1.0 runtime — the ChatRuntime + CommandBus + Session this REPL drives.
+ardur-runtime = { workspace = true }
+# §11.14 cap-tokens — the CliError::CapToken surface and the verified-token
+# types the chat session authorizes turns against (Phase 2 wiring seam).
+ardur-cap-token = { workspace = true }
+# §11.14 receipts — the FusedEngine loads/mints the P-256 receipt signing key
+# the fused runtime chains each turn's signed receipt with.
+ardur-receipt = { workspace = true }
+# §3.0 provider runtime — the AnthropicProvider (the offline stub fallback) the
+# engine wires when the selected backend is unavailable.
+ardur-provider-runtime = { workspace = true }
+# §3.0 provider selection — reads ARDUR_PROVIDER and boxes the chosen backend
+# (anthropic | openrouter | openai-compat | ollama | codex | claude-cli) at boot.
+ardur-provider-selector = { workspace = true }
+# §11.14 cost gate — the budget store + admission gate every turn routes through.
+ardur-cost-gate = { workspace = true }
+# Phase-2 fused runtime — the FusedRuntime the default chat path drives through
+# its full ten-stage pipeline.
+ardur-fused-runtime = { workspace = true }
+# §11.0 Cedar — the policy bundle the fused runtime authorizes turns against.
+ardur-cedar-policy = { workspace = true }
+# §7.0 memory — the bi-temporal sink stage 9 records each turn into.
+ardur-memory = { workspace = true }
+# §7.10 session journals — the durable per-session journal stage 10 appends to.
+ardur-session-journals = { workspace = true }
+# ARD-426: automation — the task-flow DAG model + orchestrator trait for
+# `ardur task` commands (task.create / task.list / task.cancel / task.status).
+ardur-automation = { workspace = true }
+# Ed25519 cap-token issuer key custody: load/persist the issuer private key so
+# the session's cap-token root is stable across runs.
+biscuit-auth = { workspace = true }
+
+# CLI surface.
+clap = { workspace = true }
+# Multi-thread runtime + sync primitives drive the async submit/admit path from
+# the synchronous `run_chat` entrypoint.
+tokio = { workspace = true }
+rustyline = { workspace = true }
+# §2.1b streaming: `StreamExt::next` drains the `Provider::stream` feed the
+# progressive display renders.
+futures = { workspace = true }
+
+# §2.X stunning-CLI rendering core (ADR-Phase2-021): CommonMark parsing
+# (comrak), syntect syntax highlight for fenced code blocks, and crossterm
+# terminal-width probing for width-adaptive boxes/tables. Feature-set rationale
+# lives in the workspace manifest.
+comrak = { workspace = true }
+syntect = { workspace = true }
+crossterm = { workspace = true }
+
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+# The cost gate keys admission on a UUIDv4 cap-token id; the workspace pins v7,
+# so opt v4 in on top (Cargo unifies the feature set).
+uuid = { workspace = true, features = ["v4"] }
+# ARD-138: token generation and ARD-140: secret redaction.
+regex = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+base64 = { workspace = true }
+# O_NOFOLLOW for race-resistant private state and session export opens on Unix.
+libc = { workspace = true }
+rustix = { workspace = true }
+# ARD-317: signed marketplace capability manifests use ES256/P-256 public keys.
+p256 = { workspace = true }
+rand = "0.10"
+# ARD-143: schedule / cron CLI.
+chrono = { workspace = true }
+ardur-cron = { workspace = true }
+# §9.4: operator-facing cron management surface.
+ardur-cron-ui = { workspace = true }
+# ARD-144/145: connector HTTP fetch.
+reqwest = { workspace = true }
+# R1: URL host parsing for the SSRF-hardened `ardur fetch` path (mirrors
+# crates/tool-registry's http.fetch host/IP classification).
+url = { workspace = true }
+# ARD-120/121/132: supply-chain audit tooling.
+ignore = { workspace = true }
+cargo-lock = { workspace = true }
+
+[dev-dependencies]
+# Integration tests are a separate crate; they re-declare the deps they name.
+assert_cmd = { workspace = true }
+predicates = { workspace = true }
+tokio = { workspace = true }
+ardur-runtime = { workspace = true }
+ardur-cost-gate = { workspace = true }
+# §2.1b streaming tests: a mock `Provider` (async-trait + boxed event stream)
+# drives the progressive-display surface in-process.
+ardur-provider-runtime = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+# A throwaway HOME so the fused state-dir tests never touch the real `~/.ardur`.
+tempfile = { workspace = true }
