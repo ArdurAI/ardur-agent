@@ -1,4 +1,4 @@
-# ardur-admin — a standalone, read-only observability dashboard for an
+# ardur-admin — an observability + operator-console dashboard for an
 # ardur-server deployment (§13.X).
 #
 # It reads the artifacts ardur-server persists on disk — session journals
@@ -6,7 +6,11 @@
 # (`<receipt-store>/chain.jsonl`) — plus, optionally, the Qdrant memory
 # collection, and serves them over a small HTTP dashboard on its own port. It
 # is decoupled from ardur-server: separate process, separate port, no shared
-# boot config, and STRICTLY no write path. See `README.md`.
+# boot config. Every route it serves is read-only against its OWN on-disk
+# artifacts, with one narrow, explicit exception: when `--server-url` +
+# `--server-admin-token` are configured, it proxies approve/reject decisions
+# to ardur-server's own admin-bearer-gated `/approvals` API (never writing to
+# any on-disk store itself). See `README.md`.
 [package]
 name = "ardur-admin"
 version = "0.0.1"
@@ -56,8 +60,13 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 subtle = { workspace = true }
+# Outbound client for the approvals proxy: admin-ui calls ardur-server's own
+# admin-bearer-gated /approvals API rather than writing to any store itself.
+reqwest = { workspace = true }
 
 [dev-dependencies]
+# Stands in for ardur-server in the approvals-proxy tests.
+wiremock = { workspace = true }
 # In-process router driver for the endpoint tests.
 axum-test = { workspace = true }
 tokio = { workspace = true }

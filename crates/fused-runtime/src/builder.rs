@@ -16,10 +16,12 @@
 //! than whoever the caller claims. The Cedar **resource** is likewise derived
 //! per-request, from the session id.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use ardur_approvals::ApprovalStore;
 use ardur_cedar_policy::{ActionRef, CedarPolicyBundle};
 use ardur_cost_gate::{
     Clock, CostEnvelope, CostTuple as GateCostTuple, HolderId as GateHolderId,
@@ -152,6 +154,8 @@ pub struct FusedRuntimeBuilder {
     max_tool_iterations: u32,
     tool_timeout: Duration,
     stream_content_max_bytes: usize,
+    approvals: Option<ApprovalStore>,
+    approval_gated_capabilities: HashSet<String>,
 }
 
 impl FusedRuntimeBuilder {
@@ -198,6 +202,8 @@ impl FusedRuntimeBuilder {
             max_tool_iterations: default_max_tool_iterations(),
             tool_timeout: default_tool_timeout(),
             stream_content_max_bytes: default_stream_content_max_bytes(),
+            approvals: None,
+            approval_gated_capabilities: HashSet::new(),
         }
     }
 
@@ -332,6 +338,19 @@ impl FusedRuntimeBuilder {
         self
     }
 
+    /// Install the built-in injection-defense signature set into stage 4.5 — the
+    /// fail-closed default the shipped server and CLI boot with (ARD-H1).
+    ///
+    /// The library default is an empty registry (opt-in, so tests and embedders
+    /// are unaffected), but a product that faces untrusted prompts should call
+    /// this so the stage actually scans rather than passing everything through.
+    /// Equivalent to `with_injection_filters(FilterRegistry::with_builtin_defaults())`;
+    /// callers wanting extra filters can build their own registry instead.
+    #[must_use]
+    pub fn with_default_injection_filters(self) -> Self {
+        self.with_injection_filters(FilterRegistry::with_builtin_defaults())
+    }
+
     /// **§6.0.** Wire the tool registry the tool-execution stage advertises to the
     /// provider and invokes. Defaults to an **empty** registry, which makes the
     /// loop run exactly once — so a runtime that does not opt into tools behaves
@@ -375,6 +394,30 @@ impl FusedRuntimeBuilder {
     #[must_use]
     pub fn tool_timeout(mut self, timeout: Duration) -> Self {
         self.tool_timeout = timeout;
+        self
+    }
+
+    /// **ARD-139.** Wire the shared on-disk approval-card store a gated tool
+    /// call proposes into. Defaults to **unset**, which makes the
+    /// approval-gate stage a no-op regardless of
+    /// [`with_approval_gated_capabilities`](Self::with_approval_gated_capabilities)
+    /// — so a runtime that does not opt in behaves exactly as before this
+    /// stage existed.
+    #[must_use]
+    pub fn with_approvals(mut self, approvals: ApprovalStore) -> Self {
+        self.approvals = Some(approvals);
+        self
+    }
+
+    /// **ARD-139.** The [`Capability`](ardur_tool_registry::Capability) label
+    /// set that requires human approval before a tool call carrying it may
+    /// proceed, even once the cap-token/cedar checks already allow it.
+    /// Defaults to **empty**, which gates nothing — so a runtime that does
+    /// not opt in behaves exactly as before this stage existed. A no-op
+    /// unless [`with_approvals`](Self::with_approvals) is also configured.
+    #[must_use]
+    pub fn with_approval_gated_capabilities(mut self, capabilities: HashSet<String>) -> Self {
+        self.approval_gated_capabilities = capabilities;
         self
     }
 
@@ -516,6 +559,8 @@ impl FusedRuntimeBuilder {
             max_tool_iterations: self.max_tool_iterations,
             tool_timeout: self.tool_timeout,
             stream_content_max_bytes: self.stream_content_max_bytes,
+            approvals: self.approvals,
+            approval_gated_capabilities: self.approval_gated_capabilities,
         })
     }
 

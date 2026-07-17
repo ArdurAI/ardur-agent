@@ -7,10 +7,14 @@ use std::net::SocketAddr;
 
 use clap::Parser;
 
-use ardur_admin::auth::BasicAuth;
+use ardur_admin::approvals::ServerConfig;
+use ardur_admin::auth::{BasicAuth, BearerAuth};
 use ardur_admin::build_router;
-use ardur_admin::config::{Cli, resolve_bind_addr, validate_bind};
+use ardur_admin::config::{
+    Cli, parse_bearer_tokens, resolve_bind_addr, validate_approvals_auth, validate_bind,
+};
 use ardur_admin::state::{AppState, MemorySource};
+use ardur_cedar_policy::{CedarPolicyBundle, PolicyBundle, PolicySource};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -25,6 +29,10 @@ async fn main() -> anyhow::Result<()> {
     // a startup error.
     let bind_ip = resolve_bind_addr(&cli).map_err(anyhow::Error::msg)?;
     validate_bind(&cli, &bind_ip).map_err(anyhow::Error::msg)?;
+    // Refuse an unauthenticated approvals proxy — clap's `requires` already
+    // guarantees --server-url and --server-admin-token appear together, but
+    // says nothing about admin-ui's own auth gate.
+    validate_approvals_auth(&cli).map_err(anyhow::Error::msg)?;
 
     // Optional, read-only Qdrant connection for the memory endpoint.
     let memory = match &cli.qdrant_url {
@@ -48,6 +56,25 @@ async fn main() -> anyhow::Result<()> {
     if let Some(user_pass) = &cli.basic_auth {
         state = state.with_basic_auth(BasicAuth::from_user_pass(user_pass));
         tracing::info!("HTTP Basic auth enabled");
+    }
+    let bearer_tokens = parse_bearer_tokens(cli.bearer_tokens.as_deref());
+    if !bearer_tokens.is_empty() {
+        tracing::info!(count = bearer_tokens.len(), "Bearer auth enabled");
+        state = state.with_bearer_auth(BearerAuth::from_tokens(bearer_tokens));
+    }
+    if let Some(path) = &cli.policy_bundle {
+        let policies = CedarPolicyBundle::load(PolicySource::File(path.clone()))
+            .map_err(|e| anyhow::anyhow!("compiling cedar policy at {}: {e}", path.display()))?;
+        tracing::info!(
+            path = %path.display(),
+            policy_count = policies.policy_count(),
+            "Trust Center policy debugger enabled"
+        );
+        state = state.with_policies(policies);
+    }
+    if let (Some(url), Some(token)) = (&cli.server_url, &cli.server_admin_token) {
+        tracing::info!(server_url = %url, "Approvals proxy enabled");
+        state = state.with_approvals_server(ServerConfig::new(url.clone(), token.clone()));
     }
 
     let app = build_router(state.shared());
