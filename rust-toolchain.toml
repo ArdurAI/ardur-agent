@@ -1,0 +1,7 @@
+# Pin the toolchain so every contributor's local `cargo` matches CI — no
+# "works on my machine" drift. The `rust-version` field in Cargo.toml documents
+# the MSRV floor (1.85, edition 2024), while CI uses this exact stable release.
+[toolchain]
+channel = "1.96.1"
+profile = "minimal"
+components = ["rustfmt", "clippy"]
