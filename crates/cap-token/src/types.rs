@@ -8,8 +8,10 @@ use crate::error::{CapTokenError, map_parse_error};
 
 /// The principal a cap-token is issued to (a runtime profile, agent, or
 /// session). Opaque string identifier — typically a SPIFFE-style URI.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct HolderId(pub String);
+///
+/// Re-exported from `ardur-core-types` so the cap-token holder identity is the
+/// same type the cost gate, receipt, and memory layers speak.
+pub use ardur_core_types::HolderId;
 
 /// The capability scope a cap-token grants: the audience it is valid for, when
 /// it expires, the spend ceiling, and the tools it may invoke. These become the

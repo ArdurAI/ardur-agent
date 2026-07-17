@@ -100,6 +100,9 @@ pub type OllamaChunkStream =
     Pin<Box<dyn Stream<Item = Result<OllamaChatChunk, ProviderError>> + Send>>;
 /// The default per-request timeout.
 const DEFAULT_TIMEOUT_SECS: u64 = 60;
+/// The default TCP/TLS connect timeout. Bounds `send()`'s connect phase so an
+/// unroutable or silently-dropping host fails fast instead of hanging.
+const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 10;
 /// The environment variable the base URL is read from by
 /// [`OllamaConfig::from_env`] / [`OllamaProvider::from_env`].
 pub const BASE_URL_ENV: &str = "OLLAMA_BASE_URL";
@@ -244,10 +247,18 @@ impl OllamaProvider {
     /// Build a live provider from `config`.
     #[must_use]
     pub fn new(config: OllamaConfig) -> Self {
+        // A connect timeout so `send()` cannot hang forever on a host that never
+        // completes the TCP/TLS handshake. It bounds only the connect phase, not
+        // the streamed body. Fall back to the default client if the builder
+        // rejects the options (it will not for a plain connect timeout).
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(DEFAULT_CONNECT_TIMEOUT_SECS))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
         Self {
             config,
             rate_card: ollama_zero_rate_card(),
-            client: reqwest::Client::new(),
+            client,
         }
     }
 
@@ -315,18 +326,27 @@ impl OllamaProvider {
         body: serde_json::Value,
         model: ModelId,
     ) -> Result<OllamaChunkStream, ProviderError> {
-        // No per-request timeout on the stream: the timeout caps a whole request
-        // including body read, which would cut off a long generation. Cancellation
-        // is the caller dropping the stream instead.
+        // No per-request `.timeout()` on the stream: that caps the whole request
+        // *including body read*, which would cut off a long generation. Instead
+        // bound only the handshake — `send()` resolves once the response headers
+        // arrive, before the body streams — so a server that accepts the TCP
+        // connection but never sends headers fails fast rather than hanging
+        // `send().await` forever. The streamed body remains unbounded; mid-stream
+        // cancellation is the caller dropping the stream.
         let mut request = self.client.post(url).json(&body);
         if let Some(key) = &self.config.api_key {
             request = request.bearer_auth(key);
         }
 
-        let resp = request
-            .send()
-            .await
-            .map_err(|e| map_send_error(e, &self.config.base_url))?;
+        let resp = match tokio::time::timeout(self.config.request_timeout, request.send()).await {
+            Ok(result) => result.map_err(|e| map_send_error(e, &self.config.base_url))?,
+            Err(_) => {
+                return Err(ProviderError::NetworkFailure(format!(
+                    "Ollama streaming handshake timed out after {:?} awaiting response headers from {}",
+                    self.config.request_timeout, self.config.base_url
+                )));
+            }
+        };
 
         let status = resp.status();
         if !status.is_success() {
@@ -633,7 +653,7 @@ impl ChatResponse {
             tokens_out: u64::from(usage.tokens_out),
             cents: 0,
             wall_ms: 0,
-            attention_score: 0.0,
+            attention_score: 0,
         };
 
         CompletionResponse {

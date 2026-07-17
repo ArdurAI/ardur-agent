@@ -9,6 +9,7 @@
 resolver = "2"
 members = [
     "crates/acp",
+    "crates/core-types",
     "crates/cap-token",
     "crates/embeddings",
     "crates/bm25-index",
@@ -39,6 +40,7 @@ members = [
     "crates/session-journals",
     "crates/multi-agent",
     "crates/injection-defense",
+    "crates/plugin-runtime",
     "crates/fused-runtime",
     "crates/slack-adapter",
     "crates/channel-matrix",
@@ -48,6 +50,7 @@ members = [
     "crates/admin-ui",
     "crates/e2e-tests",
     "crates/eval-harness",
+    "crates/memory-eval",
     "crates/browser",
     "crates/terminal",
     "crates/web",
@@ -59,8 +62,16 @@ members = [
 
 [workspace.package]
 edition = "2024"
-# Edition 2024 stabilized in Rust 1.85, so the MSRV floor is 1.85 (R-2
-# reconciliation in §0.0 — the seed's 1.83 predated the edition-2024 bump).
+# Edition 2024 stabilized in Rust 1.85, but that is NOT a verified MSRV
+# floor for this workspace: `cargo +1.85.0 check --workspace` fails outright
+# against several transitive dependencies (matrix-sdk-common needs 1.93,
+# ruma 1.89, tonic 1.88, tantivy 1.86, ...) — confirmed 2026-07-12 (deep code
+# review finding M11). `rust-version` is left at the edition floor as a
+# lower bound only; nothing in CI gates against it (ci.yml's `gauntlet` job
+# installs 1.96.1). Raising it to the real floor is a larger, separate
+# change: clippy's MSRV-aware lints (e.g. let-chain collapsing) start firing
+# differently the moment `rust-version` moves, which touches unrelated code
+# across ~20 files — out of scope here.
 rust-version = "1.85"
 license = "Apache-2.0"
 repository = "https://github.com/ArdurAI/ardur-agent"
@@ -103,10 +114,13 @@ regex = "1"
 once_cell = "1"
 # HTTP client for the live provider backends (crates/provider-runtime, §3.1).
 # `rustls-tls` keeps the TLS stack pure-Rust — no OpenSSL/native-tls system
-# dependency; `json` pulls the serde request/response helpers.
-reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
+# dependency; `json` pulls the serde request/response helpers; `stream`
+# exposes `Response::bytes_stream()`, used by crates/terminal's ModalBackend
+# to bound response-body reads instead of buffering an unbounded body before
+# parsing it.
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls", "stream"] }
 ignore = "0.4"
-cargo-lock = "10.1"
+cargo-lock = "11.0"
 # URL parsing + host classification for the §6.2 built-in `http.fetch` tool
 # (crates/tool-registry): rejects relative/non-http(s) URLs and exposes the
 # host as a typed `Host` (domain vs IP literal) for the SSRF allowlist + IP
@@ -196,6 +210,8 @@ crossterm = { version = "0.29", default-features = false }
 # Black-box CLI assertions — drives the built `ardur` binary in integration
 # tests (crates/cli dev-dependency, §2.1).
 assert_cmd = "2"
+# `assert_cmd`'s stdout/stderr predicate matchers (crates/cli dev-dependency).
+predicates = "3"
 # Serial test execution for env-mutating integration tests — prevents races
 # on process-global environment variables (crates/server, crates/provider-selector
 # dev-dependency).
@@ -231,6 +247,7 @@ russh = { version = "0.62", default-features = false, features = ["flate2", "aws
 
 # --- Internal crate path-deps (one per Phase-0 crate). Declared here so
 #     cross-crate wiring in Phase 1 references `{ workspace = true }`. ---
+ardur-core-types = { path = "crates/core-types" }
 ardur-cap-token = { path = "crates/cap-token" }
 ardur-embeddings = { path = "crates/embeddings" }
 ardur-bm25-index = { path = "crates/bm25-index" }
@@ -241,6 +258,7 @@ ardur-hooks-openclaw-compat = { path = "crates/hooks-openclaw-compat" }
 ardur-cedar-policy = { path = "crates/cedar-policy" }
 ardur-memory = { path = "crates/memory" }
 ardur-memory-qdrant = { path = "crates/memory-qdrant" }
+ardur-memory-eval = { path = "crates/memory-eval" }
 ardur-runtime = { path = "crates/runtime" }
 ardur-acp = { path = "crates/acp" }
 ardur-automation = { path = "crates/automation" }
@@ -261,6 +279,7 @@ ardur-tool-registry = { path = "crates/tool-registry" }
 ardur-session-journals = { path = "crates/session-journals" }
 ardur-multi-agent = { path = "crates/multi-agent" }
 ardur-injection-defense = { path = "crates/injection-defense" }
+ardur-plugin-runtime = { path = "crates/plugin-runtime" }
 ardur-fused-runtime = { path = "crates/fused-runtime" }
 ardur-slack-adapter = { path = "crates/slack-adapter" }
 ardur-channel-matrix = { path = "crates/channel-matrix" }
