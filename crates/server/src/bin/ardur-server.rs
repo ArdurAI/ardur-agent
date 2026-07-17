@@ -59,12 +59,17 @@ async fn main() -> anyhow::Result<()> {
         MemoryBackend::Qdrant => "qdrant",
         MemoryBackend::Hybrid => "hybrid",
     };
+    // ARD-457: `builtin_tool_opts()` maps the operator's fail-closed opt-ins
+    // (`ARDUR_ENABLE_SHELL_TOOL` + allowlist, `ARDUR_ENABLE_HTTP_TOOL`,
+    // `ARDUR_FILE_TOOL_ROOT`) to the hardened built-ins registered below. With no
+    // opt-ins set it grants nothing, so the default boot is unchanged.
     let tools = Arc::new(
         assemble_tool_registry(
             provider_id.clone(),
             memory_label,
             &config.skills_dirs,
             &config.mcp_remote_servers,
+            config.builtin_tool_opts(),
         )
         .await,
     );
@@ -76,6 +81,7 @@ async fn main() -> anyhow::Result<()> {
         model = %config.model,
         provider = %provider_id,
         budget_cents = config.cost_budget_cents,
+        slack_enabled = config.slack_enabled,
         channel_matrix = config.channel_matrix,
         channel_discord = config.channel_discord,
         channel_telegram = config.channel_telegram,
@@ -135,7 +141,11 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(&config.bind_addr)
         .await
         .map_err(|e| anyhow::anyhow!("binding {}: {e}", config.bind_addr))?;
-    tracing::info!(addr = %config.bind_addr, "listening for slack events");
+    if config.slack_enabled {
+        tracing::info!(addr = %config.bind_addr, "listening for HTTP + Slack events");
+    } else {
+        tracing::info!(addr = %config.bind_addr, "listening for HTTP requests (Slack disabled)");
+    }
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())

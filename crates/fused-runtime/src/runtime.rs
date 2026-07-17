@@ -5,11 +5,12 @@
 //!
 //! [`submit`]: FusedRuntime::submit
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use ardur_approvals::{ApprovalStatus, ApprovalStore};
 use ardur_cap_token::{
     BiscuitCapTokenVerifier, CapToken, CapTokenError, CapTokenVerifier, PublicKey, RequiredCaveats,
     VerifiedClaims,
@@ -94,6 +95,77 @@ pub struct PerRequestProvisioning {
     /// against a holder the cap did not prove); `Some` overrides it — rare, and
     /// intended for impersonation-test fixtures.
     pub subject: Option<GateHolderId>,
+}
+
+/// **§1.8.** The result of [`FusedRuntime::checkpoint`].
+#[derive(Clone, Debug)]
+pub struct CheckpointOutcome {
+    /// The newly minted checkpoint's stable id.
+    pub checkpoint_id: uuid::Uuid,
+    /// The journal position the checkpoint entry landed at.
+    pub entry_id: ardur_session_journals::EntryId,
+    /// The receipt chained for this checkpoint.
+    pub receipt_id: ReceiptId,
+    /// The (possibly caller-supplied, otherwise generated) checkpoint label.
+    pub summary: String,
+}
+
+/// **§1.8.** One checkpoint entry, as returned by [`FusedRuntime::list_checkpoints`].
+#[derive(Clone, Debug)]
+pub struct CheckpointInfo {
+    /// The checkpoint's stable id.
+    pub checkpoint_id: uuid::Uuid,
+    /// The journal position this checkpoint was recorded at.
+    pub entry_id: ardur_session_journals::EntryId,
+    /// The checkpoint's label.
+    pub summary: String,
+    /// When the checkpoint was recorded.
+    pub at: u64,
+}
+
+/// **§1.8.** The result of [`FusedRuntime::rollback_to_checkpoint`].
+#[derive(Clone, Debug)]
+pub struct RollbackOutcome {
+    /// The checkpoint that was rolled back to.
+    pub target_checkpoint_id: uuid::Uuid,
+    /// The journal position the `Rollback` marker landed at.
+    pub entry_id: ardur_session_journals::EntryId,
+    /// The receipt chained for this rollback.
+    pub receipt_id: ReceiptId,
+    /// The journal entries up to and including the target checkpoint — the
+    /// caller's new live-history view.
+    pub retained_entries: Vec<JournalEntry>,
+}
+
+/// **§1.7.** The result of [`FusedRuntime::compact`].
+#[derive(Clone, Debug)]
+pub struct CompactOutcome {
+    /// The newly minted compaction checkpoint's stable id (restore it with
+    /// [`FusedRuntime::rollback_to_checkpoint`]).
+    pub checkpoint_id: uuid::Uuid,
+    /// The journal position the checkpoint entry landed at.
+    pub entry_id: ardur_session_journals::EntryId,
+    /// The receipt chained for this compaction.
+    pub receipt_id: ReceiptId,
+    /// The structured compaction summary text.
+    pub summary: String,
+    /// A rough (~4 chars/token) estimate of the pre-compaction history size.
+    pub before_tokens_estimate: u64,
+    /// A rough (~4 chars/token) estimate of the summary's size.
+    pub after_tokens_estimate: u64,
+}
+
+/// **§1.9.** The result of [`FusedRuntime::run_background_task`]. Exactly one
+/// of `result`/`error` is `Some` — a background task's own success/failure is
+/// a normal terminal outcome, not a [`RuntimeError`] (see the method's docs).
+#[derive(Clone, Debug)]
+pub struct BackgroundTaskOutcome {
+    /// The terminal receipt chained for this task (completed or failed).
+    pub receipt_id: ReceiptId,
+    /// The task's result, on success.
+    pub result: Option<String>,
+    /// The failure message, on failure.
+    pub error: Option<String>,
 }
 
 /// A [`ChatRuntime`] that fuses every Phase-1 substrate crate behind one
@@ -185,6 +257,17 @@ pub struct FusedRuntime {
     /// ARD-491 — the per-turn cap (bytes) on accumulated streamed assistant
     /// content.
     pub(crate) stream_content_max_bytes: usize,
+    /// ARD-139 — the shared on-disk approval-card store a gated tool call
+    /// proposes into. `None` (the builder default) disables approval-gating
+    /// entirely, regardless of [`approval_gated_capabilities`], so a runtime
+    /// that does not opt in behaves exactly as before this stage existed.
+    ///
+    /// [`approval_gated_capabilities`]: Self::approval_gated_capabilities
+    pub(crate) approvals: Option<ApprovalStore>,
+    /// ARD-139 — the [`Capability`] labels that require human approval before
+    /// a tool call carrying them may proceed, even once the cap-token/cedar
+    /// checks already allow it. Empty (the builder default) gates nothing.
+    pub(crate) approval_gated_capabilities: HashSet<String>,
 }
 
 impl FusedRuntime {
@@ -225,9 +308,512 @@ impl FusedRuntime {
                 requested_provider: None,
             },
             &PerRequestProvisioning::default(),
-            self.clock.now_ms() / 1000,
+            self.clock.now_ms().get() / 1000,
             tool,
         )
+    }
+
+    /// The journal this runtime is wired to, or a typed error if none is
+    /// configured — every §1.7/§1.8/§1.9 session-control operation requires a
+    /// durable journal to record its state transition against.
+    fn journal_or_err(&self) -> Result<&Arc<dyn SessionJournal>, RuntimeError> {
+        self.journal.as_ref().ok_or_else(|| {
+            RuntimeError::Internal(anyhow::anyhow!(
+                "no session journal is configured for this runtime"
+            ))
+        })
+    }
+
+    /// **§1.8.** Record a checkpoint: a named resume point over the session's
+    /// current history, with a signed receipt chained onto the same receipt
+    /// chain turns use. Read-only — nothing about the session's live history
+    /// changes; a checkpoint is purely a marker later [`rollback_to_checkpoint`](Self::rollback_to_checkpoint)
+    /// or [`SessionJournal::replay_from`] can target.
+    ///
+    /// # Errors
+    /// Returns [`RuntimeError`] if the cap-token does not grant `tool`, if no
+    /// journal is configured, or if the journal append fails.
+    pub async fn checkpoint(
+        &self,
+        session_id: SessionId,
+        cap_token: &CapTokenRef,
+        tool: &str,
+        label: Option<String>,
+    ) -> Result<CheckpointOutcome, RuntimeError> {
+        let journal = self.journal_or_err()?;
+        let entry_count = journal
+            .replay(session_id)
+            .await
+            .map_err(|e| RuntimeError::Internal(anyhow::anyhow!("journal replay failed: {e}")))?
+            .len();
+        let checkpoint_id = uuid::Uuid::new_v4();
+        let summary = label.unwrap_or_else(|| format!("checkpoint at {entry_count} entries"));
+
+        let receipt = self
+            .commit_control_receipt(
+                session_id,
+                cap_token,
+                tool,
+                "session.checkpoint.created.v1",
+                Sha256Digest::of(summary.as_bytes()),
+                ardur_receipt::CostTuple {
+                    tokens_in: 0,
+                    tokens_out: 0,
+                    cents: 0,
+                    wall_ms: 0,
+                    attention_score: 0,
+                },
+            )
+            .await?;
+
+        let entry_id = journal
+            .append(JournalEntry::Checkpoint {
+                checkpoint_id,
+                summary: summary.clone(),
+                at: self.clock.now_ms(),
+            })
+            .await
+            .map_err(|e| RuntimeError::Internal(anyhow::anyhow!("journal append failed: {e}")))?;
+
+        Ok(CheckpointOutcome {
+            checkpoint_id,
+            entry_id,
+            receipt_id: ReceiptId(receipt.receipt_id),
+            summary,
+        })
+    }
+
+    /// **§1.8.** List every checkpoint recorded in this session's journal, in
+    /// creation order. Read-only: no receipt is minted for a query.
+    ///
+    /// # Errors
+    /// Returns [`RuntimeError`] if no journal is configured or the replay
+    /// fails.
+    pub async fn list_checkpoints(
+        &self,
+        session_id: SessionId,
+    ) -> Result<Vec<CheckpointInfo>, RuntimeError> {
+        let journal = self.journal_or_err()?;
+        let entries = journal
+            .replay(session_id)
+            .await
+            .map_err(|e| RuntimeError::Internal(anyhow::anyhow!("journal replay failed: {e}")))?;
+        Ok(entries
+            .iter()
+            .enumerate()
+            .filter_map(|(pos, entry)| match entry {
+                JournalEntry::Checkpoint {
+                    checkpoint_id,
+                    summary,
+                    at,
+                } => Some(CheckpointInfo {
+                    checkpoint_id: *checkpoint_id,
+                    entry_id: ardur_session_journals::EntryId::new(pos as u64),
+                    summary: summary.clone(),
+                    at: at.get(),
+                }),
+                _ => None,
+            })
+            .collect())
+    }
+
+    /// **§1.8.** Roll back to a previously recorded checkpoint: append a
+    /// [`JournalEntry::Rollback`] marker (the journal stays append-only —
+    /// nothing between the checkpoint and this marker is deleted or
+    /// rewritten, only excluded from the *live* reconstruction going
+    /// forward) and mint a chained receipt recording the rollback.
+    ///
+    /// Returns the full entry log up to and including the target checkpoint
+    /// so the caller can rebuild its in-memory session state without a
+    /// second journal round-trip.
+    ///
+    /// # Errors
+    /// Returns [`RuntimeError`] if the cap-token does not grant `tool`, no
+    /// journal is configured, `checkpoint_id` does not name a checkpoint in
+    /// this session's journal, or the journal append fails.
+    pub async fn rollback_to_checkpoint(
+        &self,
+        session_id: SessionId,
+        cap_token: &CapTokenRef,
+        tool: &str,
+        checkpoint_id: uuid::Uuid,
+    ) -> Result<RollbackOutcome, RuntimeError> {
+        let journal = self.journal_or_err()?;
+        let entries = journal
+            .replay(session_id)
+            .await
+            .map_err(|e| RuntimeError::Internal(anyhow::anyhow!("journal replay failed: {e}")))?;
+        let checkpoint_pos = entries
+            .iter()
+            .position(|entry| {
+                matches!(entry, JournalEntry::Checkpoint { checkpoint_id: id, .. } if *id == checkpoint_id)
+            })
+            .ok_or_else(|| {
+                RuntimeError::Internal(anyhow::anyhow!(
+                    "checkpoint {checkpoint_id} not found in this session's journal"
+                ))
+            })?;
+
+        let receipt = self
+            .commit_control_receipt(
+                session_id,
+                cap_token,
+                tool,
+                "session.rollback.completed.v1",
+                Sha256Digest::of(checkpoint_id.as_bytes()),
+                ardur_receipt::CostTuple {
+                    tokens_in: 0,
+                    tokens_out: 0,
+                    cents: 0,
+                    wall_ms: 0,
+                    attention_score: 0,
+                },
+            )
+            .await?;
+        let receipt_id = ReceiptId(receipt.receipt_id);
+
+        let entry_id = journal
+            .append(JournalEntry::Rollback {
+                target_checkpoint_id: checkpoint_id,
+                receipt_id,
+                at: self.clock.now_ms(),
+            })
+            .await
+            .map_err(|e| RuntimeError::Internal(anyhow::anyhow!("journal append failed: {e}")))?;
+
+        Ok(RollbackOutcome {
+            target_checkpoint_id: checkpoint_id,
+            entry_id,
+            receipt_id,
+            retained_entries: entries[..=checkpoint_pos].to_vec(),
+        })
+    }
+
+    /// **§1.7.** Call the provider directly to summarize `history` into a
+    /// structured compaction summary. Bypasses the turn pipeline (`submit`/
+    /// `stream`) deliberately: this is a meta-operation *over* the
+    /// transcript, not a chat turn, so it must not itself become a journaled
+    /// `UserMessage`/`AssistantMessage` pair the way a real turn would — that
+    /// would pollute the conversation it is trying to summarize.
+    ///
+    /// A condensed practical subset of the blueprint's nine-heading summary
+    /// template: Active Task, Completed Actions, Open Items, Decisions,
+    /// Critical Exact Values, Next Best Step. The full template's
+    /// Mission/Policy/Memory-anchor sections need substrate (a live mission
+    /// object, capability-grant tracking, a memory index) this runtime does
+    /// not yet expose to a summarization call, so they are omitted rather
+    /// than filled with placeholders.
+    async fn summarize(
+        &self,
+        history: &[ChatMessage],
+        focus: Option<&str>,
+    ) -> Result<CompletionResponse, RuntimeError> {
+        let mut instruction = String::from(
+            "Summarize the conversation below for continuation by another AI \
+             agent. Use exactly this structure:\n\n\
+             ## Active Task\n[the most recent unfulfilled user request, exact wording where possible]\n\n\
+             ## Completed Actions\n[concrete actions taken, with outcomes, commands, file paths, test results]\n\n\
+             ## Open Items\n[pending tasks, blockers, unanswered questions]\n\n\
+             ## Decisions\n[decisions made and why]\n\n\
+             ## Critical Exact Values\n[paths, IDs, error strings, hashes, names, ports — redact any secrets]\n\n\
+             ## Next Best Step\n[one concise statement of what to do next]\n\n\
+             Be concise. Omit a section entirely if it has nothing to report.",
+        );
+        if let Some(focus) = focus {
+            instruction.push_str(&format!(
+                "\n\nPrioritize preserving detail related to: {focus}"
+            ));
+        }
+        let mut messages = vec![ChatMessage::system(instruction)];
+        messages.extend_from_slice(history);
+
+        let req = CompletionRequest::new(messages, self.model.clone(), self.max_tokens);
+        self.provider
+            .complete(req)
+            .await
+            .map_err(|e| map_provider_error(&e))
+    }
+
+    /// **§1.7.** Summarize `history` and install the result as a compaction
+    /// checkpoint: mints a control receipt recording the real token/cost the
+    /// summarization call incurred, and records the summary as a
+    /// [`JournalEntry::Checkpoint`] so the existing
+    /// [`rollback_to_checkpoint`](Self::rollback_to_checkpoint) machinery can
+    /// restore it later — a compaction checkpoint and a manual `/checkpoint`
+    /// are the same underlying journal record; only how the summary text was
+    /// produced differs.
+    ///
+    /// KNOWN LIMITATION: unlike a chat turn, this call does not yet reserve
+    /// against the cost-gate before dispatching — the minted receipt's
+    /// `cost` field reflects the real provider usage for audit, but the call
+    /// is not yet admission-controlled the way [`submit`](Self::submit) is.
+    /// Compaction is a threshold/user-triggered operation, not a per-turn
+    /// one, which bounds the exposure; tracked as a follow-up.
+    ///
+    /// # Errors
+    /// Returns [`RuntimeError`] if the cap-token does not grant `tool`, the
+    /// provider call fails, no journal is configured, or the journal append
+    /// fails.
+    pub async fn compact(
+        &self,
+        session_id: SessionId,
+        cap_token: &CapTokenRef,
+        tool: &str,
+        history: &[ChatMessage],
+        focus: Option<String>,
+    ) -> Result<CompactOutcome, RuntimeError> {
+        // Fail fast on a denied cap-token before spending on a provider call.
+        self.verify_cap_token_for_tool(cap_token, tool)?;
+        let journal = self.journal_or_err()?;
+
+        let before_tokens = estimate_tokens(history);
+        let response = self.summarize(history, focus.as_deref()).await?;
+        let after_tokens = estimate_tokens(std::slice::from_ref(&ChatMessage::assistant(
+            response.content.clone(),
+        )));
+
+        let receipt = self
+            .commit_control_receipt(
+                session_id,
+                cap_token,
+                tool,
+                "context.compact.applied.v1",
+                Sha256Digest::of(response.content.as_bytes()),
+                response.cost,
+            )
+            .await?;
+
+        let checkpoint_id = uuid::Uuid::new_v4();
+        let entry_id = journal
+            .append(JournalEntry::Checkpoint {
+                checkpoint_id,
+                summary: response.content.clone(),
+                at: self.clock.now_ms(),
+            })
+            .await
+            .map_err(|e| RuntimeError::Internal(anyhow::anyhow!("journal append failed: {e}")))?;
+
+        Ok(CompactOutcome {
+            checkpoint_id,
+            entry_id,
+            receipt_id: ReceiptId(receipt.receipt_id),
+            summary: response.content,
+            before_tokens_estimate: before_tokens,
+            after_tokens_estimate: after_tokens,
+        })
+    }
+
+    /// **§1.7.** Summarize `history` without installing it: no journal entry,
+    /// no receipt, no session state change — lets a caller preview a
+    /// compaction candidate before committing to it with [`compact`](Self::compact).
+    ///
+    /// # Errors
+    /// Returns [`RuntimeError`] if the cap-token does not grant `tool` or
+    /// the provider call fails.
+    pub async fn preview_compact(
+        &self,
+        cap_token: &CapTokenRef,
+        tool: &str,
+        history: &[ChatMessage],
+        focus: Option<String>,
+    ) -> Result<String, RuntimeError> {
+        self.verify_cap_token_for_tool(cap_token, tool)?;
+        let response = self.summarize(history, focus.as_deref()).await?;
+        Ok(response.content)
+    }
+
+    /// **§1.9.** Run one agent background task: a single prompt dispatched
+    /// straight to the provider (like [`compact`](Self::compact), this
+    /// bypasses `submit`/`stream` — a background task's own transcript is
+    /// not the foreground conversation, per the blueprint's invariant that a
+    /// background task "can be inspected without injecting its full context
+    /// into the foreground chat").
+    ///
+    /// Unlike `compact`, a provider failure here is *not* an `Err` — the
+    /// blueprint's invariant 12 requires a terminal receipt whether the task
+    /// completes or fails, so a failed provider call still mints a
+    /// `task.background.failed.v1` receipt and returns `Ok` with the outcome's
+    /// `error` field set. Only a denied cap-token (never even attempted) or a
+    /// receipt-mint failure is a hard `Err`.
+    ///
+    /// KNOWN LIMITATION: same as `compact` — not yet cost-gate admission
+    /// controlled before dispatch.
+    ///
+    /// # Errors
+    /// Returns [`RuntimeError`] if the cap-token does not grant `tool` or a
+    /// receipt could not be minted.
+    pub async fn run_background_task(
+        &self,
+        session_id: SessionId,
+        cap_token: &CapTokenRef,
+        tool: &str,
+        prompt: &str,
+    ) -> Result<BackgroundTaskOutcome, RuntimeError> {
+        self.verify_cap_token_for_tool(cap_token, tool)?;
+        let req = CompletionRequest::new(
+            vec![ChatMessage::user(prompt)],
+            self.model.clone(),
+            self.max_tokens,
+        );
+        match self.provider.complete(req).await {
+            Ok(response) => {
+                let receipt = self
+                    .commit_control_receipt(
+                        session_id,
+                        cap_token,
+                        tool,
+                        "task.background.completed.v1",
+                        Sha256Digest::of(response.content.as_bytes()),
+                        response.cost,
+                    )
+                    .await?;
+                Ok(BackgroundTaskOutcome {
+                    receipt_id: ReceiptId(receipt.receipt_id),
+                    result: Some(response.content),
+                    error: None,
+                })
+            }
+            Err(e) => {
+                let message = e.to_string();
+                let receipt = self
+                    .commit_control_receipt(
+                        session_id,
+                        cap_token,
+                        tool,
+                        "task.background.failed.v1",
+                        Sha256Digest::of(message.as_bytes()),
+                        ardur_receipt::CostTuple {
+                            tokens_in: 0,
+                            tokens_out: 0,
+                            cents: 0,
+                            wall_ms: 0,
+                            attention_score: 0,
+                        },
+                    )
+                    .await?;
+                Ok(BackgroundTaskOutcome {
+                    receipt_id: ReceiptId(receipt.receipt_id),
+                    result: None,
+                    error: Some(message),
+                })
+            }
+        }
+    }
+
+    /// **§1.9.** Mint the terminal receipt for a background task cancelled by
+    /// explicit user action (invariant 12: a background task must leave a
+    /// terminal receipt whether it completes, fails, times out, is
+    /// cancelled, or becomes lost — this MVP does not yet implement
+    /// timeout/lost detection).
+    ///
+    /// # Errors
+    /// Returns [`RuntimeError`] if the cap-token does not grant `tool` or the
+    /// receipt could not be minted.
+    pub async fn cancel_background_task(
+        &self,
+        session_id: SessionId,
+        cap_token: &CapTokenRef,
+        tool: &str,
+    ) -> Result<ReceiptId, RuntimeError> {
+        let receipt = self
+            .commit_control_receipt(
+                session_id,
+                cap_token,
+                tool,
+                "task.background.cancelled.v1",
+                Sha256Digest::of(b"cancelled by user"),
+                ardur_receipt::CostTuple {
+                    tokens_in: 0,
+                    tokens_out: 0,
+                    cents: 0,
+                    wall_ms: 0,
+                    attention_score: 0,
+                },
+            )
+            .await?;
+        Ok(ReceiptId(receipt.receipt_id))
+    }
+
+    /// **§1.10.** Mint the receipt for a steering directive accepted against
+    /// a target background task (verb `input.steer.accepted.v1`).
+    ///
+    /// KNOWN LIMITATION: this MVP's background-task runtime
+    /// ([`run_background_task`](Self::run_background_task)) is a single
+    /// one-shot provider call with no iterative loop to check a steering
+    /// queue between iterations — the same way `/compact`'s summarizer or a
+    /// chat turn's provider round is a single call. So a steer directive is
+    /// durably recorded and receipted (real evidence a steering request was
+    /// made and accepted) but does **not** yet change the target task's
+    /// in-flight behavior. It becomes actionable once a task type actually
+    /// loops (task flows, §1.9's deferred scope). Surfaced, not hidden: the
+    /// CLI's `/steer` response says this explicitly.
+    ///
+    /// # Errors
+    /// Returns [`RuntimeError`] if the cap-token does not grant `tool` or
+    /// the receipt could not be minted.
+    pub async fn accept_steer_directive(
+        &self,
+        session_id: SessionId,
+        cap_token: &CapTokenRef,
+        tool: &str,
+        target_task_id: uuid::Uuid,
+        message: &str,
+    ) -> Result<ReceiptId, RuntimeError> {
+        let receipt = self
+            .commit_control_receipt(
+                session_id,
+                cap_token,
+                tool,
+                "input.steer.accepted.v1",
+                Sha256Digest::of(format!("{target_task_id}:{message}").as_bytes()),
+                ardur_receipt::CostTuple {
+                    tokens_in: 0,
+                    tokens_out: 0,
+                    cents: 0,
+                    wall_ms: 0,
+                    attention_score: 0,
+                },
+            )
+            .await?;
+        Ok(ReceiptId(receipt.receipt_id))
+    }
+
+    /// **§1.10.** Mint the receipt for an accepted interrupt against a
+    /// target background task (verb `input.interrupt.accepted.v1`) —
+    /// distinct from [`cancel_background_task`](Self::cancel_background_task)'s
+    /// `task.background.cancelled.v1` even though both end the same task:
+    /// the blueprint models "the user interrupted the active run" and "the
+    /// user cancelled a background task" as different intents worth
+    /// distinguishing in the receipt trail, even when today's MVP resolves
+    /// both the same mechanical way (abort the task).
+    ///
+    /// # Errors
+    /// Returns [`RuntimeError`] if the cap-token does not grant `tool` or
+    /// the receipt could not be minted.
+    pub async fn accept_interrupt(
+        &self,
+        session_id: SessionId,
+        cap_token: &CapTokenRef,
+        tool: &str,
+        target_task_id: uuid::Uuid,
+    ) -> Result<ReceiptId, RuntimeError> {
+        let receipt = self
+            .commit_control_receipt(
+                session_id,
+                cap_token,
+                tool,
+                "input.interrupt.accepted.v1",
+                Sha256Digest::of(target_task_id.as_bytes()),
+                ardur_receipt::CostTuple {
+                    tokens_in: 0,
+                    tokens_out: 0,
+                    cents: 0,
+                    wall_ms: 0,
+                    attention_score: 0,
+                },
+            )
+            .await?;
+        Ok(ReceiptId(receipt.receipt_id))
     }
 
     /// Revoke a capability token mid-session: add its revocation ids to the
@@ -554,6 +1140,196 @@ impl FusedRuntime {
         Ok(())
     }
 
+    /// **ARD-139.** Mint and durably chain a receipt for a session-control
+    /// operation that is not a turn: no provider call, no cost-gate
+    /// reservation (`cost` is the caller's actual spend — zero for a purely
+    /// local operation like an approval propose). Reuses the exact
+    /// durability guarantees the turn-receipt commit path gives ordinary
+    /// **ARD-139.** Mint a signed receipt for an approval **decision**
+    /// (`approval.approve.accepted.v1`/`approval.reject.accepted.v1`) made
+    /// against `approval_id`, minted under `cap_token`'s verified subject.
+    /// A thin `pub` wrapper over [`commit_control_receipt`](Self::commit_control_receipt)
+    /// for a caller that already mutated the approval card through
+    /// [`ardur_approvals::ApprovalStore::decide`] elsewhere (the actual
+    /// store mutation stays outside this runtime — the same non-turn,
+    /// non-cost-gated control-plane receipt pattern
+    /// [`checkpoint`](Self)-style operations use elsewhere in this epic).
+    ///
+    /// # Errors
+    /// Returns [`RuntimeError`] if the cap-token does not grant `tool` or
+    /// the receipt could not be minted.
+    pub async fn mint_approval_decision_receipt(
+        &self,
+        session_id: SessionId,
+        cap_token: &CapTokenRef,
+        tool: &str,
+        verb: &str,
+        approval_id: &str,
+    ) -> Result<ReceiptId, RuntimeError> {
+        let receipt = self
+            .commit_control_receipt(
+                session_id,
+                cap_token,
+                tool,
+                verb,
+                Sha256Digest::of(approval_id.as_bytes()),
+                ardur_receipt::CostTuple {
+                    tokens_in: 0,
+                    tokens_out: 0,
+                    cents: 0,
+                    wall_ms: 0,
+                    attention_score: 0,
+                },
+            )
+            .await?;
+        Ok(ReceiptId(receipt.receipt_id))
+    }
+
+    /// turns — the same `commit_lock`, the same `chain_tail`, the same
+    /// fsync'd receipt log — so a control-plane receipt sits in the *same*
+    /// hash chain as ordinary turn receipts.
+    async fn commit_control_receipt(
+        &self,
+        session_id: SessionId,
+        cap_token: &CapTokenRef,
+        tool: &str,
+        verb: &str,
+        payload_digest: Sha256Digest,
+        cost: ardur_receipt::CostTuple,
+    ) -> Result<ReceiptBody, RuntimeError> {
+        let claims = self.verify_cap_token_for_tool(cap_token, tool)?;
+        let verb = VerbObject::new(verb)
+            .map_err(|e| RuntimeError::Internal(anyhow::anyhow!("invalid receipt verb: {e}")))?;
+        let now_ms = self.clock.now_ms().get();
+
+        let _commit_guard = self.commit_lock.lock().await;
+        let parent_hash = *self.chain_tail.lock();
+        let body = ReceiptBody {
+            receipt_id: uuid::Uuid::new_v4(),
+            parent_hash,
+            verb,
+            issued_at: ardur_receipt::UnixTsMillis(now_ms),
+            subject: ardur_receipt::HolderId(claims.subject.0.clone()),
+            cap_token_id: ardur_receipt::TokenId(claims.token_id),
+            payload_digest,
+            session_id: Some(session_id.0),
+            cost,
+            tool_calls: Vec::new(),
+            provider: None,
+        };
+        let signed = ReceiptSigner::sign(body, &self.receipt_key)
+            .map_err(|e| RuntimeError::Internal(anyhow::anyhow!("receipt mint failed: {e}")))?;
+        self.persist_receipt(signed.jws_compact())
+            .map_err(|e| RuntimeError::Internal(anyhow::anyhow!("receipt persist failed: {e}")))?;
+        *self.chain_tail.lock() = Some(Sha256Digest::of(signed.jws_compact().as_bytes()));
+        Ok(signed.body().clone())
+    }
+
+    /// **ARD-139.** The propose-half of the approval-gate loop: called after
+    /// `authorize_tool_invocation`/`authorize_tool_capabilities` have already
+    /// allowed `tool_name`'s call, this additionally requires human sign-off
+    /// for any call whose required capabilities intersect
+    /// [`approval_gated_capabilities`](Self::approval_gated_capabilities).
+    ///
+    /// Looks up an existing card by `(tool_name, arguments_digest,
+    /// session_id)` so a retried *identical* call is idempotent rather than
+    /// proposing a fresh card every time the model re-requests it:
+    /// - no card exists: propose one, mint `approval.propose.created.v1`,
+    ///   and deny with [`RuntimeError::ApprovalRequired`].
+    /// - a `Pending` card exists: deny again with the *same* card id (no
+    ///   second receipt — the propose already happened).
+    /// - an `Approved` card exists: allow the call to proceed.
+    /// - a `Denied` card exists: deny with [`RuntimeError::ApprovalRejected`].
+    ///
+    /// A tool whose required capabilities do not intersect the gated set, or
+    /// a runtime with no [`approvals`](Self::approvals) store configured, is
+    /// unaffected — this stage is a no-op in both cases, matching every other
+    /// opt-in builder knob's "absent config behaves as before" contract.
+    async fn authorize_or_propose_approval(
+        &self,
+        cap_token: &CapTokenRef,
+        session_id: SessionId,
+        now_unix: u64,
+        tool_name: &str,
+        capabilities: &[Capability],
+        arguments: &serde_json::Value,
+    ) -> Result<(), RuntimeError> {
+        let Some(store) = &self.approvals else {
+            return Ok(());
+        };
+        let Some(gated_capability) = capabilities
+            .iter()
+            .map(Capability::as_str)
+            .find(|label| self.approval_gated_capabilities.contains(label.as_str()))
+        else {
+            return Ok(());
+        };
+
+        let arguments_digest =
+            Sha256Digest::of(&serde_json::to_vec(arguments).unwrap_or_default()).to_hex();
+        let session_id_str = session_id.0.to_string();
+
+        let existing = store
+            .find_matching(tool_name, &arguments_digest, Some(&session_id_str))
+            .map_err(|e| {
+                RuntimeError::Internal(anyhow::anyhow!("approval store lookup failed: {e}"))
+            })?;
+
+        match existing {
+            Some(card) if card.status == ApprovalStatus::Approved => Ok(()),
+            Some(card) if card.status == ApprovalStatus::Denied => {
+                Err(RuntimeError::ApprovalRejected {
+                    approval_id: card.id.unwrap_or_default(),
+                    tool: tool_name.to_string(),
+                    reason: card.deny_reason.unwrap_or_default(),
+                })
+            }
+            Some(card) => Err(RuntimeError::ApprovalRequired {
+                approval_id: card.id.unwrap_or_default(),
+                tool: tool_name.to_string(),
+                reason: card.reason,
+            }),
+            None => {
+                let reason = format!(
+                    "tool `{tool_name}` requires capability `{gated_capability}`, which is approval-gated"
+                );
+                let card = store
+                    .propose(
+                        tool_name,
+                        gated_capability.as_str(),
+                        &arguments_digest,
+                        Some(session_id_str),
+                        &reason,
+                        now_unix,
+                    )
+                    .map_err(|e| {
+                        RuntimeError::Internal(anyhow::anyhow!("approval propose failed: {e}"))
+                    })?;
+                let approval_id = card.id.clone().unwrap_or_default();
+                self.commit_control_receipt(
+                    session_id,
+                    cap_token,
+                    &gated_capability,
+                    "approval.propose.created.v1",
+                    Sha256Digest::of(approval_id.as_bytes()),
+                    ardur_receipt::CostTuple {
+                        tokens_in: 0,
+                        tokens_out: 0,
+                        cents: 0,
+                        wall_ms: 0,
+                        attention_score: 0,
+                    },
+                )
+                .await?;
+                Err(RuntimeError::ApprovalRequired {
+                    approval_id,
+                    tool: tool_name.to_string(),
+                    reason,
+                })
+            }
+        }
+    }
+
     /// **Stage 3 (setup).** Resolve the budget holder (the verified subject
     /// unless the request overrides it), apply a per-request top-up if one was
     /// supplied, and bind the verified token to the holder. Returns the gate
@@ -721,7 +1497,7 @@ impl FusedRuntime {
                     if let Err(e) = journal
                         .append(JournalEntry::UserMessage {
                             content: prompt.to_string(),
-                            at: now_ms,
+                            at: ardur_cost_gate::UnixTsMillis(now_ms),
                         })
                         .await
                     {
@@ -736,7 +1512,7 @@ impl FusedRuntime {
             if let Err(e) = journal
                 .append(JournalEntry::AssistantMessage {
                     content: response.content.clone(),
-                    at: now_ms,
+                    at: ardur_cost_gate::UnixTsMillis(now_ms),
                     receipt_id: ReceiptId(receipt.receipt_id),
                 })
                 .await
@@ -880,7 +1656,7 @@ impl FusedRuntime {
                 // The original assistant text is lost (it was never journaled),
                 // so the content is an explicit recovery marker, not a fabricated
                 // response.
-                let now = self.clock.now_ms();
+                let now = self.clock.now_ms().get();
                 for &i in &orphan_indices {
                     let rid = chain[i].body.receipt_id;
                     journal
@@ -891,7 +1667,7 @@ impl FusedRuntime {
                                  journal append (stage 10), so the original assistant content is \
                                  unrecoverable."
                             ),
-                            at: now,
+                            at: ardur_cost_gate::UnixTsMillis(now),
                             receipt_id: ReceiptId(rid),
                         })
                         .await?;
@@ -960,6 +1736,7 @@ impl FusedRuntime {
     }
 }
 
+#[async_trait::async_trait]
 impl ChatRuntime for FusedRuntime {
     async fn submit(&self, req: SubmitRequest) -> Result<SubmitResult, RuntimeError> {
         self.submit_inner(req, PerRequestProvisioning::default())
@@ -999,7 +1776,7 @@ impl FusedRuntime {
         provisioning: PerRequestProvisioning,
     ) -> Result<SubmitResult, RuntimeError> {
         let session_id = req.session_id;
-        let turn_start_ms = self.clock.now_ms();
+        let turn_start_ms = self.clock.now_ms().get();
         let turn_start_unix = turn_start_ms / 1000;
 
         // ---- 1. cap-token: parse + verify against the root, audience, tool,
@@ -1073,7 +1850,7 @@ impl FusedRuntime {
             iteration += 1;
             // ARD-480: expiry-sensitive re-verification happens throughout the
             // tool loop, so use the clock at this iteration, not turn start.
-            let iteration_now_ms = self.clock.now_ms();
+            let iteration_now_ms = self.clock.now_ms().get();
 
             // Build this iteration's request from the current transcript + tools.
             let mut iter_request =
@@ -1136,6 +1913,11 @@ impl FusedRuntime {
                     return Err(map_provider_error(&provider_err));
                 }
             };
+            // ARD-501: a slow completion can outlive the reservation TTL. Refresh
+            // the lease now the provider has returned so the finalize below (and
+            // the post-receipt hooks between here and it) does not discard a turn
+            // the caller has already received. No-op once finalized.
+            self.gate.touch_reservation(reservation.reservation_id);
 
             // The tool calls (if any) the model requested this round.
             let requested: Vec<ToolCall> = match &response.finish_reason {
@@ -1165,7 +1947,7 @@ impl FusedRuntime {
                             .await;
                         return Err(err);
                     };
-                    let tool_auth_now_unix = self.clock.now_ms() / 1000;
+                    let tool_auth_now_unix = self.clock.now_ms().get() / 1000;
                     if let Err(err) = self.authorize_tool_invocation(
                         &req,
                         &provisioning,
@@ -1187,6 +1969,25 @@ impl FusedRuntime {
                         &call.name,
                         tool.required_capabilities(),
                     ) {
+                        self.release(reservation).await;
+                        self.fire_error(session_id, LifecyclePhase::Submit, &err)
+                            .await;
+                        return Err(err);
+                    }
+                    // ARD-139: a call whose required capabilities include an
+                    // approval-gated one needs human sign-off even though the
+                    // cap-token/cedar checks above already allow it.
+                    if let Err(err) = self
+                        .authorize_or_propose_approval(
+                            &req.cap_token,
+                            session_id,
+                            tool_auth_now_unix,
+                            &call.name,
+                            tool.required_capabilities(),
+                            &call.arguments,
+                        )
+                        .await
+                    {
                         self.release(reservation).await;
                         self.fire_error(session_id, LifecyclePhase::Submit, &err)
                             .await;
@@ -1226,7 +2027,7 @@ impl FusedRuntime {
                         return Err(err);
                     }
 
-                    tool_cost = add_cost(tool_cost, &output.cost);
+                    tool_cost = tool_cost.saturating_add(&output.cost);
                     tool_receipts.push(ToolCallReceipt {
                         call_id: call.id.clone(),
                         tool_name: call.name.clone(),
@@ -1236,7 +2037,7 @@ impl FusedRuntime {
                         output_digest: Sha256Digest::of(
                             &serde_json::to_vec(&output.content).unwrap_or_default(),
                         ),
-                        cost: runtime_cost_to_receipt(&output.cost),
+                        cost: output.cost,
                     });
                     tool_messages.push(ChatMessage::tool_result(
                         &call.id,
@@ -1255,7 +2056,7 @@ impl FusedRuntime {
                             &serde_json::to_vec(&call.arguments).unwrap_or_default(),
                         ),
                         output_digest: Sha256Digest::of(b""),
-                        cost: runtime_cost_to_receipt(&RuntimeCostTuple::default()),
+                        cost: RuntimeCostTuple::default(),
                     });
                 }
             }
@@ -1266,7 +2067,7 @@ impl FusedRuntime {
             //    signing, cost finalization, journal append, receipt persistence,
             //    and tail update; this prevents concurrent turns from forking the
             //    receipt chain or rolling back each other's journals.
-            let combined_cost = add_cost(response.cost, &tool_cost);
+            let combined_cost = response.cost.saturating_add(&tool_cost);
             let (signed, receipt) = {
                 let _commit_guard = self.commit_lock.lock().await;
                 let parent_hash = *self.chain_tail.lock();
@@ -1276,10 +2077,10 @@ impl FusedRuntime {
                     verb: self.verb.clone(),
                     issued_at: ardur_receipt::UnixTsMillis(iteration_now_ms),
                     subject: ardur_receipt::HolderId(claims.subject.0.clone()),
-                    cap_token_id: ardur_receipt::TokenId(claims.token_id.to_string()),
+                    cap_token_id: ardur_receipt::TokenId(claims.token_id),
                     payload_digest: Sha256Digest::of(response.content.as_bytes()),
                     session_id: Some(session_id.0),
-                    cost: runtime_cost_to_receipt(&combined_cost),
+                    cost: combined_cost,
                     tool_calls: tool_receipts,
                     provider: Some(self.provider.name()),
                 };
@@ -1299,7 +2100,7 @@ impl FusedRuntime {
                 //    combined actual (provider + tools) before making the turn
                 //    durable. If the reservation expired, no receipt/journal entry
                 //    is committed for a turn the cost gate rejected.
-                let actual = runtime_cost_to_gate(&combined_cost);
+                let actual = combined_cost;
                 let finalization = match self.gate.finalize(reservation, actual).await {
                     Ok(finalization) => finalization,
                     Err(e) => {
@@ -1373,7 +2174,7 @@ impl FusedRuntime {
                     .audience
                     .clone()
                     .unwrap_or_else(|| self.audience.clone());
-                let memory_now_ms = self.clock.now_ms();
+                let memory_now_ms = self.clock.now_ms().get();
                 let memory_now_unix = memory_now_ms / 1000;
                 let memory_write_claims = CapToken::from_base64(&req.cap_token.0, &self.cap_root)
                     .and_then(|token| {
@@ -1436,7 +2237,7 @@ impl FusedRuntime {
             //     post-receipt hooks/finalize/memory, so no separate journal append
             //     runs here.
 
-            total_cost = add_cost(total_cost, &combined_cost);
+            total_cost = total_cost.saturating_add(&combined_cost);
 
             // Termination: a response with no tool calls is the final answer; a
             // tool-wanting response at the iteration ceiling aborts; otherwise we
@@ -1525,7 +2326,7 @@ impl FusedRuntime {
     ) -> impl Stream<Item = Result<FusedEvent, RuntimeError>> + Send + '_ {
         async_stream::try_stream! {
             let session_id = req.session_id;
-            let now_ms = self.clock.now_ms();
+            let now_ms = self.clock.now_ms().get();
             let now_unix = now_ms / 1000;
 
             // ---- 1. cap-token.
@@ -1648,10 +2449,11 @@ impl FusedRuntime {
                 // moves the value out without moving the binding.
                 // ARD-488: release the reservation if this streaming round is
                 // cancelled (stream dropped / outer timeout) before it settles.
+                let reservation_id = reservation_handle.reservation_id;
                 let _cancel_guard = ReservationCancelGuard::new(
                     Arc::clone(&self.gate),
                     self.budget.clone(),
-                    reservation_handle.reservation_id,
+                    reservation_id,
                 );
                 let mut reservation = Some(reservation_handle);
 
@@ -1672,6 +2474,13 @@ impl FusedRuntime {
                 let mut finish_reason = FinishReason::Stop;
                 let mut stream_err: Option<ProviderError> = None;
                 while let Some(item) = provider_stream.next().await {
+                    // ARD-501: the reservation was admitted with a TTL sized for
+                    // a prompt turn; a long generation can outlive it. Refresh
+                    // the lease on every provider event so an actively-streaming
+                    // turn is never reclaimed as abandoned and discarded at
+                    // `finalize`. Cheap, lock-only, and a no-op once the
+                    // reservation is being finalized.
+                    self.gate.touch_reservation(reservation_id);
                     match item {
                         Ok(StreamEvent::ContentDelta(text)) => {
                             content.push_str(&text);
@@ -1762,7 +2571,7 @@ impl FusedRuntime {
                             Err(err)?;
                             unreachable!()
                         };
-                        let invocation_now_unix = self.clock.now_ms() / 1000;
+                        let invocation_now_unix = self.clock.now_ms().get() / 1000;
                         if let Err(err) = self.authorize_tool_invocation(
                             &req,
                             &provisioning,
@@ -1785,6 +2594,27 @@ impl FusedRuntime {
                             &call.name,
                             tool.required_capabilities(),
                         ) {
+                            self.release(reservation.take().expect("reservation held")).await;
+                            yield FusedEvent::StageEnd { stage: StageKind::ToolExec, ok: false };
+                            self.fire_error(session_id, LifecyclePhase::Submit, &err).await;
+                            Err(err)?;
+                            unreachable!()
+                        }
+                        // ARD-139: a call whose required capabilities include
+                        // an approval-gated one needs human sign-off even
+                        // though the cap-token/cedar checks above already
+                        // allow it.
+                        if let Err(err) = self
+                            .authorize_or_propose_approval(
+                                &req.cap_token,
+                                session_id,
+                                invocation_now_unix,
+                                &call.name,
+                                tool.required_capabilities(),
+                                &call.arguments,
+                            )
+                            .await
+                        {
                             self.release(reservation.take().expect("reservation held")).await;
                             yield FusedEvent::StageEnd { stage: StageKind::ToolExec, ok: false };
                             self.fire_error(session_id, LifecyclePhase::Submit, &err).await;
@@ -1832,7 +2662,7 @@ impl FusedRuntime {
                             result: output.content.clone(),
                         };
 
-                        tool_cost = add_cost(tool_cost, &output.cost);
+                        tool_cost = tool_cost.saturating_add(&output.cost);
                         tool_receipts.push(ToolCallReceipt {
                             call_id: call.id.clone(),
                             tool_name: call.name.clone(),
@@ -1842,7 +2672,7 @@ impl FusedRuntime {
                             output_digest: Sha256Digest::of(
                                 &serde_json::to_vec(&output.content).unwrap_or_default(),
                             ),
-                            cost: runtime_cost_to_receipt(&output.cost),
+                            cost: output.cost,
                         });
                         tool_messages.push(ChatMessage::tool_result(
                             &call.id,
@@ -1861,14 +2691,14 @@ impl FusedRuntime {
                                 &serde_json::to_vec(&call.arguments).unwrap_or_default(),
                             ),
                             output_digest: Sha256Digest::of(b""),
-                            cost: runtime_cost_to_receipt(&RuntimeCostTuple::default()),
+                            cost: RuntimeCostTuple::default(),
                         });
                     }
                 }
 
                 // 7. receipt mint + chain.
                 yield FusedEvent::StageStart { stage: StageKind::ReceiptMint };
-                let combined_cost = add_cost(response.cost, &tool_cost);
+                let combined_cost = response.cost.saturating_add(&tool_cost);
                 // Match the non-streaming atomicity contract: serialize parent-tail
                 // selection, cost settlement, receipt persistence, and journal append.
                 let _commit_guard = self.commit_lock.lock().await;
@@ -1879,10 +2709,10 @@ impl FusedRuntime {
                     verb: self.verb.clone(),
                     issued_at: ardur_receipt::UnixTsMillis(now_ms),
                     subject: ardur_receipt::HolderId(claims.subject.0.clone()),
-                    cap_token_id: ardur_receipt::TokenId(claims.token_id.to_string()),
+                    cap_token_id: ardur_receipt::TokenId(claims.token_id),
                     payload_digest: Sha256Digest::of(response.content.as_bytes()),
                     session_id: Some(session_id.0),
-                    cost: runtime_cost_to_receipt(&combined_cost),
+                    cost: combined_cost,
                     tool_calls: tool_receipts,
                     provider: Some(self.provider.name()),
                 };
@@ -1903,7 +2733,7 @@ impl FusedRuntime {
                 // journal state becomes durable. A rejected/expired reservation
                 // therefore cannot produce authoritative spend evidence.
                 yield FusedEvent::StageStart { stage: StageKind::CostGateFinalize };
-                let actual = runtime_cost_to_gate(&combined_cost);
+                let actual = combined_cost;
                 let finalization = match self
                     .gate
                     .finalize(reservation.take().expect("reservation held"), actual)
@@ -1991,7 +2821,7 @@ impl FusedRuntime {
                         .audience
                         .clone()
                         .unwrap_or_else(|| self.audience.clone());
-                    let memory_now_ms = self.clock.now_ms();
+                    let memory_now_ms = self.clock.now_ms().get();
                     let memory_now_unix = memory_now_ms / 1000;
                     let memory_write_claims = CapToken::from_base64(&req.cap_token.0, &self.cap_root)
                         .and_then(|token| {
@@ -2154,23 +2984,21 @@ fn cedar_attributes_from_claims(
     serde_json::Value::Object(map)
 }
 
+/// **§1.7.** A rough token-count estimate (~4 characters/token, the common
+/// English-text heuristic) over a message slice's content — not a real
+/// tokenizer. Good enough for `/compact status`-style before/after context
+/// sizing; not billed anywhere (the receipted cost always comes from the
+/// provider's actual reported [`Usage`](ardur_provider_runtime::Usage)).
+fn estimate_tokens(messages: &[ChatMessage]) -> u64 {
+    let chars: usize = messages.iter().map(|m| m.content.len()).sum();
+    (chars as u64).div_ceil(4)
+}
+
 /// Map a provider failure onto the runtime's error surface.
 fn map_provider_error(err: &ProviderError) -> RuntimeError {
     match err {
         ProviderError::CostCeilingExceeded => RuntimeError::CostCeilingExceeded,
         _ => RuntimeError::ProviderUnavailable,
-    }
-}
-
-/// Sum two runtime cost tuples dimension-wise (saturating on the integer axes),
-/// used to fold each tool call's cost into a turn's provider cost (§6.0).
-fn add_cost(a: RuntimeCostTuple, b: &RuntimeCostTuple) -> RuntimeCostTuple {
-    RuntimeCostTuple {
-        tokens_in: a.tokens_in.saturating_add(b.tokens_in),
-        tokens_out: a.tokens_out.saturating_add(b.tokens_out),
-        cents: a.cents.saturating_add(b.cents),
-        wall_ms: a.wall_ms.saturating_add(b.wall_ms),
-        attention_score: a.attention_score + b.attention_score,
     }
 }
 
@@ -2193,30 +3021,6 @@ fn tool_output_text(value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::String(s) => s.clone(),
         other => other.to_string(),
-    }
-}
-
-/// Convert the runtime's `CostTuple` into the receipt crate's (identically
-/// shaped) `CostTuple`.
-fn runtime_cost_to_receipt(cost: &RuntimeCostTuple) -> ardur_receipt::CostTuple {
-    ardur_receipt::CostTuple {
-        tokens_in: cost.tokens_in,
-        tokens_out: cost.tokens_out,
-        cents: cost.cents,
-        wall_ms: cost.wall_ms,
-        attention_score: cost.attention_score,
-    }
-}
-
-/// Widen the runtime's `CostTuple` into the cost gate's, mapping the fractional
-/// attention score onto the gate's integer axis.
-fn runtime_cost_to_gate(cost: &RuntimeCostTuple) -> GateCostTuple {
-    GateCostTuple {
-        tokens_in: cost.tokens_in,
-        tokens_out: cost.tokens_out,
-        cents: cost.cents,
-        wall_ms: cost.wall_ms,
-        attention_score: cost.attention_score as u64,
     }
 }
 

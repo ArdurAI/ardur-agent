@@ -256,11 +256,19 @@ fn map_stream_finish_reason(reason: &str, acc: &ToolCallAccumulator) -> FinishRe
 ///
 /// A chunk may carry a content delta, tool-call deltas, a finish reason, and/or
 /// usage; each present part becomes its own event, emitted content → tool-call →
-/// done → usage. A chunk that fails to parse becomes a single
-/// [`ProviderError::Upstream`].
+/// usage → done. OpenRouter emits `finish_reason` in an earlier chunk than the
+/// trailing `usage` chunk (ARD-502), which would otherwise put [`Finish`] before
+/// [`Usage`] and violate the shared-stream contract that `Finish` is terminal.
+/// The finish reason is buffered in `pending_finish` and flushed only after
+/// usage (or at end of stream), so `Done` stays last. A chunk that fails to parse
+/// becomes a single [`ProviderError::Upstream`].
+///
+/// [`Finish`]: ardur_provider_runtime::StreamEvent::Finish
+/// [`Usage`]: ardur_provider_runtime::StreamEvent::Usage
 fn process_chunk(
     json: &str,
     acc: &mut ToolCallAccumulator,
+    pending_finish: &mut Option<FinishReason>,
     out: &mut VecDeque<Result<OpenRouterChunk, ProviderError>>,
 ) {
     let parsed: ChatCompletionStreamResponse = match serde_json::from_str(json) {
@@ -285,9 +293,7 @@ fn process_chunk(
             out.push_back(Ok(OpenRouterChunk::ToolCall(delta)));
         }
         if let Some(reason) = choice.finish_reason {
-            out.push_back(Ok(OpenRouterChunk::Done(map_stream_finish_reason(
-                &reason, acc,
-            ))));
+            *pending_finish = Some(map_stream_finish_reason(&reason, acc));
         }
     }
 
@@ -308,6 +314,19 @@ fn process_chunk(
             tokens_out: u.completion_tokens,
             cost_cents,
         })));
+        flush_pending_finish(pending_finish, out);
+    }
+}
+
+/// Emit the buffered finish reason as a terminal [`OpenRouterChunk::Done`], if
+/// one is pending. Called after usage and again at end of stream so `Done` is
+/// emitted exactly once, always last.
+fn flush_pending_finish(
+    pending_finish: &mut Option<FinishReason>,
+    out: &mut VecDeque<Result<OpenRouterChunk, ProviderError>>,
+) {
+    if let Some(reason) = pending_finish.take() {
+        out.push_back(Ok(OpenRouterChunk::Done(reason)));
     }
 }
 
@@ -320,13 +339,22 @@ struct StreamState {
     buf: Vec<u8>,
     pending: VecDeque<Result<OpenRouterChunk, ProviderError>>,
     acc: ToolCallAccumulator,
+    pending_finish: Option<FinishReason>,
     finished: bool,
 }
 
+/// ARD-503: ceiling on a single un-terminated SSE line. A well-formed OpenRouter
+/// event is a `data:` line at most a few KiB; a provider (or a MITM on a
+/// misconfigured endpoint) that never emits `\n` would otherwise grow `buf`
+/// without bound. 1 MiB is orders of magnitude above any real event; crossing it
+/// is treated as a malformed stream and fails the turn closed.
+const MAX_SSE_LINE_BYTES: usize = 1024 * 1024;
+
 /// Handle one complete SSE line (no trailing newline). Blank lines (event
 /// boundaries), `:` comments, and non-`data:` fields (`event:`, `id:`) are
-/// ignored; a `data: [DONE]` payload sets `finished`; any other `data:` payload
-/// is a JSON chunk handed to [`process_chunk`].
+/// ignored; a `data: [DONE]` payload flushes any buffered finish and sets
+/// `finished`; any other `data:` payload is a JSON chunk handed to
+/// [`process_chunk`].
 fn handle_sse_line(line: &str, st: &mut StreamState) {
     let line = line.trim_end_matches(['\r', '\n']);
     if line.is_empty() || line.starts_with(':') {
@@ -340,14 +368,22 @@ fn handle_sse_line(line: &str, st: &mut StreamState) {
         return;
     }
     if payload == "[DONE]" {
+        flush_pending_finish(&mut st.pending_finish, &mut st.pending);
         st.finished = true;
         return;
     }
-    process_chunk(payload, &mut st.acc, &mut st.pending);
+    process_chunk(
+        payload,
+        &mut st.acc,
+        &mut st.pending_finish,
+        &mut st.pending,
+    );
 }
 
 /// Pull every complete line (terminated by `\n`) out of the byte buffer and
 /// dispatch it through [`handle_sse_line`], stopping early once `[DONE]` is seen.
+/// A line that grows past [`MAX_SSE_LINE_BYTES`] without a terminator ends the
+/// stream with a [`ProviderError::Upstream`] rather than buffering unboundedly.
 fn drain_lines(st: &mut StreamState) {
     while let Some(pos) = st.buf.iter().position(|&b| b == b'\n') {
         let line: Vec<u8> = st.buf.drain(..=pos).collect();
@@ -359,6 +395,13 @@ fn drain_lines(st: &mut StreamState) {
         if st.finished {
             break;
         }
+    }
+    if !st.finished && st.buf.len() > MAX_SSE_LINE_BYTES {
+        st.pending.push_back(Err(ProviderError::Upstream(format!(
+            "SSE line exceeded {MAX_SSE_LINE_BYTES} bytes without a newline"
+        ))));
+        st.buf.clear();
+        st.finished = true;
     }
 }
 
@@ -380,6 +423,7 @@ pub(crate) fn into_chunk_stream(
         buf: Vec::new(),
         pending: VecDeque::new(),
         acc: ToolCallAccumulator::new(),
+        pending_finish: None,
         finished: false,
     };
 
@@ -403,13 +447,16 @@ pub(crate) fn into_chunk_stream(
                 }
                 None => {
                     // Upstream closed. Flush any trailing line that arrived
-                    // without a final newline, then end.
+                    // without a final newline, then any buffered finish (so a
+                    // stream that ends without `[DONE]` still terminates with a
+                    // `Done`), then end.
                     if !st.buf.is_empty() {
                         let trailing = std::mem::take(&mut st.buf);
                         if let Ok(text) = std::str::from_utf8(&trailing) {
                             handle_sse_line(text, &mut st);
                         }
                     }
+                    flush_pending_finish(&mut st.pending_finish, &mut st.pending);
                     st.finished = true;
                 }
             }
@@ -570,11 +617,15 @@ where
 mod tests {
     use super::*;
 
-    /// Drain a single JSON chunk into the events it produces.
+    /// Drain a single JSON chunk into the events it produces, flushing any
+    /// buffered finish at "end of stream" so a lone finish chunk still yields its
+    /// terminal `Done`.
     fn events_of(json: &str) -> Vec<OpenRouterChunk> {
         let mut acc = ToolCallAccumulator::new();
+        let mut pending_finish = None;
         let mut out = VecDeque::new();
-        process_chunk(json, &mut acc, &mut out);
+        process_chunk(json, &mut acc, &mut pending_finish, &mut out);
+        flush_pending_finish(&mut pending_finish, &mut out);
         out.into_iter().map(|r| r.unwrap()).collect()
     }
 
@@ -622,25 +673,30 @@ mod tests {
     #[test]
     fn finish_reason_tool_calls_carries_assembled_calls() {
         let mut acc = ToolCallAccumulator::new();
+        let mut pending_finish = None;
         let mut out = VecDeque::new();
         // Opening fragment: id + name, empty args.
         process_chunk(
             r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_9","function":{"name":"echo","arguments":""}}]}}]}"#,
             &mut acc,
+            &mut pending_finish,
             &mut out,
         );
         // Argument fragment, no finish.
         process_chunk(
             r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"msg\":\"hi\"}"}}]}}]}"#,
             &mut acc,
+            &mut pending_finish,
             &mut out,
         );
         // Terminal chunk: finish_reason tool_calls, empty delta.
         process_chunk(
             r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
             &mut acc,
+            &mut pending_finish,
             &mut out,
         );
+        flush_pending_finish(&mut pending_finish, &mut out);
         let done = out.into_iter().map(|r| r.unwrap()).next_back().unwrap();
         match done {
             OpenRouterChunk::Done(FinishReason::ToolUse(calls)) => {
@@ -724,11 +780,80 @@ mod tests {
     #[test]
     fn malformed_chunk_becomes_upstream_error() {
         let mut acc = ToolCallAccumulator::new();
+        let mut pending_finish = None;
         let mut out = VecDeque::new();
-        process_chunk("{not json", &mut acc, &mut out);
+        process_chunk("{not json", &mut acc, &mut pending_finish, &mut out);
         assert!(matches!(
             out.pop_front().unwrap(),
             Err(ProviderError::Upstream(_))
+        ));
+    }
+
+    #[test]
+    fn finish_before_usage_on_the_wire_still_emits_usage_before_done() {
+        // ARD-502: OpenRouter puts `finish_reason` in an earlier chunk than the
+        // trailing `usage` chunk. The decoder must still surface `Usage` before
+        // the terminal `Done`, honoring the shared-stream contract that `Finish`
+        // is the last event. Drive the two chunks in wire order and assert the
+        // emitted order is Content → Usage → Done.
+        let mut acc = ToolCallAccumulator::new();
+        let mut pending_finish = None;
+        let mut out = VecDeque::new();
+        process_chunk(
+            r#"{"choices":[{"delta":{"content":"hi"},"finish_reason":"stop"}]}"#,
+            &mut acc,
+            &mut pending_finish,
+            &mut out,
+        );
+        // After the finish chunk, no `Done` has been emitted yet — it is buffered.
+        assert_eq!(
+            out.iter()
+                .filter(|e| matches!(e, Ok(OpenRouterChunk::Done(_))))
+                .count(),
+            0,
+            "finish must not be emitted before usage"
+        );
+        process_chunk(
+            r#"{"choices":[],"usage":{"prompt_tokens":11,"completion_tokens":4}}"#,
+            &mut acc,
+            &mut pending_finish,
+            &mut out,
+        );
+        flush_pending_finish(&mut pending_finish, &mut out);
+
+        let events: Vec<OpenRouterChunk> = out.into_iter().map(|r| r.unwrap()).collect();
+        assert_eq!(
+            events,
+            vec![
+                OpenRouterChunk::Content("hi".to_string()),
+                OpenRouterChunk::Usage(Usage {
+                    tokens_in: 11,
+                    tokens_out: 4,
+                    cost_cents: None,
+                }),
+                OpenRouterChunk::Done(FinishReason::Stop),
+            ]
+        );
+    }
+
+    #[test]
+    fn oversized_sse_line_fails_closed() {
+        // ARD-503: a `data:` line that never terminates must not grow the buffer
+        // without bound — past the cap the stream ends with an upstream error.
+        let mut st = StreamState {
+            bytes: Box::pin(futures::stream::empty::<Result<Vec<u8>, reqwest::Error>>()),
+            buf: vec![b'x'; MAX_SSE_LINE_BYTES + 1],
+            pending: VecDeque::new(),
+            acc: ToolCallAccumulator::new(),
+            pending_finish: None,
+            finished: false,
+        };
+        drain_lines(&mut st);
+        assert!(st.finished, "an oversized line ends the stream");
+        assert!(st.buf.is_empty(), "the runaway buffer is released");
+        assert!(matches!(
+            st.pending.pop_front(),
+            Some(Err(ProviderError::Upstream(_)))
         ));
     }
 
