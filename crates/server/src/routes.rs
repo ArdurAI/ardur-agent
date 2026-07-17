@@ -175,6 +175,112 @@ async fn metrics(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Resp
         state.admin_bearer_tokens().len()
     );
 
+    // Receipt-chain aggregates, rolled up from disk at scrape time. Counts and
+    // summed cost only — no message content, no per-principal identifiers.
+    let stats = state.receipt_stats();
+    let _ = writeln!(
+        body,
+        "# HELP ardur_server_receipt_chain_verified Whether the persisted receipt chain verified (hash + signatures)."
+    );
+    let _ = writeln!(body, "# TYPE ardur_server_receipt_chain_verified gauge");
+    let _ = writeln!(
+        body,
+        "ardur_server_receipt_chain_verified {}",
+        u8::from(stats.chain_verified)
+    );
+    let _ = writeln!(
+        body,
+        "# HELP ardur_server_receipt_cost_cents_total Summed settled cost across all receipts, in cents."
+    );
+    let _ = writeln!(body, "# TYPE ardur_server_receipt_cost_cents_total counter");
+    let _ = writeln!(
+        body,
+        "ardur_server_receipt_cost_cents_total {}",
+        stats.cost_cents_sum
+    );
+    let _ = writeln!(
+        body,
+        "# HELP ardur_server_tool_calls_total Tool calls attested across the receipt chain."
+    );
+    let _ = writeln!(body, "# TYPE ardur_server_tool_calls_total counter");
+    let _ = writeln!(
+        body,
+        "ardur_server_tool_calls_total {}",
+        stats.tool_calls_sum
+    );
+    let _ = writeln!(
+        body,
+        "# HELP ardur_server_sessions_total Distinct sessions spanned by the receipt chain."
+    );
+    let _ = writeln!(body, "# TYPE ardur_server_sessions_total gauge");
+    let _ = writeln!(
+        body,
+        "ardur_server_sessions_total {}",
+        stats.distinct_sessions
+    );
+    let _ = writeln!(
+        body,
+        "# HELP ardur_server_receipts_by_verb Receipt count keyed by verb."
+    );
+    let _ = writeln!(body, "# TYPE ardur_server_receipts_by_verb counter");
+    for (verb, count) in &stats.by_verb {
+        let _ = writeln!(
+            body,
+            "ardur_server_receipts_by_verb{{verb=\"{}\"}} {count}",
+            prometheus_label_value(verb)
+        );
+    }
+    let _ = writeln!(
+        body,
+        "# HELP ardur_server_receipts_by_provider Receipt count keyed by model backend."
+    );
+    let _ = writeln!(body, "# TYPE ardur_server_receipts_by_provider counter");
+    for (provider, count) in &stats.by_provider {
+        let _ = writeln!(
+            body,
+            "ardur_server_receipts_by_provider{{provider=\"{}\"}} {count}",
+            prometheus_label_value(provider)
+        );
+    }
+
+    // Turn-outcome and security-denial counters, accumulated by the worker over
+    // the process lifetime. Counts only — the *why* of a block lives in tracing.
+    let sec = state.security_metrics().snapshot();
+    let _ = writeln!(
+        body,
+        "# HELP ardur_server_turns_ok_total Turns that settled with a minted receipt."
+    );
+    let _ = writeln!(body, "# TYPE ardur_server_turns_ok_total counter");
+    let _ = writeln!(body, "ardur_server_turns_ok_total {}", sec.turns_ok);
+    let _ = writeln!(
+        body,
+        "# HELP ardur_server_turns_denied_total Turns blocked by a security gate, keyed by gate."
+    );
+    let _ = writeln!(body, "# TYPE ardur_server_turns_denied_total counter");
+    for (gate, count) in [
+        ("injection", sec.injection_blocked),
+        ("policy", sec.policy_denied),
+        ("cap_token", sec.cap_denied),
+        ("cost", sec.cost_rejected),
+        ("hook", sec.hook_vetoed),
+        ("tool", sec.tool_denied),
+    ] {
+        let _ = writeln!(
+            body,
+            "ardur_server_turns_denied_total{{gate=\"{gate}\"}} {count}"
+        );
+    }
+    let _ = writeln!(
+        body,
+        "# HELP ardur_server_turns_errored_total Turns that failed for non-security reasons (provider/internal)."
+    );
+    let _ = writeln!(body, "# TYPE ardur_server_turns_errored_total counter");
+    let _ = writeln!(
+        body,
+        "ardur_server_turns_errored_total {}",
+        sec.other_errors
+    );
+
     (
         [(
             header::CONTENT_TYPE,
@@ -221,6 +327,8 @@ async fn admin_runtime(State(state): State<Arc<AppState>>, headers: HeaderMap) -
         return *response;
     }
 
+    let stats = state.receipt_stats();
+    let sec = state.security_metrics().snapshot();
     Json(json!({
         "cap_tokens": {
             "audience": AUDIENCE,
@@ -230,9 +338,25 @@ async fn admin_runtime(State(state): State<Arc<AppState>>, headers: HeaderMap) -
         },
         "receipts": {
             "count": state.receipt_count(),
+            "chain_verified": stats.chain_verified,
+            "cost_cents_total": stats.cost_cents_sum,
+            "tool_calls_total": stats.tool_calls_sum,
+            "distinct_sessions": stats.distinct_sessions,
         },
         "gates": {
             "cost_budget_cents": state.cost_budget_cents(),
+        },
+        "turns": {
+            "ok": sec.turns_ok,
+            "errored": sec.other_errors,
+            "denied": {
+                "injection": sec.injection_blocked,
+                "policy": sec.policy_denied,
+                "cap_token": sec.cap_denied,
+                "cost": sec.cost_rejected,
+                "hook": sec.hook_vetoed,
+                "tool": sec.tool_denied,
+            },
         },
         "tools": {
             "allowlist_count": state.tool_allowlist().len(),
