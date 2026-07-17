@@ -534,21 +534,13 @@ impl TerminalBackend for DockerBackend {
                 }
                 bollard::exec::StartExecResults::Detached => {}
             }
-            let exit_code = docker
-                .inspect_exec(&exec_id)
-                .await
-                .ok()
-                .and_then(|info| info.exit_code)
-                .and_then(|code| i32::try_from(code).ok())
-                // `-1` (not `0`) per `ExecResult::exit_code`'s documented
-                // contract: `0` means the process genuinely exited
-                // successfully, which we do not know here — inspect_exec
-                // failing, returning no code, or a code that doesn't fit in
-                // `i32` are all "the backend could not provide one", and
-                // reporting `0` for those would tell an agent gating a
-                // follow-up action on "exit_code == 0" that a
-                // failed/unknown/still-running command succeeded.
-                .unwrap_or(-1);
+            let exit_code = docker_exit_code(
+                docker
+                    .inspect_exec(&exec_id)
+                    .await
+                    .ok()
+                    .and_then(|info| info.exit_code),
+            );
             Ok(ExecResult::new(
                 stdout.into_string_lossy(),
                 stderr.into_string_lossy(),
@@ -559,10 +551,34 @@ impl TerminalBackend for DockerBackend {
             ))
         };
 
+        // On timeout the `run` future is dropped, which drops the `start_exec`
+        // attach stream and closes that connection to the daemon. Note this does
+        // NOT stop the in-container process — a detached `docker exec` keeps
+        // running to completion, so a timed-out command can outlive the turn.
+        // We deliberately do not try to kill it by the inspected pid: bollard's
+        // `inspect_exec` reports the process's pid in the *host* namespace, and a
+        // `kill <pid>` issued back through `docker exec` runs in the *container*
+        // namespace where that number denotes an unrelated process — killing it
+        // would be worse than the leak. Reaping a timed-out exec safely needs a
+        // container-namespace pid the daemon does not expose here; tracked as a
+        // known limitation rather than papered over with an unsafe kill.
         tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), run)
             .await
             .map_err(|_| TerminalError::Timeout { secs: timeout_secs })?
     }
+}
+
+/// Map Docker's inspected exec exit code onto the [`ExecResult`] convention.
+///
+/// A missing code (the daemon could not be inspected, the exec had no code yet,
+/// or the code did not fit `i32`) becomes `-1` — "the backend could not provide
+/// one" — **not** `0`. Defaulting to `0` would report an in-container failure
+/// the client failed to read back as a *success*, a fail-open the other backends
+/// (which use `-1`) avoid.
+fn docker_exit_code(inspected: Option<i64>) -> i32 {
+    inspected
+        .and_then(|code| i32::try_from(code).ok())
+        .unwrap_or(-1)
 }
 
 /// SSH remote backend.
@@ -793,6 +809,19 @@ impl TerminalBackend for ModalBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// M4: a Docker exec whose exit code cannot be read back must report `-1`
+    /// (unknown), never `0` (success) — otherwise an in-container failure the
+    /// client couldn't inspect is silently a success.
+    #[test]
+    fn docker_exit_code_defaults_missing_to_minus_one() {
+        assert_eq!(docker_exit_code(None), -1, "missing code is not success");
+        assert_eq!(docker_exit_code(Some(0)), 0);
+        assert_eq!(docker_exit_code(Some(2)), 2);
+        assert_eq!(docker_exit_code(Some(137)), 137);
+        // Out-of-`i32`-range codes are also "unknown", not success.
+        assert_eq!(docker_exit_code(Some(i64::from(i32::MAX) + 1)), -1);
+    }
 
     /// ARD-476: the safe-charset allowlist admits ordinary commands, flags,
     /// paths, and `key=value` pairs (under a permissive policy, so only the

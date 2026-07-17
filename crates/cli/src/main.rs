@@ -21,7 +21,9 @@ use ardur_cli::{
     list_directory_names_no_follow, read_string_no_follow, remove_directory_tree_no_follow,
     run_chat, write_private_file_atomic_no_follow, write_private_file_no_follow,
 };
-use ardur_session_journals::JournalEntry;
+use ardur_session_journals::{
+    JournalEntry, default_secret_patterns, redact_entries_default, redact_text,
+};
 use audit::{AuditArgs, run_audit};
 use clap::{Args, Parser, Subcommand};
 use device_mesh::{NodesArgs, run_nodes};
@@ -71,6 +73,8 @@ enum Commands {
     Receipts(ReceiptsArgs),
     /// Browse capability tokens and grants.
     Caps(CapsArgs),
+    /// Grant a hardened built-in tool and record a signed grant receipt (ARD-457).
+    Grant(GrantArgs),
     /// Dry-run and inspect Cedar policy decisions.
     Policy(PolicyArgs),
     /// Manage pending approval requests.
@@ -261,6 +265,37 @@ enum CapsAction {
     },
 }
 
+/// Arguments to `ardur grant` (ARD-457).
+#[derive(Args)]
+struct GrantArgs {
+    #[command(subcommand)]
+    action: GrantAction,
+}
+
+/// Subcommands for `ardur grant`.
+#[derive(Subcommand)]
+enum GrantAction {
+    /// Record an operator grant allowing a hardened built-in tool, and emit a
+    /// signed `tool.grant.allow.v1` receipt into the local chain.
+    ///
+    /// The grant is appended to `~/.ardur/grants.json` as a durable operator
+    /// ledger, and an audit receipt is chained into `~/.ardur/receipts/` so the
+    /// decision is tamper-evident. (Server-side enforcement is via the
+    /// `ARDUR_ENABLE_SHELL_TOOL` / `ARDUR_ENABLE_HTTP_TOOL` / `ARDUR_FILE_TOOL_ROOT`
+    /// opt-ins; this records and audits the operator's intent.)
+    Allow {
+        /// The built-in tool id to grant: `shell.run`, `http.fetch`,
+        /// `file.read`, `file.write`, or `file.list`.
+        tool: String,
+        /// Optional scope note recorded with the grant (e.g. a shell allowlist
+        /// `"git|cargo"` or a file root path).
+        #[arg(long)]
+        scope: Option<String>,
+    },
+    /// List the operator grants recorded in `~/.ardur/grants.json`.
+    List,
+}
+
 /// Arguments to `ardur policy`.
 #[derive(Args)]
 struct PolicyArgs {
@@ -333,6 +368,7 @@ fn main() -> ExitCode {
         Commands::Session(args) => run_session(args),
         Commands::Receipts(args) => run_receipts(args),
         Commands::Caps(args) => run_caps(args),
+        Commands::Grant(args) => run_grant(args),
         Commands::Policy(args) => run_policy(args),
         Commands::Approvals(args) => run_approvals(args),
         Commands::Token(args) => run_token(args),
@@ -865,6 +901,10 @@ fn run_session(args: SessionArgs) -> Result<(), CliError> {
                         reason,
                         ..
                     } => println!("INVALIDATED entry {target_entry_id}: {reason}"),
+                    JournalEntry::Rollback {
+                        target_checkpoint_id,
+                        ..
+                    } => println!("ROLLBACK to checkpoint {target_checkpoint_id}"),
                 }
             }
             println!("continuing session {id} in chat...");
@@ -877,7 +917,7 @@ fn run_session(args: SessionArgs) -> Result<(), CliError> {
             let id = validated_session_id(&id)?;
             let journal_path = session_journal_path(&sessions_dir, &id);
             let entries = require_session_entries(&journal_path, &id)?;
-            let redacted_entries = redact_session_entries(&entries);
+            let redacted_entries = redact_entries_default(&entries);
             let receipts = session_receipts(&redacted_entries);
             let receipt_inventory = load_session_receipt_inventory(&root);
             let receipt_status = receipt_inventory.status_for(&receipts, &id);
@@ -1211,7 +1251,8 @@ fn journal_entry_timestamp(entry: &JournalEntry) -> u64 {
         | JournalEntry::ToolInvocation { at, .. }
         | JournalEntry::CostFinalized { at, .. }
         | JournalEntry::Checkpoint { at, .. }
-        | JournalEntry::Invalidation { at, .. } => *at,
+        | JournalEntry::Invalidation { at, .. }
+        | JournalEntry::Rollback { at, .. } => at.get(),
     }
 }
 
@@ -1249,7 +1290,7 @@ mod session_cost_tests {
         let receipt_ids = vec![receipt_id.to_string()];
         let entries = vec![JournalEntry::AssistantMessage {
             content: "done".to_string(),
-            at: 1,
+            at: ardur_cost_gate::UnixTsMillis(1),
             receipt_id: ardur_runtime::ReceiptId(receipt_id),
         }];
         let mut inventory = SessionReceiptInventory::default();
@@ -1278,7 +1319,7 @@ mod session_cost_tests {
         let entries = vec![
             JournalEntry::AssistantMessage {
                 content: "done".to_string(),
-                at: 1,
+                at: ardur_cost_gate::UnixTsMillis(1),
                 receipt_id: ardur_runtime::ReceiptId(receipt_id),
             },
             JournalEntry::CostFinalized {
@@ -1294,7 +1335,7 @@ mod session_cost_tests {
                     wall_ms: 0,
                     attention_score: 0,
                 },
-                at: 2,
+                at: ardur_cost_gate::UnixTsMillis(2),
             },
         ];
         let inventory = SessionReceiptInventory {
@@ -1312,27 +1353,6 @@ mod session_cost_tests {
             None
         );
     }
-}
-
-fn redact_session_entries(entries: &[JournalEntry]) -> Vec<JournalEntry> {
-    let patterns = default_secret_patterns();
-    let mut redacted = entries.to_vec();
-    for entry in &mut redacted {
-        match entry {
-            JournalEntry::UserMessage { content, .. }
-            | JournalEntry::AssistantMessage { content, .. } => {
-                *content = redact_text(content, &patterns);
-            }
-            JournalEntry::Checkpoint { summary, .. } => {
-                *summary = redact_text(summary, &patterns);
-            }
-            JournalEntry::Invalidation { reason, .. } => {
-                *reason = redact_text(reason, &patterns);
-            }
-            JournalEntry::ToolInvocation { .. } | JournalEntry::CostFinalized { .. } => {}
-        }
-    }
-    redacted
 }
 
 fn write_private_session_export(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
@@ -1540,6 +1560,17 @@ fn render_session_markdown(
                     reason
                 ));
             }
+            JournalEntry::Rollback {
+                target_checkpoint_id,
+                receipt_id,
+                ..
+            } => {
+                md.push_str(&format!(
+                    "### {}. Rollback\n\nTarget checkpoint: `{target_checkpoint_id}`\nReceipt: `{}`\n\n",
+                    i + 1,
+                    receipt_id.0
+                ));
+            }
         }
     }
     md
@@ -1717,6 +1748,171 @@ fn run_caps(args: CapsArgs) -> Result<(), CliError> {
         }
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// ARD-457: Operator tool-grant flow (`ardur grant`)
+// ---------------------------------------------------------------------------
+
+/// The `cap.*` capabilities each hardened built-in tool requires — the same
+/// snake-cased `Capability` labels the server derives its runtime cap-token
+/// allowlist from. Grants are recorded against these so the ledger and receipt
+/// name exactly what the operator authorized.
+fn tool_grant_capabilities(tool: &str) -> Option<Vec<&'static str>> {
+    match tool {
+        "shell.run" => Some(vec!["cap.shell_exec", "cap.process_spawn"]),
+        "http.fetch" => Some(vec!["cap.network_out"]),
+        "file.read" | "file.list" => Some(vec!["cap.fs_read"]),
+        "file.write" => Some(vec!["cap.fs_write"]),
+        _ => None,
+    }
+}
+
+/// The operator grant ledger file.
+fn grants_path(dirs: &StateDirs) -> PathBuf {
+    dirs.root.join("grants.json")
+}
+
+/// Read the recorded grants (a JSON array), returning an empty list when the
+/// ledger does not exist yet.
+fn read_grants(dirs: &StateDirs) -> Result<Vec<serde_json::Value>, CliError> {
+    match read_string_no_follow(&grants_path(dirs)) {
+        Ok(raw) if raw.trim().is_empty() => Ok(Vec::new()),
+        Ok(raw) => serde_json::from_str(&raw)
+            .map_err(|e| CliError::State(format!("parsing {}: {e}", grants_path(dirs).display()))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(CliError::Io(e)),
+    }
+}
+
+/// Run `ardur grant` subcommands.
+fn run_grant(args: GrantArgs) -> Result<(), CliError> {
+    let dirs = StateDirs::resolve()?;
+    match args.action {
+        GrantAction::Allow { tool, scope } => {
+            let caps = tool_grant_capabilities(&tool).ok_or_else(|| {
+                CliError::State(format!(
+                    "unknown tool `{tool}`; expected one of shell.run, http.fetch, file.read, file.write, file.list"
+                ))
+            })?;
+            // Materialize the state tree so `receipts/` and `keys/` exist before
+            // we chain a receipt into them.
+            dirs.create()?;
+
+            let subject = dirs.local_subject();
+            let granted_at_ms = unix_now_ms();
+            // The canonical grant payload the receipt commits to (by digest).
+            let payload = json!({
+                "tool": tool,
+                "capabilities": caps,
+                "scope": scope,
+                "subject": subject,
+                "granted_at_ms": granted_at_ms,
+            });
+            let receipt_id = append_grant_receipt(&dirs, &subject, granted_at_ms, &payload)?;
+
+            // Append the grant to the durable operator ledger.
+            let mut grants = read_grants(&dirs)?;
+            let mut record = payload;
+            record["receipt_id"] = json!(receipt_id.to_string());
+            grants.push(record);
+            let serialized = serde_json::to_vec_pretty(&grants).expect("grants ledger serializes");
+            write_private_file_atomic_no_follow(&grants_path(&dirs), &serialized)
+                .map_err(CliError::Io)?;
+
+            println!(
+                "granted `{tool}` ({}) — receipt {receipt_id}",
+                caps.join(", ")
+            );
+            Ok(())
+        }
+        GrantAction::List => {
+            let grants = read_grants(&dirs)?;
+            if grants.is_empty() {
+                println!("no grants recorded at {}", grants_path(&dirs).display());
+                return Ok(());
+            }
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!(grants)).expect("grants serialise")
+            );
+            Ok(())
+        }
+    }
+}
+
+/// Build, sign, and chain a `tool.grant.allow.v1` receipt committing to `payload`
+/// (by SHA-256 digest), returning the new receipt id. The receipt links onto the
+/// existing `~/.ardur/receipts/chain.jsonl` tail and is signed with the same
+/// ES256 key the chat runtime uses, so `ardur receipts verify` stays green.
+fn append_grant_receipt(
+    dirs: &StateDirs,
+    subject: &str,
+    issued_at_ms: u64,
+    payload: &serde_json::Value,
+) -> Result<uuid::Uuid, CliError> {
+    let signing_key = dirs.load_or_create_receipt_key()?;
+    let receipt_log = dirs.receipt_log();
+
+    // Link onto the current chain tail (genesis when the chain is empty). The
+    // parent hash is SHA-256 of the prior receipt's compact JWS — exactly what
+    // the chain verifier recomputes.
+    let chain = ardur_fused_runtime::load_persisted_chain(&receipt_log)
+        .map_err(|e| CliError::State(format!("loading receipt chain: {e}")))?;
+    let parent_hash = chain
+        .last()
+        .map(|tail| ardur_receipt::Sha256Digest::of(tail.jws_compact.as_bytes()));
+
+    let payload_bytes = serde_json::to_vec(payload).expect("grant receipt payload serializes");
+    let body = ardur_receipt::ReceiptBody {
+        receipt_id: uuid::Uuid::new_v4(),
+        parent_hash,
+        verb: ardur_receipt::VerbObject::new("tool.grant.allow.v1")
+            .map_err(|e| CliError::State(format!("invalid grant verb: {e}")))?,
+        issued_at: ardur_receipt::UnixTsMillis(issued_at_ms),
+        subject: ardur_receipt::HolderId(subject.to_string()),
+        // Operator grants are not made under a session cap-token; use a fixed
+        // sentinel token id (a stable, self-documenting UUID) rather than
+        // borrowing a turn's token id. `TokenId` is a `Uuid` newtype (H5), so a
+        // 16-byte ASCII label stands in for the absent session token.
+        cap_token_id: ardur_receipt::TokenId(uuid::Uuid::from_bytes(*b"ardur-op-grant!!")),
+        payload_digest: ardur_receipt::Sha256Digest::of(&payload_bytes),
+        session_id: None,
+        // A grant costs nothing — it is an authorization record, not a turn.
+        cost: ardur_receipt::CostTuple {
+            tokens_in: 0,
+            tokens_out: 0,
+            cents: 0,
+            wall_ms: 0,
+            attention_score: 0,
+        },
+        tool_calls: Vec::new(),
+        provider: None,
+    };
+    let receipt_id = body.receipt_id;
+    let signed = ardur_receipt::ReceiptSigner::sign(body, &signing_key)
+        .map_err(|e| CliError::State(format!("signing grant receipt: {e}")))?;
+
+    append_receipt_line(&receipt_log, signed.jws_compact())?;
+    Ok(receipt_id)
+}
+
+/// Append one compact-JWS receipt line to the chain log, preserving the
+/// newline-delimited format `load_persisted_chain` reads. Rewrites the file
+/// atomically (the local chain is small) rather than opening in append mode, so
+/// a crash mid-write cannot leave a torn tail.
+fn append_receipt_line(receipt_log: &Path, jws_compact: &str) -> Result<(), CliError> {
+    let mut contents = match read_string_no_follow(receipt_log) {
+        Ok(existing) => existing,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(CliError::Io(e)),
+    };
+    if !contents.is_empty() && !contents.ends_with('\n') {
+        contents.push('\n');
+    }
+    contents.push_str(jws_compact);
+    contents.push('\n');
+    write_private_file_atomic_no_follow(receipt_log, contents.as_bytes()).map_err(CliError::Io)
 }
 
 // ---------------------------------------------------------------------------
@@ -2215,9 +2411,9 @@ enum TokenAction {
 
 /// Generate a URL-safe random token.
 fn generate_token_value() -> String {
-    use rand::RngCore;
+    use rand::Rng;
     let mut bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    rand::rng().fill_bytes(&mut bytes);
     base64::engine::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, bytes)
 }
 
@@ -2286,9 +2482,8 @@ fn run_token(args: TokenArgs) -> Result<(), CliError> {
             if !path.is_file() {
                 return Err(CliError::State(format!("token `{id}` not found")));
             }
-            let mut token: serde_json::Value =
-                serde_json::from_str(&read_string_no_follow(&path)?)
-                    .map_err(|e| CliError::State(e.to_string()))?;
+            let mut token: serde_json::Value = serde_json::from_str(&read_string_no_follow(&path)?)
+                .map_err(|e| CliError::State(e.to_string()))?;
             token["revoked"] = json!(true);
             token["revoked_at"] = json!(
                 std::time::SystemTime::now()
@@ -2327,41 +2522,6 @@ struct RedactArgs {
     /// If set, treat input as JSON and redact string values recursively.
     #[arg(long)]
     json: bool,
-}
-
-/// Default secret patterns: API keys, tokens, passwords, private keys, etc.
-fn default_secret_patterns() -> Vec<regex::Regex> {
-    let patterns = [
-        // OpenAI / Anthropic / OpenRouter API keys, including segmented
-        // prefixes such as `sk-ant-...` and `sk-or-...`.
-        r"(?i)\bsk-[a-z0-9_-]{16,}",
-        // Generic secret-looking tokens
-        r"(?i)bearer\s+[a-z0-9_\-\.]{20,}",
-        r"(?i)token[a-z0-9_\-]*[:=]\s*[a-z0-9_\-\.]{8,}",
-        r"(?i)api[_\-]?key[a-z0-9_\-]*[:=]\s*[a-z0-9_\-\.]{8,}",
-        // Natural-language password/secret leakage
-        r"(?i)pass(?:word)?\s*(?:is|=|:)\s*\S+",
-        r"(?i)secret(?:\s+is|=|:)\s*\S+",
-        // AWS-style access keys
-        r"AKIA[0-9A-Z]{16}",
-        // Private keys / certs
-        r"-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----[\s\S]*?-----END",
-        // GitHub tokens
-        r"gh[pousr]_[A-Za-z0-9_]{36,}",
-    ];
-    patterns
-        .iter()
-        .filter_map(|p| regex::Regex::new(p).ok())
-        .collect()
-}
-
-/// Redact secrets in a plain string.
-fn redact_text(text: &str, patterns: &[regex::Regex]) -> String {
-    let mut out = text.to_string();
-    for re in patterns {
-        out = re.replace_all(&out, "<REDACTED>").to_string();
-    }
-    out
 }
 
 /// Recursively redact string values in a JSON object.
@@ -2415,8 +2575,7 @@ fn read_bounded(reader: impl std::io::Read, max: u64, source: &str) -> Result<St
             "{source} exceeds the {max}-byte redact input cap; split the input and retry"
         )));
     }
-    String::from_utf8(buf)
-        .map_err(|e| CliError::State(format!("{source} is not valid UTF-8: {e}")))
+    String::from_utf8(buf).map_err(|e| CliError::State(format!("{source} is not valid UTF-8: {e}")))
 }
 
 fn run_redact(args: RedactArgs) -> Result<(), CliError> {
@@ -2919,19 +3078,18 @@ fn run_fetch(args: FetchArgs) -> Result<(), CliError> {
                             "too many redirects (exceeded limit of {FETCH_REDIRECT_LIMIT})"
                         )));
                     }
-                    current = current
-                        .join(location)
-                        .map_err(|e| CliError::State(format!("invalid redirect target `{location}`: {e}")))?;
+                    current = current.join(location).map_err(|e| {
+                        CliError::State(format!("invalid redirect target `{location}`: {e}"))
+                    })?;
                     continue;
                 }
             }
 
             let mut body = Vec::new();
             loop {
-                let chunk = resp
-                    .chunk()
-                    .await
-                    .map_err(|e| CliError::State(format!("reading body of `{current}` failed: {e}")))?;
+                let chunk = resp.chunk().await.map_err(|e| {
+                    CliError::State(format!("reading body of `{current}` failed: {e}"))
+                })?;
                 let Some(chunk) = chunk else { break };
                 let remaining = max_bytes.saturating_sub(body.len());
                 if chunk.len() > remaining {

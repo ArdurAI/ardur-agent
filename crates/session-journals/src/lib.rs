@@ -62,6 +62,7 @@ mod error;
 mod file;
 mod inmemory;
 mod journal;
+pub mod redact;
 mod registry;
 mod types;
 
@@ -69,6 +70,7 @@ pub use error::{JournalError, RegistryError};
 pub use file::FileSessionJournal;
 pub use inmemory::InMemorySessionJournal;
 pub use journal::SessionJournal;
+pub use redact::{default_secret_patterns, redact_entries, redact_entries_default, redact_text};
 pub use registry::JournalRegistry;
 pub use types::{EntryId, JournalEntry, ReservationId, Sha256Digest};
 

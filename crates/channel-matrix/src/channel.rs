@@ -308,7 +308,7 @@ async fn on_room_message(ev: OriginalSyncRoomMessageEvent, room: Room, ctx: Ctx<
         channel_id: ChannelId(format!("{}/{}", ctx.channel_prefix, room_id)),
         sender: SenderRef(ev.sender.to_string()),
         body: MessageBody::Text(text.body),
-        received_at: u64::from(ev.origin_server_ts.get()),
+        received_at: UnixTsMillis(u64::from(ev.origin_server_ts.get())),
         thread_id: None,
     };
 
@@ -347,8 +347,10 @@ async fn on_stripped_member(
 
 /// Current wall-clock time in Unix milliseconds (saturating to 0 before the epoch).
 fn now_millis() -> UnixTsMillis {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+    UnixTsMillis(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0),
+    )
 }
