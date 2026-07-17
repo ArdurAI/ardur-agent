@@ -2236,7 +2236,10 @@ fn read_schedules(root: &Path) -> Result<Vec<ScheduleRecord>, CliError> {
 }
 
 /// Parse a 5-field cron string into a CronExpression.
-/// Supported: * (any), n (exact), n-m (range), a,b (list), */n (step).
+/// Supported: `*` (any), `n` (exact), `n-m` (range), `a,b` (list), `*/n` (step),
+/// `a-b/n` (range step), and `JAN`/`MON` names — validated up front so an
+/// unparseable or out-of-range expression is rejected rather than silently
+/// scheduling something that never fires.
 fn cron_to_expression(cron: &str) -> Result<ardur_cron::CronExpression, CliError> {
     let fields: Vec<&str> = cron.split_whitespace().collect();
     if fields.len() != 5 {
@@ -2245,9 +2248,11 @@ fn cron_to_expression(cron: &str) -> Result<ardur_cron::CronExpression, CliError
             fields.len()
         )));
     }
-    Ok(ardur_cron::CronExpression::new(
-        fields[0], fields[1], fields[2], fields[3], fields[4],
-    ))
+    let expr =
+        ardur_cron::CronExpression::new(fields[0], fields[1], fields[2], fields[3], fields[4]);
+    expr.validate()
+        .map_err(|e| CliError::State(format!("invalid cron: {e}")))?;
+    Ok(expr)
 }
 
 /// Compute next N fire times from a cron expression (UTC).
@@ -2256,15 +2261,18 @@ fn next_fire_times(
     count: usize,
 ) -> Result<Vec<chrono::DateTime<chrono::Utc>>, CliError> {
     let expr = cron_to_expression(cron)?;
-    let now = chrono::Utc::now();
+    // Compile once and jump minute-boundary to minute-boundary rather than
+    // probing every minute; this also honors step/list/named fields and the
+    // day-of-month/day-of-week OR rule that `is_due` now implements.
     let mut fires = Vec::with_capacity(count);
-    let mut probe = now;
-    // Safety guard: stop searching after 1 year of minutes.
-    let cutoff = now + chrono::Duration::days(366);
-    while fires.len() < count && probe < cutoff {
-        probe += chrono::Duration::minutes(1);
-        if expr.is_due(probe) {
-            fires.push(probe);
+    let mut from = chrono::Utc::now();
+    for _ in 0..count {
+        match expr.next_after(from) {
+            Ok(next) => {
+                fires.push(next);
+                from = next;
+            }
+            Err(_) => break,
         }
     }
     Ok(fires)

@@ -840,7 +840,22 @@ where
             }
             // Pull more bytes.
             match state.stream.next().await {
-                Some(Ok(bytes)) => state.buf.extend_from_slice(bytes.as_ref()),
+                Some(Ok(bytes)) => {
+                    state.buf.extend_from_slice(bytes.as_ref());
+                    // ARD-503: a well-formed NDJSON line is a small JSON object;
+                    // an endpoint that never emits `\n` would otherwise grow the
+                    // carry buffer without bound. Cap it and fail closed.
+                    if state.buf.len() > MAX_NDJSON_LINE_BYTES {
+                        state.buf.clear();
+                        state.finished = true;
+                        return Some((
+                            Err(ProviderError::Upstream(format!(
+                                "NDJSON line exceeded {MAX_NDJSON_LINE_BYTES} bytes without a newline"
+                            ))),
+                            state,
+                        ));
+                    }
+                }
                 Some(Err(e)) => {
                     state.finished = true;
                     return Some((Err(e), state));
@@ -851,6 +866,11 @@ where
     })
     .boxed()
 }
+
+/// ARD-503: ceiling on a single un-terminated NDJSON line from Ollama (1 MiB —
+/// far above any real streamed object) before the carry buffer is treated as a
+/// malformed, unbounded stream.
+const MAX_NDJSON_LINE_BYTES: usize = 1024 * 1024;
 
 /// Strip a single trailing `\n` and/or `\r` from a buffered line.
 fn trim_line(line: &[u8]) -> &[u8] {
