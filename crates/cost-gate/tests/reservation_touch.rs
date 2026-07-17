@@ -6,7 +6,8 @@ use std::sync::Arc;
 
 use ardur_cost_gate::{
     AdmissionRequest, CostAdmissionGate, CostEnvelope, CostTuple, HolderId, InMemoryBudgetStore,
-    InMemoryCostAdmissionGate, ManualClock, ModelId, ProviderId, Sha256Digest, TokenId, UnixTsMillis,
+    InMemoryCostAdmissionGate, ManualClock, ModelId, ProviderId, Sha256Digest, TokenId,
+    UnixTsMillis,
 };
 use uuid::Uuid;
 
