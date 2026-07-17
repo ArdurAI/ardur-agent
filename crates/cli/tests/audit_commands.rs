@@ -71,8 +71,7 @@ fn audit_secrets_skips_oversized_files_instead_of_buffering_them() {
     let dir = tempfile::tempdir().expect("tempdir");
     let src = dir.path().join("src");
     std::fs::create_dir_all(&src).expect("create src");
-    std::fs::write(src.join("huge.txt"), vec![b'a'; 11 * 1024 * 1024])
-        .expect("write huge file");
+    std::fs::write(src.join("huge.txt"), vec![b'a'; 11 * 1024 * 1024]).expect("write huge file");
     std::fs::write(
         src.join("config.rs"),
         "let api_key = \"sk-1234567890abcdef\";\n",

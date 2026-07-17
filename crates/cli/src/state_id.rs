@@ -71,10 +71,7 @@ mod tests {
             "sub/dir",
             "a\0b",
         ] {
-            assert!(
-                sanitize_state_id(bad).is_err(),
-                "should reject {bad:?}"
-            );
+            assert!(sanitize_state_id(bad).is_err(), "should reject {bad:?}");
         }
     }
 }

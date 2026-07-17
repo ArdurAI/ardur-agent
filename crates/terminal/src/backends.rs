@@ -777,7 +777,11 @@ impl TerminalBackend for ModalBackend {
         // misbehaving/compromised endpoint returning something absurd, not
         // trim ordinary responses (those are still trimmed exactly by
         // `ExecResult::truncate` below).
-        let body_cap = self.policy.max_output_bytes.saturating_mul(8).max(64 * 1024);
+        let body_cap = self
+            .policy
+            .max_output_bytes
+            .saturating_mul(8)
+            .max(64 * 1024);
         let mut body = BoundedSink::new(body_cap);
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
@@ -913,14 +917,7 @@ mod tests {
         // "héllo" — 'é' is 2 bytes (0xC3 0xA9) at offsets 1..3, so a cap of 2
         // bytes lands inside it.
         let stdout = "héllo".to_string();
-        let result = ExecResult::new(
-            stdout,
-            String::new(),
-            0,
-            BackendKind::Local,
-            now_ms(),
-            2,
-        );
+        let result = ExecResult::new(stdout, String::new(), 0, BackendKind::Local, now_ms(), 2);
         assert!(result.truncated);
         // Floored to the boundary at offset 1 ("h"), not a panic or a split
         // codepoint, and the result still round-trips as valid UTF-8.

@@ -27,7 +27,9 @@ fn assert_id_rejected(args: &[&str], evil_id: &str) {
         .clone();
     let stderr = String::from_utf8_lossy(&output);
     assert!(
-        stderr.contains(evil_id) || stderr.contains("path separator") || stderr.contains("absolute"),
+        stderr.contains(evil_id)
+            || stderr.contains("path separator")
+            || stderr.contains("absolute"),
         "expected a sanitizer rejection for {args:?}, got: {stderr}"
     );
 }
@@ -59,10 +61,7 @@ fn memory_forget_rejects_traversal_id() {
 
 #[test]
 fn channel_add_rejects_traversal_name() {
-    assert_id_rejected(
-        &["channel", "add", "discord", "../../../etc/passwd"],
-        "..",
-    );
+    assert_id_rejected(&["channel", "add", "discord", "../../../etc/passwd"], "..");
 }
 
 #[test]
@@ -72,10 +71,7 @@ fn channel_remove_rejects_traversal_name() {
 
 #[test]
 fn channel_set_rejects_traversal_name() {
-    assert_id_rejected(
-        &["channel", "set", "../../../etc/passwd", "enabled"],
-        "..",
-    );
+    assert_id_rejected(&["channel", "set", "../../../etc/passwd", "enabled"], "..");
 }
 
 #[test]
