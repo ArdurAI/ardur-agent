@@ -45,7 +45,7 @@ members = [
     "crates/tool-registry",
     "crates/session-journals",
     "crates/multi-agent",
-    "crates/loop-detector",
+    "crates/delegate-tool",
     "crates/injection-defense",
     "crates/plugin-runtime",
     "crates/fused-runtime",
@@ -66,6 +66,8 @@ members = [
     "crates/health",
     "crates/logs",
     "crates/resilience",
+    "crates/durability",
+    "crates/benches",
 ]
 
 [workspace.package]
@@ -143,6 +145,9 @@ prost = "0.10"
 # §8.X). serde_yaml is archived upstream but remains the de-facto serde YAML
 # deserializer; the frontmatter parsed here is small, trusted, author-authored.
 serde_yaml = "0.9"
+# Archive creation/extraction for `ardur backup` (crates/cli).
+tar = "0.4"
+flate2 = "1"
 # Async runtime (crates/runtime, §1.0).
 tokio = { version = "1", features = ["full"] }
 # HTTP server framework backing the `ardur-server` binary (crates/server): the
@@ -298,7 +303,7 @@ ardur-messaging-gateway = { path = "crates/messaging-gateway" }
 ardur-tool-registry = { path = "crates/tool-registry" }
 ardur-session-journals = { path = "crates/session-journals" }
 ardur-multi-agent = { path = "crates/multi-agent" }
-ardur-loop-detector = { path = "crates/loop-detector" }
+ardur-delegate-tool = { path = "crates/delegate-tool" }
 ardur-injection-defense = { path = "crates/injection-defense" }
 ardur-plugin-runtime = { path = "crates/plugin-runtime" }
 ardur-fused-runtime = { path = "crates/fused-runtime" }
@@ -314,3 +319,5 @@ ardur-config = { path = "crates/config" }
 ardur-health = { path = "crates/health" }
 ardur-logs = { path = "crates/logs" }
 ardur-resilience = { path = "crates/resilience" }
+ardur-durability = { path = "crates/durability" }
+ardur-webhook = { path = "crates/webhook" }

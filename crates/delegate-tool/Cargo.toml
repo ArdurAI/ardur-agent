@@ -1,0 +1,31 @@
+[package]
+name = "ardur-delegate-tool"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# §5.1 adapter: `delegate_task` is a `Tool` so the fused runtime's existing
+# tool-invocation gate (cap-token allowlist + Cedar) authorizes it exactly like
+# every other tool, with no parallel chokepoint.
+ardur-tool-registry = { workspace = true }
+# The §5.0/§5.1 sub-agent substrate this tool wraps: spawn/ask/terminate,
+# cap-token attenuation, and the termination receipt the child's audit chain
+# links back through.
+ardur-multi-agent = { workspace = true }
+ardur-cap-token = { workspace = true }
+ardur-runtime = { workspace = true }
+ardur-cost-gate = { workspace = true }
+ardur-receipt = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

@@ -6,12 +6,17 @@
 #![forbid(unsafe_code)]
 
 mod audit;
+mod backup;
 mod cron_ui;
 mod device_mesh;
 mod marketplace;
+mod marketplace_advisory;
+mod marketplace_policy;
+mod marketplace_search;
 mod persona;
 mod project_surface;
 mod state_id;
+mod webhook_ui;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -26,6 +31,7 @@ use ardur_session_journals::{
     JournalEntry, default_secret_patterns, redact_entries_default, redact_text,
 };
 use audit::{AuditArgs, run_audit};
+use backup::{BackupArgs, run_backup};
 use clap::{Args, Parser, Subcommand};
 use cron_ui::{CronArgs, run_cron};
 use device_mesh::{NodesArgs, run_nodes};
@@ -35,6 +41,7 @@ use project_surface::{ProjectArgs, run_project};
 use serde_json::json;
 use sha2::Digest;
 use state_id::sanitize_state_id;
+use webhook_ui::{WebhookArgs, run_webhook};
 
 /// Ardur — a capability-secure, cost-metered agent runtime.
 #[derive(Parser)]
@@ -89,6 +96,8 @@ enum Commands {
     Nodes(NodesArgs),
     /// Manage scheduled automation jobs.
     Schedule(ScheduleArgs),
+    /// Manage outbound webhook endpoints and inbound triggers.
+    Webhook(WebhookArgs),
     /// Inspect and manage scheduled crons (list, show, create, pause, delete).
     Cron(CronArgs),
     /// Manage messaging channel adapters.
@@ -101,6 +110,8 @@ enum Commands {
     Project(ProjectArgs),
     /// Run supply-chain security audits (secrets, SBOM, vulns).
     Audit(AuditArgs),
+    /// Archive or restore the state tree (receipts, journals, keys, memory).
+    Backup(BackupArgs),
     /// Browse and install skills from the marketplace.
     Marketplace(MarketplaceArgs),
     /// Fetch a URL with the built-in allowlisted HTTP tool.
@@ -379,12 +390,14 @@ fn main() -> ExitCode {
         Commands::Redact(args) => run_redact(args),
         Commands::Nodes(args) => run_nodes(args),
         Commands::Schedule(args) => run_schedule(args),
+        Commands::Webhook(args) => run_webhook(args),
         Commands::Cron(args) => run_cron(args),
         Commands::Channel(args) => run_channel(args),
         Commands::Migrate(args) => run_migrate(args),
         Commands::Persona(args) => run_persona(args),
         Commands::Project(args) => run_project(args),
         Commands::Audit(args) => run_audit(args),
+        Commands::Backup(args) => run_backup(args),
         Commands::Marketplace(args) => run_marketplace(args),
         Commands::Fetch(args) => run_fetch(args),
         Commands::Search(args) => run_search(args),

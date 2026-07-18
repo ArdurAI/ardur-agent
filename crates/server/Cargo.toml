@@ -54,6 +54,8 @@ ardur-memory = { workspace = true }
 # The durable Qdrant memory backend, selected at boot via `ARDUR_MEMORY=qdrant`.
 ardur-memory-qdrant = { workspace = true }
 ardur-session-journals = { workspace = true }
+# Crash-safe, symlink-resistant file writes for the on-disk issuer/receipt keys.
+ardur-durability = { workspace = true }
 ardur-receipt = { workspace = true }
 ardur-runtime = { workspace = true }
 ardur-messaging-gateway = { workspace = true }
@@ -72,6 +74,8 @@ ardur-hooks-openclaw-compat = { workspace = true }
 # ARD-426: automation — the task-flow orchestrator trait for `ardur task`
 # commands surfaced through the server's API.
 ardur-automation = { workspace = true }
+# §5.1 delegate-task tool — multi-agent orchestration exposed via MCP.
+ardur-delegate-tool = { workspace = true }
 
 # `ardur-cap-token` re-exports `KeyPair`/`PublicKey` but not `PrivateKey`, and
 # loading the persisted issuer key needs `PrivateKey::from_bytes_hex`. Pulled

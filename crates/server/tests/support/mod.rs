@@ -51,6 +51,13 @@ pub fn sign(timestamp: &str, body: &str) -> String {
 /// empty — tests inject the stub provider.
 #[must_use]
 pub fn test_config(data_dir: &TempDir, slack_base: Option<String>) -> Config {
+    // macOS tempdirs live under /var/folders/... (where /var symlinks to
+    // /private/var); the schema-migration guard refuses symlinks in trusted
+    // state paths, so canonicalize before passing to the server.
+    let canonical_data_dir = data_dir
+        .path()
+        .canonicalize()
+        .expect("canonicalize tempdir");
     Config {
         anthropic_api_key: String::new(),
         slack_enabled: true,
@@ -58,7 +65,7 @@ pub fn test_config(data_dir: &TempDir, slack_base: Option<String>) -> Config {
         slack_signing_secret: Some(SIGNING_SECRET.to_string()),
         slack_app_id: Some(APP_ID.to_string()),
         slack_allowed_senders: vec!["U4242".to_string()],
-        data_dir: data_dir.path().to_path_buf(),
+        data_dir: canonical_data_dir,
         bind_addr: "127.0.0.1:0".to_string(),
         chat_bearer_tokens: vec![CHAT_TOKEN.to_string()],
         admin_bearer_tokens: Vec::new(),
