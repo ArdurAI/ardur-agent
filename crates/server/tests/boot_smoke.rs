@@ -17,7 +17,10 @@ async fn boots_and_lays_down_the_state_dir() {
     let config = support::test_config(&dir, None);
 
     let state = support::boot_stub(&config).await;
-    assert_eq!(state.data_dir(), dir.path());
+    assert_eq!(
+        state.data_dir(),
+        &dir.path().canonicalize().expect("canonicalize tempdir")
+    );
 
     // The four state subdirectories exist.
     for sub in ["memory", "journals", "receipts", "keys"] {
@@ -76,7 +79,10 @@ async fn boots_without_slack_creds() {
     assert!(!config.slack_enabled, "the http-only config disables Slack");
 
     let state = support::boot_stub(&config).await;
-    assert_eq!(state.data_dir(), dir.path());
+    assert_eq!(
+        state.data_dir(),
+        &dir.path().canonicalize().expect("canonicalize tempdir")
+    );
     assert!(
         state.slack().is_none(),
         "no Slack adapter is built in HTTP-only mode"

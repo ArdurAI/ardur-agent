@@ -24,6 +24,13 @@ use tower::ServiceExt as _;
 const CHAT_TOKEN: &str = "e2e-streaming-chat-token";
 
 fn test_config(data_dir: &tempfile::TempDir) -> Config {
+    // macOS tempdirs live under /var/folders/... (where /var symlinks to
+    // /private/var); the schema-migration guard refuses symlinks in trusted
+    // state paths, so canonicalize before passing to the server.
+    let canonical = data_dir
+        .path()
+        .canonicalize()
+        .expect("canonicalize tempdir");
     Config {
         anthropic_api_key: String::new(),
         enable_shell_tool: false,
@@ -36,7 +43,7 @@ fn test_config(data_dir: &tempfile::TempDir) -> Config {
         slack_signing_secret: Some("streaming-e2e-signing-secret".to_string()),
         slack_app_id: Some("A0STREAMINGE2E".to_string()),
         slack_allowed_senders: vec!["U0STREAM".to_string()],
-        data_dir: data_dir.path().to_path_buf(),
+        data_dir: canonical,
         bind_addr: "127.0.0.1:0".to_string(),
         chat_bearer_tokens: vec![CHAT_TOKEN.to_string()],
         admin_bearer_tokens: Vec::new(),

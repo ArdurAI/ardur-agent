@@ -44,7 +44,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ardur_cap_token::{
-    BiscuitCapTokenIssuer, CapScope, CapTokenIssuer, HolderId as CapHolderId, KeyPair,
+    BiscuitCapTokenIssuer, CapScope, CapTokenIssuer, HolderId as CapHolderId, KeyPair, PublicKey,
 };
 use ardur_cedar_policy::{ActionRef, CedarPolicyBundle, PolicyBundle, PolicySource};
 use ardur_channel_discord::DiscordChannel;
@@ -406,6 +406,17 @@ impl AppState {
             std::fs::create_dir_all(dir)
                 .map_err(|e| anyhow::anyhow!("creating {}: {e}", dir.display()))?;
         }
+        // Stamp (or migrate) the data_dir's on-disk schema version — no
+        // migration exists yet, so this is a no-op stamp on every boot until
+        // a future format change registers a real migration step. The CLI's
+        // StateDirs::create() stamps the same way, since both trees share
+        // this shape.
+        ardur_durability::schema::migrate_to(
+            &data_dir,
+            ardur_durability::schema::UNVERSIONED_BASELINE,
+            &[],
+        )
+        .map_err(|e| anyhow::anyhow!("data_dir schema migration: {e}"))?;
 
         // 2. Long-lived keys: the cap-token issuer (Ed25519/Biscuit) and the
         //    receipt signing key (ES256), loaded if present else minted + saved.
@@ -1797,6 +1808,22 @@ fn qdrant_config(config: &Config) -> QdrantMemoryConfig {
     qcfg
 }
 
+/// The cap-token issuer's root public key, loaded (minting on first boot) from
+/// `<data_dir>/keys/issuer.key` — the same file [`AppState::boot`] itself reads.
+///
+/// Exists so a caller can learn the root a session's cap-token will verify
+/// against *before* `AppState::boot` runs (e.g. to construct a tool that must
+/// parse and attenuate that token, such as `delegate_task`). Calling this and
+/// then `AppState::boot` reads the same persisted key twice rather than
+/// minting it twice: `load_or_mint_issuer` only mints on the first-ever read of
+/// an absent file, and by definition only one of the two calls can be first.
+pub fn issuer_public_key(data_dir: &Path) -> anyhow::Result<PublicKey> {
+    let keys_dir = data_dir.join("keys");
+    std::fs::create_dir_all(&keys_dir)
+        .map_err(|e| anyhow::anyhow!("creating {}: {e}", keys_dir.display()))?;
+    Ok(load_or_mint_issuer(&keys_dir)?.public_key())
+}
+
 fn load_or_mint_issuer(keys_dir: &Path) -> anyhow::Result<BiscuitCapTokenIssuer> {
     let path = keys_dir.join("issuer.key");
     match read_private(keys_dir, "issuer.key") {
@@ -1854,91 +1881,28 @@ fn load_policy(path: Option<&Path>, dev_permissive: bool) -> anyhow::Result<Ceda
     CedarPolicyBundle::load(source).map_err(|e| anyhow::anyhow!("compiling cedar policy: {e}"))
 }
 
-#[cfg(unix)]
-fn open_keys_directory(keys_dir: &Path) -> std::io::Result<std::fs::File> {
-    use rustix::fs::{Mode, OFlags, openat};
-
-    let trusted_root = keys_dir.parent().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "keys directory has no parent",
-        )
-    })?;
-    let name = keys_dir.file_name().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "keys directory has no name",
-        )
-    })?;
-    let trusted = {
-        use rustix::fs::{CWD, Mode, OFlags, openat};
-        let fd = openat(
-            CWD,
-            trusted_root,
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .map_err(|error| std::io::Error::from_raw_os_error(error.raw_os_error()))?;
-        std::fs::File::from(fd)
-    };
-    let descriptor = openat(
-        &trusted,
-        name,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map_err(|error| std::io::Error::from_raw_os_error(error.raw_os_error()))?;
-    Ok(std::fs::File::from(descriptor))
+/// Convert a [`ardur_durability::DurabilityError`] into the `io::Result`
+/// shape the two call sites above already match on (`ErrorKind::NotFound`
+/// for "no key minted yet").
+fn durability_to_io(error: ardur_durability::DurabilityError) -> std::io::Error {
+    match error {
+        ardur_durability::DurabilityError::Io(e) => e,
+        other => std::io::Error::new(std::io::ErrorKind::InvalidInput, other.to_string()),
+    }
 }
 
 fn read_private(keys_dir: &Path, name: &str) -> std::io::Result<String> {
-    #[cfg(unix)]
-    let mut file = {
-        use rustix::fs::{Mode, OFlags, openat};
-        let keys = open_keys_directory(keys_dir)?;
-        let descriptor = openat(
-            &keys,
-            name,
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .map_err(|error| std::io::Error::from_raw_os_error(error.raw_os_error()))?;
-        std::fs::File::from(descriptor)
-    };
-    #[cfg(not(unix))]
-    let mut file = std::fs::File::open(keys_dir.join(name))?;
-    if !file.metadata()?.file_type().is_file() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "private key path is not a regular file",
-        ));
-    }
-    let mut contents = String::new();
-    std::io::Read::read_to_string(&mut file, &mut contents)?;
-    Ok(contents)
+    ardur_durability::read_string_no_follow(&keys_dir.join(name)).map_err(durability_to_io)
 }
 
+/// Persist a new private key file. Crash-safe: the key material is written
+/// and fsynced to a temp file in `keys_dir` first, then linked into place
+/// (failing closed with `EEXIST`, matching `O_EXCL` semantics, if a
+/// concurrent boot already minted the key) — a crash mid-write can never
+/// leave a truncated `issuer.key`/`receipt.pem` behind.
 fn create_private(keys_dir: &Path, name: &str, contents: &str) -> std::io::Result<()> {
-    #[cfg(unix)]
-    let mut file = {
-        use rustix::fs::{Mode, OFlags, openat};
-        let keys = open_keys_directory(keys_dir)?;
-        let descriptor = openat(
-            &keys,
-            name,
-            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::from_bits_truncate(0o600),
-        )
-        .map_err(|error| std::io::Error::from_raw_os_error(error.raw_os_error()))?;
-        std::fs::File::from(descriptor)
-    };
-    #[cfg(not(unix))]
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(keys_dir.join(name))?;
-    std::io::Write::write_all(&mut file, contents.as_bytes())?;
-    file.sync_all()
+    ardur_durability::create_new_atomic_no_follow(&keys_dir.join(name), contents.as_bytes())
+        .map_err(durability_to_io)
 }
 
 #[cfg(test)]

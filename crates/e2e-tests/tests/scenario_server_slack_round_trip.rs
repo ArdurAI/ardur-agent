@@ -75,6 +75,13 @@ async fn server_routes_signed_slack_message_through_runtime_to_chat_post_message
 
     // Boot the *real* server state over a stub provider + tempdir.
     let data_dir = tempfile::tempdir().expect("tempdir");
+    // macOS tempdirs live under /var/folders/... (where /var symlinks to
+    // /private/var); the schema-migration guard refuses symlinks in trusted
+    // state paths, so canonicalize before passing to the server.
+    let canonical_data_dir = data_dir
+        .path()
+        .canonicalize()
+        .expect("canonicalize tempdir");
     let config = Config {
         anthropic_api_key: String::new(),
         enable_shell_tool: false,
@@ -87,7 +94,7 @@ async fn server_routes_signed_slack_message_through_runtime_to_chat_post_message
         slack_signing_secret: Some(SIGNING_SECRET.to_string()),
         slack_app_id: Some(APP_ID.to_string()),
         slack_allowed_senders: vec!["U0DEPLOY".to_string()],
-        data_dir: data_dir.path().to_path_buf(),
+        data_dir: canonical_data_dir,
         bind_addr: "127.0.0.1:0".to_string(),
         chat_bearer_tokens: vec!["e2e-chat-token".to_string()],
         admin_bearer_tokens: Vec::new(),
