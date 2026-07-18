@@ -57,6 +57,12 @@ pub enum StreamEvent {
     /// still drain the stream to `None` rather than stopping on `Finish`, so a
     /// non-conforming provider cannot strand a trailing event.
     Finish(FinishReason),
+    /// The actual model name the provider served (when different from the
+    /// requested model — e.g. a fallback or version-resolved alias). Emitted
+    /// early in the stream by providers that include it, so the observability
+    /// layer can record `gen_ai.response.model` faithfully rather than
+    /// echoing the requested model.
+    ServedModel(String),
 }
 
 /// The stream type [`Provider::stream`](crate::Provider::stream) returns.
