@@ -314,3 +314,4 @@ ardur-health = { path = "crates/health" }
 ardur-logs = { path = "crates/logs" }
 ardur-resilience = { path = "crates/resilience" }
 ardur-durability = { path = "crates/durability" }
+ardur-webhook = { path = "crates/webhook" }

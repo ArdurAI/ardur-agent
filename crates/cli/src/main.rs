@@ -16,6 +16,7 @@ mod marketplace_search;
 mod persona;
 mod project_surface;
 mod state_id;
+mod webhook_ui;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -40,6 +41,7 @@ use project_surface::{ProjectArgs, run_project};
 use serde_json::json;
 use sha2::Digest;
 use state_id::sanitize_state_id;
+use webhook_ui::{WebhookArgs, run_webhook};
 
 /// Ardur — a capability-secure, cost-metered agent runtime.
 #[derive(Parser)]
@@ -94,6 +96,8 @@ enum Commands {
     Nodes(NodesArgs),
     /// Manage scheduled automation jobs.
     Schedule(ScheduleArgs),
+    /// Manage outbound webhook endpoints and inbound triggers.
+    Webhook(WebhookArgs),
     /// Inspect and manage scheduled crons (list, show, create, pause, delete).
     Cron(CronArgs),
     /// Manage messaging channel adapters.
@@ -386,6 +390,7 @@ fn main() -> ExitCode {
         Commands::Redact(args) => run_redact(args),
         Commands::Nodes(args) => run_nodes(args),
         Commands::Schedule(args) => run_schedule(args),
+        Commands::Webhook(args) => run_webhook(args),
         Commands::Cron(args) => run_cron(args),
         Commands::Channel(args) => run_channel(args),
         Commands::Migrate(args) => run_migrate(args),
