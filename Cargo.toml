@@ -63,6 +63,7 @@ members = [
     "crates/health",
     "crates/logs",
     "crates/resilience",
+    "crates/benches",
 ]
 
 [workspace.package]
