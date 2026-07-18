@@ -27,6 +27,9 @@ use p256::pkcs8::{DecodePrivateKey, DecodePublicKey};
 use sha2::{Digest, Sha256};
 
 use crate::StateDirs;
+use crate::marketplace_advisory::AdvisoryDatabase;
+use crate::marketplace_policy;
+use crate::marketplace_search;
 use crate::state_id::sanitize_state_id;
 
 /// Manifest byte-size ceiling (256 KiB) — refused before parsing.
@@ -49,6 +52,30 @@ const HIGH_RISK_CAPABILITIES: &[&str] = &["shell_exec", "process_spawn", "networ
 pub struct MarketplaceArgs {
     #[command(subcommand)]
     pub action: MarketplaceAction,
+    /// An operator-authored Cedar policy file composed on top of the
+    /// built-in permissive default, gating `install`/`update`/`uninstall`/
+    /// `publish`/`audit` on the manifest's declared kind/capabilities/claims
+    /// (e.g. `forbid` a `shell_exec` install). Independent of, and layered
+    /// on top of, the signature/bounds checks those verbs already run.
+    #[arg(
+        long,
+        global = true,
+        env = "ARDUR_MARKETPLACE_POLICY",
+        value_name = "CEDAR_FILE"
+    )]
+    pub policy: Option<PathBuf>,
+    /// A local, bounded advisory database (JSON array of `{advisory_id,
+    /// skill_id, affected_versions, severity, summary}`) checked at
+    /// `install`/`update`/`audit` against the manifest's exact `(id,
+    /// version)`. Not a live OSV/NVD feed — no network call; the built-in
+    /// default is empty. See `docs/marketplace.md`.
+    #[arg(
+        long,
+        global = true,
+        env = "ARDUR_MARKETPLACE_ADVISORY_DB",
+        value_name = "ADVISORY_JSON"
+    )]
+    pub advisory_db: Option<PathBuf>,
 }
 
 /// Subcommands for `ardur marketplace`.
@@ -57,10 +84,19 @@ pub enum MarketplaceAction {
     /// Browse installed skills and plugins.
     #[command(alias = "list")]
     Browse,
-    /// Search installed skills/plugins by name, id, or capability.
+    /// Search installed skills/plugins. BM25 lexical search by default;
+    /// `--semantic` additionally ranks by cosine similarity over a
+    /// locally-computed embedding (downloads its model on first use).
     Search {
         /// Query string.
         query: String,
+        /// Maximum results to return.
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+        /// Rank by embedding cosine similarity instead of BM25 lexical
+        /// score. Downloads a local embedding model on first use.
+        #[arg(long)]
+        semantic: bool,
     },
     /// Install a skill or plugin from a local signed manifest.
     Install {
@@ -75,6 +111,11 @@ pub enum MarketplaceAction {
         /// default — installs are signature-verified unless you opt out.
         #[arg(long)]
         allow_unsigned: bool,
+        /// Advisory id(s) to explicitly accept despite a matching entry in
+        /// the advisory database; repeatable. A match not named here refuses
+        /// the install.
+        #[arg(long = "allow-known-vulnerable")]
+        allow_known_vulnerable: Vec<String>,
     },
     /// Show an installed skill/plugin's manifest, signature state, and
     /// declared capabilities/claims.
@@ -98,6 +139,10 @@ pub enum MarketplaceAction {
         /// Allow a same-version reinstall or a version downgrade.
         #[arg(long)]
         force: bool,
+        /// Advisory id(s) to explicitly accept despite a matching entry in
+        /// the advisory database; repeatable.
+        #[arg(long = "allow-known-vulnerable")]
+        allow_known_vulnerable: Vec<String>,
     },
     /// Audit one (or, with no id, every) installed skill/plugin for
     /// unsigned installs, high-risk capabilities, and source-manifest drift.
@@ -615,6 +660,91 @@ fn capability_risk(capability: &str) -> &'static str {
     }
 }
 
+/// The Cedar resource attributes a manifest projects for
+/// [`marketplace_policy::check`] — everything an operator-authored `forbid`
+/// rule might reasonably branch on.
+fn manifest_policy_attrs(manifest: &CapabilityManifest, verified: bool) -> serde_json::Value {
+    let stripped: Vec<&str> = manifest
+        .capabilities
+        .iter()
+        .map(|c| strip_capability_prefix(c))
+        .collect();
+    let high_risk: Vec<&str> = stripped
+        .iter()
+        .copied()
+        .filter(|c| HIGH_RISK_CAPABILITIES.contains(c))
+        .collect();
+    serde_json::json!({
+        "kind": manifest.kind,
+        "capabilities": stripped,
+        "high_risk_capabilities": high_risk,
+        "high_risk": !high_risk.is_empty(),
+        "signed": verified,
+        "claims_count": manifest.runtime_claims.len(),
+        "version": manifest.version,
+    })
+}
+
+/// Check `manifest`'s exact `(id, version)` against `db`; refuse unless
+/// every match's `advisory_id` is present in `allowed`. Matches are always
+/// printed (even when allowed) so the operator sees what they overrode.
+fn check_advisories(
+    db: &AdvisoryDatabase,
+    manifest: &CapabilityManifest,
+    allowed: &[String],
+) -> Result<(), CliError> {
+    let matches = db.matches(&manifest.id, &manifest.version);
+    if matches.is_empty() {
+        return Ok(());
+    }
+    let mut blocking = Vec::new();
+    for advisory in &matches {
+        let accepted = allowed.iter().any(|a| a == &advisory.advisory_id);
+        println!(
+            "advisory {} [{}]: {} ({})",
+            advisory.advisory_id,
+            advisory.severity,
+            advisory.summary,
+            if accepted { "accepted" } else { "BLOCKING" }
+        );
+        if !accepted {
+            blocking.push(advisory.advisory_id.clone());
+        }
+    }
+    if !blocking.is_empty() {
+        return Err(CliError::State(format!(
+            "refusing install: {} matches known-vulnerable advisory(ies) {blocking:?}; \
+             pass --allow-known-vulnerable <advisory_id> to explicitly accept each",
+            manifest.id
+        )));
+    }
+    Ok(())
+}
+
+/// [`manifest_policy_attrs`]'s equivalent over an already-installed record
+/// (for `uninstall`/`audit`, which act on a record, not a fresh manifest).
+fn record_policy_attrs(record: &SkillRecord) -> serde_json::Value {
+    let stripped: Vec<&str> = record
+        .capabilities
+        .iter()
+        .map(|c| strip_capability_prefix(c))
+        .collect();
+    let high_risk: Vec<&str> = stripped
+        .iter()
+        .copied()
+        .filter(|c| HIGH_RISK_CAPABILITIES.contains(c))
+        .collect();
+    serde_json::json!({
+        "kind": record.kind,
+        "capabilities": stripped,
+        "high_risk_capabilities": high_risk,
+        "high_risk": !high_risk.is_empty(),
+        "signed": record.verified,
+        "claims_count": record.runtime_claims.len(),
+        "version": record.version,
+    })
+}
+
 /// Parse a `major.minor.patch` (patch/minor optional, default 0) numeric
 /// version for ordering. Non-numeric versions return `None` — the caller
 /// falls back to a simple inequality check when this fails.
@@ -669,6 +799,8 @@ pub fn run_marketplace(args: MarketplaceArgs) -> Result<(), CliError> {
     let root = StateDirs::resolve()?.root;
     let dir = skills_dir(&root);
     std::fs::create_dir_all(&dir)?;
+    let policy_bundle = marketplace_policy::load_policy(args.policy.as_deref())?;
+    let advisory_db = AdvisoryDatabase::load(args.advisory_db.as_deref())?;
 
     match args.action {
         MarketplaceAction::Browse => {
@@ -689,25 +821,44 @@ pub fn run_marketplace(args: MarketplaceArgs) -> Result<(), CliError> {
                 }
             }
         }
-        MarketplaceAction::Search { query } => {
-            let query = query.to_lowercase();
+        MarketplaceAction::Search {
+            query,
+            limit,
+            semantic,
+        } => {
             let records = read_skills(&root)?;
-            let filtered: Vec<&SkillRecord> = records
-                .iter()
-                .filter(|r| {
-                    r.name.to_lowercase().contains(&query)
-                        || r.skill_id.to_lowercase().contains(&query)
-                        || r.capabilities
-                            .iter()
-                            .any(|capability| capability.to_lowercase().contains(&query))
-                })
-                .collect();
-            if filtered.is_empty() {
-                println!("no installed skills/plugins match '{query}'");
+            if records.is_empty() {
+                println!("no skills or plugins installed");
                 println!("note: remote marketplace search is a Phase 2 wiring task");
             } else {
-                for r in filtered {
-                    println!("{} {} {}", r.skill_id, r.name, r.version);
+                let corpus: Vec<(String, String)> = records
+                    .iter()
+                    .map(|r| {
+                        (
+                            r.skill_id.clone(),
+                            format!("{} {} {}", r.name, r.skill_id, r.capabilities.join(" ")),
+                        )
+                    })
+                    .collect();
+                let hits = if semantic {
+                    marketplace_search::semantic_rerank(&corpus, &query, limit)?
+                } else {
+                    marketplace_search::bm25_search(&corpus, &query, limit)?
+                };
+                if hits.is_empty() {
+                    println!("no installed skills/plugins match '{query}'");
+                    println!("note: remote marketplace search is a Phase 2 wiring task");
+                } else {
+                    let by_id: std::collections::HashMap<&str, &SkillRecord> =
+                        records.iter().map(|r| (r.skill_id.as_str(), r)).collect();
+                    for hit in hits {
+                        if let Some(r) = by_id.get(hit.skill_id.as_str()) {
+                            println!(
+                                "{} {} {} [score {:.3}]",
+                                r.skill_id, r.name, r.version, hit.score
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -715,10 +866,18 @@ pub fn run_marketplace(args: MarketplaceArgs) -> Result<(), CliError> {
             source,
             key,
             allow_unsigned,
+            allow_known_vulnerable,
         } => {
             let path = Path::new(&source);
             let (manifest, verified) =
                 resolve_install_manifest(path, key.as_ref(), allow_unsigned)?;
+            marketplace_policy::check(
+                &policy_bundle,
+                "skill_install",
+                &manifest.id,
+                manifest_policy_attrs(&manifest, verified),
+            )?;
+            check_advisories(&advisory_db, &manifest, &allow_known_vulnerable)?;
             let record = record_from_manifest(&manifest, &source, verified)?;
             write_record(&dir, &record)?;
             let synced = sync_skill_markdown(&root, path, &manifest)?;
@@ -788,6 +947,7 @@ pub fn run_marketplace(args: MarketplaceArgs) -> Result<(), CliError> {
             key,
             allow_unsigned,
             force,
+            allow_known_vulnerable,
         } => {
             let existing_path = dir.join(format!("{id}.json"));
             let existing: SkillRecord = serde_json::from_str(
@@ -798,6 +958,13 @@ pub fn run_marketplace(args: MarketplaceArgs) -> Result<(), CliError> {
 
             let (new_manifest, verified) =
                 resolve_install_manifest(&manifest, key.as_ref(), allow_unsigned)?;
+            marketplace_policy::check(
+                &policy_bundle,
+                "skill_update",
+                &new_manifest.id,
+                manifest_policy_attrs(&new_manifest, verified),
+            )?;
+            check_advisories(&advisory_db, &new_manifest, &allow_known_vulnerable)?;
 
             if new_manifest.id != existing.skill_id {
                 return Err(CliError::State(format!(
@@ -869,9 +1036,21 @@ pub fn run_marketplace(args: MarketplaceArgs) -> Result<(), CliError> {
                     None => "no skills or plugins installed".to_string(),
                 }));
             }
+            // Bulk `audit` (no id) is read-heavy and low-stakes; gate only the
+            // single-target form, where a policy might reasonably restrict who
+            // may pull a specific skill's audit report.
+            if let Some(id) = &id {
+                marketplace_policy::check(
+                    &policy_bundle,
+                    "skill_audit",
+                    id,
+                    record_policy_attrs(targets[0]),
+                )?;
+            }
 
             let mut unverified_count = 0;
             let mut high_risk_count = 0;
+            let mut advisory_count = 0;
             for r in &targets {
                 println!("== {} ({}) v{} ==", r.skill_id, r.kind, r.version);
                 if !r.verified {
@@ -886,6 +1065,16 @@ pub fn run_marketplace(args: MarketplaceArgs) -> Result<(), CliError> {
                 if !high_risk.is_empty() {
                     println!("  [flag] high-risk capabilities: {high_risk:?}");
                     high_risk_count += 1;
+                }
+                let advisories = advisory_db.matches(&r.skill_id, &r.version);
+                if !advisories.is_empty() {
+                    for advisory in &advisories {
+                        println!(
+                            "  [flag] advisory {} [{}]: {}",
+                            advisory.advisory_id, advisory.severity, advisory.summary
+                        );
+                    }
+                    advisory_count += 1;
                 }
                 let source_path = Path::new(&r.source);
                 if source_path.is_file() {
@@ -906,16 +1095,23 @@ pub fn run_marketplace(args: MarketplaceArgs) -> Result<(), CliError> {
                 }
             }
             println!(
-                "audit summary: {} checked, {unverified_count} unverified, {high_risk_count} with high-risk capabilities",
+                "audit summary: {} checked, {unverified_count} unverified, {high_risk_count} with high-risk capabilities, {advisory_count} with matching advisories",
                 targets.len()
             );
         }
         MarketplaceAction::Uninstall { id } => {
             sanitize_state_id(&id)?;
             let path = dir.join(format!("{id}.json"));
-            if !path.is_file() {
-                return Err(CliError::State(format!("skill `{id}` not found")));
-            }
+            let content = std::fs::read_to_string(&path)
+                .map_err(|_| CliError::State(format!("skill `{id}` not found")))?;
+            let record: SkillRecord =
+                serde_json::from_str(&content).map_err(|e| CliError::State(e.to_string()))?;
+            marketplace_policy::check(
+                &policy_bundle,
+                "skill_uninstall",
+                &id,
+                record_policy_attrs(&record),
+            )?;
             std::fs::remove_file(&path)?;
             remove_skill_markdown(&root, &id)?;
             println!("removed skill {id}");
@@ -975,6 +1171,12 @@ pub fn run_marketplace(args: MarketplaceArgs) -> Result<(), CliError> {
                 runtime_claims: runtime_claims.clone(),
             };
             validate_manifest_shape_for_publish(&unsigned)?;
+            marketplace_policy::check(
+                &policy_bundle,
+                "skill_publish",
+                &unsigned.id,
+                manifest_policy_attrs(&unsigned, false),
+            )?;
 
             let payload = canonical_manifest_payload(&unsigned)?;
             let key_pem = std::fs::read_to_string(&key)?;
