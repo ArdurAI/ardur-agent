@@ -44,7 +44,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ardur_cap_token::{
-    BiscuitCapTokenIssuer, CapScope, CapTokenIssuer, HolderId as CapHolderId, KeyPair,
+    BiscuitCapTokenIssuer, CapScope, CapTokenIssuer, HolderId as CapHolderId, KeyPair, PublicKey,
 };
 use ardur_cedar_policy::{ActionRef, CedarPolicyBundle, PolicyBundle, PolicySource};
 use ardur_channel_discord::DiscordChannel;
@@ -1696,6 +1696,22 @@ fn qdrant_config(config: &Config) -> QdrantMemoryConfig {
         qcfg = qcfg.with_collection_name(collection.clone());
     }
     qcfg
+}
+
+/// The cap-token issuer's root public key, loaded (minting on first boot) from
+/// `<data_dir>/keys/issuer.key` — the same file [`AppState::boot`] itself reads.
+///
+/// Exists so a caller can learn the root a session's cap-token will verify
+/// against *before* `AppState::boot` runs (e.g. to construct a tool that must
+/// parse and attenuate that token, such as `delegate_task`). Calling this and
+/// then `AppState::boot` reads the same persisted key twice rather than
+/// minting it twice: `load_or_mint_issuer` only mints on the first-ever read of
+/// an absent file, and by definition only one of the two calls can be first.
+pub fn issuer_public_key(data_dir: &Path) -> anyhow::Result<PublicKey> {
+    let keys_dir = data_dir.join("keys");
+    std::fs::create_dir_all(&keys_dir)
+        .map_err(|e| anyhow::anyhow!("creating {}: {e}", keys_dir.display()))?;
+    Ok(load_or_mint_issuer(&keys_dir)?.public_key())
 }
 
 fn load_or_mint_issuer(keys_dir: &Path) -> anyhow::Result<BiscuitCapTokenIssuer> {
