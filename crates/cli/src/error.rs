@@ -39,6 +39,14 @@ pub enum CliError {
     State(String),
 }
 
+/// Webhook operator errors (§9.7) surface as CLI state errors, preserving the
+/// operator-facing message (refusals, not-found, signing-key resolution).
+impl From<ardur_webhook::WebhookError> for CliError {
+    fn from(e: ardur_webhook::WebhookError) -> Self {
+        CliError::State(e.to_string())
+    }
+}
+
 /// Cron-UI errors (§9.4) surface as CLI state errors. A refused mutation
 /// (missing cap-token scope) and a not-found cron both land here with their
 /// operator-facing message preserved.

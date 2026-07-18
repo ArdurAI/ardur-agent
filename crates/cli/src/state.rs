@@ -98,11 +98,20 @@ impl StateDirs {
     }
 
     /// Create the state-dir tree (idempotent). Creates `memory/`, `journals/`,
-    /// `receipts/`, and `keys/` under `~/.ardur/`.
+    /// `receipts/`, and `keys/` under `~/.ardur/`, then stamps (or migrates)
+    /// its on-disk schema version. No migration exists yet — the CLI ships
+    /// only the version framework — so this is a no-op stamp on every boot
+    /// until a future format change registers a real migration step.
     pub fn create(&self) -> Result<(), CliError> {
         for dir in [&self.memory, &self.journals, &self.receipts, &self.keys] {
             std::fs::create_dir_all(dir)?;
         }
+        ardur_durability::schema::migrate_to(
+            &self.root,
+            ardur_durability::schema::UNVERSIONED_BASELINE,
+            &[],
+        )
+        .map_err(|e| CliError::State(format!("state schema migration: {e}")))?;
         Ok(())
     }
 

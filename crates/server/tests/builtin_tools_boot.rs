@@ -21,6 +21,7 @@ mod support;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use ardur_cap_token::KeyPair;
 use ardur_provider_runtime::{AnthropicProvider, ModelId, Provider};
 use ardur_server::{AppState, Config, assemble_tool_registry};
 use ardur_tool_registry::{
@@ -31,7 +32,10 @@ use ardur_tool_registry::{
 /// Assemble the runtime tool registry with `opts` applied (no skills, no remote
 /// MCP servers) — the same path `ardur-server` uses at boot.
 async fn assemble(opts: BuiltinOpts) -> ToolRegistry {
-    assemble_tool_registry("stub", "in-memory", &[] as &[PathBuf], &[], opts).await
+    // A throwaway cap-root key: the delegate_task tool registers against it but
+    // these tests never mint/verify tokens, so any valid Ed25519 public key works.
+    let cap_root = KeyPair::new().public();
+    assemble_tool_registry("stub", "in-memory", &[] as &[PathBuf], &[], cap_root, opts).await
 }
 
 /// Boot an `AppState` over the stub provider with the already-assembled `tools`.

@@ -1,0 +1,27 @@
+[package]
+name = "ardur-durability"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Shared no-follow, crash-safe file I/O primitives for on-disk agent state
+# (receipts, journals, keys, config). Consolidates the atomic-write patterns
+# that used to be reimplemented independently in crates/cli/src/secure_io.rs
+# and crates/fused-runtime/src/receipts.rs.
+
+[lib]
+name = "ardur_durability"
+path = "src/lib.rs"
+
+[dependencies]
+thiserror = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

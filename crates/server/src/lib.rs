@@ -35,5 +35,5 @@ pub use mcp::{
 pub use routes::build_router;
 pub use state::{
     AUDIENCE, AppState, CAP_TTL_SECS, ChatSubmitError, ChatTurnOutcome, GATEWAY_SUBJECT,
-    McpSurface, TOOL,
+    McpSurface, TOOL, issuer_public_key,
 };
