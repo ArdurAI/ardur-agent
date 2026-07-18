@@ -104,6 +104,13 @@ url = { workspace = true }
 # ARD-120/121/132: supply-chain audit tooling.
 ignore = { workspace = true }
 cargo-lock = { workspace = true }
+# Crash-safe atomic writes for the backup archive and the restored state tree.
+ardur-durability = { workspace = true }
+# `ardur backup` — state-tree archive create/restore. Restore verifies the
+# restored receipt chain's hash linkage (via ardur-fused-runtime, already a
+# dependency above) before swapping it into place.
+tar = { workspace = true }
+flate2 = { workspace = true }
 # §8.1 marketplace search index: BM25 lexical search (default) and optional
 # local-embedding semantic reranking (--semantic) over installed skills/plugins.
 ardur-bm25-index = { workspace = true }

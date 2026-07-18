@@ -54,6 +54,8 @@ ardur-memory = { workspace = true }
 # The durable Qdrant memory backend, selected at boot via `ARDUR_MEMORY=qdrant`.
 ardur-memory-qdrant = { workspace = true }
 ardur-session-journals = { workspace = true }
+# Crash-safe, symlink-resistant file writes for the on-disk issuer/receipt keys.
+ardur-durability = { workspace = true }
 ardur-receipt = { workspace = true }
 ardur-runtime = { workspace = true }
 ardur-messaging-gateway = { workspace = true }
