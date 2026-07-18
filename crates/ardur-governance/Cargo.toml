@@ -1,0 +1,42 @@
+[package]
+name = "ardur-governance"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The agent-side substrate this crate bridges to the Ardur governance layer.
+# `ardur-receipt` supplies the ES256/JWKS key custody + Sha256Digest we reuse so
+# a governed runtime publishes ONE JWKS for both native receipts and the MCEP
+# Execution Receipts minted here; `ardur-cap-token` supplies the verified grant
+# claims (`VerifiedClaims`) an ER binds to.
+ardur-receipt = { workspace = true }
+ardur-cap-token = { workspace = true }
+# ER JWS is signed on raw p256 (ES256 over NIST P-256) — the MCEP ER v0.1
+# primary wire format (spec §9.1 `alg=ES256`). We mirror the receipt crate's
+# ARD-483 low-S normalization rather than depend on its crate-private signer.
+p256 = { workspace = true }
+# OsRng for `ErSigningKey::generate` — matches `ardur-receipt` (p256's
+# `SigningKey::random` needs a CSPRNG; signing is deterministic RFC 6979).
+rand_core = { workspace = true }
+# invocation_digest / arguments_hash are SHA-256 over the RFC 8785 (JCS)
+# canonical form of the normalized invocation.
+sha2 = { workspace = true }
+base64 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+# grant_id carries the cap-token UUIDv4 token id; run_nonce/step ids are UUIDv4.
+uuid = { workspace = true, features = ["v4"] }
+# RFC 3339 `timestamp` claim rendering from Unix-millis step time.
+chrono = { workspace = true }
+
+[dev-dependencies]
+# The E2E test mints a real cap-token and native receipt through the actual
+# public APIs, then projects + verifies the ER mirror chain.
+ardur-cap-token = { workspace = true }
+ardur-receipt = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
