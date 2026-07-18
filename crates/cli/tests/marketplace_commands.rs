@@ -664,3 +664,403 @@ fn canonical_payload(
     }
     out
 }
+
+#[test]
+fn marketplace_default_policy_permits_high_risk_capability_install() {
+    // No --policy/ARDUR_MARKETPLACE_POLICY supplied: the built-in default is
+    // permissive, so a shell_exec-declaring manifest installs same as before
+    // Cedar gating existed — this feature is opt-in hardening, not a new
+    // default restriction.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (manifest_path, key_path, _) = signed_skill_manifest(
+        dir.path(),
+        "skill.risky-default",
+        "Risky",
+        "0.1.0",
+        vec!["cap.shell_exec".to_string()],
+    );
+
+    Command::cargo_bin("ardur")
+        .expect("the `ardur` binary builds")
+        .env("HOME", dir.path())
+        .args(["marketplace", "install"])
+        .arg(&manifest_path)
+        .arg("--key")
+        .arg(&key_path)
+        .assert()
+        .success();
+}
+
+#[test]
+fn marketplace_custom_policy_denies_high_risk_capability_install() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (manifest_path, key_path, _) = signed_skill_manifest(
+        dir.path(),
+        "skill.risky",
+        "Risky",
+        "0.1.0",
+        vec!["cap.shell_exec".to_string()],
+    );
+
+    let policy_path = dir.path().join("no-shell-exec.cedar");
+    std::fs::write(
+        &policy_path,
+        r#"forbid(principal, action == Action::"skill_install", resource)
+when { resource.high_risk_capabilities.contains("shell_exec") };
+"#,
+    )
+    .expect("write policy");
+
+    Command::cargo_bin("ardur")
+        .expect("the `ardur` binary builds")
+        .env("HOME", dir.path())
+        .args(["marketplace", "install"])
+        .arg(&manifest_path)
+        .arg("--key")
+        .arg(&key_path)
+        .arg("--policy")
+        .arg(&policy_path)
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("policy denied"));
+
+    // A sibling manifest without the forbidden capability still installs
+    // under the SAME custom policy — proving the deny is capability-specific,
+    // not a blanket refusal.
+    let (clean_manifest, clean_key, _) = signed_skill_manifest(
+        dir.path(),
+        "skill.clean",
+        "Clean",
+        "0.1.0",
+        vec!["cap.fs_read".to_string()],
+    );
+    Command::cargo_bin("ardur")
+        .expect("the `ardur` binary builds")
+        .env("HOME", dir.path())
+        .args(["marketplace", "install"])
+        .arg(&clean_manifest)
+        .arg("--key")
+        .arg(&clean_key)
+        .arg("--policy")
+        .arg(&policy_path)
+        .assert()
+        .success();
+}
+
+#[test]
+fn marketplace_custom_policy_via_env_var_denies_plugin_kind() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (manifest_path, key_path, _) =
+        signed_skill_manifest(dir.path(), "skill.viaenv", "ViaEnv", "0.1.0", vec![]);
+
+    let policy_path = dir.path().join("no-plugins.cedar");
+    std::fs::write(
+        &policy_path,
+        r#"forbid(principal, action == Action::"skill_install", resource)
+when { resource.kind == "plugin" };
+"#,
+    )
+    .expect("write policy");
+
+    // Skill kind installs fine under the "no plugins" policy...
+    Command::cargo_bin("ardur")
+        .expect("the `ardur` binary builds")
+        .env("HOME", dir.path())
+        .env("ARDUR_MARKETPLACE_POLICY", &policy_path)
+        .args(["marketplace", "install"])
+        .arg(&manifest_path)
+        .arg("--key")
+        .arg(&key_path)
+        .assert()
+        .success();
+}
+
+#[test]
+fn marketplace_custom_policy_denies_uninstall_of_high_risk_skill() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (manifest_path, key_path, _) = signed_skill_manifest(
+        dir.path(),
+        "skill.locked",
+        "Locked",
+        "0.1.0",
+        vec!["cap.shell_exec".to_string()],
+    );
+
+    // Install under the permissive default...
+    Command::cargo_bin("ardur")
+        .expect("the `ardur` binary builds")
+        .env("HOME", dir.path())
+        .args(["marketplace", "install"])
+        .arg(&manifest_path)
+        .arg("--key")
+        .arg(&key_path)
+        .assert()
+        .success();
+
+    // ...then a policy that forbids uninstalling high-risk skills blocks
+    // removal (e.g. an org rule requiring an admin workflow for teardown).
+    let policy_path = dir.path().join("no-uninstall-high-risk.cedar");
+    std::fs::write(
+        &policy_path,
+        r#"forbid(principal, action == Action::"skill_uninstall", resource)
+when { resource.high_risk == true };
+"#,
+    )
+    .expect("write policy");
+
+    Command::cargo_bin("ardur")
+        .expect("the `ardur` binary builds")
+        .env("HOME", dir.path())
+        .args(["marketplace", "uninstall", "skill.locked"])
+        .arg("--policy")
+        .arg(&policy_path)
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("policy denied"));
+
+    // The skill is still installed — the refused uninstall had no effect.
+    Command::cargo_bin("ardur")
+        .expect("the `ardur` binary builds")
+        .env("HOME", dir.path())
+        .args(["marketplace", "inspect", "skill.locked"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn marketplace_no_advisory_db_permits_install() {
+    // No --advisory-db/ARDUR_MARKETPLACE_ADVISORY_DB supplied: the built-in
+    // default is empty, so installs behave exactly as before this feature
+    // existed.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (manifest_path, key_path, _) =
+        signed_skill_manifest(dir.path(), "skill.plain", "Plain", "0.1.0", vec![]);
+
+    Command::cargo_bin("ardur")
+        .expect("the `ardur` binary builds")
+        .env("HOME", dir.path())
+        .args(["marketplace", "install"])
+        .arg(&manifest_path)
+        .arg("--key")
+        .arg(&key_path)
+        .assert()
+        .success();
+}
+
+#[test]
+fn marketplace_advisory_db_blocks_known_vulnerable_version_by_default() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (manifest_path, key_path, _) = signed_skill_manifest(
+        dir.path(),
+        "skill.vulnerable",
+        "Vulnerable",
+        "1.0.0",
+        vec![],
+    );
+
+    let advisory_path = dir.path().join("advisories.json");
+    std::fs::write(
+        &advisory_path,
+        json!([{
+            "advisory_id": "ARDUR-ADV-0001",
+            "skill_id": "skill.vulnerable",
+            "affected_versions": ["1.0.0"],
+            "severity": "critical",
+            "summary": "Reported credential-exfiltration behavior."
+        }])
+        .to_string(),
+    )
+    .expect("write advisories");
+
+    Command::cargo_bin("ardur")
+        .expect("the `ardur` binary builds")
+        .env("HOME", dir.path())
+        .args(["marketplace", "install"])
+        .arg(&manifest_path)
+        .arg("--key")
+        .arg(&key_path)
+        .arg("--advisory-db")
+        .arg(&advisory_path)
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("ARDUR-ADV-0001"));
+
+    // Explicitly accepting the advisory id lets the install through.
+    Command::cargo_bin("ardur")
+        .expect("the `ardur` binary builds")
+        .env("HOME", dir.path())
+        .args(["marketplace", "install"])
+        .arg(&manifest_path)
+        .arg("--key")
+        .arg(&key_path)
+        .arg("--advisory-db")
+        .arg(&advisory_path)
+        .arg("--allow-known-vulnerable")
+        .arg("ARDUR-ADV-0001")
+        .assert()
+        .success();
+}
+
+#[test]
+fn marketplace_advisory_db_is_exact_version_scoped() {
+    // The advisory names version 1.0.0; a different version of the same
+    // skill_id is unaffected — proving the match is exact-version, not
+    // blanket-by-id.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (manifest_path, key_path, _) = signed_skill_manifest(
+        dir.path(),
+        "skill.vulnerable",
+        "Vulnerable",
+        "2.0.0",
+        vec![],
+    );
+
+    let advisory_path = dir.path().join("advisories.json");
+    std::fs::write(
+        &advisory_path,
+        json!([{
+            "advisory_id": "ARDUR-ADV-0002",
+            "skill_id": "skill.vulnerable",
+            "affected_versions": ["1.0.0"],
+            "severity": "high",
+            "summary": "Only affects 1.0.0."
+        }])
+        .to_string(),
+    )
+    .expect("write advisories");
+
+    Command::cargo_bin("ardur")
+        .expect("the `ardur` binary builds")
+        .env("HOME", dir.path())
+        .args(["marketplace", "install"])
+        .arg(&manifest_path)
+        .arg("--key")
+        .arg(&key_path)
+        .arg("--advisory-db")
+        .arg(&advisory_path)
+        .assert()
+        .success();
+}
+
+#[test]
+fn marketplace_audit_reports_advisory_matches_regardless_of_override() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (manifest_path, key_path, _) = signed_skill_manifest(
+        dir.path(),
+        "skill.audited-vuln",
+        "AuditedVuln",
+        "1.0.0",
+        vec![],
+    );
+
+    let advisory_path = dir.path().join("advisories.json");
+    std::fs::write(
+        &advisory_path,
+        json!([{
+            "advisory_id": "ARDUR-ADV-0003",
+            "skill_id": "skill.audited-vuln",
+            "affected_versions": ["1.0.0"],
+            "severity": "medium",
+            "summary": "Flagged for audit visibility."
+        }])
+        .to_string(),
+    )
+    .expect("write advisories");
+
+    Command::cargo_bin("ardur")
+        .expect("the `ardur` binary builds")
+        .env("HOME", dir.path())
+        .args(["marketplace", "install"])
+        .arg(&manifest_path)
+        .arg("--key")
+        .arg(&key_path)
+        .arg("--advisory-db")
+        .arg(&advisory_path)
+        .arg("--allow-known-vulnerable")
+        .arg("ARDUR-ADV-0003")
+        .assert()
+        .success();
+
+    Command::cargo_bin("ardur")
+        .expect("the `ardur` binary builds")
+        .env("HOME", dir.path())
+        .args(["marketplace", "audit", "skill.audited-vuln"])
+        .arg("--advisory-db")
+        .arg(&advisory_path)
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("ARDUR-ADV-0003"))
+        .stdout(predicates::str::contains("1 with matching advisories"));
+}
+
+#[test]
+fn marketplace_advisory_db_rejects_oversized_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (manifest_path, key_path, _) =
+        signed_skill_manifest(dir.path(), "skill.x", "X", "0.1.0", vec![]);
+
+    let advisory_path = dir.path().join("huge.json");
+    // 6 MiB of whitespace-padded JSON, exceeding the 5 MiB ceiling.
+    let padding = " ".repeat(6 * 1024 * 1024);
+    std::fs::write(&advisory_path, format!("[{padding}]")).expect("write");
+
+    Command::cargo_bin("ardur")
+        .expect("the `ardur` binary builds")
+        .env("HOME", dir.path())
+        .args(["marketplace", "install"])
+        .arg(&manifest_path)
+        .arg("--key")
+        .arg(&key_path)
+        .arg("--advisory-db")
+        .arg(&advisory_path)
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("exceeding"));
+}
+
+#[test]
+fn marketplace_search_bm25_ranks_relevant_skill_first() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (translate_manifest, translate_key, _) = signed_skill_manifest(
+        dir.path(),
+        "skill.translate",
+        "Translate Helper",
+        "0.1.0",
+        vec!["cap.fs_read".to_string()],
+    );
+    let (unrelated_manifest, unrelated_key, _) = signed_skill_manifest(
+        dir.path(),
+        "skill.weather",
+        "Weather Report",
+        "0.1.0",
+        vec!["cap.network_out".to_string()],
+    );
+
+    for (manifest, key) in [
+        (&translate_manifest, &translate_key),
+        (&unrelated_manifest, &unrelated_key),
+    ] {
+        Command::cargo_bin("ardur")
+            .expect("the `ardur` binary builds")
+            .env("HOME", dir.path())
+            .args(["marketplace", "install"])
+            .arg(manifest)
+            .arg("--key")
+            .arg(key)
+            .assert()
+            .success();
+    }
+
+    let out = Command::cargo_bin("ardur")
+        .expect("the `ardur` binary builds")
+        .env("HOME", dir.path())
+        .args(["marketplace", "search", "translate", "--limit", "5"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(out).expect("stdout utf8");
+    assert!(stdout.contains("skill.translate"), "{stdout}");
+    assert!(!stdout.contains("skill.weather"), "{stdout}");
+}
