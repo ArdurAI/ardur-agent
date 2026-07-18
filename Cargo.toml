@@ -309,3 +309,4 @@ ardur-config = { path = "crates/config" }
 ardur-health = { path = "crates/health" }
 ardur-logs = { path = "crates/logs" }
 ardur-resilience = { path = "crates/resilience" }
+ardur-webhook = { path = "crates/webhook" }

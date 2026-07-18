@@ -95,6 +95,7 @@ chrono = { workspace = true }
 ardur-cron = { workspace = true }
 # §9.4: operator-facing cron management surface.
 ardur-cron-ui = { workspace = true }
+ardur-webhook = { workspace = true }
 # ARD-144/145: connector HTTP fetch.
 reqwest = { workspace = true }
 # R1: URL host parsing for the SSRF-hardened `ardur fetch` path (mirrors
