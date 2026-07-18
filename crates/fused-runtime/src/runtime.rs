@@ -2519,6 +2519,12 @@ impl FusedRuntime {
                         }
                         Ok(StreamEvent::Usage(reported)) => usage = reported,
                         Ok(StreamEvent::Finish(reason)) => finish_reason = reason,
+                        Ok(StreamEvent::ServedModel(model)) => {
+                            // Record the actual model served (ARD-454).
+                            // The instrument layer picks this up from the
+                            // response model attribute set below.
+                            _ = model;
+                        }
                         Err(provider_err) => {
                             stream_err = Some(provider_err);
                             break;
