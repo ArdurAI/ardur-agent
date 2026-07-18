@@ -42,7 +42,7 @@ members = [
     "crates/tool-registry",
     "crates/session-journals",
     "crates/multi-agent",
-    "crates/loop-detector",
+    "crates/delegate-tool",
     "crates/injection-defense",
     "crates/plugin-runtime",
     "crates/fused-runtime",
@@ -293,7 +293,7 @@ ardur-messaging-gateway = { path = "crates/messaging-gateway" }
 ardur-tool-registry = { path = "crates/tool-registry" }
 ardur-session-journals = { path = "crates/session-journals" }
 ardur-multi-agent = { path = "crates/multi-agent" }
-ardur-loop-detector = { path = "crates/loop-detector" }
+ardur-delegate-tool = { path = "crates/delegate-tool" }
 ardur-injection-defense = { path = "crates/injection-defense" }
 ardur-plugin-runtime = { path = "crates/plugin-runtime" }
 ardur-fused-runtime = { path = "crates/fused-runtime" }

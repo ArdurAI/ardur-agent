@@ -18,6 +18,7 @@ use ardur_media_audio::VoiceTranscribeTool;
 use ardur_server::assemble_tool_registry;
 use ardur_tool_registry::BuiltinOpts;
 use ardur_tool_registry::ToolId;
+use biscuit_auth::KeyPair;
 use serial_test::serial;
 
 const TOUCHED: &[&str] = &[
@@ -77,8 +78,15 @@ async fn voice_transcribe_is_registered_when_a_whisper_key_is_present() {
     let _env = EnvGuard::capture();
     _env.set("OPENAI_WHISPER_API_KEY", "sk-test-whisper-key");
 
-    let registry =
-        assemble_tool_registry::<&str>("stub", "in-memory", &[], &[], BuiltinOpts::default()).await;
+    let registry = assemble_tool_registry::<&str>(
+        "stub",
+        "in-memory",
+        &[],
+        &[],
+        KeyPair::new().public(),
+        BuiltinOpts::default(),
+    )
+    .await;
     assert!(
         has_voice_transcribe(&registry),
         "voice.transcribe must be registered when a Whisper key is configured"
@@ -91,8 +99,15 @@ async fn voice_transcribe_falls_back_to_the_general_openai_key() {
     let _env = EnvGuard::capture();
     _env.set("OPENAI_API_KEY", "sk-test-general-key");
 
-    let registry =
-        assemble_tool_registry::<&str>("stub", "in-memory", &[], &[], BuiltinOpts::default()).await;
+    let registry = assemble_tool_registry::<&str>(
+        "stub",
+        "in-memory",
+        &[],
+        &[],
+        KeyPair::new().public(),
+        BuiltinOpts::default(),
+    )
+    .await;
     assert!(
         has_voice_transcribe(&registry),
         "OPENAI_API_KEY must be accepted when OPENAI_WHISPER_API_KEY is unset"
@@ -104,8 +119,15 @@ async fn voice_transcribe_falls_back_to_the_general_openai_key() {
 async fn voice_transcribe_is_absent_without_any_key() {
     let _env = EnvGuard::capture();
 
-    let registry =
-        assemble_tool_registry::<&str>("stub", "in-memory", &[], &[], BuiltinOpts::default()).await;
+    let registry = assemble_tool_registry::<&str>(
+        "stub",
+        "in-memory",
+        &[],
+        &[],
+        KeyPair::new().public(),
+        BuiltinOpts::default(),
+    )
+    .await;
     assert!(
         !has_voice_transcribe(&registry),
         "voice.transcribe must not be registered without a Whisper/OpenAI key"
@@ -126,8 +148,15 @@ async fn voice_transcribe_is_skipped_not_panicking_on_an_invalid_base_url_overri
     // rather than panicking or aborting the rest of registry assembly.
     _env.set("OPENAI_WHISPER_BASE_URL", "http://whisper.example.com");
 
-    let registry =
-        assemble_tool_registry::<&str>("stub", "in-memory", &[], &[], BuiltinOpts::default()).await;
+    let registry = assemble_tool_registry::<&str>(
+        "stub",
+        "in-memory",
+        &[],
+        &[],
+        KeyPair::new().public(),
+        BuiltinOpts::default(),
+    )
+    .await;
     assert!(
         !has_voice_transcribe(&registry),
         "an invalid base URL override must skip registration, not panic"
