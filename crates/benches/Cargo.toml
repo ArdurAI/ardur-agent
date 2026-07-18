@@ -1,0 +1,68 @@
+# ardur-benches — the criterion benchmark harness for Ardur's hot paths.
+#
+# A bench-only workspace member (`publish = false`, no runtime consumers) that
+# depends only on the *public* API of the crates it measures, so it never forces
+# a rebuild of, or couples to the internals of, any in-flight crate. The four
+# benchmark targets map one-to-one to the hot paths called out in the plan:
+#
+#   fusion            — rank/score fusion (the RRF step of hybrid retrieval)
+#   memory_retrieval  — the hermetic half of hybrid recall (BM25 query, RRF fuse,
+#                       the in-process lexical fallback, the mock embed step)
+#   receipt           — JWS-ES256 signing/verification + hash-chain verification
+#   cost_gate         — the admit → finalize → commit admission cycle
+#
+# Benches that need a network service (Qdrant ANN) or a downloaded ONNX model
+# (the real fastembed embedder) are deliberately excluded — they are not
+# hermetic and cannot produce a stable, CI-reproducible baseline. The mock
+# embedder stands in for the embed *step's* shape without the model.
+[package]
+name = "ardur-benches"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Criterion benchmark harness for Ardur's hot paths (fusion, hybrid retrieval, receipt signing/verification, cost-gate)."
+publish = false
+
+# The lib carries no benchmarks itself (all benches are `[[bench]]` targets);
+# disabling its default libtest bench harness keeps `cargo bench` from running a
+# libtest binary that rejects criterion's CLI flags.
+[lib]
+bench = false
+
+[dependencies]
+
+[dev-dependencies]
+# The crates under measurement — public API only.
+ardur-fusion = { workspace = true }
+ardur-bm25-index = { workspace = true }
+ardur-embeddings = { workspace = true }
+ardur-memory = { workspace = true }
+ardur-receipt = { workspace = true }
+ardur-cost-gate = { workspace = true }
+# For building `MemoryRecord` payloads in the in-process search benchmark.
+serde_json = { workspace = true }
+# Criterion, lean: no plotters/rayon/html — just the runnable bench harness, to
+# keep the transitive footprint (and `--all-targets` compile time in CI) small.
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+# The cost-gate and BM25 surfaces are async; drive them on a current-thread
+# runtime inside the measured closures.
+tokio = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
+
+[[bench]]
+name = "fusion"
+harness = false
+
+[[bench]]
+name = "memory_retrieval"
+harness = false
+
+[[bench]]
+name = "receipt"
+harness = false
+
+[[bench]]
+name = "cost_gate"
+harness = false
