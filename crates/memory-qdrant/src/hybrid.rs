@@ -103,7 +103,7 @@ impl HybridMemoryRetriever {
     pub async fn record(&self, rec: MemoryRecord) -> Result<RecordId> {
         let doc_id = rec.record_id.to_string();
         let text = searchable_text(&rec);
-        let record_id = self.qdrant.record(rec)?;
+        let record_id = self.qdrant.record_async(rec).await?;
         self.bm25
             .lock()
             .await
@@ -156,12 +156,18 @@ impl HybridMemoryRetriever {
 
         // ARD-477: exclude any chain that has been tombstoned so a forgotten
         // memory is never re-injected. One scroll of the relevant records.
-        let dead = self.qdrant.dead_chains(subject)?;
+        // Awaited directly (not the sync bridge) so this recall runs on a single
+        // `block_on` pass — a nested bridge here re-enters the owned runtime and
+        // panics the turn (#348).
+        let dead = self.qdrant.dead_chains(subject).await?;
 
         // ---- dense: embed the query, ANN-search, drop tombstones, and keep the
         //      hydrated records (vector hits carry their full record_json).
         let query_vec = self.embed_query(query).await?;
-        let vector_hits = self.qdrant.search_vectors(query_vec, candidate_k as u64)?;
+        let vector_hits = self
+            .qdrant
+            .search_vectors_async(query_vec, candidate_k as u64)
+            .await?;
         let mut hydrated: HashMap<String, MemoryRecord> = HashMap::new();
         let mut vector_list: Vec<ScoredDoc> = Vec::with_capacity(vector_hits.len());
         for (rec, score) in vector_hits {
@@ -201,7 +207,7 @@ impl HybridMemoryRetriever {
             }
             let rec = match hydrated.remove(&doc.doc_id) {
                 Some(rec) => rec,
-                None => match self.fetch_live(&doc.doc_id, subject, &dead)? {
+                None => match self.fetch_live(&doc.doc_id, subject, &dead).await? {
                     Some(rec) => rec,
                     None => continue,
                 },
@@ -225,7 +231,7 @@ impl HybridMemoryRetriever {
     /// Hydrate a fused `doc_id` from the durable store, returning it only if it is
     /// a live (non-tombstone) record. An unparseable id or a missing point yields
     /// `None`.
-    fn fetch_live(
+    async fn fetch_live(
         &self,
         doc_id: &str,
         subject: Option<&HolderId>,
@@ -236,7 +242,8 @@ impl HybridMemoryRetriever {
         };
         Ok(self
             .qdrant
-            .fetch_record(RecordId(uuid))?
+            .fetch_record_async(RecordId(uuid))
+            .await?
             .filter(|rec| rec.invalidation_time.is_none())
             .filter(|rec| !dead.contains(&rec.correction_chain_root))
             .filter(|rec| subject.is_none_or(|s| &rec.subject == s)))
@@ -252,11 +259,14 @@ impl HybridMemoryRetriever {
 /// straight to the durable [`QdrantMemoryRuntime`]. The write/recall methods —
 /// [`record`](MemoryRuntime::record) and [`search`](MemoryRuntime::search) — are
 /// asynchronous on the inherent API (dual-write to Qdrant **and** the BM25 index;
-/// fused recall over both), so the synchronous trait methods bridge onto the
-/// runtime's own Tokio executor via its `block_on` (the same `block_in_place`
-/// path the durable runtime uses for its sync trait methods). `self.record(..)`
-/// and `self.search(..)` below resolve to the *inherent* async methods (inherent
-/// methods shadow trait methods of the same name), so there is no recursion.
+/// fused recall over both), so each synchronous trait method bridges onto the
+/// runtime's own Tokio executor with a **single** outer `block_on` over a fully
+/// async body. That body `await`s the durable store's `*_async` cores directly
+/// (`record_async`, `search_vectors_async`, `dead_chains`, `fetch_record_async`)
+/// rather than the sync methods, so it never re-enters the owned runtime — the
+/// nested-bridge recall panic (#348). `self.record(..)` and `self.search(..)`
+/// below resolve to the *inherent* async methods (inherent methods shadow trait
+/// methods of the same name), so there is no recursion.
 impl MemoryRuntime for HybridMemoryRetriever {
     fn record(&self, rec: MemoryRecord) -> Result<RecordId> {
         self.qdrant.block_on(self.record(rec))

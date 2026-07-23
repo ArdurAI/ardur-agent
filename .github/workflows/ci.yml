@@ -117,3 +117,64 @@ jobs:
 
       - name: cargo test
         run: cargo test --workspace --all-features
+
+  qdrant-integration:
+    # §7.0 Phase 2: the durable/hybrid Qdrant memory backend needs a live Qdrant,
+    # which the gauntlet lacks — so those scenarios are `#[ignore]`d there (they
+    # report as `ignored`, never a masked `passed` — see #358). This job boots a
+    # real Qdrant and runs them with `--ignored`, so the recall re-entry (#348)
+    # and async-drop (#349) fixes are exercised and cannot silently regress.
+    name: qdrant integration (--ignored)
+    runs-on: ubuntu-latest
+    services:
+      qdrant:
+        # Pin a server whose minor version is within one of the qdrant-client in
+        # Cargo.lock (the client refuses a wider skew).
+        image: qdrant/qdrant:v1.18.0
+        ports:
+          - 6333:6333
+          - 6334:6334
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Free disk space (ubuntu)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/powershell /usr/share/swift /usr/local/.ghcup \
+            /usr/lib/jvm /usr/lib/mono 2>/dev/null || true
+          df -h /
+
+      - name: Install pinned toolchain
+        run: rustup toolchain install 1.96.1 --profile minimal
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Wait for Qdrant readiness
+        run: |
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:6333/readyz >/dev/null; then
+              echo "qdrant ready after ${i}s"; exit 0
+            fi
+            sleep 1
+          done
+          echo "qdrant did not become ready" >&2; exit 1
+
+      - name: Gated Qdrant integration tests (--ignored)
+        env:
+          QDRANT_INTEGRATION_TEST: "1"
+          QDRANT_URL: http://localhost:6334
+        run: |
+          # Crate-level: durable backend (incl. the async-drop restart path) and
+          # hybrid dense+sparse recall over Mock embeddings. The `--skip`ped tests
+          # need extras out of this job's scope: `snapshot_*` a longer snapshot
+          # deadline (tracked separately), the two semantic tests the BGE model.
+          cargo test -p ardur-memory-qdrant --test integration \
+            -- --ignored --skip snapshot_into_receipt_records_event
+          cargo test -p ardur-memory-qdrant --test hybrid_integration \
+            -- --ignored --skip semantic_hit_gated --skip hybrid_beats_either
+          # End-to-end through the fused runtime: recall re-entry (#348) and the
+          # async-context drop (#349) on the real durable + hybrid backends.
+          cargo test -p ardur-e2e-tests \
+            --test scenario_qdrant_memory_persistence \
+            --test scenario_hybrid_memory_full_pipeline -- --ignored
+
