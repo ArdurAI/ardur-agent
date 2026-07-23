@@ -88,3 +88,7 @@ serde_json = { workspace = true }
 assert_matches = "1"
 biscuit-auth = { workspace = true }
 futures = { workspace = true }
+# #350 regression: re-import the receipt signing key to hand-sign a *legacy*
+# float-attention payload the current signer no longer emits, proving boot
+# tolerates it without weakening signature verification.
+p256 = { workspace = true }
