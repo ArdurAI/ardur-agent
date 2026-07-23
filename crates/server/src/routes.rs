@@ -16,7 +16,6 @@
 use std::convert::Infallible;
 use std::fmt::Write as _;
 use std::sync::Arc;
-use std::time::Duration;
 
 use axum::Router;
 use axum::body::{Body, Bytes};
@@ -44,7 +43,6 @@ use crate::state::{
 };
 
 const HTTP_BODY_LIMIT_BYTES: usize = 64 * 1024;
-const HTTP_TURN_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Build the application router over the shared [`AppState`].
 ///
@@ -768,7 +766,7 @@ async fn chat(State(state): State<Arc<AppState>>, headers: HeaderMap, body: Byte
     let session_id = request.session_id.unwrap_or_default();
 
     match tokio::time::timeout(
-        HTTP_TURN_TIMEOUT,
+        state.http_turn_timeout(),
         state.submit_chat(request.message, session_id),
     )
     .await
@@ -980,7 +978,7 @@ async fn acp(State(state): State<Arc<AppState>>, headers: HeaderMap, body: Bytes
         }
     };
     match tokio::time::timeout(
-        HTTP_TURN_TIMEOUT,
+        state.http_turn_timeout(),
         state.submit_chat(prompt, SessionId::new()),
     )
     .await

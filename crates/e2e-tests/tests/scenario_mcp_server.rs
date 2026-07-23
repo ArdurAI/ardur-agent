@@ -42,6 +42,7 @@ async fn spawn_server(bearer: &str) -> String {
         enable_http_tool: false,
         http_allowlist: Vec::new(),
         file_tool_root: None,
+        http_turn_timeout: std::time::Duration::from_secs(30),
         slack_enabled: true,
         slack_bot_token: Some("xoxb-e2e".to_string()),
         slack_signing_secret: Some("e2e-signing-secret-0000000000".to_string()),

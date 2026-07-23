@@ -38,6 +38,7 @@ fn test_config(data_dir: &tempfile::TempDir) -> Config {
         enable_http_tool: false,
         http_allowlist: Vec::new(),
         file_tool_root: None,
+        http_turn_timeout: std::time::Duration::from_secs(30),
         slack_enabled: true,
         slack_bot_token: Some("redacted-test-token".to_string()),
         slack_signing_secret: Some("streaming-e2e-signing-secret".to_string()),
