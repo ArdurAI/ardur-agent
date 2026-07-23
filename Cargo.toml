@@ -98,7 +98,7 @@ chrono = { version = "0.4", features = ["serde"] }
 # reconstruct verifying keys offline (ADR-Phase3-549). `pem` enables the
 # PKCS#8 PEM round-trip for key custody; `rand_core`'s `getrandom` backs
 # `Es256SigningKey::generate`.
-p256 = { version = "0.13", features = ["ecdsa", "pkcs8", "pem"] }
+p256 = { version = "0.14", features = ["ecdsa", "pkcs8", "pem"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 sha2 = "0.11"
 # Slack signing-secret verification (crates/slack-adapter, §4.1): HMAC-SHA256
@@ -247,7 +247,7 @@ futures = "0.3"
 # `SseStream::from_bytes_stream`, which the `sse-stream` version in our lock
 # (0.2.3, exposing only `from_byte_stream`) doesn't have — E0599 on every
 # platform. Unpin once `sse-stream` ships the renamed method.
-rmcp = { version = "=2.0.0", default-features = false, features = ["server", "client", "transport-streamable-http-server", "transport-streamable-http-client-reqwest"] }
+rmcp = { version = "=2.2.0", default-features = false, features = ["server", "client", "transport-streamable-http-server", "transport-streamable-http-client-reqwest"] }
 # Docker daemon API for terminal Docker exec backend (ARD-315/ARD-324).
 bollard = "0.21"
 # Jitter for the shared resilience layer's retry/backoff (crates/resilience).
