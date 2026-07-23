@@ -31,6 +31,7 @@ ardur-cedar-policy = { workspace = true }
 # (it is no other crate's library dep), so it is pulled in by an explicit path.
 ardur-cli = { path = "../cli" }
 ardur-cost-gate = { workspace = true }
+ardur-cron = { workspace = true }
 ardur-fused-runtime = { workspace = true }
 ardur-lifecycle-hooks = { workspace = true }
 ardur-memory = { workspace = true }
