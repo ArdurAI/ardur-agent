@@ -39,7 +39,8 @@ use ardur_slack_adapter::{SlackError, SlackEvent, SlackHeaders};
 
 use crate::openapi::{generate_python_client, generate_rust_client, openapi_spec};
 use crate::state::{
-    AUDIENCE, AppState, CAP_TTL_SECS, ChatSubmitError, ChatTurnOutcome, GATEWAY_SUBJECT,
+    AUDIENCE, AppState, CAP_TTL_SECS, ChatSubmitError, ChatTurnOutcome, EnqueueOutcome,
+    GATEWAY_SUBJECT,
 };
 
 const HTTP_BODY_LIMIT_BYTES: usize = 64 * 1024;
@@ -1160,9 +1161,11 @@ fn bad_request(message: String) -> Response {
 ///
 /// Reads the raw body *before* deserializing (the HMAC is over the exact bytes),
 /// hands it to the adapter (which fails closed on a bad signature or replay),
-/// and dispatches on the parsed [`SlackEvent`]. A genuine message is enqueued
-/// for the worker and acknowledged with `200` — Slack retries non-2xx, and a
-/// failed turn is reported into the channel rather than by HTTP status.
+/// and dispatches on the parsed [`SlackEvent`]. A genuine message that is
+/// accepted onto the work queue is acknowledged with `200` — a *failed* turn is
+/// reported into the channel rather than by HTTP status. If the bounded queue is
+/// saturated (or the worker has shut down) the message is not enqueued and we
+/// return `503` so Slack redelivers rather than dropping it silently.
 async fn slack_events(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1192,12 +1195,26 @@ async fn slack_events(
         }
         // A verified event we deliberately drop (e.g. our own bot's message).
         Ok(SlackEvent::Ignored) => StatusCode::OK.into_response(),
-        Ok(SlackEvent::Message(incoming)) => {
-            if !state.enqueue(incoming) {
-                tracing::error!("turn worker is gone; dropping message");
+        Ok(SlackEvent::Message(incoming)) => match state.enqueue(incoming) {
+            // Durably handed to the worker — acknowledge so Slack does not retry.
+            EnqueueOutcome::Accepted => StatusCode::OK.into_response(),
+            // The queue is saturated (or the worker is gone): the message was
+            // *not* enqueued. Return `503` so Slack redelivers instead of
+            // treating the message as received — acking `200` here would drop it
+            // silently. Mirrors the `/chat` full-queue behavior.
+            EnqueueOutcome::Full => {
+                tracing::warn!("turn worker queue is full; asking Slack to redeliver");
+                (StatusCode::SERVICE_UNAVAILABLE, "turn worker queue is full").into_response()
             }
-            StatusCode::OK.into_response()
-        }
+            EnqueueOutcome::WorkerGone => {
+                tracing::error!("turn worker is gone; asking Slack to redeliver");
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "turn worker is unavailable",
+                )
+                    .into_response()
+            }
+        },
         // Fail closed on a forged signature or a replayed (stale/future) request.
         Err(SlackError::InvalidSignature) | Err(SlackError::Replay { .. }) => {
             (StatusCode::UNAUTHORIZED, "signature verification failed").into_response()
