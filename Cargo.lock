@@ -279,7 +279,7 @@ dependencies = [
  "ardur-session-journals",
  "axum 0.8.9",
  "axum-test",
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "clap",
  "maud",
@@ -367,7 +367,7 @@ dependencies = [
  "ardur-runtime",
  "ardur-tool-registry",
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -477,7 +477,7 @@ dependencies = [
  "ardur-webhook",
  "assert_cmd",
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "biscuit-auth",
  "cargo-lock",
  "chrono",
@@ -719,7 +719,7 @@ dependencies = [
  "assert_matches",
  "async-stream",
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "biscuit-auth",
  "futures",
  "libc",
@@ -831,7 +831,7 @@ dependencies = [
  "ardur-runtime",
  "ardur-tool-registry",
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "hex",
  "reqwest 0.12.28",
  "serde",
@@ -863,7 +863,7 @@ dependencies = [
  "ardur-runtime",
  "ardur-tool-registry",
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "hex",
  "reqwest 0.12.28",
  "serde",
@@ -1087,7 +1087,7 @@ name = "ardur-receipt"
 version = "0.0.1"
 dependencies = [
  "ardur-core-types",
- "base64 0.22.1",
+ "base64 0.23.1",
  "once_cell",
  "p256 0.13.2",
  "rand_core 0.6.4",
@@ -1291,7 +1291,7 @@ dependencies = [
  "ardur-runtime",
  "ardur-tool-registry",
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "regex",
  "reqwest 0.12.28",
  "serde",
@@ -1311,7 +1311,7 @@ dependencies = [
  "ardur-receipt",
  "async-trait",
  "axum 0.8.9",
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "hex",
  "hmac 0.13.0",
@@ -1738,6 +1738,12 @@ name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+
+[[package]]
+name = "base64"
+version = "0.23.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
 name = "base64ct"
