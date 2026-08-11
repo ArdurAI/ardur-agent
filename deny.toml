@@ -41,6 +41,7 @@ ignore = [
     { id = "RUSTSEC-2024-0436", reason = "paste is pulled transitively by fastembed/tokenizers/rav1e; no safe drop-in upgrade exposed here" },
     { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2 is transitive via Matrix/Teloxide/Biscuit; no direct replacement in this workspace" },
     { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile is transitive via qdrant-client/tonic; no patched direct upgrade available" },
+    { id = "RUSTSEC-2026-0247", reason = "bitmaps is transitive via matrix-sdk -> imbl -> imbl-sized-chunks; unmaintained notice, cargo-deny reports 'No safe upgrade is available!'" },
 ]
 # Require cargo-audit advisories db to be up to date
 db-urls = ["https://github.com/rustsec/advisory-db"]
