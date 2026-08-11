@@ -318,6 +318,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
  "uuid",
 ]
 
@@ -614,6 +615,7 @@ dependencies = [
  "ardur-channel-telegram",
  "ardur-cli",
  "ardur-cost-gate",
+ "ardur-cron",
  "ardur-embeddings",
  "ardur-fused-runtime",
  "ardur-hooks-openclaw-compat",

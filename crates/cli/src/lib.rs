@@ -40,6 +40,7 @@ mod error;
 mod fused;
 mod links;
 mod markdown;
+mod schedule_exec;
 mod secure_io;
 mod slash;
 mod state;
@@ -70,6 +71,10 @@ pub use error::CliError;
 pub use fused::FusedEngine;
 pub use links::{osc8_from_env, terminal_supports_osc8};
 pub use markdown::{render_markdown, render_markdown_with};
+pub use schedule_exec::{
+    DEFAULT_DRIVER_INTERVAL_SECS, ScheduleRecord, read_schedule_records, run_schedule_fire,
+    run_schedule_run,
+};
 pub use secure_io::{
     create_private_file_no_follow, directory_modified_no_follow, list_directory_names_no_follow,
     read_file_no_follow, read_string_no_follow, remove_directory_tree_no_follow,

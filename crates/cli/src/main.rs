@@ -23,9 +23,10 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use ardur_cli::{
-    ChatArgs, CliError, Config, SessionMetadata, StateDirs, directory_modified_no_follow,
-    list_directory_names_no_follow, read_string_no_follow, remove_directory_tree_no_follow,
-    run_chat, write_private_file_atomic_no_follow, write_private_file_no_follow,
+    ChatArgs, CliError, Config, DEFAULT_DRIVER_INTERVAL_SECS, ScheduleRecord, SessionMetadata,
+    StateDirs, directory_modified_no_follow, list_directory_names_no_follow, read_schedule_records,
+    read_string_no_follow, remove_directory_tree_no_follow, run_chat, run_schedule_fire,
+    run_schedule_run, write_private_file_atomic_no_follow, write_private_file_no_follow,
 };
 use ardur_session_journals::{
     JournalEntry, default_secret_patterns, redact_entries_default, redact_text,
@@ -2193,22 +2194,20 @@ enum ScheduleAction {
         /// Schedule ID.
         id: String,
     },
-    /// Test fire a schedule now (dry-run).
+    /// Fire a schedule now, executing it end-to-end through the pipeline.
     Fire {
         /// Schedule ID.
         id: String,
     },
-}
-
-/// Parsed schedule record stored in the state directory.
-#[derive(serde::Serialize, serde::Deserialize)]
-struct ScheduleRecord {
-    schedule_id: String,
-    label: String,
-    pattern: String,
-    prompt: String,
-    created_at: u64,
-    enabled: bool,
+    /// Drive every due schedule on an interval, executing each end-to-end.
+    Run {
+        /// Seconds between ticks.
+        #[arg(long, default_value_t = DEFAULT_DRIVER_INTERVAL_SECS)]
+        interval_secs: u64,
+        /// Stop after this many ticks (omit to run until interrupted).
+        #[arg(long)]
+        max_ticks: Option<usize>,
+    },
 }
 
 /// Simple cron-like parser for the most common NL patterns.
@@ -2269,24 +2268,6 @@ fn parse_time_to_cron(time_str: &str) -> Option<String> {
     Some(format!("{minute} {hour} * * *"))
 }
 
-/// Read schedule records from the state directory.
-fn read_schedules(root: &Path) -> Result<Vec<ScheduleRecord>, CliError> {
-    let dir = root.join("schedules");
-    let mut records = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&dir) {
-        for entry in entries.flatten() {
-            if entry.path().extension().is_some_and(|e| e == "json") {
-                if let Ok(content) = read_string_no_follow(&entry.path()) {
-                    if let Ok(v) = serde_json::from_str::<ScheduleRecord>(&content) {
-                        records.push(v);
-                    }
-                }
-            }
-        }
-    }
-    Ok(records)
-}
-
 /// Parse a 5-field cron string into a CronExpression.
 /// Supported: `*` (any), `n` (exact), `n-m` (range), `a,b` (list), `*/n` (step),
 /// `a-b/n` (range step), and `JAN`/`MON` names — validated up front so an
@@ -2332,7 +2313,8 @@ fn next_fire_times(
 
 /// Run `ardur schedule` subcommands.
 fn run_schedule(args: ScheduleArgs) -> Result<(), CliError> {
-    let root = StateDirs::resolve()?.root;
+    let dirs = StateDirs::resolve()?;
+    let root = dirs.root.clone();
     let schedules_dir = root.join("schedules");
     std::fs::create_dir_all(&schedules_dir)?;
 
@@ -2358,6 +2340,8 @@ fn run_schedule(args: ScheduleArgs) -> Result<(), CliError> {
                     .map(|d| d.as_secs())
                     .unwrap_or(0),
                 enabled: true,
+                last_fire_at: None,
+                fire_count: 0,
             };
             write_private_file_atomic_no_follow(
                 &schedules_dir.join(format!("{id}.json")),
@@ -2372,7 +2356,7 @@ fn run_schedule(args: ScheduleArgs) -> Result<(), CliError> {
             }
         }
         ScheduleAction::List => {
-            let records = read_schedules(&root)?;
+            let records = read_schedule_records(&schedules_dir);
             if records.is_empty() {
                 println!("no schedules");
             } else {
@@ -2395,7 +2379,7 @@ fn run_schedule(args: ScheduleArgs) -> Result<(), CliError> {
             }
         }
         ScheduleAction::Next { id, count } => {
-            let records = read_schedules(&root)?;
+            let records = read_schedule_records(&schedules_dir);
             let found = records.iter().find(|r| r.schedule_id == id);
             match found {
                 Some(r) => {
@@ -2420,19 +2404,15 @@ fn run_schedule(args: ScheduleArgs) -> Result<(), CliError> {
             println!("deleted schedule {id}");
         }
         ScheduleAction::Fire { id } => {
-            let records = read_schedules(&root)?;
-            let found = records.iter().find(|r| r.schedule_id == id);
-            match found {
-                Some(r) => {
-                    println!("dry-run fire schedule {id}");
-                    println!("  prompt: {}", r.prompt);
-                    println!("  pattern: {}", r.pattern);
-                    println!("  note: execution engine not yet wired");
-                }
-                None => {
-                    return Err(CliError::State(format!("schedule `{id}` not found")));
-                }
-            }
+            let config = Config::load(None)?;
+            run_schedule_fire(&dirs, &config, &id)?;
+        }
+        ScheduleAction::Run {
+            interval_secs,
+            max_ticks,
+        } => {
+            let config = Config::load(None)?;
+            run_schedule_run(&dirs, &config, interval_secs, max_ticks)?;
         }
     }
     Ok(())

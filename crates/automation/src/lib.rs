@@ -22,12 +22,14 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod driver;
 mod error;
 pub mod learning;
 pub mod proactive;
 mod task_record;
 pub mod tasks;
 
+pub use driver::ScheduleDriver;
 pub use error::TaskFlowError;
 pub use proactive::{
     AutomationAttenuation, AutomationChannel, AutomationDeliveryEvent, AutomationRuntime,
