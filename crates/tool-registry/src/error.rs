@@ -46,6 +46,13 @@ pub enum ToolError {
     #[error("tool timed out")]
     Timeout,
 
+    /// The tool is registered but its backend is not yet implemented. Returned
+    /// instead of fabricating a success: an unimplemented tool must surface an
+    /// explicit error so the runtime mints **no** permitted receipt for work it
+    /// never performed.
+    #[error("tool not implemented: {0}")]
+    NotImplemented(String),
+
     /// Running the tool would exceed its
     /// [`cost_budget_cents`](crate::ToolContext::cost_budget_cents) ceiling.
     #[error("tool invocation exceeds its cost ceiling")]

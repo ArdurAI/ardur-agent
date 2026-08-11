@@ -199,6 +199,25 @@ pub enum ChatSubmitError {
     QueueFull,
 }
 
+/// The outcome of handing an inbound channel message to the worker via
+/// [`AppState::enqueue`].
+///
+/// A webhook caller uses this to choose the HTTP status it returns to the
+/// source: [`Accepted`](Self::Accepted) → `200`, while both non-accepted
+/// variants are retryable and must map to a non-2xx so the source (e.g. Slack)
+/// redelivers rather than treating the message as durably received.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnqueueOutcome {
+    /// The message was placed on the bounded work queue.
+    Accepted,
+    /// The bounded work queue is currently saturated. The message was **not**
+    /// enqueued — retryable.
+    Full,
+    /// The turn worker has shut down; the queue is closed and no further work
+    /// will be processed. The message was **not** enqueued.
+    WorkerGone,
+}
+
 /// Process-lifetime turn-outcome and security-denial counters, shared between
 /// the turn worker (which increments them as turns settle) and the HTTP layer
 /// (which reads them for `/metrics` and `/admin/runtime`).
@@ -777,12 +796,24 @@ impl AppState {
         self.slack.as_deref()
     }
 
-    /// Hand a verified inbound message to the processing worker. Returns `false`
-    /// only if the worker has shut down (so the caller can log a drop).
+    /// Hand a verified inbound message to the processing worker.
+    ///
+    /// The three outcomes are kept distinct on purpose: a webhook caller (e.g.
+    /// the Slack events handler) must be able to tell a saturated queue
+    /// ([`EnqueueOutcome::Full`], retryable — ask the source to redeliver) from
+    /// a worker that has shut down ([`EnqueueOutcome::WorkerGone`]). Collapsing
+    /// them into a single bool led to inbound messages being silently dropped
+    /// under burst while the source was told `200 OK` and never retried.
     #[must_use]
-    pub fn enqueue(&self, message: IncomingMessage) -> bool {
-        self.work_sender()
-            .is_some_and(|tx| tx.try_send(WorkItem::Channel(message)).is_ok())
+    pub fn enqueue(&self, message: IncomingMessage) -> EnqueueOutcome {
+        let Some(tx) = self.work_sender() else {
+            return EnqueueOutcome::WorkerGone;
+        };
+        match tx.try_send(WorkItem::Channel(message)) {
+            Ok(()) => EnqueueOutcome::Accepted,
+            Err(mpsc::error::TrySendError::Full(_)) => EnqueueOutcome::Full,
+            Err(mpsc::error::TrySendError::Closed(_)) => EnqueueOutcome::WorkerGone,
+        }
     }
 
     /// Run a synchronous chat turn (the `POST /chat` path): hand the prompt to the
@@ -1907,6 +1938,75 @@ mod tests {
             *ran.lock().unwrap(),
             vec![1, 3],
             "the panicking turn was isolated; turns before and after still ran"
+        );
+    }
+
+    /// Build a minimal `AppState` wired to `work_tx` for enqueue-path tests.
+    /// The worker side of the channel is the caller's to hold (or drop).
+    fn test_state(work_tx: mpsc::Sender<WorkItem>, tempdir: &tempfile::TempDir) -> AppState {
+        AppState {
+            slack: None,
+            work_tx: Arc::new(Mutex::new(Some(work_tx))),
+            worker_handle: Mutex::new(None),
+            journal: Arc::new(InMemorySessionJournal::new(SessionId::new())),
+            data_dir: tempdir.path().to_path_buf(),
+            chat_bearer_tokens: Vec::new(),
+            admin_bearer_tokens: Vec::new(),
+            tool_allowlist: Vec::new(),
+            cost_budget_cents: 0,
+            mcp: None,
+            matrix: Arc::new(OnceLock::new()),
+            discord: Arc::new(OnceLock::new()),
+            telegram: Arc::new(OnceLock::new()),
+            receipt_jwks: ardur_receipt::Jwks::new(),
+            security_metrics: Arc::new(SecurityMetrics::default()),
+        }
+    }
+
+    fn test_incoming(text: &str) -> IncomingMessage {
+        IncomingMessage {
+            message_id: uuid::Uuid::new_v4(),
+            channel_id: ardur_messaging_gateway::ChannelId("slack://T/C1".to_string()),
+            sender: ardur_messaging_gateway::SenderRef("U1".to_string()),
+            body: MessageBody::Text(text.to_string()),
+            received_at: ardur_messaging_gateway::UnixTsMillis(1_750_000_000_000),
+            thread_id: None,
+        }
+    }
+
+    /// Regression for #356: a saturated worker queue must surface as
+    /// [`EnqueueOutcome::Full`] (retryable) — distinct from a shut-down worker
+    /// ([`EnqueueOutcome::WorkerGone`]). Before the fix both collapsed into a
+    /// single `false`, so the Slack handler acked `200` and dropped the message
+    /// silently instead of returning `503` for Slack to redeliver.
+    #[test]
+    fn enqueue_distinguishes_full_queue_from_a_gone_worker() {
+        // Capacity-1 channel whose receiver we deliberately never drain.
+        let (work_tx, work_rx) = mpsc::channel::<WorkItem>(1);
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let state = test_state(work_tx, &tempdir);
+
+        // First message takes the single slot.
+        assert_eq!(
+            state.enqueue(test_incoming("one")),
+            EnqueueOutcome::Accepted,
+            "the first message fits the bounded queue"
+        );
+        // The queue is now full: the next message must report `Full`, not a
+        // gone worker, and must not be silently accepted.
+        assert_eq!(
+            state.enqueue(test_incoming("two")),
+            EnqueueOutcome::Full,
+            "a saturated queue is retryable, not a dropped-and-acked message"
+        );
+
+        // Once the worker side is gone, enqueue reports `WorkerGone` — the case
+        // that must stay distinct from `Full`.
+        drop(work_rx);
+        assert_eq!(
+            state.enqueue(test_incoming("three")),
+            EnqueueOutcome::WorkerGone,
+            "a closed queue is a gone worker, not a full one"
         );
     }
 
