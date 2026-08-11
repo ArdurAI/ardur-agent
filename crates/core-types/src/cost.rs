@@ -44,7 +44,61 @@ pub struct CostTuple {
     /// Human attention consumed, in **milli-attention** units (thousandths of
     /// one unit; see [`MILLI_ATTENTION_PER_UNIT`]). Integer so the attention
     /// budget decrements exactly and receipt bytes are stable.
+    ///
+    /// Deserialization is migration-tolerant: a receipt persisted by an older
+    /// build carries this axis as a `0.0..=1.0` float, which is coerced to
+    /// milli-attention rather than rejected — see [`de_attention_score`].
+    #[serde(deserialize_with = "de_attention_score")]
     pub attention_score: u64,
+}
+
+/// Deserialize [`CostTuple::attention_score`], migrating the legacy on-disk
+/// representation forward.
+///
+/// Older builds carried this axis as an `f64` attention *share* in `0.0..=1.0`
+/// (see the module docs); it is now a milli-attention `u64`. A receipt written
+/// by such a build therefore stores e.g. `"attention_score":0.0`, which a plain
+/// `u64` field rejects with `invalid type: floating point, expected u64`. On the
+/// boot-time receipt-chain reconciliation path that single line aborts the whole
+/// load and bricks CLI and server startup for that data dir (issue #350).
+///
+/// Accept either shape: an integer is already milli-attention and passes through
+/// unchanged; a float is a legacy share and is mapped losslessly onto `0..=1000`
+/// (`share * MILLI_ATTENTION_PER_UNIT`, rounded). The migration is
+/// *representational only* — a persisted receipt's JWS signature and hash-chain
+/// linkage are verified over its original on-disk bytes, never over this decoded
+/// value, so coercing the float weakens no trust check.
+fn de_attention_score<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct AttentionScoreVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for AttentionScoreVisitor {
+        type Value = u64;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a milli-attention integer or a legacy 0.0..=1.0 attention-share float")
+        }
+
+        fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<u64, E> {
+            Ok(v)
+        }
+
+        fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<u64, E> {
+            u64::try_from(v).map_err(|_| E::custom(format!("attention_score out of range: {v}")))
+        }
+
+        fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<u64, E> {
+            if !v.is_finite() || v < 0.0 {
+                return Err(E::custom(format!("invalid legacy attention_score: {v}")));
+            }
+            // Legacy `0.0..=1.0` share → milli-attention (`0..=1000`).
+            Ok((v * MILLI_ATTENTION_PER_UNIT as f64).round() as u64)
+        }
+    }
+
+    deserializer.deserialize_any(AttentionScoreVisitor)
 }
 
 impl CostTuple {
@@ -265,6 +319,53 @@ mod attention_regression {
         );
         let back: CostTuple = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(cost, back);
+    }
+
+    // Issue #350: a receipt persisted by an older build carries `attention_score`
+    // as a `0.0..=1.0` float. Boot-time chain reconciliation must load it rather
+    // than aborting, so the field deserializer coerces the legacy share onto the
+    // milli-attention integer axis (`share * 1000`, rounded) instead of failing
+    // with `invalid type: floating point, expected u64`.
+    #[test]
+    fn legacy_float_attention_score_migrates_to_milli() {
+        for (json, expected) in [
+            (
+                r#"{"tokens_in":0,"tokens_out":0,"cents":0,"wall_ms":0,"attention_score":0.0}"#,
+                0,
+            ),
+            (
+                r#"{"tokens_in":0,"tokens_out":0,"cents":0,"wall_ms":0,"attention_score":0.5}"#,
+                500,
+            ),
+            (
+                r#"{"tokens_in":0,"tokens_out":0,"cents":0,"wall_ms":0,"attention_score":1.0}"#,
+                1_000,
+            ),
+        ] {
+            let cost: CostTuple = serde_json::from_str(json).expect("legacy float must migrate");
+            assert_eq!(
+                cost.attention_score, expected,
+                "legacy share in {json} should map to {expected} milli-attention"
+            );
+        }
+    }
+
+    // The new integer representation is unchanged by the migration path: a
+    // milli-attention integer passes through as-is (no accidental ×1000).
+    #[test]
+    fn integer_attention_score_passes_through_unchanged() {
+        let json = r#"{"tokens_in":0,"tokens_out":0,"cents":0,"wall_ms":0,"attention_score":750}"#;
+        let cost: CostTuple = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(cost.attention_score, 750);
+    }
+
+    // A genuinely malformed value (negative / non-finite share) is still an
+    // error — tolerance is scoped to the legacy float shape, not "accept
+    // anything".
+    #[test]
+    fn negative_attention_score_is_rejected() {
+        let json = r#"{"tokens_in":0,"tokens_out":0,"cents":0,"wall_ms":0,"attention_score":-1.0}"#;
+        assert!(serde_json::from_str::<CostTuple>(json).is_err());
     }
 }
 
