@@ -45,7 +45,7 @@ ardur-cost-gate = { workspace = true }
 serde_json = { workspace = true }
 # Criterion, lean: no plotters/rayon/html — just the runnable bench harness, to
 # keep the transitive footprint (and `--all-targets` compile time in CI) small.
-criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 # The cost-gate and BM25 surfaces are async; drive them on a current-thread
 # runtime inside the measured closures.
 tokio = { workspace = true }
