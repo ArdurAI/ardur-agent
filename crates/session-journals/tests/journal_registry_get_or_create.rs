@@ -5,6 +5,7 @@
 use ardur_session_journals::{
     InMemorySessionJournal, JournalEntry, JournalRegistry, SessionId, SessionJournal,
 };
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[tokio::test]
@@ -15,7 +16,7 @@ async fn get_or_create_returns_the_same_journal() {
 
     let factory = || {
         factory_calls.fetch_add(1, Ordering::SeqCst);
-        Box::new(InMemorySessionJournal::new(session_id)) as Box<dyn SessionJournal>
+        Arc::new(InMemorySessionJournal::new(session_id)) as Arc<dyn SessionJournal>
     };
 
     // First call mints the journal and appends through it.
@@ -57,10 +58,10 @@ async fn register_rejects_a_duplicate_session() {
     let session_id = SessionId::new();
 
     registry
-        .register(Box::new(InMemorySessionJournal::new(session_id)))
+        .register(Arc::new(InMemorySessionJournal::new(session_id)))
         .expect("first registration");
     let err = registry
-        .register(Box::new(InMemorySessionJournal::new(session_id)))
+        .register(Arc::new(InMemorySessionJournal::new(session_id)))
         .expect_err("duplicate registration");
     assert!(matches!(
         err,
