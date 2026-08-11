@@ -1,0 +1,27 @@
+[package]
+name = "ardur-code-execution"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# §6.0 tool registry — the Tool trait, Capability, and shared types.
+ardur-tool-registry = { workspace = true }
+# §1.0 runtime — shared value types (CapTokenRef, CostTuple, SessionId).
+ardur-runtime = { workspace = true }
+# §11.16 prompt-injection defense — scan captured stdout before it reaches
+# the model.
+ardur-injection-defense = { workspace = true }
+
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
