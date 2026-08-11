@@ -111,7 +111,7 @@ hex = "0.4"
 # Secret custody for the Slack bot token + signing secret (crates/slack-adapter,
 # §4.1) — keeps them out of Debug/log output behind `SecretString`.
 secrecy = "0.10"
-base64 = "0.22"
+base64 = "0.23"
 # Race-resistant Unix opens for private state and exported session bundles.
 libc = "0.2"
 # Descriptor-relative directory traversal for journal paths; prevents parent
