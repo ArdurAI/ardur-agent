@@ -4,12 +4,15 @@
 //! live Qdrant: chat turn → receipt-chained memory store → hybrid dense+sparse
 //! recall → memory context display in the next provider request.
 //!
-//! Gated on `QDRANT_INTEGRATION_TEST=1` (CI has no Qdrant). To run locally:
+//! `#[ignore]`d because it needs a live Qdrant (CI has none by default); the
+//! default suite reports it as `ignored`, never a silent `passed` (#358). Run it
+//! explicitly against a Qdrant — the dedicated CI job does exactly this:
 //!
 //! ```text
 //! docker run -p 6333:6333 -p 6334:6334 qdrant/qdrant
-//! QDRANT_INTEGRATION_TEST=1 \
-//!   cargo test -p ardur-e2e-tests --test scenario_hybrid_memory_full_pipeline
+//! QDRANT_INTEGRATION_TEST=1 QDRANT_URL=http://localhost:6334 \
+//!   cargo test -p ardur-e2e-tests --test scenario_hybrid_memory_full_pipeline \
+//!   -- --ignored
 //! ```
 
 use std::collections::VecDeque;
@@ -32,12 +35,8 @@ use async_trait::async_trait;
 
 const COLLECTION: &str = "ardur_e2e_hybrid_full_pipeline";
 
-fn gate() -> Option<QdrantMemoryConfig> {
-    if std::env::var("QDRANT_INTEGRATION_TEST").as_deref() != Ok("1") {
-        eprintln!("skipping scenario_hybrid_memory_full_pipeline: set QDRANT_INTEGRATION_TEST=1");
-        return None;
-    }
-    Some(QdrantMemoryConfig::from_env().with_collection_name(COLLECTION))
+fn config() -> QdrantMemoryConfig {
+    QdrantMemoryConfig::from_env().with_collection_name(COLLECTION)
 }
 
 struct CapturingProvider {
@@ -107,12 +106,9 @@ fn submit_request(prompt: &str, session_id: SessionId) -> SubmitRequest {
 }
 
 #[test]
+#[ignore = "requires a live Qdrant; run with `-- --ignored` (see module docs)"]
 fn chat_store_recall_and_display_through_real_hybrid_memory() {
-    let Some(cfg) = gate() else {
-        return;
-    };
-
-    let qdrant = QdrantMemoryRuntime::connect(cfg).expect("connect qdrant");
+    let qdrant = QdrantMemoryRuntime::connect(config()).expect("connect qdrant");
     let bm25 = Bm25Index::new(None).expect("in-memory bm25");
     let hybrid = Arc::new(HybridMemoryRetriever::new(
         qdrant,
