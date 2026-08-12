@@ -91,6 +91,7 @@ pub fn test_config(data_dir: &TempDir, slack_base: Option<String>) -> Config {
         enable_http_tool: false,
         http_allowlist: Vec::new(),
         file_tool_root: None,
+        http_turn_timeout: std::time::Duration::from_secs(30),
     }
 }
 

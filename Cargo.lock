@@ -511,6 +511,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "ardur-code-execution"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "ardur-injection-defense",
+ "ardur-runtime",
+ "ardur-tool-registry",
+ "async-trait",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "ardur-config"
 version = "0.0.1"
 dependencies = [

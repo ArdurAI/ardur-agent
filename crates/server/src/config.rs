@@ -15,6 +15,7 @@
 
 use std::fmt;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use ardur_provider_selector::{ProviderKind, SELECTOR_ENV};
 use ardur_tool_registry::{BuiltinOpts, HttpFetchOpts};
@@ -176,6 +177,13 @@ pub struct Config {
     /// `file.list` built-in tools (`ARDUR_FILE_TOOL_ROOT`). `Some(root)`
     /// registers all three confined to it; `None` registers no file tool.
     pub file_tool_root: Option<PathBuf>,
+    /// How long a synchronous `POST /chat` (and ACP) turn may run before the
+    /// HTTP surface stops waiting on it (`ARDUR_HTTP_TURN_TIMEOUT_SECS`, default
+    /// `30`). When the wait elapses the client receives `504`; the worker
+    /// observes the dropped reply channel and cancels the in-flight turn before
+    /// it commits a receipt or bills cost, so the `504` is never paired with a
+    /// silently-billed turn (issue #359). Must be a positive number of seconds.
+    pub http_turn_timeout: Duration,
 }
 
 /// A required environment variable was unset or empty.
@@ -254,6 +262,7 @@ impl fmt::Debug for Config {
             .field("enable_http_tool", &self.enable_http_tool)
             .field("http_allowlist", &self.http_allowlist)
             .field("file_tool_root", &self.file_tool_root)
+            .field("http_turn_timeout", &self.http_turn_timeout)
             .finish()
     }
 }
@@ -414,6 +423,28 @@ impl Config {
         let http_allowlist = parse_csv(optional("ARDUR_HTTP_ALLOWLIST").as_deref());
         let file_tool_root = optional("ARDUR_FILE_TOOL_ROOT").map(PathBuf::from);
 
+        // The synchronous-turn wait ceiling. A slow-but-legitimate turn (a long
+        // tool loop, a slow provider) should be able to outlast the default 30s
+        // without the operator having to fork the code — so it is a knob, not a
+        // constant. A zero or unparseable value is rejected rather than silently
+        // treated as "no timeout".
+        let http_turn_timeout = match optional("ARDUR_HTTP_TURN_TIMEOUT_SECS") {
+            None => Duration::from_secs(30),
+            Some(raw) => {
+                let secs = raw.parse::<u64>().map_err(|e| ConfigError::Invalid {
+                    var: "ARDUR_HTTP_TURN_TIMEOUT_SECS",
+                    reason: format!("`{raw}` is not a valid u64: {e}"),
+                })?;
+                if secs == 0 {
+                    return Err(ConfigError::Invalid {
+                        var: "ARDUR_HTTP_TURN_TIMEOUT_SECS",
+                        reason: "must be a positive number of seconds".to_string(),
+                    });
+                }
+                Duration::from_secs(secs)
+            }
+        };
+
         Ok(Self {
             anthropic_api_key,
             slack_enabled,
@@ -473,6 +504,7 @@ impl Config {
             enable_http_tool,
             http_allowlist,
             file_tool_root,
+            http_turn_timeout,
         })
     }
 
