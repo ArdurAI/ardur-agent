@@ -41,7 +41,7 @@ use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ardur_cap_token::{
     BiscuitCapTokenIssuer, CapScope, CapTokenIssuer, HolderId as CapHolderId, KeyPair, PublicKey,
@@ -365,6 +365,11 @@ pub struct AppState {
     receipt_jwks: ardur_receipt::Jwks,
     /// Turn-outcome and security-denial counters, shared with the worker.
     security_metrics: Arc<SecurityMetrics>,
+    /// How long the synchronous `/chat` + ACP handlers wait on a turn before
+    /// returning `504` (`ARDUR_HTTP_TURN_TIMEOUT_SECS`, default `30s`). The
+    /// worker cancels the turn when the wait elapses, so the timeout bounds the
+    /// client's wait without billing for an unobservable turn (issue #359).
+    http_turn_timeout: Duration,
 }
 
 /// The data [`build_router`](crate::build_router) needs to mount the §6.0 MCP
@@ -630,6 +635,7 @@ impl AppState {
             telegram,
             receipt_jwks,
             security_metrics,
+            http_turn_timeout: config.http_turn_timeout,
         }))
     }
 
@@ -649,6 +655,13 @@ impl AppState {
     #[must_use]
     pub fn cost_budget_cents(&self) -> u64 {
         self.cost_budget_cents
+    }
+
+    /// How long the synchronous `/chat` + ACP handlers wait on a turn before
+    /// returning `504` (`ARDUR_HTTP_TURN_TIMEOUT_SECS`, default `30s`).
+    #[must_use]
+    pub fn http_turn_timeout(&self) -> Duration {
+        self.http_turn_timeout
     }
 
     /// The tool ids minted into session cap-tokens for runtime turns.
@@ -1204,7 +1217,7 @@ impl Processor {
         let HttpTurn {
             message,
             session_id,
-            reply,
+            mut reply,
         } = turn;
 
         let token = match self.mint_session_token(now_unix()) {
@@ -1231,7 +1244,33 @@ impl Processor {
             requested_provider: None,
         };
 
-        let outcome = match self.runtime.submit(request).await {
+        // Cancel the turn if the HTTP caller goes away before it settles. The
+        // client-facing turn timeout firing (or the client simply hanging up)
+        // drops the `submit_chat` future, which drops the oneshot receiver and
+        // resolves `reply.closed()`. Racing that against the turn — the sync
+        // mirror of the streaming path's `events.closed()` guard — lets us drop
+        // the in-flight `submit` future before it commits the receipt, journal,
+        // and cost side effects (all of which happen at `.await` points inside
+        // `submit`). Without this, the worker ran the turn to completion and
+        // minted+billed a receipt the caller was told `504` for and never saw
+        // (issue #359). `biased` prefers the completion arm so a turn that
+        // finished right at the deadline still reports its already-committed
+        // outcome rather than being needlessly discarded.
+        let submit = self.runtime.submit(request);
+        tokio::pin!(submit);
+        let submit_result = tokio::select! {
+            biased;
+            result = &mut submit => result,
+            () = reply.closed() => {
+                tracing::info!(
+                    session_id = %session_id.0,
+                    "HTTP turn abandoned by caller before completion; cancelling turn (no receipt minted)"
+                );
+                return;
+            }
+        };
+
+        let outcome = match submit_result {
             Ok(result) => {
                 self.security_metrics.record_ok();
                 let tools_called = self.tools_called_since(receipts_before);
@@ -1960,6 +1999,7 @@ mod tests {
             telegram: Arc::new(OnceLock::new()),
             receipt_jwks: ardur_receipt::Jwks::new(),
             security_metrics: Arc::new(SecurityMetrics::default()),
+            http_turn_timeout: Duration::from_secs(30),
         }
     }
 
@@ -2044,6 +2084,7 @@ mod tests {
             telegram: Arc::new(OnceLock::new()),
             receipt_jwks: ardur_receipt::Jwks::new(),
             security_metrics: Arc::new(SecurityMetrics::default()),
+            http_turn_timeout: Duration::from_secs(30),
         };
 
         assert!(state.worker_alive());

@@ -934,6 +934,16 @@ cargo test -p ardur-fused-runtime --test memory_recall
 spend. The cost-gate enforces this server-side and returns a structured
 error to the channel before the next provider call when the ceiling is hit.
 
+## Turn timeout
+
+`ARDUR_HTTP_TURN_TIMEOUT_SECS=30` (default `30`) bounds how long the
+synchronous `POST /chat` and ACP HTTP handlers wait on a single turn before
+returning `504 Gateway Timeout`. Raise it for workloads with long tool loops
+or slow providers. The value must be a positive integer number of seconds; a
+`0` or unparseable value is rejected at boot. When the wait elapses the turn is
+cancelled before it commits a receipt or bills cost, so a `504` never pairs
+with a silently-billed turn the client could not observe.
+
 ## Troubleshooting
 
 **Events not arriving.**

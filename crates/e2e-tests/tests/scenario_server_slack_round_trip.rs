@@ -89,6 +89,7 @@ async fn server_routes_signed_slack_message_through_runtime_to_chat_post_message
         enable_http_tool: false,
         http_allowlist: Vec::new(),
         file_tool_root: None,
+        http_turn_timeout: std::time::Duration::from_secs(30),
         slack_enabled: true,
         slack_bot_token: Some(BOT_TOKEN.to_string()),
         slack_signing_secret: Some(SIGNING_SECRET.to_string()),
