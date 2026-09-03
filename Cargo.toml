@@ -54,7 +54,7 @@ version = "0.4"
 features = [ "serde",]
 
 [workspace.dependencies.p256]
-version = "0.13"
+version = "0.14"
 features = [ "ecdsa", "pkcs8", "pem",]
 
 [workspace.dependencies.rand_core]
