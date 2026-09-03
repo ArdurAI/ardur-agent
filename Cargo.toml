@@ -128,7 +128,7 @@ default-features = false
 features = [ "server", "client", "transport-streamable-http-server", "transport-streamable-http-client-reqwest",]
 
 [workspace.dependencies.russh]
-version = "0.62"
+version = "0.63"
 default-features = false
 features = [ "flate2", "aws-lc-rs",]
 
