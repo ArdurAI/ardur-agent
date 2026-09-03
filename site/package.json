@@ -9,7 +9,7 @@
     "build": "hugo --gc --minify"
   },
   "devDependencies": {
-    "@tailwindcss/postcss": "^4.3.2",
+    "@tailwindcss/postcss": "^4.3.3",
     "postcss": "^8.5.26",
     "postcss-cli": "^11.0.0",
     "tailwindcss": "^4.3.2"
