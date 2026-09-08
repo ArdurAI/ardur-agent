@@ -565,9 +565,19 @@ fn run_doctor(args: DoctorArgs) -> Result<(), CliError> {
     let cedar_path = root.join("cedar.policies");
     if cedar_path.is_file() {
         checks.push(json!({"name": "cedar_policy", "status": "ok"}));
+    } else if std::env::var("ARDUR_DEV_PERMISSIVE_POLICY")
+        .ok()
+        .is_some_and(|v| v == "true")
+    {
+        // The file-presence warning would be noise: turns are currently
+        // permitted by the explicit dev fallback.
+        checks.push(json!({"name": "cedar_policy", "status": "ok", "present": false, "note": "no policy file; dev-permissive fallback active (ARDUR_DEV_PERMISSIVE_POLICY=true)"}));
     } else {
         warnings += 1;
-        checks.push(json!({"name": "cedar_policy", "status": "warn", "present": false, "note": "policy file not found — run `ardur setup` to write a starter policy, or set ARDUR_DEV_PERMISSIVE_POLICY=true for local development"}));
+        // #408 / codex review: `ardur setup` writes only the HOME-resolved
+        // `~/.ardur`, so when `--state-dir` inspects another directory the
+        // remedy text must name the inspected path explicitly.
+        checks.push(json!({"name": "cedar_policy", "status": "warn", "present": false, "note": format!("policy file not found at {} — `ardur setup` writes a starter policy under the HOME-resolved ~/.ardur; for this state directory, write or copy a cedar.policies into it", cedar_path.display())}));
     }
 
     // 7. Disk usage

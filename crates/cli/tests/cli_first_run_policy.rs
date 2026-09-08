@@ -72,6 +72,24 @@ fn setup_writes_starter_policy_and_offline_chat_works_without_dev_flag() {
         "the fused stub turn should complete after setup, got stdout: {stdout}\nstderr: {}",
         String::from_utf8_lossy(&chat.stderr)
     );
+
+    // Re-running setup is idempotent: the starter is kept, never replaced
+    // (codex review: create-new-only semantics, no replacement race).
+    let again = ardur(&home_path)
+        .args(["setup", "--yes"])
+        .output()
+        .expect("second setup runs");
+    assert!(again.status.success());
+    assert!(
+        String::from_utf8_lossy(&again.stdout).contains("kept existing Cedar policy"),
+        "second setup must keep the existing policy, got: {}",
+        String::from_utf8_lossy(&again.stdout)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&policy_path).expect("policy file"),
+        policy,
+        "starter policy content must be unchanged after a second setup"
+    );
 }
 
 #[test]

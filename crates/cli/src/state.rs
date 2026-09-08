@@ -158,13 +158,17 @@ impl StateDirs {
     /// when no policy file exists yet. Returns `Some(path)` when the starter was
     /// written, `None` when an existing (operator-owned) policy file was left
     /// untouched. Called by `ardur setup`; see #408.
+    ///
+    /// Uses create-new-only semantics (O_EXCL on Unix): a policy file that
+    /// appears concurrently — configuration management, a second `setup` — is
+    /// reported as "kept", never replaced.
     pub fn write_starter_cedar_policy_if_absent(&self) -> Result<Option<PathBuf>, CliError> {
         let path = self.cedar_path();
-        if path.exists() {
-            return Ok(None);
+        match create_private_file_no_follow(&path, STARTER_CEDAR_POLICY.as_bytes()) {
+            Ok(()) => Ok(Some(path)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
+            Err(e) => Err(CliError::Io(e)),
         }
-        write_private_file_atomic_no_follow(&path, STARTER_CEDAR_POLICY.as_bytes())?;
-        Ok(Some(path))
     }
 
     /// Load the cap-token issuer from [`issuer_key_path`](Self::issuer_key_path),
