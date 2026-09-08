@@ -18,9 +18,8 @@ ardur-cap-token = { workspace = true }
 # primary wire format (spec §9.1 `alg=ES256`). We mirror the receipt crate's
 # ARD-483 low-S normalization rather than depend on its crate-private signer.
 p256 = { workspace = true }
-# OsRng for `ErSigningKey::generate` — matches `ardur-receipt` (p256's
-# `SigningKey::random` needs a CSPRNG; signing is deterministic RFC 6979).
-rand_core = { workspace = true }
+# `ErSigningKey::generate` uses p256's ambient-CSPRNG `Generate` impl — matches
+# `ardur-receipt` (signing is deterministic RFC 6979).
 # invocation_digest / arguments_hash are SHA-256 over the RFC 8785 (JCS)
 # canonical form of the normalized invocation.
 sha2 = { workspace = true }
