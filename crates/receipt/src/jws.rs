@@ -79,8 +79,9 @@ impl ReceiptSigner {
             .try_sign(signing_input.as_bytes())
             .map_err(|e| ReceiptError::Malformed(format!("sign: {e}")))?;
         // ARD-483: emit canonical low-S so the verifier (which rejects high-S)
-        // accepts our own receipts.
-        let sig = sig.normalize_s().unwrap_or(sig);
+        // accepts our own receipts. ecdsa 0.17: normalize_s() always returns
+        // the low-S form.
+        let sig = sig.normalize_s();
         let jws_compact = format!("{signing_input}.{}", B64URL.encode(sig.to_bytes()));
 
         Ok(SignedReceipt::from_parts(jws_compact, body))
@@ -151,7 +152,9 @@ impl ReceiptVerifier {
         // ARD-483: enforce canonical low-S (BIP-62). ECDSA admits a second valid
         // signature (n - s) for the same key+message; rejecting s > n/2 removes
         // the malleable twin and pins one signature per (key, message).
-        if sig.normalize_s().is_some() {
+        // ecdsa 0.17: normalize_s() always returns the low-S form, so any input
+        // that differs from its normalized form was high-S.
+        if sig.normalize_s() != sig {
             return Err(ReceiptError::SignatureInvalid);
         }
         let signing_input = format!("{header_b64}.{payload_b64}");
@@ -222,7 +225,7 @@ mod tests {
         let signed = ReceiptSigner::sign(sample_body(), &key).unwrap();
         let sig_b64 = signed.jws_compact().split('.').nth(2).unwrap();
         let sig = Signature::from_slice(&B64URL.decode(sig_b64).unwrap()).unwrap();
-        assert!(sig.normalize_s().is_none(), "signer must emit low-S");
+        assert_eq!(sig.normalize_s(), sig, "signer must emit low-S");
         assert!(ReceiptVerifier::verify(&signed, &jwks).is_ok());
     }
 
@@ -241,7 +244,7 @@ mod tests {
         let payload_b64 = parts.next().unwrap();
         let sig_b64 = parts.next().unwrap();
         let sig = Signature::from_slice(&B64URL.decode(sig_b64).unwrap()).unwrap();
-        let low = sig.normalize_s().unwrap_or(sig);
+        let low = sig.normalize_s();
         let high = Signature::from_scalars(low.r(), low.s().neg()).expect("n - s_low is nonzero");
         let malicious = format!(
             "{header_b64}.{payload_b64}.{}",

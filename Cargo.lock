@@ -1106,7 +1106,6 @@ dependencies = [
  "base64 0.23.1",
  "once_cell",
  "p256 0.14.0",
- "rand_core 0.6.4",
  "regex",
  "serde",
  "serde_json",

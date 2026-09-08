@@ -57,10 +57,6 @@ features = [ "serde",]
 version = "0.14"
 features = [ "ecdsa", "pkcs8", "pem",]
 
-[workspace.dependencies.rand_core]
-version = "0.6"
-features = [ "getrandom",]
-
 [workspace.dependencies.rustix]
 version = "1.1"
 features = [ "fs",]
