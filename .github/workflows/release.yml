@@ -35,7 +35,7 @@ jobs:
           ref: ${{ env.RELEASE_TAG }}
 
       - name: Install pinned Rust toolchain
-        run: rustup toolchain install 1.96.1 --profile minimal
+        run: rustup toolchain install 1.98.1 --profile minimal
 
       - name: Build release binaries
         run: |
