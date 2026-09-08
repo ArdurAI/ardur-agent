@@ -4,7 +4,7 @@ use assert_cmd::Command;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use p256::ecdsa::{Signature, SigningKey, signature::Signer};
-use p256::elliptic_curve::rand_core::OsRng;
+use p256::elliptic_curve::Generate;
 use p256::pkcs8::{EncodePublicKey, LineEnding};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -27,7 +27,7 @@ fn signed_skill_manifest(
         std::fs::read(&artifact).expect("artifact bytes"),
     ));
 
-    let signing_key = SigningKey::random(&mut OsRng);
+    let signing_key = SigningKey::generate();
     let public_pem = signing_key
         .verifying_key()
         .to_public_key_pem(LineEnding::LF)
@@ -333,7 +333,7 @@ fn marketplace_publish_then_install_round_trip() {
     std::fs::create_dir_all(&skill_dir).expect("skill dir");
     std::fs::write(skill_dir.join("SKILL.md"), "# My Skill\n\nDoes things.\n").expect("write");
 
-    let signing_key = SigningKey::random(&mut OsRng);
+    let signing_key = SigningKey::generate();
     let public_pem = signing_key
         .verifying_key()
         .to_public_key_pem(LineEnding::LF)
@@ -391,7 +391,7 @@ fn marketplace_publish_plugin_with_runtime_claims() {
     std::fs::create_dir_all(&skill_dir).expect("dir");
     std::fs::write(skill_dir.join("SKILL.md"), "# My Plugin\n").expect("write");
 
-    let signing_key = SigningKey::random(&mut OsRng);
+    let signing_key = SigningKey::generate();
     let private_pem = {
         use p256::pkcs8::EncodePrivateKey;
         signing_key
@@ -433,7 +433,7 @@ fn marketplace_publish_rejects_claim_without_plugin_kind() {
     let skill_dir = dir.path().join("skl");
     std::fs::create_dir_all(&skill_dir).expect("dir");
     std::fs::write(skill_dir.join("SKILL.md"), "# S\n").expect("write");
-    let signing_key = SigningKey::random(&mut OsRng);
+    let signing_key = SigningKey::generate();
     let private_pem = {
         use p256::pkcs8::EncodePrivateKey;
         signing_key
@@ -471,7 +471,7 @@ fn marketplace_validate_verifies_signature_and_artifact_digest() {
         std::fs::read(&artifact).expect("artifact bytes"),
     ));
 
-    let signing_key = SigningKey::random(&mut OsRng);
+    let signing_key = SigningKey::generate();
     let public_pem = signing_key
         .verifying_key()
         .to_public_key_pem(LineEnding::LF)

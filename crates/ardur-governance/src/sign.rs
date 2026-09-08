@@ -17,8 +17,8 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use p256::ecdsa::signature::{Signer as _, Verifier as _};
 use p256::ecdsa::{Signature, SigningKey, VerifyingKey};
+use p256::elliptic_curve::Generate;
 use p256::pkcs8::{DecodePrivateKey, EncodePrivateKey, LineEnding};
-use p256::{EncodedPoint, FieldBytes};
 use serde::{Deserialize, Serialize};
 
 use crate::er::ExecutionReceipt;
@@ -47,7 +47,7 @@ pub struct ErSigningKey {
 impl ErSigningKey {
     /// Generate a fresh key from the OS CSPRNG.
     pub fn generate() -> Self {
-        let inner = SigningKey::random(&mut rand_core::OsRng);
+        let inner = SigningKey::generate();
         let kid = kid_of(inner.verifying_key());
         Self { inner, kid }
     }
@@ -142,7 +142,8 @@ impl ErSigner {
             .try_sign(signing_input.as_bytes())
             .map_err(|e| GovernanceError::Sign(format!("sign: {e}")))?;
         // ARD-483: emit canonical low-S so a high-S-rejecting verifier accepts.
-        let sig = sig.normalize_s().unwrap_or(sig);
+        // ecdsa 0.17: normalize_s() always returns the low-S form.
+        let sig = sig.normalize_s();
         let jws_compact = format!("{signing_input}.{}", B64URL.encode(sig.to_bytes()));
 
         Ok(SignedExecutionReceipt {
@@ -201,8 +202,9 @@ impl ErVerifier {
             .map_err(|_| GovernanceError::Verify("signature base64url".to_string()))?;
         let sig = Signature::from_slice(&sig_bytes)
             .map_err(|_| GovernanceError::Verify("signature bytes".to_string()))?;
-        // ARD-483: reject the malleable high-S twin.
-        if sig.normalize_s().is_some() {
+        // ARD-483: reject the malleable high-S twin. ecdsa 0.17: normalize_s()
+        // always returns the low-S form, so a differing input was high-S.
+        if sig.normalize_s() != sig {
             return Err(GovernanceError::Verify("non-canonical high-S".to_string()));
         }
         let signing_input = format!("{header_b64}.{payload_b64}");
@@ -262,13 +264,13 @@ pub fn verify_er_chain(
 /// The JWS `kid` for a verifying key — first 16 hex of `SHA256(SEC1
 /// uncompressed pubkey)`. Identical to `ardur_receipt::Es256PublicKey::key_id`.
 fn kid_of(vk: &VerifyingKey) -> String {
-    let point = vk.to_encoded_point(false);
+    let point = vk.to_sec1_point(false);
     to_hex(&crate::hash::sha256(point.as_bytes()))[..16].to_string()
 }
 
 /// Render a verifying key as an `ardur-receipt` JWK.
 fn jwk_of(vk: &VerifyingKey, kid: &str) -> JwksKey {
-    let point = vk.to_encoded_point(false);
+    let point = vk.to_sec1_point(false);
     JwksKey {
         kid: kid.to_string(),
         kty: "EC".to_string(),
@@ -288,12 +290,12 @@ fn verifying_key_from_jwk(jwk: &JwksKey) -> Result<VerifyingKey, GovernanceError
     }
     let x = decode_coord(&jwk.x)?;
     let y = decode_coord(&jwk.y)?;
-    let point = EncodedPoint::from_affine_coordinates(
-        FieldBytes::from_slice(&x),
-        FieldBytes::from_slice(&y),
-        false,
-    );
-    VerifyingKey::from_encoded_point(&point)
+    // SEC1 uncompressed point: 0x04 || x || y.
+    let mut sec1 = [0u8; 65];
+    sec1[0] = 0x04;
+    sec1[1..33].copy_from_slice(&x);
+    sec1[33..65].copy_from_slice(&y);
+    VerifyingKey::from_sec1_bytes(&sec1)
         .map_err(|e| GovernanceError::Verify(format!("invalid JWK point: {e}")))
 }
 

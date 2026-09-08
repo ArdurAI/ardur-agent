@@ -42,7 +42,7 @@ tracing-subscriber = "0.3"
 rustyline = "18"
 assert_cmd = "2"
 predicates = "3"
-serial_test = "3"
+serial_test = "4"
 tempfile = "3"
 wiremock = "0.6"
 futures = "0.3"
@@ -54,12 +54,8 @@ version = "0.4"
 features = [ "serde",]
 
 [workspace.dependencies.p256]
-version = "0.13"
+version = "0.14"
 features = [ "ecdsa", "pkcs8", "pem",]
-
-[workspace.dependencies.rand_core]
-version = "0.6"
-features = [ "getrandom",]
 
 [workspace.dependencies.rustix]
 version = "1.1"
@@ -123,12 +119,12 @@ version = "0.29"
 default-features = false
 
 [workspace.dependencies.rmcp]
-version = "=2.0.0"
+version = "=3.2.0"
 default-features = false
 features = [ "server", "client", "transport-streamable-http-server", "transport-streamable-http-client-reqwest",]
 
 [workspace.dependencies.russh]
-version = "0.62"
+version = "0.63"
 default-features = false
 features = [ "flate2", "aws-lc-rs",]
 
