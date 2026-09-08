@@ -146,7 +146,7 @@ class GitHubSecurityWorkflowTests(unittest.TestCase):
     def test_rust_toolchain_is_exactly_pinned(self):
         toolchain = (ROOT / "rust-toolchain.toml").read_text(encoding="utf-8")
 
-        self.assertIn('channel = "1.96.1"', toolchain)
+        self.assertIn('channel = "1.98.1"', toolchain)
         self.assertNotIn('channel = "stable"', toolchain)
 
 
