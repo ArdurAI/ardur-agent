@@ -40,6 +40,21 @@ const DENY_ALL_POLICY: &str = "forbid(principal, action, resource);";
 /// Explicit local-development fallback for ad-hoc CLI smoke tests.
 const PERMISSIVE_POLICY: &str = "permit(principal, action, resource);";
 
+/// The scoped starter policy `ardur setup` writes to `cedar.policies` so a
+/// fresh install can chat out of the box without resorting to the permit-all
+/// development fallback. Deliberately narrower than [`PERMISSIVE_POLICY`]:
+/// chat submission and tool invocation only — every other action stays denied.
+/// Mirrors the server's embedded development policy
+/// (`crates/server/src/state.rs::DEFAULT_POLICY`).
+pub(crate) const STARTER_CEDAR_POLICY: &str = "\
+// Ardur starter policy (written by `ardur setup`).
+// Permits chat submission and tool invocation for local sessions; every other
+// action remains denied. Edit to taste — or delete this file to return to the
+// fail-closed deny-all default.
+permit(principal, action == Action::\"Submit\", resource);
+permit(principal, action == Action::\"ToolInvoke\", resource);
+";
+
 /// Operator-facing metadata recorded alongside a durable session journal.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct SessionMetadata {
@@ -137,6 +152,19 @@ impl StateDirs {
     #[must_use]
     pub fn cedar_path(&self) -> PathBuf {
         self.root.join("cedar.policies")
+    }
+
+    /// Write the scoped starter Cedar policy to [`cedar_path`](Self::cedar_path)
+    /// when no policy file exists yet. Returns `Some(path)` when the starter was
+    /// written, `None` when an existing (operator-owned) policy file was left
+    /// untouched. Called by `ardur setup`; see #408.
+    pub fn write_starter_cedar_policy_if_absent(&self) -> Result<Option<PathBuf>, CliError> {
+        let path = self.cedar_path();
+        if path.exists() {
+            return Ok(None);
+        }
+        write_private_file_atomic_no_follow(&path, STARTER_CEDAR_POLICY.as_bytes())?;
+        Ok(Some(path))
     }
 
     /// Load the cap-token issuer from [`issuer_key_path`](Self::issuer_key_path),

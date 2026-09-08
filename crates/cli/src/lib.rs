@@ -1140,6 +1140,22 @@ async fn run_chat_message(
             history.pop();
             let _ = std::io::stdout().flush();
             eprintln!("error: {e}");
+            // #408: a policy denial on an install with no policy file means the
+            // fail-closed default fired — tell the operator how to proceed
+            // instead of leaving them with a bare Cedar reason.
+            if matches!(e, CliError::Runtime(RuntimeError::PolicyDenied { .. })) {
+                if let Ok(dirs) = StateDirs::resolve() {
+                    if !dirs.cedar_path().exists() {
+                        eprintln!(
+                            "hint: no Cedar policy file at {} — the runtime is fail-closed by default.",
+                            dirs.cedar_path().display()
+                        );
+                        eprintln!(
+                            "      run `ardur setup` to write a starter policy, or set ARDUR_DEV_PERMISSIVE_POLICY=true for local development."
+                        );
+                    }
+                }
+            }
         }
     }
 }

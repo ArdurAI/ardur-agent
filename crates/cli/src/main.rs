@@ -567,7 +567,7 @@ fn run_doctor(args: DoctorArgs) -> Result<(), CliError> {
         checks.push(json!({"name": "cedar_policy", "status": "ok"}));
     } else {
         warnings += 1;
-        checks.push(json!({"name": "cedar_policy", "status": "warn", "present": false, "note": "policy file not found"}));
+        checks.push(json!({"name": "cedar_policy", "status": "warn", "present": false, "note": "policy file not found — run `ardur setup` to write a starter policy, or set ARDUR_DEV_PERMISSIVE_POLICY=true for local development"}));
     }
 
     // 7. Disk usage
@@ -604,7 +604,8 @@ fn run_doctor(args: DoctorArgs) -> Result<(), CliError> {
 
 /// Interactive setup wizard for first-time Ardur configuration.
 fn run_setup(args: SetupArgs) -> Result<(), CliError> {
-    let root = StateDirs::resolve()?.root;
+    let dirs = StateDirs::resolve()?;
+    let root = dirs.root.clone();
     std::fs::create_dir_all(&root)?;
     for sub in ["memory", "journals", "receipts", "keys", "logs"] {
         std::fs::create_dir_all(root.join(sub))?;
@@ -617,6 +618,7 @@ fn run_setup(args: SetupArgs) -> Result<(), CliError> {
         let config = Config::default();
         write_config(&config_path, &config)?;
         println!("created default config at {}", config_path.display());
+        write_starter_policy_line(&dirs)?;
         return Ok(());
     }
 
@@ -659,6 +661,7 @@ fn run_setup(args: SetupArgs) -> Result<(), CliError> {
         budget_cents,
     };
     write_config(&config_path, &config)?;
+    write_starter_policy_line(&dirs)?;
 
     println!();
     println!(
@@ -677,6 +680,24 @@ fn config_path(path: Option<PathBuf>) -> Result<PathBuf, CliError> {
     path.or_else(Config::default_path).ok_or_else(|| {
         CliError::State("cannot resolve a config path (HOME/USERPROFILE unset)".to_string())
     })
+}
+
+/// Write the scoped starter Cedar policy on first run and print the outcome
+/// (#408). Without a policy file the runtime boots fail-closed (deny-all), so
+/// a fresh `ardur chat` would otherwise be denied with no obvious remedy. An
+/// existing operator policy file is never overwritten.
+fn write_starter_policy_line(dirs: &StateDirs) -> Result<(), CliError> {
+    match dirs.write_starter_cedar_policy_if_absent()? {
+        Some(path) => println!(
+            "created starter Cedar policy at {} (permits chat + tools; edit to tighten)",
+            path.display()
+        ),
+        None => println!(
+            "kept existing Cedar policy at {}",
+            dirs.cedar_path().display()
+        ),
+    }
+    Ok(())
 }
 
 fn state_root(path: Option<PathBuf>) -> Result<PathBuf, CliError> {
