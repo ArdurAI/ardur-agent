@@ -1,6 +1,9 @@
 # Validates the production Docker image path documented in RUN.md, including the
 # image contract, SBOM generation, vulnerability scanning, and provenance
-# attestation on trusted pushes.
+# attestation on trusted pushes. Version tags matching `v*` also publish the
+# already-scanned local `ardur-agent:ci` image to
+# `ghcr.io/<owner>/<repo>:<tag>` (lowercase) — the same digest that passed
+# Trivy and /healthz, not a second build.
 #
 # Keep this as a separate Ubuntu-only workflow: the release Docker build is
 # materially more expensive than the Rust fmt/clippy/check/test gauntlet and
@@ -11,6 +14,7 @@ name: docker
 on:
   push:
     branches: [main, dev]
+    tags: ["v*"]
   pull_request:
     branches: [main, dev]
 
@@ -29,8 +33,16 @@ jobs:
     name: build-healthcheck-scan
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      security-events: write
+      packages: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
@@ -134,3 +146,61 @@ jobs:
 
           docker inspect ardur-ci-smoke --format '{{json .State.Health}}'
           exit 1
+
+      - name: Require tag ancestry on origin/dev or origin/main
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin dev main
+          if git merge-base --is-ancestor HEAD origin/dev \
+            || git merge-base --is-ancestor HEAD origin/main; then
+            echo "tagged commit is reachable from origin/dev or origin/main"
+          else
+            echo "::error::refusing GHCR publish: tag is not on origin/dev or origin/main"
+            exit 1
+          fi
+
+      - name: Log in to GHCR
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push an unadvertised digest for attestation
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        id: publish
+        run: |
+          set -euo pipefail
+          repo="$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
+          image="ghcr.io/${repo}"
+          tag="${GITHUB_REF_NAME}"
+          scratch="${image}:sha-${GITHUB_SHA}"
+          release="${image}:${tag}"
+          docker tag ardur-agent:ci "${scratch}"
+          docker push "${scratch}"
+          digest="$(docker inspect --format='{{index .RepoDigests 0}}' "${scratch}")"
+          digest="${digest##*@}"
+          case "${digest}" in
+            sha256:*) ;;
+            *) echo "unexpected repo digest: ${digest}" >&2; exit 1 ;;
+          esac
+          echo "image=${image}" >> "${GITHUB_OUTPUT}"
+          echo "digest=${digest}" >> "${GITHUB_OUTPUT}"
+          echo "scratch=${scratch}" >> "${GITHUB_OUTPUT}"
+          echo "release=${release}" >> "${GITHUB_OUTPUT}"
+
+      - name: Attest published GHCR image provenance
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ steps.publish.outputs.image }}
+          subject-digest: ${{ steps.publish.outputs.digest }}
+
+      - name: Promote attested image to the version tag
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+          docker tag ardur-agent:ci "${{ steps.publish.outputs.release }}"
+          docker push "${{ steps.publish.outputs.release }}"

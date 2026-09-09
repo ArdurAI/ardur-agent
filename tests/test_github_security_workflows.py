@@ -143,6 +143,35 @@ class GitHubSecurityWorkflowTests(unittest.TestCase):
         )
         self.assertFalse(any(re.search(r"rust /|site /|docker /|security /", c) for c in contexts))
 
+    def test_docker_workflow_publishes_ghcr_on_version_tags(self):
+        docker = (WORKFLOWS / "docker.yml").read_text(encoding="utf-8")
+        header, jobs = docker.split("jobs:", 1)
+
+        self.assertIn('tags: ["v*"]', header)
+        self.assertNotIn("packages: write", header)
+        self.assertIn("packages: write", jobs)
+        self.assertNotIn("name: publish-ghcr", docker)
+        self.assertNotIn(":latest", docker)
+        self.assertNotIn("push: true", docker)
+        self.assertIn("docker tag ardur-agent:ci", jobs)
+        self.assertIn("docker push", jobs)
+        self.assertIn("merge-base --is-ancestor", jobs)
+        self.assertIn(":sha-${GITHUB_SHA}", jobs)
+        self.assertIn("Promote attested image to the version tag", jobs)
+        tag_if = (
+            "if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')"
+        )
+        self.assertEqual(jobs.count(tag_if), 5, jobs)
+        self.assertIn(tag_if, jobs)
+        self.assertIn(
+            "docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef",
+            jobs,
+        )
+        self.assertIn("registry: ghcr.io", jobs)
+        self.assertIn("ghcr.io/${repo}", jobs)
+        self.assertIn("subject-name: ${{ steps.publish.outputs.image }}", jobs)
+        self.assertIn("subject-digest: ${{ steps.publish.outputs.digest }}", jobs)
+
     def test_rust_toolchain_is_exactly_pinned(self):
         toolchain = (ROOT / "rust-toolchain.toml").read_text(encoding="utf-8")
 
