@@ -85,6 +85,11 @@ pub struct Config {
     /// (`ARDUR_ADMIN_BEARER_TOKENS`, comma-separated). When empty, admin routes
     /// deny every request with `401` (fail-closed).
     pub admin_bearer_tokens: Vec<String>,
+    /// Exact browser origins allowed to call `/chat` and `/approvals*` from a
+    /// separately-hosted PWA (`ARDUR_CORS_ORIGINS`, comma-separated
+    /// `http(s)://host[:port]` values). Empty (the default) emits no CORS
+    /// headers — fail-closed. `*` and `null` are refused at config load.
+    pub cors_origins: Vec<String>,
     /// Explicit development escape hatch for the embedded permissive Cedar policy
     /// (`ARDUR_DEV_PERMISSIVE_POLICY=true`). Production boots without a configured
     /// policy use a deny-all policy, and a configured-but-missing path is an error.
@@ -237,6 +242,7 @@ impl fmt::Debug for Config {
                 "admin_bearer_tokens",
                 &redacted_count(self.admin_bearer_tokens.len()),
             )
+            .field("cors_origins", &self.cors_origins)
             .field("dev_permissive_policy", &self.dev_permissive_policy)
             .field("model", &self.model)
             .field("cost_budget_cents", &self.cost_budget_cents)
@@ -457,6 +463,7 @@ impl Config {
             bind_addr: optional("ARDUR_BIND_ADDR").unwrap_or_else(|| "127.0.0.1:3000".to_string()),
             chat_bearer_tokens: parse_csv(optional("ARDUR_CHAT_BEARER_TOKENS").as_deref()),
             admin_bearer_tokens: parse_csv(optional("ARDUR_ADMIN_BEARER_TOKENS").as_deref()),
+            cors_origins: parse_cors_origins(optional("ARDUR_CORS_ORIGINS").as_deref())?,
             dev_permissive_policy: optional("ARDUR_DEV_PERMISSIVE_POLICY")
                 .as_deref()
                 .is_some_and(is_truthy),
@@ -540,6 +547,87 @@ impl Config {
     }
 }
 
+/// Parse `ARDUR_CORS_ORIGINS` into exact `scheme://host[:port]` origins.
+///
+/// Fail-closed: wildcard (`*`), the string `null`, credentials, paths, queries,
+/// and fragments are rejected. Callers that need a PWA on another origin must
+/// list that origin explicitly.
+fn parse_cors_origins(value: Option<&str>) -> Result<Vec<String>, ConfigError> {
+    parse_csv(value)
+        .into_iter()
+        .map(|raw| parse_cors_origin(&raw))
+        .collect()
+}
+
+fn parse_cors_origin(raw: &str) -> Result<String, ConfigError> {
+    const VAR: &str = "ARDUR_CORS_ORIGINS";
+    let origin = raw.trim();
+    if origin == "*" || origin.eq_ignore_ascii_case("null") {
+        return Err(ConfigError::Invalid {
+            var: VAR,
+            reason: "wildcard and `null` origins are refused; list explicit http(s) origins"
+                .to_string(),
+        });
+    }
+    if origin.len() > 253 || !origin.is_ascii() {
+        return Err(ConfigError::Invalid {
+            var: VAR,
+            reason: "origin must be ASCII and at most 253 characters".to_string(),
+        });
+    }
+    // Allow a single trailing slash (browsers sometimes send it); extra path
+    // characters — including `//` — stay rejected.
+    let origin = match origin.strip_suffix('/') {
+        Some(rest) if rest.ends_with('/') => {
+            return Err(ConfigError::Invalid {
+                var: VAR,
+                reason: format!("`{raw}` is not a scheme://host[:port] origin"),
+            });
+        }
+        Some(rest) => rest,
+        None => origin,
+    };
+    let rest = origin
+        .strip_prefix("https://")
+        .or_else(|| origin.strip_prefix("http://"))
+        .ok_or_else(|| ConfigError::Invalid {
+            var: VAR,
+            reason: format!("`{raw}` is not an http(s) origin"),
+        })?;
+    if rest.is_empty()
+        || rest.contains('/')
+        || rest.contains('?')
+        || rest.contains('#')
+        || rest.contains('@')
+        || rest.contains('\\')
+        || rest.contains(' ')
+    {
+        return Err(ConfigError::Invalid {
+            var: VAR,
+            reason: format!("`{raw}` is not a scheme://host[:port] origin"),
+        });
+    }
+    let host = match rest.rsplit_once(':') {
+        Some((host, port)) => {
+            if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(ConfigError::Invalid {
+                    var: VAR,
+                    reason: format!("`{raw}` has an invalid port"),
+                });
+            }
+            host
+        }
+        None => rest,
+    };
+    if host.is_empty() || host.starts_with('.') || host.ends_with('.') {
+        return Err(ConfigError::Invalid {
+            var: VAR,
+            reason: format!("`{raw}` has an empty or invalid host"),
+        });
+    }
+    Ok(origin.to_string())
+}
+
 /// Parse a comma-separated token list, trimming whitespace and dropping empties.
 fn parse_csv(value: Option<&str>) -> Vec<String> {
     value
@@ -602,13 +690,55 @@ fn optional(key: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{MemoryBackend, parse_memory_backend};
+    use super::{MemoryBackend, parse_cors_origin, parse_cors_origins, parse_memory_backend};
 
     #[test]
     fn parses_explicit_in_memory_literal() {
         assert_eq!(
             parse_memory_backend(Some("in_memory")).expect("in_memory parses"),
             MemoryBackend::InMemory
+        );
+    }
+
+    #[test]
+    fn cors_origin_accepts_loopback_with_port() {
+        assert_eq!(
+            parse_cors_origin("http://127.0.0.1:4173").expect("loopback origin"),
+            "http://127.0.0.1:4173"
+        );
+        assert_eq!(
+            parse_cors_origin("https://chat.example.com/").expect("trailing slash stripped"),
+            "https://chat.example.com"
+        );
+    }
+
+    #[test]
+    fn cors_origin_refuses_wildcard_null_and_paths() {
+        for bad in [
+            "*",
+            "null",
+            "https://evil.example/path",
+            "https://pwa.example.com//",
+            "ftp://x",
+            "http://",
+        ] {
+            assert!(
+                parse_cors_origin(bad).is_err(),
+                "expected {bad} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn cors_origins_csv_parses_two_explicit_origins() {
+        let origins = parse_cors_origins(Some("http://127.0.0.1:4173, https://pwa.example.com"))
+            .expect("csv origins");
+        assert_eq!(
+            origins,
+            vec![
+                "http://127.0.0.1:4173".to_string(),
+                "https://pwa.example.com".to_string()
+            ]
         );
     }
 }

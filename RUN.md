@@ -731,8 +731,11 @@ skills ship under `examples/skills/`.
 | Method & path                   | Purpose                                                        |
 | ------------------------------- | -------------------------------------------------------------- |
 | `POST /slack/events`            | Slack Events-API webhook (HMAC-verified; replies to channel).  |
-| `POST /chat`                    | Generic synchronous chat — run one turn, get the reply back.   |
+| `POST /chat`                    | Chat — JSON body, or SSE when `stream: true`.                  |
 | `POST /acp`                     | ACP JSON-RPC ingress; bearer-gated and receipt-chained through the fused runtime. |
+| `GET  /approvals`               | List approval cards (admin bearer).                            |
+| `POST /approvals/{id}/approve`  | Flip a pending card to approved and mint a decision receipt.   |
+| `POST /approvals/{id}/reject`   | Flip a pending card to denied and mint a decision receipt.     |
 | `GET  /healthz`                 | Liveness probe with build metadata.                            |
 | `GET  /openapi.json`            | OpenAPI 3.0 document for the mounted HTTP surface.              |
 | `GET  /openapi/clients/rust`    | Generated Rust client source.                                  |
@@ -791,15 +794,23 @@ curl -sS http://localhost:3000/chat \
 
 Status codes:
 
-- `400` — malformed JSON body, a missing/empty `message`, or `stream: true`.
+- `400` — malformed JSON body or a missing/empty `message`.
+- `401` — missing or invalid chat bearer token (fail-closed when none are configured).
 - `502` — the runtime rejected or failed the turn (cost-gate denied, injection
   blocked, provider error, …); the body carries `{"error": "<reason>"}`.
-- `200` — success, with the body above.
+- `503` — the bounded worker queue is full.
+- `504` — the HTTP turn wait timed out.
+- `200` — success. JSON body above when `stream` is omitted/false; SSE when
+  `stream: true`.
 
-**Streaming.** `stream: true` (an SSE `text/event-stream` response of
-`Provider::stream` events) is **not yet implemented** — a `true` value is
-rejected with `400` rather than silently answered with a consolidated body. It
-is a planned P1.5 follow-up.
+**Streaming.** `stream: true` returns `text/event-stream` of fused-runtime
+events (`stage_start` / `stage_end`, `content` with `text`, tool-call frames,
+`usage`, `receipt`, `finish`, in-band `error`). Dropping the response body
+cancels the in-flight turn on a best-effort basis (a fast stream can still
+commit buffered frames; the commit-boundary gate is tracked by #359).
+The static PWA in `web-client/` consumes this contract and appends only
+`type: "content"` text. Cross-origin PWA hosts must be listed in
+`ARDUR_CORS_ORIGINS` (exact `http(s)://host[:port]`; `*` is refused).
 
 ### OpenAPI and generated clients
 

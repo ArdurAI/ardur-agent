@@ -35,6 +35,8 @@ const TOUCHED: &[&str] = &[
     "ARDUR_DATA_DIR",
     "ARDUR_BIND_ADDR",
     "ARDUR_CHAT_BEARER_TOKENS",
+    "ARDUR_ADMIN_BEARER_TOKENS",
+    "ARDUR_CORS_ORIGINS",
     "ARDUR_DEV_PERMISSIVE_POLICY",
     "ARDUR_MODEL",
     "ARDUR_COST_BUDGET_CENTS",
@@ -557,5 +559,33 @@ fn from_env_partial_slack_creds_fails() {
     assert!(
         err.to_string().contains("SLACK_SIGNING_SECRET"),
         "error should name the missing Slack signing secret, got: {err}"
+    );
+}
+
+#[test]
+#[serial]
+fn from_env_cors_origins_parse_and_reject_wildcard() {
+    let _guard = env_lock();
+    let _env = CleanEnv::new();
+    set("ARDUR_PROVIDER", "ollama");
+    set(
+        "ARDUR_CORS_ORIGINS",
+        "http://127.0.0.1:4173, https://pwa.example.com",
+    );
+
+    let config = Config::from_env().expect("explicit cors origins load");
+    assert_eq!(
+        config.cors_origins,
+        vec![
+            "http://127.0.0.1:4173".to_string(),
+            "https://pwa.example.com".to_string()
+        ]
+    );
+
+    set("ARDUR_CORS_ORIGINS", "*");
+    let err = Config::from_env().expect_err("wildcard cors origin must fail closed");
+    assert!(
+        err.to_string().contains("ARDUR_CORS_ORIGINS"),
+        "error should name the cors var, got: {err}"
     );
 }

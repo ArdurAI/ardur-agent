@@ -60,8 +60,9 @@ impl RunConfig {
 
 /// The request body the runner POSTs for each turn.
 ///
-/// `stream` is deliberately never sent: the server rejects `stream: true` with
-/// a `400`, and omitting it yields the consolidated reply the harness grades.
+/// `stream` is deliberately never sent: the harness grades the consolidated
+/// JSON reply. The server accepts `stream: true` as SSE, which is a different
+/// response shape.
 #[derive(Debug, Serialize)]
 struct ChatRequest<'a> {
     message: &'a str,
