@@ -765,37 +765,30 @@ async fn chat(State(state): State<Arc<AppState>>, headers: HeaderMap, body: Byte
     // one mints a fresh, time-ordered session (`SessionId::default` == `new`).
     let session_id = request.session_id.unwrap_or_default();
 
-    match tokio::time::timeout(
-        state.http_turn_timeout(),
-        state.submit_chat(request.message, session_id),
-    )
-    .await
-    {
-        Err(_elapsed) => (
+    match state.submit_chat(request.message, session_id).await {
+        Ok(outcome) => (StatusCode::OK, Json(ChatResponse::from(outcome))).into_response(),
+        Err(ChatSubmitError::Runtime(RuntimeError::TurnCancelled)) => (
             StatusCode::GATEWAY_TIMEOUT,
             Json(json!({ "error": "turn processing timed out" })),
         )
             .into_response(),
-        Ok(result) => match result {
-            Ok(outcome) => (StatusCode::OK, Json(ChatResponse::from(outcome))).into_response(),
-            // The runtime rejected or failed the turn — a bad-gateway from the HTTP
-            // surface's point of view (the upstream pipeline refused or errored).
-            Err(ChatSubmitError::Runtime(e)) => (
-                StatusCode::BAD_GATEWAY,
-                Json(json!({ "error": e.to_string() })),
-            )
-                .into_response(),
-            Err(ChatSubmitError::WorkerGone) => (
-                StatusCode::BAD_GATEWAY,
-                Json(json!({ "error": "turn worker is unavailable" })),
-            )
-                .into_response(),
-            Err(ChatSubmitError::QueueFull) => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({ "error": "turn worker queue is full" })),
-            )
-                .into_response(),
-        },
+        // The runtime rejected or failed the turn — a bad-gateway from the HTTP
+        // surface's point of view (the upstream pipeline refused or errored).
+        Err(ChatSubmitError::Runtime(e)) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+        Err(ChatSubmitError::WorkerGone) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": "turn worker is unavailable" })),
+        )
+            .into_response(),
+        Err(ChatSubmitError::QueueFull) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "turn worker queue is full" })),
+        )
+            .into_response(),
     }
 }
 
@@ -977,13 +970,8 @@ async fn acp(State(state): State<Arc<AppState>>, headers: HeaderMap, body: Bytes
                 .into_response();
         }
     };
-    match tokio::time::timeout(
-        state.http_turn_timeout(),
-        state.submit_chat(prompt, SessionId::new()),
-    )
-    .await
-    {
-        Err(_elapsed) => (
+    match state.submit_chat(prompt, SessionId::new()).await {
+        Err(ChatSubmitError::Runtime(RuntimeError::TurnCancelled)) => (
             StatusCode::GATEWAY_TIMEOUT,
             Json(AcpMessage::Response(AcpResponse::failure(
                 request.id,
@@ -991,52 +979,50 @@ async fn acp(State(state): State<Arc<AppState>>, headers: HeaderMap, body: Bytes
             ))),
         )
             .into_response(),
-        Ok(result) => match result {
-            Ok(outcome) => {
-                let result = json!({
-                    "accepted": true,
-                    "method": request.method,
-                    "receipt_id": outcome.receipt_id,
-                    "reply": outcome.reply,
-                    "tokens": {
-                        "input": outcome.tokens_in,
-                        "output": outcome.tokens_out,
-                    },
-                    "cost_usd": outcome.cents as f64 / 100.0,
-                });
-                (
-                    StatusCode::OK,
-                    Json(AcpMessage::Response(AcpResponse::success(
-                        request.id, result,
-                    ))),
-                )
-                    .into_response()
-            }
-            Err(ChatSubmitError::Runtime(e)) => (
-                StatusCode::BAD_GATEWAY,
-                Json(AcpMessage::Response(AcpResponse::failure(
-                    request.id,
-                    AcpErrorObject::new(-32000, e.to_string(), None),
+        Ok(outcome) => {
+            let result = json!({
+                "accepted": true,
+                "method": request.method,
+                "receipt_id": outcome.receipt_id,
+                "reply": outcome.reply,
+                "tokens": {
+                    "input": outcome.tokens_in,
+                    "output": outcome.tokens_out,
+                },
+                "cost_usd": outcome.cents as f64 / 100.0,
+            });
+            (
+                StatusCode::OK,
+                Json(AcpMessage::Response(AcpResponse::success(
+                    request.id, result,
                 ))),
             )
-                .into_response(),
-            Err(ChatSubmitError::WorkerGone) => (
-                StatusCode::BAD_GATEWAY,
-                Json(AcpMessage::Response(AcpResponse::failure(
-                    request.id,
-                    AcpErrorObject::new(-32001, "turn worker is unavailable", None),
-                ))),
-            )
-                .into_response(),
-            Err(ChatSubmitError::QueueFull) => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(AcpMessage::Response(AcpResponse::failure(
-                    request.id,
-                    AcpErrorObject::new(-32002, "turn worker queue is full", None),
-                ))),
-            )
-                .into_response(),
-        },
+                .into_response()
+        }
+        Err(ChatSubmitError::Runtime(e)) => (
+            StatusCode::BAD_GATEWAY,
+            Json(AcpMessage::Response(AcpResponse::failure(
+                request.id,
+                AcpErrorObject::new(-32000, e.to_string(), None),
+            ))),
+        )
+            .into_response(),
+        Err(ChatSubmitError::WorkerGone) => (
+            StatusCode::BAD_GATEWAY,
+            Json(AcpMessage::Response(AcpResponse::failure(
+                request.id,
+                AcpErrorObject::new(-32001, "turn worker is unavailable", None),
+            ))),
+        )
+            .into_response(),
+        Err(ChatSubmitError::QueueFull) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(AcpMessage::Response(AcpResponse::failure(
+                request.id,
+                AcpErrorObject::new(-32002, "turn worker queue is full", None),
+            ))),
+        )
+            .into_response(),
     }
 }
 

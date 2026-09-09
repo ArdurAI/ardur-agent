@@ -1736,13 +1736,18 @@ impl FusedRuntime {
     }
 }
 
-/// A synchronous probe reporting whether the turn's caller is still waiting.
-/// Consulted at the commit gate (after the provider round, before the
-/// receipt/journal/billing commit): a probe reporting `true` aborts the turn
-/// with [`RuntimeError::TurnCancelled`] and no side effects. The HTTP server
-/// builds one from the reply channel's `is_closed()`, which closes the race
-/// where a starved worker observes a completed provider round before it ever
-/// sees the caller's 504 drop (#359).
+/// A synchronous probe reporting whether the turn's caller has gone away.
+/// Consulted at the commit gate (after each provider round and again after
+/// tool execution, immediately before the receipt/journal/billing commit): a
+/// probe reporting `true` aborts the turn with [`RuntimeError::TurnCancelled`]
+/// and no *further* side effects.
+///
+/// The HTTP server builds this over a per-turn `AtomicBool` that
+/// `CallerGoneOnDrop` (hang-up) or `submit_chat`'s timeout arm (deadline)
+/// stores `true` into **synchronously in the signalling thread**. That is the
+/// starvation-safety argument: the flag does not wait to be scheduled the way
+/// `oneshot::Sender::is_closed()` does. Do not substitute `is_closed()` here
+/// (#359).
 pub type CancelProbe = Arc<dyn Fn() -> bool + Send + Sync>;
 
 #[async_trait::async_trait]
@@ -1779,12 +1784,12 @@ impl FusedRuntime {
         self.submit_inner(req, provisioning, None).await
     }
 
-    /// Submit a turn with a [`CancelProbe`]: the probe is consulted at the
-    /// commit gate of every provider round, and a turn whose caller has gone
-    /// away aborts with [`RuntimeError::TurnCancelled`] before any receipt,
-    /// journal, or billing side effect commits (#359). The caller-abandonment
-    /// drop path (releasing the in-flight future) still applies as the fast
-    /// path; this probe is the correctness floor under task starvation.
+    /// Submit a turn with a [`CancelProbe`]: the probe is consulted after every
+    /// provider round and again after tool execution, immediately before the
+    /// receipt/journal/billing commit. A gone caller aborts with
+    /// [`RuntimeError::TurnCancelled`] so the current round does not mint
+    /// (#359). Already-committed earlier tool-loop rounds cannot be un-minted
+    /// (the receipt log is append-only); that residual is tracked separately.
     pub async fn submit_with_cancellation(
         &self,
         req: SubmitRequest,
@@ -1793,6 +1798,25 @@ impl FusedRuntime {
     ) -> Result<SubmitResult, RuntimeError> {
         self.submit_inner(req, provisioning, Some(cancel_probe))
             .await
+    }
+
+    /// #359 commit gate. If the caller is gone, release the reservation (the
+    /// `ReservationCancelGuard` then finds nothing to refund — `take_reservation`
+    /// is None after an explicit release) and abort with TurnCancelled.
+    async fn abort_if_caller_gone(
+        &self,
+        session_id: SessionId,
+        reservation: Reservation,
+        cancel_probe: &Option<CancelProbe>,
+    ) -> Result<Reservation, RuntimeError> {
+        if cancel_probe.as_ref().is_some_and(|probe| probe()) {
+            self.release(reservation).await;
+            let err = RuntimeError::TurnCancelled;
+            self.fire_error(session_id, LifecyclePhase::Provider, &err)
+                .await;
+            return Err(err);
+        }
+        Ok(reservation)
     }
 
     async fn submit_inner(
@@ -1945,22 +1969,10 @@ impl FusedRuntime {
             // the caller has already received. No-op once finalized.
             self.gate.touch_reservation(reservation.reservation_id);
 
-            // #359 commit gate: if the caller went away while the provider round
-            // was in flight (HTTP turn timeout / hang-up), abort BEFORE tool
-            // execution and the receipt/journal/billing commit below. This is
-            // the correctness floor the worker's drop-based cancellation cannot
-            // provide: under task starvation the worker may only be scheduled
-            // once the provider round has completed, at which point a biased
-            // select would happily report the completed turn — minting and
-            // billing a receipt the caller was already told `504` for. The
-            // synchronous probe does not depend on scheduling.
-            if cancel_probe.as_ref().is_some_and(|probe| probe()) {
-                self.release(reservation).await;
-                let err = RuntimeError::TurnCancelled;
-                self.fire_error(session_id, LifecyclePhase::Provider, &err)
-                    .await;
-                return Err(err);
-            }
+            // #359 commit gate after the provider round.
+            let reservation = self
+                .abort_if_caller_gone(session_id, reservation, &cancel_probe)
+                .await?;
 
             // The tool calls (if any) the model requested this round.
             let requested: Vec<ToolCall> = match &response.finish_reason {
@@ -2103,6 +2115,12 @@ impl FusedRuntime {
                     });
                 }
             }
+
+            // #359: recheck after tool.invoke awaits — a timeout during tool
+            // execution would otherwise fall through to cost finalize + commit.
+            let reservation = self
+                .abort_if_caller_gone(session_id, reservation, &cancel_probe)
+                .await?;
 
             // 6. receipt: mint over the provider response, recording the tool
             //    calls and the combined (provider + tool) cost, chained onto the

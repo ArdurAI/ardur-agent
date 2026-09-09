@@ -151,18 +151,18 @@ struct HttpTurn {
     message: String,
     session_id: SessionId,
     reply: oneshot::Sender<Result<ChatTurnOutcome, RuntimeError>>,
-    /// Set to `true` by a drop guard in the caller's future — synchronously, at
-    /// drop time — when the HTTP timeout (or a hang-up) abandons the turn
-    /// (#359). The worker hands this to the turn pipeline's commit gate as a
-    /// `CancelProbe`; unlike `Sender::closed()` (which only resolves when the
-    /// worker is next scheduled), the flag flips exactly when the caller's
-    /// future is dropped, so a starved worker still cannot mint the receipt.
+    /// Set to `true` by a drop guard in the caller's future (client hang-up)
+    /// or by `submit_chat`'s timeout arm (deadline), synchronously in the
+    /// signalling thread (#359). The worker hands this to the turn pipeline's
+    /// commit gate as a `CancelProbe`. Unlike `Sender::closed()`, the flag does
+    /// not wait for the worker to be scheduled.
     caller_gone: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
-/// Drop guard owned by the `submit_chat` future: when the HTTP layer's turn
-/// timeout (or a client disconnect) drops that future, this flips the shared
-/// flag to `true` in the dropping thread — no task scheduling involved.
+/// Drop guard owned by the `submit_chat` future: a client disconnect drops that
+/// future and this flips the shared flag in the dropping thread. The HTTP
+/// timeout path sets the same flag without dropping, so an already-committed
+/// turn can still deliver its outcome.
 struct CallerGoneOnDrop(std::sync::Arc<std::sync::atomic::AtomicBool>);
 
 impl Drop for CallerGoneOnDrop {
@@ -870,16 +870,18 @@ impl AppState {
         message: String,
         session_id: SessionId,
     ) -> Result<ChatTurnOutcome, ChatSubmitError> {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        // #359: the flag flips when THIS future is dropped (turn timeout /
-        // client hang-up), synchronously in the dropping thread.
+        let (reply_tx, mut reply_rx) = oneshot::channel();
+        // Hang-up path: dropping THIS future (client disconnect) flips the flag
+        // synchronously. The HTTP-timeout path below sets the same flag WITHOUT
+        // dropping the oneshot, then waits for the worker — so a turn that
+        // already committed returns 200 rather than 504-while-billing (#359).
         let caller_gone = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let _caller_gone_on_drop = CallerGoneOnDrop(std::sync::Arc::clone(&caller_gone));
         let turn = HttpTurn {
             message,
             session_id,
             reply: reply_tx,
-            caller_gone,
+            caller_gone: std::sync::Arc::clone(&caller_gone),
         };
         let Some(work_tx) = self.work_sender() else {
             return Err(ChatSubmitError::WorkerGone);
@@ -889,10 +891,17 @@ impl AppState {
             Err(mpsc::error::TrySendError::Full(_)) => return Err(ChatSubmitError::QueueFull),
             Err(mpsc::error::TrySendError::Closed(_)) => return Err(ChatSubmitError::WorkerGone),
         }
-        match reply_rx.await {
-            Ok(result) => result.map_err(ChatSubmitError::Runtime),
-            // The worker dropped the sender without replying (it shut down).
-            Err(_canceled) => Err(ChatSubmitError::WorkerGone),
+        match tokio::time::timeout(self.http_turn_timeout(), &mut reply_rx).await {
+            Ok(Ok(result)) => result.map_err(ChatSubmitError::Runtime),
+            Ok(Err(_canceled)) => Err(ChatSubmitError::WorkerGone),
+            Err(_elapsed) => {
+                caller_gone.store(true, std::sync::atomic::Ordering::SeqCst);
+                match reply_rx.await {
+                    Ok(Ok(outcome)) => Ok(outcome),
+                    Ok(Err(e)) => Err(ChatSubmitError::Runtime(e)),
+                    Err(_canceled) => Err(ChatSubmitError::WorkerGone),
+                }
+            }
         }
     }
 

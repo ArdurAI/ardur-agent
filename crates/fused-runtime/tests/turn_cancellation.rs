@@ -87,35 +87,48 @@ async fn a_present_caller_commits_normally() {
 
 #[tokio::test]
 async fn the_probe_is_consulted_after_the_provider_round_not_before() {
-    // The probe flips only once the provider has been called, mirroring the
-    // real race: the timeout fires WHILE the round is in flight. If the gate
-    // checked before dispatch, this would cancel even though the caller was
-    // still present at dispatch time.
+    // The probe flips only after dispatch has been observed. If the gate
+    // checked before provider.complete, this would cancel without ever
+    // entering complete — which the dispatched notify would fail to fire.
     let gone = Arc::new(AtomicBool::new(false));
     let probe = {
         let gone = Arc::clone(&gone);
         move || gone.load(Ordering::SeqCst)
     };
 
+    let dispatched = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let provider = Arc::new(GatedEchoProvider {
+        dispatched: Arc::clone(&dispatched),
+        release: Arc::clone(&release),
+        inner: EchoProvider::new(),
+    });
+
     let root = tempfile::tempdir().expect("tempdir");
     let receipt_log = root.path().join("receipts.jsonl");
     let session_id = ardur_runtime::SessionId::new();
-    let provider = Arc::new(EchoProvider::new());
 
     let runtime = runtime_builder(provider)
         .receipt_log(&receipt_log)
         .build()
         .expect("runtime builds");
 
-    // Caller still present for dispatch...
+    // Subscribe before polling submit so notify_waiters cannot be missed.
+    let dispatched_wait = dispatched.notified();
+    tokio::pin!(dispatched_wait);
     let submit = runtime.submit_with_cancellation(
         request_for("mid-flight timeout", &valid_token(), session_id),
         Default::default(),
         Arc::new(probe),
     );
-    // ...but gone by the time the round settles. With an instant provider the
-    // flag flips before the commit gate is reached, deterministically.
+    tokio::pin!(submit);
+    tokio::select! {
+        biased;
+        () = &mut dispatched_wait => {}
+        result = &mut submit => panic!("submit finished before dispatch: {result:?}"),
+    }
     gone.store(true, Ordering::SeqCst);
+    release.notify_one();
     let result = submit.await;
     assert!(
         matches!(result, Err(RuntimeError::TurnCancelled)),
@@ -123,4 +136,38 @@ async fn the_probe_is_consulted_after_the_provider_round_not_before() {
     );
     let chain = load_persisted_chain(&receipt_log).expect("chain load succeeds");
     assert!(chain.is_empty());
+}
+
+/// Echoes like [`EchoProvider`] but parks in `complete` until `release` is
+/// signalled, after announcing entry via `dispatched`. Lets a test prove the
+/// probe ran after dispatch, not merely after the future was constructed.
+struct GatedEchoProvider {
+    dispatched: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+    inner: EchoProvider,
+}
+
+#[async_trait::async_trait]
+impl ardur_provider_runtime::Provider for GatedEchoProvider {
+    async fn complete(
+        &self,
+        req: ardur_provider_runtime::CompletionRequest,
+    ) -> Result<ardur_provider_runtime::CompletionResponse, ardur_provider_runtime::ProviderError>
+    {
+        self.dispatched.notify_waiters();
+        self.release.notified().await;
+        self.inner.complete(req).await
+    }
+
+    fn id(&self) -> ardur_runtime::ProviderId {
+        self.inner.id()
+    }
+
+    fn supports_streaming(&self) -> bool {
+        self.inner.supports_streaming()
+    }
+
+    fn rate_card(&self) -> &ardur_provider_runtime::RateCard {
+        self.inner.rate_card()
+    }
 }
