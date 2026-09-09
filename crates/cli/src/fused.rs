@@ -90,6 +90,10 @@ const CAP_TTL_SECS: u64 = 3_600;
 /// - `shell.run` is registered ONLY with scoped grants — scopes from every
 ///   scoped shell grant are unioned into one allowlist. A scope-less shell
 ///   grant is skipped with a warning — never the dev-only unrestricted shell.
+///   NOTE: the shell allowlist is a PREFIX GATE, not a sandbox (the tool
+///   executes through the system shell; `git; uname`-style chaining is not
+///   confined by a prefix). Grants should name prefixes that are safe to run
+///   with arbitrary arguments.
 /// - `file.*` grants register ONLY with a scope (the confinement root), and
 ///   only the granted file tool ids register — granting `file.read` does not
 ///   expose `file.write`. Duplicate grants for the same file tool: last wins.
@@ -105,6 +109,10 @@ const CAP_TTL_SECS: u64 = 3_600;
 struct GrantTooling {
     registry: ToolRegistry,
     extra_allowlist: Vec<String>,
+    /// The final http.fetch host allowlist, kept for tests (the tool owns it
+    /// after registration).
+    #[cfg(test)]
+    http_hosts: Vec<String>,
 }
 
 impl GrantTooling {
@@ -142,8 +150,12 @@ impl GrantTooling {
                 continue;
             };
             let expected = ardur_receipt::Sha256Digest::of(&Self::canonical_payload(record));
+            // The matching receipt must be a GRANT receipt — a turn receipt that
+            // happens to carry the same payload digest is not authorization.
             let receipted = chain.iter().any(|r| {
-                r.body.receipt_id.to_string() == receipt_id && r.body.payload_digest == expected
+                r.body.receipt_id.to_string() == receipt_id
+                    && r.body.verb.as_str() == "tool.grant.allow.v1"
+                    && r.body.payload_digest == expected
             });
             if receipted {
                 valid.push(record.clone());
@@ -163,6 +175,10 @@ impl GrantTooling {
         let mut shell_scopes: Vec<String> = Vec::new();
         let mut http_hosts: Vec<String> = Vec::new();
         let mut http_granted = false;
+        // A scope-less http grant means localhost-only; if a scoped grant joins
+        // the union, localhost must be re-added explicitly (a non-empty
+        // allowlist otherwise drops it).
+        let mut http_localhost = false;
         // Per-file-tool root, so granting file.read never exposes file.write.
         let mut file_roots: std::collections::HashMap<&str, std::path::PathBuf> =
             std::collections::HashMap::new();
@@ -182,14 +198,18 @@ impl GrantTooling {
                 },
                 "http.fetch" => {
                     http_granted = true;
-                    if let Some(scope) = record.scope.as_deref() {
-                        http_hosts.extend(
+                    match record.scope.as_deref().map(str::trim) {
+                        // A scope-less grant means localhost-only — preserve that
+                        // even when a scoped grant joins the union, because a
+                        // non-empty allowlist otherwise drops localhost.
+                        Some("") | None => http_localhost = true,
+                        Some(scope) => http_hosts.extend(
                             scope
                                 .split(',')
                                 .map(str::trim)
                                 .filter(|h| !h.is_empty())
                                 .map(str::to_string),
-                        );
+                        ),
                     }
                     wanted.push(record);
                 }
@@ -224,7 +244,14 @@ impl GrantTooling {
             }
         }
         if http_granted {
-            let tool = HttpFetchTool::new().with_allowlist(http_hosts);
+            if http_localhost && !http_hosts.is_empty() {
+                http_hosts.extend([
+                    "localhost".to_string(),
+                    "127.0.0.1".to_string(),
+                    "::1".to_string(),
+                ]);
+            }
+            let tool = HttpFetchTool::new().with_allowlist(http_hosts.clone());
             if let Err(e) = registry.register(Box::new(tool)) {
                 tracing::warn!(error = %e, "http.fetch registration failed");
             }
@@ -258,6 +285,8 @@ impl GrantTooling {
         Self {
             registry,
             extra_allowlist,
+            #[cfg(test)]
+            http_hosts,
         }
     }
 
@@ -1152,6 +1181,49 @@ mod grant_tooling_tests {
         assert!(
             GrantTooling::validate_records(&[edited], "cli://localhost-test", &chain).is_empty()
         );
+
+        // 5. A TURN receipt carrying the matching id+digest but a non-grant verb
+        //    is not authorization.
+        let turn_chain = vec![ardur_fused_runtime::PersistedReceipt {
+            jws_compact: format!("h.{good_id}.s"),
+            body: ReceiptBody {
+                verb: VerbObject::new("llm.completion.minted.v1").expect("verb"),
+                ..chain[0].body.clone()
+            },
+        }];
+        assert!(
+            GrantTooling::validate_records(
+                std::slice::from_ref(&good),
+                "cli://localhost-test",
+                &turn_chain
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_scopeless_http_grant_preserves_localhost_when_scoped_grants_join() {
+        let records = [
+            record("http.fetch", &["cap.network_out"], Some("example.com")),
+            record("http.fetch", &["cap.network_out"], None),
+        ];
+        let tooling = GrantTooling::from_records(&records);
+        assert!(tooling.registry.get(&ToolId::new("http.fetch")).is_some());
+        for host in ["example.com", "localhost", "127.0.0.1", "::1"] {
+            assert!(
+                tooling.http_hosts.iter().any(|h| h == host),
+                "merged allowlist must keep `{host}`: {:?}",
+                tooling.http_hosts
+            );
+        }
+
+        // A scoped grant alone must NOT gain localhost.
+        let scoped_only = GrantTooling::from_records(&[record(
+            "http.fetch",
+            &["cap.network_out"],
+            Some("example.com"),
+        )]);
+        assert!(!scoped_only.http_hosts.iter().any(|h| h == "localhost"));
     }
 
     #[test]

@@ -1887,7 +1887,7 @@ fn run_grant(args: GrantArgs) -> Result<(), CliError> {
             if scope_missing {
                 match tool.as_str() {
                     "shell.run" => println!(
-                        "note: shell.run grants need --scope \"<allowlist pattern>\" (e.g. \"git|cargo\") to take effect; without one the grant is skipped"
+                        "note: shell.run grants need --scope \"<allowlist prefix>\" (e.g. \"git|cargo\") to take effect; without one the grant is skipped. The allowlist is a prefix gate, not a sandbox — commands run through the system shell, so chaining (`git; uname`) is not confined. Grant only prefixes that are safe with arbitrary arguments."
                     ),
                     "file.read" | "file.write" | "file.list" => println!(
                         "note: file tool grants need --scope \"<root dir>\" to take effect; without one the grant is skipped"
