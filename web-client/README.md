@@ -36,7 +36,11 @@ Empty `ARDUR_CORS_ORIGINS` (the default) emits no CORS headers.
 ## Local smoke
 
 ```sh
-# Terminal 1 — HTTP-only stub server with PWA CORS + chat bearer
+# Terminal 1 — HTTP-only server with PWA CORS + chat bearer.
+# `ARDUR_PROVIDER=ollama` is the no-Anthropic-key path; it talks to a live
+# Ollama daemon (default http://127.0.0.1:11434) and the configured model
+# must exist. Without that daemon, `/chat` returns a provider error rather
+# than a streamed reply.
 ARDUR_PROVIDER=ollama \
 ARDUR_DEV_PERMISSIVE_POLICY=true \
 ARDUR_CHAT_BEARER_TOKENS='dev-chat-token' \

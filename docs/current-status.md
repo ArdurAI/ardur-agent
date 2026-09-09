@@ -123,8 +123,10 @@ The platform tool crates are also implemented as explicit integration surfaces:
 
 - `POST /chat` with `stream: true` returns `text/event-stream` of fused-runtime
   events (`stage_start`/`stage_end`, `content`, tool events, `usage`, `receipt`,
-  `finish`, in-band `error`). Dropping the body cancels the turn before
-  receipt/journal/memory side effects. Covered by `crates/server/tests/streaming.rs`
+  `finish`, in-band `error`). Dropping the body **attempts** to cancel the turn
+  before receipt/journal/memory side effects; a fast stream can still commit if
+  frames are already buffered (the commit-boundary gate is #359 / PR #421).
+  Covered by `crates/server/tests/streaming.rs`
   and `crates/e2e-tests/tests/scenario_streaming_chat_sse.rs`.
 - `GET /approvals`, `POST /approvals/{id}/approve`, and
   `POST /approvals/{id}/reject` are admin-bearer gated, persist to the same

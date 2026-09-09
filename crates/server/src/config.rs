@@ -561,7 +561,7 @@ fn parse_cors_origins(value: Option<&str>) -> Result<Vec<String>, ConfigError> {
 
 fn parse_cors_origin(raw: &str) -> Result<String, ConfigError> {
     const VAR: &str = "ARDUR_CORS_ORIGINS";
-    let origin = raw.trim().trim_end_matches('/');
+    let origin = raw.trim();
     if origin == "*" || origin.eq_ignore_ascii_case("null") {
         return Err(ConfigError::Invalid {
             var: VAR,
@@ -575,6 +575,18 @@ fn parse_cors_origin(raw: &str) -> Result<String, ConfigError> {
             reason: "origin must be ASCII and at most 253 characters".to_string(),
         });
     }
+    // Allow a single trailing slash (browsers sometimes send it); extra path
+    // characters — including `//` — stay rejected.
+    let origin = match origin.strip_suffix('/') {
+        Some(rest) if rest.ends_with('/') => {
+            return Err(ConfigError::Invalid {
+                var: VAR,
+                reason: format!("`{raw}` is not a scheme://host[:port] origin"),
+            });
+        }
+        Some(rest) => rest,
+        None => origin,
+    };
     let rest = origin
         .strip_prefix("https://")
         .or_else(|| origin.strip_prefix("http://"))
@@ -706,6 +718,7 @@ mod tests {
             "*",
             "null",
             "https://evil.example/path",
+            "https://pwa.example.com//",
             "ftp://x",
             "http://",
         ] {

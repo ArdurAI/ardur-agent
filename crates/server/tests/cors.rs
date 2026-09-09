@@ -161,3 +161,32 @@ async fn preflight_without_allowlist_does_not_reflect_origin() {
             .is_none()
     );
 }
+
+#[tokio::test]
+async fn oversized_chat_body_still_reflects_allowlisted_origin() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let router = support::boot_router(&cors_config(&dir, vec![PWA_ORIGIN.to_string()])).await;
+
+    let oversized = format!(
+        "{{\"message\":\"{}\",\"stream\":true}}",
+        "a".repeat(70 * 1024)
+    );
+    let request = Request::builder()
+        .method("POST")
+        .uri("/chat")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::ORIGIN, PWA_ORIGIN)
+        .header("authorization", format!("Bearer {}", support::CHAT_TOKEN))
+        .body(Body::from(oversized))
+        .expect("request builds");
+    let response = router.oneshot(request).await.expect("router responds");
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .and_then(|v| v.to_str().ok()),
+        Some(PWA_ORIGIN),
+        "413 from the body-limit layer must still be CORS-visible to the PWA"
+    );
+}

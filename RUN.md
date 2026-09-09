@@ -806,7 +806,8 @@ Status codes:
 **Streaming.** `stream: true` returns `text/event-stream` of fused-runtime
 events (`stage_start` / `stage_end`, `content` with `text`, tool-call frames,
 `usage`, `receipt`, `finish`, in-band `error`). Dropping the response body
-cancels the in-flight turn before receipt, journal, or memory side effects.
+cancels the in-flight turn on a best-effort basis (a fast stream can still
+commit buffered frames; the commit-boundary gate is tracked by #359).
 The static PWA in `web-client/` consumes this contract and appends only
 `type: "content"` text. Cross-origin PWA hosts must be listed in
 `ARDUR_CORS_ORIGINS` (exact `http(s)://host[:port]`; `*` is refused).

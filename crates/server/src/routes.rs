@@ -19,8 +19,9 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::body::{Body, Bytes};
-use axum::extract::{DefaultBodyLimit, Path, State};
+use axum::extract::{DefaultBodyLimit, Path, Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use serde::{Deserialize, Serialize};
@@ -52,13 +53,11 @@ const HTTP_BODY_LIMIT_BYTES: usize = 64 * 1024;
 /// surface is enabled (see [`AppState::mcp`]), the bearer-gated MCP routes are
 /// merged in at the configured path prefix.
 pub fn build_router(state: Arc<AppState>) -> Router {
-    let mut router = Router::new()
+    // CORS must wrap the body-limit layer on these routes so a 413 from an
+    // oversized `/chat` body is still readable by an allowlisted PWA origin
+    // (extractor rejections never reach the handler-local `with_cors` path).
+    let pwa = Router::new()
         .route("/chat", post(chat).options(cors_preflight))
-        .route("/acp", post(acp))
-        .route("/healthz", get(healthz))
-        .route("/health", get(health))
-        .route("/metrics", get(metrics))
-        .route("/admin/runtime", get(admin_runtime))
         .route("/approvals", get(approvals_list).options(cors_preflight))
         .route(
             "/approvals/{id}/approve",
@@ -68,6 +67,15 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/approvals/{id}/reject",
             post(approvals_reject).options(cors_preflight),
         )
+        .layer(DefaultBodyLimit::max(HTTP_BODY_LIMIT_BYTES))
+        .layer(middleware::from_fn_with_state(state.clone(), cors_mw));
+
+    let mut rest = Router::new()
+        .route("/acp", post(acp))
+        .route("/healthz", get(healthz))
+        .route("/health", get(health))
+        .route("/metrics", get(metrics))
+        .route("/admin/runtime", get(admin_runtime))
         .route("/openapi.json", get(openapi_json))
         .route("/openapi/clients/rust", get(openapi_rust_client))
         .route("/openapi/clients/python", get(openapi_python_client));
@@ -75,19 +83,18 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     // The Slack webhook is mounted only when Slack is enabled, mirroring the
     // conditional MCP merge below. HTTP-only boots leave it off entirely.
     if state.slack().is_some() {
-        router = router.route("/slack/events", post(slack_events));
+        rest = rest.route("/slack/events", post(slack_events));
     }
 
     if let Some(mcp) = state.mcp() {
-        router = router.merge(crate::build_mcp_router(
+        rest = rest.merge(crate::build_mcp_router(
             mcp.registry.clone(),
             mcp.bearer_tokens.clone(),
             &mcp.path_prefix,
         ));
     }
 
-    router
-        .layer(DefaultBodyLimit::max(HTTP_BODY_LIMIT_BYTES))
+    pwa.merge(rest.layer(DefaultBodyLimit::max(HTTP_BODY_LIMIT_BYTES)))
         .with_state(state)
 }
 
@@ -1132,6 +1139,15 @@ fn allowed_cors_origin<'a>(state: &'a AppState, headers: &'a HeaderMap) -> Optio
         .iter()
         .any(|allowed| allowed == presented)
         .then_some(presented)
+}
+
+/// Outermost PWA-route layer: reflect an allowlisted Origin onto every
+/// response from `/chat` and `/approvals*`, including extractor rejections
+/// (413 body-too-large) that never reach the handler.
+async fn cors_mw(State(state): State<Arc<AppState>>, req: Request, next: Next) -> Response {
+    let headers = req.headers().clone();
+    let response = next.run(req).await;
+    with_cors(&state, &headers, response)
 }
 
 /// CORS preflight for `/chat` and `/approvals*`. Never requires a bearer token
