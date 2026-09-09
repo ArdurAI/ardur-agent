@@ -165,11 +165,9 @@ jobs:
           QDRANT_URL: http://localhost:6334
         run: |
           # Crate-level: durable backend (incl. the async-drop restart path) and
-          # hybrid dense+sparse recall over Mock embeddings. The `--skip`ped tests
-          # need extras out of this job's scope: `snapshot_*` a longer snapshot
-          # deadline (tracked separately), the two semantic tests the BGE model.
-          cargo test -p ardur-memory-qdrant --test integration \
-            -- --ignored --skip snapshot_into_receipt_records_event
+          # hybrid dense+sparse recall over Mock embeddings. The `--skip`ped
+          # semantic tests need the BGE model, out of this job's scope.
+          cargo test -p ardur-memory-qdrant --test integration -- --ignored
           cargo test -p ardur-memory-qdrant --test hybrid_integration \
             -- --ignored --skip semantic_hit_gated --skip hybrid_beats_either
           # End-to-end through the fused runtime: recall re-entry (#348) and the

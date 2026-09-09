@@ -34,6 +34,13 @@ pub struct QdrantMemoryConfig {
     /// [`Embedder`]: ardur_embeddings::Embedder
     /// [`QdrantMemoryRuntime::with_embedder`]: crate::QdrantMemoryRuntime::with_embedder
     pub default_embed_model: Option<String>,
+    /// Request timeout for ordinary Qdrant RPCs (`QDRANT_TIMEOUT_SECS`, default
+    /// `5`). Matches the qdrant-client default so recall stays fail-fast.
+    pub timeout_secs: u64,
+    /// Request timeout for snapshot RPCs (`QDRANT_SNAPSHOT_TIMEOUT_SECS`,
+    /// default `60`). Snapshot creation flushes segments/WAL and routinely
+    /// exceeds the client's 5s default (#371).
+    pub snapshot_timeout_secs: u64,
 }
 
 impl Default for QdrantMemoryConfig {
@@ -44,6 +51,8 @@ impl Default for QdrantMemoryConfig {
             collection_name: "ardur_memory".to_string(),
             vector_dim: 384,
             default_embed_model: None,
+            timeout_secs: 5,
+            snapshot_timeout_secs: 60,
         }
     }
 }
@@ -85,6 +94,18 @@ impl QdrantMemoryConfig {
         if let Some(dim) = non_empty(get("QDRANT_VECTOR_DIM")).and_then(|v| v.parse().ok()) {
             cfg.vector_dim = dim;
         }
+        if let Some(timeout) = non_empty(get("QDRANT_TIMEOUT_SECS"))
+            .and_then(|v| v.parse().ok())
+            .filter(|v| *v > 0)
+        {
+            cfg.timeout_secs = timeout;
+        }
+        if let Some(timeout) = non_empty(get("QDRANT_SNAPSHOT_TIMEOUT_SECS"))
+            .and_then(|v| v.parse().ok())
+            .filter(|v| *v > 0)
+        {
+            cfg.snapshot_timeout_secs = timeout;
+        }
         cfg.default_embed_model = non_empty(get("EMBED_MODEL"));
         cfg
     }
@@ -123,6 +144,20 @@ impl QdrantMemoryConfig {
         self.default_embed_model = Some(model.into());
         self
     }
+
+    /// Override the ordinary request timeout, in seconds.
+    #[must_use]
+    pub fn with_timeout_secs(mut self, secs: u64) -> Self {
+        self.timeout_secs = secs;
+        self
+    }
+
+    /// Override the snapshot-RPC timeout, in seconds.
+    #[must_use]
+    pub fn with_snapshot_timeout_secs(mut self, secs: u64) -> Self {
+        self.snapshot_timeout_secs = secs;
+        self
+    }
 }
 
 /// Treat an unset *or* empty environment value as absent.
@@ -142,6 +177,12 @@ mod tests {
         assert_eq!(cfg.collection_name, "ardur_memory");
         assert_eq!(cfg.vector_dim, 384);
         assert_eq!(cfg.default_embed_model, None);
+        assert_eq!(cfg.timeout_secs, 5);
+        assert_eq!(cfg.snapshot_timeout_secs, 60);
+        assert!(
+            cfg.snapshot_timeout_secs > cfg.timeout_secs,
+            "snapshot RPCs must outlive the recall fail-fast deadline"
+        );
         // `new()` is the same as `default()`.
         assert_eq!(QdrantMemoryConfig::new(), cfg);
     }
@@ -153,12 +194,16 @@ mod tests {
             .with_api_key("secret")
             .with_collection_name("custom")
             .with_vector_dim(1024)
-            .with_default_embed_model("gte-base-en-v1.5");
+            .with_default_embed_model("gte-base-en-v1.5")
+            .with_timeout_secs(15)
+            .with_snapshot_timeout_secs(120);
         assert_eq!(cfg.url, "http://qdrant.internal:6334");
         assert_eq!(cfg.api_key.as_deref(), Some("secret"));
         assert_eq!(cfg.collection_name, "custom");
         assert_eq!(cfg.vector_dim, 1024);
         assert_eq!(cfg.default_embed_model.as_deref(), Some("gte-base-en-v1.5"));
+        assert_eq!(cfg.timeout_secs, 15);
+        assert_eq!(cfg.snapshot_timeout_secs, 120);
     }
 
     // `from_env`'s defaults-then-overrides behaviour is exercised via the pure
