@@ -81,7 +81,10 @@ pub use secure_io::{
     write_private_file_atomic_no_follow, write_private_file_no_follow,
 };
 pub use slash::{apply_theme_command, phase1_help};
-pub use state::{SessionMetadata, StateDirs, dev_permissive_policy_enabled};
+pub use state::{
+    GrantRecord, SessionMetadata, StateDirs, dev_permissive_policy_enabled, grants_path,
+    read_grant_records,
+};
 pub use stream::{RenderCtx, StreamOutcome, drive_fused_turn, drive_turn};
 pub use theme::{Attr, Role, Theme, ThemeName};
 pub use toolbox::{MAX_BOX_COLS, SessionCost, TurnStats, render_cost_line, render_tool_call_box};

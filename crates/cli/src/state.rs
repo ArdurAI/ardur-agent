@@ -75,6 +75,51 @@ pub struct SessionMetadata {
     pub workspace: Option<String>,
 }
 
+/// One durable operator grant from `~/.ardur/grants.json` (ARD-457). Written by
+/// `ardur grant allow` (which also chains a signed `tool.grant.allow.v1`
+/// receipt) and consumed by the CLI chat engine, which registers the granted
+/// hardened tools and mints their capabilities into the session cap-token.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct GrantRecord {
+    /// The granted built-in tool id (`shell.run`, `http.fetch`, `file.read`,
+    /// `file.write`, `file.list`).
+    pub tool: String,
+    /// The `cap.*` capability labels the grant covers.
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    /// The grant's scope: shell allowlist pattern, file-tool root path, or
+    /// HTTP host list (comma-separated), depending on the tool.
+    #[serde(default)]
+    pub scope: Option<String>,
+    /// The local subject the grant was recorded under.
+    #[serde(default)]
+    pub subject: String,
+    /// Grant time in Unix milliseconds.
+    #[serde(default)]
+    pub granted_at_ms: u64,
+    /// The chained grant receipt id.
+    #[serde(default)]
+    pub receipt_id: Option<String>,
+}
+
+/// The operator grant ledger file (`~/.ardur/grants.json`).
+pub fn grants_path(dirs: &StateDirs) -> PathBuf {
+    dirs.root.join("grants.json")
+}
+
+/// Read the recorded grants (a JSON array), returning an empty list when the
+/// ledger does not exist yet.
+pub fn read_grant_records(dirs: &StateDirs) -> Result<Vec<GrantRecord>, CliError> {
+    let path = grants_path(dirs);
+    match read_string_no_follow(&path) {
+        Ok(raw) if raw.trim().is_empty() => Ok(Vec::new()),
+        Ok(raw) => serde_json::from_str(&raw)
+            .map_err(|e| CliError::State(format!("parsing {}: {e}", path.display()))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(CliError::Io(e)),
+    }
+}
+
 /// The resolved `~/.ardur/` state directories for a session. Construct with
 /// [`resolve`](StateDirs::resolve), then [`create`](StateDirs::create) to
 /// materialize the tree on first run.

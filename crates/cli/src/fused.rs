@@ -49,11 +49,14 @@ use ardur_provider_runtime::{
 use ardur_provider_selector as provider_selector;
 use ardur_runtime::{CapTokenRef, ChatMessage, ChatRuntime, SessionId, SubmitRequest};
 use ardur_session_journals::FileSessionJournal;
+use ardur_tool_registry::{
+    HttpFetchTool, ListDirTool, ReadFileTool, ShellTool, ToolId, ToolRegistry, WriteFileTool,
+};
 
 use crate::config::Config;
 use crate::engine::TurnOutcome;
 use crate::error::CliError;
-use crate::state::StateDirs;
+use crate::state::{GrantRecord, StateDirs, read_grant_records};
 use crate::stream::{StreamOutcome, drive_fused_turn};
 
 /// The audience the session cap-token is scoped to (matches the runtime's
@@ -75,6 +78,244 @@ const STEER_CAPABILITY: &str = "input.steer";
 const INTERRUPT_CAPABILITY: &str = "input.interrupt";
 /// The session cap-token's lifetime, in seconds (one hour from process start).
 const CAP_TTL_SECS: u64 = 3_600;
+
+/// The tool side of the operator grant ledger (ARD-457): a [`ToolRegistry`]
+/// holding every granted hardened built-in, plus the exact tool ids and `cap.*`
+/// labels that must be minted into the session cap-token for those tools to be
+/// invokable. Registration alone is dead-on-`CapDenied`; capability minting
+/// alone points at tools that do not exist — both halves come from the same
+/// pass here, mirroring the server's boot invariant.
+///
+/// Fail-closed mapping rules:
+/// - `shell.run` is registered ONLY with scoped grants — scopes from every
+///   scoped shell grant are unioned into one allowlist. A scope-less shell
+///   grant is skipped with a warning — never the dev-only unrestricted shell.
+///   NOTE: the shell allowlist is a PREFIX GATE, not a sandbox (the tool
+///   executes through the system shell; `git; uname`-style chaining is not
+///   confined by a prefix). Grants should name prefixes that are safe to run
+///   with arbitrary arguments.
+/// - `file.*` grants register ONLY with a scope (the confinement root), and
+///   only the granted file tool ids register — granting `file.read` does not
+///   expose `file.write`. Duplicate grants for the same file tool: last wins.
+/// - `http.fetch` grants union their host scopes; a scope-less http grant
+///   registers localhost-only (the strict default).
+/// - Unknown tool ids in the ledger are skipped with a warning.
+///
+/// Tamper evidence: every record must (a) name this machine's local subject,
+/// (b) carry a `receipt_id` found in the persisted receipt chain, and (c) have
+/// that receipt's payload digest match the recomputed canonical grant payload.
+/// A ledger copied in, hand-edited, or restored without its chain activates
+/// nothing.
+struct GrantTooling {
+    registry: ToolRegistry,
+    extra_allowlist: Vec<String>,
+    /// The final http.fetch host allowlist, kept for tests (the tool owns it
+    /// after registration).
+    #[cfg(test)]
+    http_hosts: Vec<String>,
+    /// Whether the merged grant set includes a scope-less (localhost-only)
+    /// http grant; when true the tool is built with localhost admitted
+    /// alongside the allowlist. Kept for tests.
+    #[cfg(test)]
+    http_localhost: bool,
+}
+
+impl GrantTooling {
+    /// The canonical payload a grant receipt commits to — the exact field set
+    /// `ardur grant allow` writes (receipt_id excluded). serde_json canonicalizes
+    /// key order on both sides, so digests compare byte-stably.
+    fn canonical_payload(record: &GrantRecord) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "tool": record.tool,
+            "capabilities": record.capabilities,
+            "scope": record.scope,
+            "subject": record.subject,
+            "granted_at_ms": record.granted_at_ms,
+        }))
+        .expect("grant payload serializes")
+    }
+
+    /// The ledger records that pass subject + receipt validation.
+    fn validate_records(
+        records: &[GrantRecord],
+        local_subject: &str,
+        chain: &[ardur_fused_runtime::PersistedReceipt],
+    ) -> Vec<GrantRecord> {
+        let mut valid = Vec::new();
+        for record in records {
+            if record.subject != local_subject {
+                tracing::warn!(
+                    tool = %record.tool,
+                    "grant subject does not match this machine's local subject; skipping"
+                );
+                continue;
+            }
+            let Some(receipt_id) = record.receipt_id.as_deref() else {
+                tracing::warn!(tool = %record.tool, "grant has no receipt id; skipping");
+                continue;
+            };
+            let expected = ardur_receipt::Sha256Digest::of(&Self::canonical_payload(record));
+            // The matching receipt must be a GRANT receipt — a turn receipt that
+            // happens to carry the same payload digest is not authorization.
+            let receipted = chain.iter().any(|r| {
+                r.body.receipt_id.to_string() == receipt_id
+                    && r.body.verb.as_str() == "tool.grant.allow.v1"
+                    && r.body.payload_digest == expected
+            });
+            if receipted {
+                valid.push(record.clone());
+            } else {
+                tracing::warn!(
+                    tool = %record.tool,
+                    "grant's receipt is missing from the chain or its payload digest does not match; skipping (ledger tampered or chain restored?)"
+                );
+            }
+        }
+        valid
+    }
+
+    /// Map validated grants to tools. Pure: takes pre-validated records.
+    fn from_records(records: &[GrantRecord]) -> Self {
+        let mut registry = ToolRegistry::new();
+        let mut shell_scopes: Vec<String> = Vec::new();
+        let mut http_hosts: Vec<String> = Vec::new();
+        let mut http_granted = false;
+        // A scope-less http grant means localhost-only; if a scoped grant joins
+        // the union, localhost must be re-added explicitly (a non-empty
+        // allowlist otherwise drops it).
+        let mut http_localhost = false;
+        // Per-file-tool root, so granting file.read never exposes file.write.
+        let mut file_roots: std::collections::HashMap<&str, std::path::PathBuf> =
+            std::collections::HashMap::new();
+        let mut wanted: Vec<&GrantRecord> = Vec::new();
+
+        for record in records {
+            match record.tool.as_str() {
+                "shell.run" => match record.scope.as_deref().map(str::trim) {
+                    Some(scope) if !scope.is_empty() => {
+                        shell_scopes.push(scope.to_string());
+                        wanted.push(record);
+                    }
+                    _ => tracing::warn!(
+                        tool = "shell.run",
+                        "grant has no --scope; skipping (never registers the unrestricted shell)"
+                    ),
+                },
+                "http.fetch" => {
+                    http_granted = true;
+                    match record.scope.as_deref().map(str::trim) {
+                        // A scope-less grant means localhost-only — preserve that
+                        // even when a scoped grant joins the union, because a
+                        // non-empty allowlist otherwise drops localhost.
+                        Some("") | None => http_localhost = true,
+                        Some(scope) => http_hosts.extend(
+                            scope
+                                .split(',')
+                                .map(str::trim)
+                                .filter(|h| !h.is_empty())
+                                .map(str::to_string),
+                        ),
+                    }
+                    wanted.push(record);
+                }
+                tool @ ("file.read" | "file.write" | "file.list") => {
+                    match record.scope.as_deref().map(str::trim) {
+                        Some(root) if !root.is_empty() => {
+                            if file_roots
+                                .insert(tool, std::path::PathBuf::from(root))
+                                .is_some()
+                            {
+                                tracing::warn!(
+                                    tool,
+                                    "duplicate file-tool grant: the latest grant's root wins"
+                                );
+                            }
+                            wanted.push(record);
+                        }
+                        _ => tracing::warn!(
+                            tool,
+                            "grant has no --scope (root dir); skipping (file tools stay unregistered)"
+                        ),
+                    }
+                }
+                other => tracing::warn!(tool = other, "unknown tool in grant ledger; skipping"),
+            }
+        }
+
+        if !shell_scopes.is_empty() {
+            let tool = ShellTool::with_allowlist(shell_scopes);
+            if let Err(e) = registry.register(Box::new(tool)) {
+                tracing::warn!(error = %e, "shell.run registration failed");
+            }
+        }
+        if http_granted {
+            let tool = HttpFetchTool::new()
+                .with_allowlist(http_hosts.clone())
+                .with_localhost_allowed(http_localhost);
+            if let Err(e) = registry.register(Box::new(tool)) {
+                tracing::warn!(error = %e, "http.fetch registration failed");
+            }
+        }
+        for (tool_id, root) in &file_roots {
+            let registered = match *tool_id {
+                "file.read" => registry.register(Box::new(ReadFileTool::with_root(root.clone()))),
+                "file.write" => registry.register(Box::new(WriteFileTool::with_root(root.clone()))),
+                _ => registry.register(Box::new(ListDirTool::with_root(root.clone()))),
+            };
+            if let Err(e) = registered {
+                tracing::warn!(tool = tool_id, error = %e, "file tool registration failed");
+            }
+        }
+
+        // Only capabilities whose tool ACTUALLY registered join the session
+        // allowlist — the server's ARD-457 invariant, mirrored.
+        let mut extra_allowlist = Vec::new();
+        for record in wanted {
+            if registry.get(&ToolId::new(&record.tool)).is_some() {
+                tracing::info!(
+                    tool = %record.tool,
+                    "registered operator-granted tool; its capabilities mint into the session cap-token"
+                );
+                extra_allowlist.push(record.tool.clone());
+                extra_allowlist.extend(record.capabilities.iter().cloned());
+            }
+        }
+        extra_allowlist.sort();
+        extra_allowlist.dedup();
+        Self {
+            registry,
+            extra_allowlist,
+            #[cfg(test)]
+            http_hosts,
+            #[cfg(test)]
+            http_localhost,
+        }
+    }
+
+    fn from_ledger(dirs: &StateDirs) -> Self {
+        let records = match read_grant_records(dirs) {
+            Ok(records) => records,
+            Err(e) => {
+                // A corrupt ledger must not block chat; the fail-closed default
+                // (no grant tools) is the safe reading of unparseable intent.
+                tracing::warn!(error = %e, "could not read the grant ledger; no grant tools active");
+                return Self::from_records(&[]);
+            }
+        };
+        if records.is_empty() {
+            return Self::from_records(&[]);
+        }
+        let chain = match ardur_fused_runtime::load_persisted_chain(dirs.receipt_log()) {
+            Ok(chain) => chain,
+            Err(e) => {
+                tracing::warn!(error = %e, "could not load the receipt chain to validate grants; no grant tools active");
+                return Self::from_records(&[]);
+            }
+        };
+        let valid = Self::validate_records(&records, &dirs.local_subject(), &chain);
+        Self::from_records(&valid)
+    }
+}
 /// The default per-turn cents ceiling when `ARDUR_CLI_PER_TURN_CENTS` is unset,
 /// capped at the session budget so a tiny budget still affords a turn.
 const DEFAULT_PER_TURN_CENTS: u64 = 100;
@@ -158,6 +399,12 @@ impl FusedEngine {
         let receipt_key = dirs.load_or_create_receipt_key()?;
         let policies = dirs.load_cedar_policies()?;
 
+        // ARD-457: consume the operator grant ledger — the granted hardened
+        // tools register into the session's tool registry and their tool ids +
+        // cap.* labels mint into the session cap-token below. No ledger (or a
+        // corrupt one) means no grant tools: fail-closed, as before.
+        let grant_tooling = GrantTooling::from_ledger(dirs);
+
         let subject = dirs.local_subject();
         let holder = GateHolderId(subject.clone());
 
@@ -166,6 +413,18 @@ impl FusedEngine {
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
+        let mut tool_allowlist = vec![
+            TOOL.to_string(),
+            ardur_memory::MEMORY_READ_CAPABILITY.to_string(),
+            ardur_memory::MEMORY_WRITE_CAPABILITY.to_string(),
+            SESSION_CHECKPOINT_CAPABILITY.to_string(),
+            SESSION_ROLLBACK_CAPABILITY.to_string(),
+            CONTEXT_COMPACT_CAPABILITY.to_string(),
+            BACKGROUND_TASK_CAPABILITY.to_string(),
+            STEER_CAPABILITY.to_string(),
+            INTERRUPT_CAPABILITY.to_string(),
+        ];
+        tool_allowlist.extend(grant_tooling.extra_allowlist.iter().cloned());
         let cap = issuer
             .issue(
                 CapHolderId(subject.clone()),
@@ -175,17 +434,7 @@ impl FusedEngine {
                     // The verifier checks the per-turn cost (1 unit) against this
                     // ceiling, so it must be at least 1.
                     budget_remaining: budget_cents.max(1),
-                    tool_allowlist: vec![
-                        TOOL.to_string(),
-                        ardur_memory::MEMORY_READ_CAPABILITY.to_string(),
-                        ardur_memory::MEMORY_WRITE_CAPABILITY.to_string(),
-                        SESSION_CHECKPOINT_CAPABILITY.to_string(),
-                        SESSION_ROLLBACK_CAPABILITY.to_string(),
-                        CONTEXT_COMPACT_CAPABILITY.to_string(),
-                        BACKGROUND_TASK_CAPABILITY.to_string(),
-                        STEER_CAPABILITY.to_string(),
-                        INTERRUPT_CAPABILITY.to_string(),
-                    ],
+                    tool_allowlist,
                 },
             )
             .map_err(|e| CliError::State(format!("minting the session cap-token: {e}")))?;
@@ -235,6 +484,9 @@ impl FusedEngine {
         .projected_envelope(envelope)
         .with_memory(memory.clone())
         .with_journal(Arc::new(journal))
+        // ARD-457: the operator-granted hardened tools (empty registry when no
+        // grants exist — fail-closed).
+        .with_tools(Arc::new(grant_tooling.registry))
         // ARD-H1: install the built-in injection-defense signatures so `ardur
         // chat` scans prompts too, rather than shipping stage 4.5 inert.
         .with_default_injection_filters()
@@ -717,4 +969,268 @@ fn per_turn_cents(budget_cents: u64) -> u64 {
         .and_then(|s| s.trim().parse::<u64>().ok())
         .unwrap_or_else(|| budget_cents.min(DEFAULT_PER_TURN_CENTS))
         .max(1)
+}
+
+#[cfg(test)]
+mod grant_tooling_tests {
+    use super::*;
+
+    fn record(tool: &str, caps: &[&str], scope: Option<&str>) -> GrantRecord {
+        GrantRecord {
+            tool: tool.to_string(),
+            capabilities: caps.iter().map(|s| s.to_string()).collect(),
+            scope: scope.map(str::to_string),
+            subject: "cli://localhost-test".to_string(),
+            granted_at_ms: 1,
+            receipt_id: Some(uuid::Uuid::new_v4().to_string()),
+        }
+    }
+
+    #[test]
+    fn empty_ledger_registers_nothing_and_adds_no_caps() {
+        let tooling = GrantTooling::from_records(&[]);
+        assert!(tooling.registry.list().is_empty());
+        assert!(tooling.extra_allowlist.is_empty());
+    }
+
+    #[test]
+    fn shell_grant_with_scope_registers_and_mints_caps() {
+        let records = [record(
+            "shell.run",
+            &["cap.shell_exec", "cap.process_spawn"],
+            Some("git|cargo"),
+        )];
+        let tooling = GrantTooling::from_records(&records);
+        assert!(tooling.registry.get(&ToolId::new("shell.run")).is_some());
+        for cap in ["shell.run", "cap.shell_exec", "cap.process_spawn"] {
+            assert!(
+                tooling.extra_allowlist.iter().any(|c| c == cap),
+                "`{cap}` must join the session allowlist"
+            );
+        }
+    }
+
+    #[test]
+    fn shell_grant_without_scope_never_registers_the_unrestricted_shell() {
+        let records = [record(
+            "shell.run",
+            &["cap.shell_exec", "cap.process_spawn"],
+            None,
+        )];
+        let tooling = GrantTooling::from_records(&records);
+        assert!(tooling.registry.get(&ToolId::new("shell.run")).is_none());
+        assert!(tooling.extra_allowlist.is_empty());
+    }
+
+    #[test]
+    fn file_grants_register_only_with_a_root_scope() {
+        let records = [
+            record("file.read", &["cap.fs_read"], Some("/tmp/ardur-files")),
+            record("file.write", &["cap.fs_write"], None), // scope-less: skipped
+        ];
+        let tooling = GrantTooling::from_records(&records);
+        assert!(tooling.registry.get(&ToolId::new("file.read")).is_some());
+        assert!(tooling.extra_allowlist.iter().any(|c| c == "cap.fs_read"));
+        assert!(
+            !tooling.extra_allowlist.iter().any(|c| c == "cap.fs_write"),
+            "a scope-less file.write grant must not mint cap.fs_write"
+        );
+    }
+
+    #[test]
+    fn http_grant_without_scope_registers_localhost_only_and_mints_network_cap() {
+        let records = [record("http.fetch", &["cap.network_out"], None)];
+        let tooling = GrantTooling::from_records(&records);
+        assert!(tooling.registry.get(&ToolId::new("http.fetch")).is_some());
+        assert!(
+            tooling
+                .extra_allowlist
+                .iter()
+                .any(|c| c == "cap.network_out")
+        );
+    }
+
+    #[tokio::test]
+    async fn multiple_shell_grants_union_their_scopes() {
+        let records = [
+            record(
+                "shell.run",
+                &["cap.shell_exec", "cap.process_spawn"],
+                Some("git"),
+            ),
+            record(
+                "shell.run",
+                &["cap.shell_exec", "cap.process_spawn"],
+                Some("cargo"),
+            ),
+        ];
+        let tooling = GrantTooling::from_records(&records);
+        let tool = tooling
+            .registry
+            .get(&ToolId::new("shell.run"))
+            .expect("registered");
+        // Behavior-level assertion: BOTH grants' commands run, a third does not.
+        use ardur_tool_registry::{InvocationId, ToolContext};
+        use std::collections::HashMap;
+        let ctx = ToolContext {
+            cap_token: CapTokenRef(String::new()),
+            session_id: SessionId::new(),
+            invocation_id: InvocationId::new(),
+            cwd: std::path::PathBuf::from("."),
+            env: HashMap::new(),
+            cost_budget_cents: u32::MAX,
+        };
+        let git = tool
+            .invoke(&ctx, serde_json::json!({ "command": "git --version" }))
+            .await;
+        assert!(git.is_ok(), "first grant's scope must run: {git:?}");
+        let cargo = tool
+            .invoke(&ctx, serde_json::json!({ "command": "cargo --version" }))
+            .await;
+        assert!(cargo.is_ok(), "second grant's scope must run: {cargo:?}");
+        let denied = tool
+            .invoke(&ctx, serde_json::json!({ "command": "uname -a" }))
+            .await;
+        assert!(denied.is_err(), "ungranted commands stay denied");
+    }
+
+    #[test]
+    fn granting_file_read_does_not_expose_file_write() {
+        let records = [record(
+            "file.read",
+            &["cap.fs_read"],
+            Some("/tmp/ardur-files"),
+        )];
+        let tooling = GrantTooling::from_records(&records);
+        assert!(tooling.registry.get(&ToolId::new("file.read")).is_some());
+        assert!(
+            tooling.registry.get(&ToolId::new("file.write")).is_none(),
+            "file.write must not register from a file.read grant"
+        );
+        assert!(
+            tooling.registry.get(&ToolId::new("file.list")).is_none(),
+            "file.list must not register from a file.read grant"
+        );
+        assert!(tooling.extra_allowlist.iter().any(|c| c == "cap.fs_read"));
+        assert!(!tooling.extra_allowlist.iter().any(|c| c == "cap.fs_write"));
+    }
+
+    #[test]
+    fn validation_rejects_wrong_subject_missing_receipt_and_digest_mismatch() {
+        use ardur_receipt::{
+            HolderId, ReceiptBody, Sha256Digest, TokenId, UnixTsMillis, VerbObject,
+        };
+        let good = record(
+            "shell.run",
+            &["cap.shell_exec", "cap.process_spawn"],
+            Some("echo"),
+        );
+        let chain_entry =
+            |id: &str, body_for: Option<&GrantRecord>| ardur_fused_runtime::PersistedReceipt {
+                jws_compact: format!("h.{id}.s"),
+                body: ReceiptBody {
+                    receipt_id: uuid::Uuid::parse_str(id).expect("uuid"),
+                    parent_hash: None,
+                    verb: VerbObject::new("tool.grant.allow.v1").expect("verb"),
+                    issued_at: UnixTsMillis(1),
+                    subject: HolderId("cli://localhost-test".to_string()),
+                    cap_token_id: TokenId(uuid::Uuid::from_bytes(*b"ardur-op-grant!!")),
+                    payload_digest: body_for
+                        .map(|r| Sha256Digest::of(&GrantTooling::canonical_payload(r)))
+                        .unwrap_or_else(|| Sha256Digest::of(b"other")),
+                    session_id: None,
+                    cost: ardur_receipt::CostTuple {
+                        tokens_in: 0,
+                        tokens_out: 0,
+                        cents: 0,
+                        wall_ms: 0,
+                        attention_score: 0,
+                    },
+                    tool_calls: Vec::new(),
+                    provider: None,
+                },
+            };
+        let good_id = good.receipt_id.clone().expect("receipt id");
+        let chain = vec![chain_entry(&good_id, Some(&good))];
+
+        // 1. Valid record passes.
+        let ok = GrantTooling::validate_records(
+            std::slice::from_ref(&good),
+            "cli://localhost-test",
+            &chain,
+        );
+        assert_eq!(ok.len(), 1);
+
+        // 2. Wrong subject is rejected.
+        let mut wrong_subject = good.clone();
+        wrong_subject.subject = "cli://localhost-other".to_string();
+        assert!(
+            GrantTooling::validate_records(&[wrong_subject], "cli://localhost-test", &chain)
+                .is_empty()
+        );
+
+        // 3. Missing receipt id is rejected.
+        let mut no_receipt = good.clone();
+        no_receipt.receipt_id = None;
+        assert!(
+            GrantTooling::validate_records(&[no_receipt], "cli://localhost-test", &chain)
+                .is_empty()
+        );
+
+        // 4. Receipt exists but commits to a different payload (edited scope) is rejected.
+        let mut edited = good.clone();
+        edited.scope = Some("rm -rf".to_string());
+        assert!(
+            GrantTooling::validate_records(&[edited], "cli://localhost-test", &chain).is_empty()
+        );
+
+        // 5. A TURN receipt carrying the matching id+digest but a non-grant verb
+        //    is not authorization.
+        let turn_chain = vec![ardur_fused_runtime::PersistedReceipt {
+            jws_compact: format!("h.{good_id}.s"),
+            body: ReceiptBody {
+                verb: VerbObject::new("llm.completion.minted.v1").expect("verb"),
+                ..chain[0].body.clone()
+            },
+        }];
+        assert!(
+            GrantTooling::validate_records(
+                std::slice::from_ref(&good),
+                "cli://localhost-test",
+                &turn_chain
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_scopeless_http_grant_preserves_localhost_when_scoped_grants_join() {
+        let records = [
+            record("http.fetch", &["cap.network_out"], Some("example.com")),
+            record("http.fetch", &["cap.network_out"], None),
+        ];
+        let tooling = GrantTooling::from_records(&records);
+        assert!(tooling.registry.get(&ToolId::new("http.fetch")).is_some());
+        // The scoped hosts union; localhost intent rides the tool's
+        // allow_localhost knob (covers the FULL loopback range, not literals —
+        // tool-registry tests assert 127.0.0.2/::1 admission).
+        assert!(tooling.http_hosts.iter().any(|h| h == "example.com"));
+        assert!(tooling.http_localhost);
+
+        // A scoped grant alone must NOT gain localhost.
+        let scoped_only = GrantTooling::from_records(&[record(
+            "http.fetch",
+            &["cap.network_out"],
+            Some("example.com"),
+        )]);
+        assert!(!scoped_only.http_localhost);
+    }
+
+    #[test]
+    fn unknown_ledger_tools_are_skipped() {
+        let records = [record("nuke.everything", &["cap.all"], Some("*"))];
+        let tooling = GrantTooling::from_records(&records);
+        assert!(tooling.registry.list().is_empty());
+        assert!(tooling.extra_allowlist.is_empty());
+    }
 }

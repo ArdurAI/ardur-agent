@@ -296,10 +296,13 @@ enum GrantAction {
     /// signed `tool.grant.allow.v1` receipt into the local chain.
     ///
     /// The grant is appended to `~/.ardur/grants.json` as a durable operator
-    /// ledger, and an audit receipt is chained into `~/.ardur/receipts/` so the
-    /// decision is tamper-evident. (Server-side enforcement is via the
-    /// `ARDUR_ENABLE_SHELL_TOOL` / `ARDUR_ENABLE_HTTP_TOOL` / `ARDUR_FILE_TOOL_ROOT`
-    /// opt-ins; this records and audits the operator's intent.)
+    /// ledger, an audit receipt is chained into `~/.ardur/receipts/` so the
+    /// decision is tamper-evident, and the next `ardur chat` session consumes
+    /// the ledger: the granted tools register into the fused runtime and their
+    /// capabilities mint into the session cap-token (ARD-457). shell.run and
+    /// file.* grants take effect only with `--scope`. (Server-side enabling is
+    /// via the `ARDUR_ENABLE_SHELL_TOOL` / `ARDUR_ENABLE_HTTP_TOOL` /
+    /// `ARDUR_FILE_TOOL_ROOT` opt-ins.)
     Allow {
         /// The built-in tool id to grant: `shell.run`, `http.fetch`,
         /// `file.read`, `file.write`, or `file.list`.
@@ -1817,9 +1820,10 @@ fn tool_grant_capabilities(tool: &str) -> Option<Vec<&'static str>> {
     }
 }
 
-/// The operator grant ledger file.
+/// The operator grant ledger file. Shared with the lib (the chat engine reads
+/// the same path) so the writer and consumer can never drift apart.
 fn grants_path(dirs: &StateDirs) -> PathBuf {
-    dirs.root.join("grants.json")
+    ardur_cli::grants_path(dirs)
 }
 
 /// Read the recorded grants (a JSON array), returning an empty list when the
@@ -1844,6 +1848,28 @@ fn run_grant(args: GrantArgs) -> Result<(), CliError> {
                     "unknown tool `{tool}`; expected one of shell.run, http.fetch, file.read, file.write, file.list"
                 ))
             })?;
+            // Captured before `json!` moves `scope` into the payload. Trimmed,
+            // so `--scope ""`/whitespace counts as missing — the same predicate
+            // the chat-side consumer (GrantTooling) applies.
+            let scope_missing = scope.as_deref().map(str::trim).is_none_or(str::is_empty);
+            // Durable file-tool scopes must not depend on the chat process's
+            // cwd (ARD-457 review): resolve them to absolute canonical paths AT
+            // GRANT TIME — a scope that does not resolve to an existing
+            // directory is rejected outright rather than recorded as a relative
+            // path that would later mean "whatever directory chat happens to
+            // start in".
+            let scope = match (tool.as_str(), scope) {
+                ("file.read" | "file.write" | "file.list", Some(s)) => {
+                    let trimmed = s.trim();
+                    let resolved = std::fs::canonicalize(trimmed).map_err(|e| {
+                        CliError::State(format!(
+                            "file tool scope `{trimmed}` does not resolve to an existing directory: {e}"
+                        ))
+                    })?;
+                    Some(resolved.display().to_string())
+                }
+                (_, other) => other,
+            };
             // Materialize the state tree so `receipts/` and `keys/` exist before
             // we chain a receipt into them.
             dirs.create()?;
@@ -1873,6 +1899,20 @@ fn run_grant(args: GrantArgs) -> Result<(), CliError> {
                 "granted `{tool}` ({}) — receipt {receipt_id}",
                 caps.join(", ")
             );
+            // ARD-457 consumption rules (crates/cli/src/fused.rs::GrantTooling):
+            // shell.run and file.* grants only take effect with a scope. Say so
+            // at grant time rather than letting the operator discover a no-op.
+            if scope_missing {
+                match tool.as_str() {
+                    "shell.run" => println!(
+                        "note: shell.run grants need --scope \"<allowlist prefix>\" (e.g. \"git|cargo\") to take effect; without one the grant is skipped. The allowlist is a prefix gate, not a sandbox — commands run through the system shell, so chaining (`git; uname`) is not confined. Grant only prefixes that are safe with arbitrary arguments."
+                    ),
+                    "file.read" | "file.write" | "file.list" => println!(
+                        "note: file grants need --scope <directory> to take effect; the path is resolved to an absolute canonical form at grant time. Without a scope the grant is skipped"
+                    ),
+                    _ => {}
+                }
+            }
             Ok(())
         }
         GrantAction::List => {
