@@ -77,6 +77,10 @@ const SCROLL_LIMIT: u32 = 16_384;
 /// A durable [`MemoryRuntime`] backed by a Qdrant collection.
 pub struct QdrantMemoryRuntime {
     client: Qdrant,
+    /// Dedicated client with the longer snapshot deadline (#371). Snapshot
+    /// creation flushes segments/WAL and must not inherit the recall fail-fast
+    /// timeout.
+    snapshot_client: Qdrant,
     config: QdrantMemoryConfig,
     /// The owned bridge runtime. `Option` so [`Drop`] can `take` it and hand it
     /// to [`shutdown_background`](tokio::runtime::Runtime::shutdown_background)
@@ -106,16 +110,12 @@ impl QdrantMemoryRuntime {
             .build()
             .map_err(|e| MemoryError::Backend(format!("building tokio runtime: {e}")))?;
 
-        let mut builder = Qdrant::from_url(&config.url);
-        if let Some(key) = &config.api_key {
-            builder = builder.api_key(key.clone());
-        }
-        let client = builder
-            .build()
-            .map_err(|e| MemoryError::Backend(format!("building qdrant client: {e}")))?;
+        let client = client_from_config(&config, config.timeout_secs, false)?;
+        let snapshot_client = client_from_config(&config, config.snapshot_timeout_secs, true)?;
 
         Ok(Self {
             client,
+            snapshot_client,
             config,
             rt: Some(rt),
             embedder: None,
@@ -225,7 +225,7 @@ impl QdrantMemoryRuntime {
     pub fn create_snapshot(&self) -> Result<MemorySnapshot> {
         let name = self.block_on(async {
             let resp = self
-                .client
+                .snapshot_client
                 .create_snapshot(&self.config.collection_name)
                 .await
                 .map_err(|e| MemoryError::Backend(format!("create_snapshot: {e}")))?;
@@ -679,6 +679,29 @@ impl MemoryRuntime for QdrantMemoryRuntime {
         // Reuse the upsert path; the tombstone is just another point.
         self.record(tombstone).map(|_| ())
     }
+}
+
+/// Build a Qdrant gRPC client with an explicit request timeout.
+///
+/// `skip_compat` disables the client's synchronous version probe. The snapshot
+/// client uses this so its longer deadline is not applied to boot-time health
+/// checks (#371 / qdrant-client default compatibility check).
+fn client_from_config(
+    config: &QdrantMemoryConfig,
+    timeout_secs: u64,
+    skip_compat: bool,
+) -> Result<Qdrant> {
+    let mut builder = Qdrant::from_url(&config.url);
+    if let Some(key) = &config.api_key {
+        builder = builder.api_key(key.clone());
+    }
+    builder = builder.timeout(std::time::Duration::from_secs(timeout_secs));
+    if skip_compat {
+        builder = builder.skip_compatibility_check();
+    }
+    builder
+        .build()
+        .map_err(|e| MemoryError::Backend(format!("building qdrant client: {e}")))
 }
 
 /// The fallback embedding used when no [`Embedder`] is attached: a unit vector

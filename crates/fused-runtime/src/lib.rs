@@ -86,6 +86,7 @@
 #![warn(missing_docs)]
 
 mod builder;
+mod receipt_cache;
 mod receipts;
 mod reconcile;
 mod runtime;
@@ -93,6 +94,7 @@ mod shared;
 pub mod streaming;
 
 pub use builder::FusedRuntimeBuilder;
+pub use receipt_cache::{LoadedReceiptChain, ReceiptCacheStats, VerifiedReceiptCache};
 pub use receipts::{
     PersistedReceipt, ReceiptChainError, load_persisted_chain, mint_control_receipt,
     verify_persisted_chain, verify_persisted_chain_with_jwks,

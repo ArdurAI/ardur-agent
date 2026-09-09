@@ -140,7 +140,7 @@ contents.
 | `ARDUR_MEMORY` | Backend | Required / notable env |
 |---|---|---|
 | `in_memory` (default) | In-process §7.0 Phase 1 store | none — **lost on restart** |
-| `qdrant` | Durable, Qdrant-backed §7.0 Phase 2 store | `QDRANT_URL` (**required**); `QDRANT_API_KEY` (cloud only), `QDRANT_COLLECTION` (default `ardur_memory`), `QDRANT_VECTOR_DIM` (default `384`), `EMBED_MODEL` (default `bge-small-en-v1.5`) |
+| `qdrant` | Durable, Qdrant-backed §7.0 Phase 2 store | `QDRANT_URL` (**required**); `QDRANT_API_KEY` (cloud only), `QDRANT_COLLECTION` (default `ardur_memory`), `QDRANT_VECTOR_DIM` (default `384`), `EMBED_MODEL` (default `bge-small-en-v1.5`), `QDRANT_TIMEOUT_SECS` (default `5`, recall fail-fast), `QDRANT_SNAPSHOT_TIMEOUT_SECS` (default `60`, snapshot RPCs) |
 | `hybrid` | §7.0c dense+sparse retriever over the durable store | same as `qdrant` (`QDRANT_URL` **required**) plus a BM25 lexical index persisted under `<ARDUR_DATA_DIR>/memory/bm25` |
 
 The default `in_memory` store is fast but volatile: every fact is gone when the

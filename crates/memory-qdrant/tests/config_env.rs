@@ -29,6 +29,8 @@ fn from_source_reads_overrides_without_touching_process_env() {
         ("QDRANT_COLLECTION", "c"),
         ("QDRANT_VECTOR_DIM", "768"),
         ("EMBED_MODEL", "gte-base-en-v1.5"),
+        ("QDRANT_TIMEOUT_SECS", "15"),
+        ("QDRANT_SNAPSHOT_TIMEOUT_SECS", "120"),
     ]);
 
     assert_eq!(cfg.url, "http://q:6334");
@@ -36,6 +38,8 @@ fn from_source_reads_overrides_without_touching_process_env() {
     assert_eq!(cfg.collection_name, "c");
     assert_eq!(cfg.vector_dim, 768);
     assert_eq!(cfg.default_embed_model.as_deref(), Some("gte-base-en-v1.5"));
+    assert_eq!(cfg.timeout_secs, 15);
+    assert_eq!(cfg.snapshot_timeout_secs, 120);
 }
 
 #[test]
@@ -43,6 +47,8 @@ fn from_source_treats_empty_values_as_unset_and_ignores_malformed_dim() {
     let cfg = from_pairs(&[
         ("QDRANT_VECTOR_DIM", "not-a-number"),
         ("QDRANT_API_KEY", ""),
+        ("QDRANT_TIMEOUT_SECS", "0"),
+        ("QDRANT_SNAPSHOT_TIMEOUT_SECS", "nope"),
     ]);
 
     assert_eq!(
@@ -50,4 +56,9 @@ fn from_source_treats_empty_values_as_unset_and_ignores_malformed_dim() {
         "a malformed dim falls back to the default"
     );
     assert_eq!(cfg.api_key, None, "an empty api key reads as absent");
+    assert_eq!(
+        cfg.timeout_secs, 5,
+        "zero or unparseable timeouts fall back to the client default"
+    );
+    assert_eq!(cfg.snapshot_timeout_secs, 60);
 }

@@ -51,7 +51,7 @@ use ardur_channel_discord::DiscordChannel;
 use ardur_channel_matrix::MatrixChannel;
 use ardur_channel_telegram::TelegramChannel;
 use ardur_cost_gate::{CostEnvelope, CostTuple as GateCostTuple, HolderId as GateHolderId};
-use ardur_fused_runtime::{FusedEvent, FusedRuntime, FusedRuntimeBuilder, load_persisted_chain};
+use ardur_fused_runtime::{FusedEvent, FusedRuntime, FusedRuntimeBuilder, VerifiedReceiptCache};
 use ardur_memory::{InMemoryMemoryRuntime, MemoryRuntime};
 use ardur_memory_qdrant::{
     Bm25Index, Embedder, FastEmbedEmbedder, HybridMemoryRetriever, QdrantMemoryConfig,
@@ -363,6 +363,10 @@ pub struct AppState {
     /// The receipt JWKS used to authenticate the server's receipt chain before
     /// reporting counts or tool names to admin/metrics endpoints.
     receipt_jwks: ardur_receipt::Jwks,
+    /// Shared incremental verifier for `chain.jsonl`. HTTP `/metrics` and the
+    /// turn worker both read through it so a scrape or a second look at an
+    /// unchanged log does not re-run ES256 over the whole chain (#355).
+    receipt_cache: Arc<VerifiedReceiptCache>,
     /// Turn-outcome and security-denial counters, shared with the worker.
     security_metrics: Arc<SecurityMetrics>,
     /// How long the synchronous `/chat` + ACP handlers wait on a turn before
@@ -585,6 +589,7 @@ impl AppState {
         let tool_allowlist = tool_allowlist_for_runtime(&tools);
         let security_metrics = Arc::new(SecurityMetrics::default());
         let security_events = SecurityEventLog::in_data_dir(&data_dir);
+        let receipt_cache = Arc::new(VerifiedReceiptCache::new());
         let processor = Processor {
             runtime,
             slack: slack.clone(),
@@ -596,6 +601,7 @@ impl AppState {
             tool_allowlist: tool_allowlist.clone(),
             receipt_log,
             receipt_jwks: receipt_jwks.clone(),
+            receipt_cache: receipt_cache.clone(),
             security_metrics: security_metrics.clone(),
             security_events,
         };
@@ -634,6 +640,7 @@ impl AppState {
             discord,
             telegram,
             receipt_jwks,
+            receipt_cache,
             security_metrics,
             http_turn_timeout: config.http_turn_timeout,
         }))
@@ -679,11 +686,13 @@ impl AppState {
     /// Number of receipts currently persisted in the server's chain log.
     #[must_use]
     pub fn receipt_count(&self) -> usize {
-        load_persisted_chain(self.data_dir.join("receipts").join("chain.jsonl"))
-            .and_then(|chain| {
-                ardur_fused_runtime::verify_persisted_chain_with_jwks(&chain, &self.receipt_jwks)
-                    .map(|()| chain.len())
-            })
+        self.receipt_cache
+            .load(
+                self.data_dir.join("receipts").join("chain.jsonl"),
+                &self.receipt_jwks,
+            )
+            .ok()
+            .and_then(|chain| chain.verified().then_some(chain.len()))
             .unwrap_or(0)
     }
 
@@ -704,20 +713,20 @@ impl AppState {
     /// `chain_verified == false`).
     #[must_use]
     pub fn receipt_stats(&self) -> ReceiptStats {
-        let Ok(chain) = load_persisted_chain(self.data_dir.join("receipts").join("chain.jsonl"))
-        else {
+        let Ok(loaded) = self.receipt_cache.load(
+            self.data_dir.join("receipts").join("chain.jsonl"),
+            &self.receipt_jwks,
+        ) else {
             return ReceiptStats::default();
         };
-        let chain_verified =
-            ardur_fused_runtime::verify_persisted_chain_with_jwks(&chain, &self.receipt_jwks)
-                .is_ok();
+        let chain = loaded.receipts();
         let mut stats = ReceiptStats {
             total: chain.len(),
-            chain_verified,
+            chain_verified: loaded.verified(),
             ..ReceiptStats::default()
         };
         let mut sessions: BTreeSet<uuid::Uuid> = BTreeSet::new();
-        for receipt in &chain {
+        for receipt in chain {
             let body = &receipt.body;
             stats.cost_cents_sum = stats.cost_cents_sum.saturating_add(body.cost.cents);
             stats.tool_calls_sum = stats
@@ -1046,6 +1055,9 @@ struct Processor {
     /// The JWKS derived from the configured receipt signing key, used to
     /// authenticate the receipt chain before reading tool-call data.
     receipt_jwks: ardur_receipt::Jwks,
+    /// Shared with [`AppState`] so `/metrics` and the worker see one verified
+    /// view of `chain.jsonl` (#355).
+    receipt_cache: Arc<VerifiedReceiptCache>,
     /// Turn-outcome and security-denial counters, shared with [`AppState`]. The
     /// worker increments them as turns settle; the HTTP layer reads the snapshot.
     security_metrics: Arc<SecurityMetrics>,
@@ -1369,35 +1381,38 @@ impl Processor {
     /// log is absent or unreadable). Brackets a turn's receipts for
     /// [`tools_called_since`](Self::tools_called_since).
     fn receipt_count(&self) -> usize {
-        ardur_fused_runtime::load_persisted_chain(&self.receipt_log)
-            .and_then(|chain| {
-                ardur_fused_runtime::verify_persisted_chain_with_jwks(&chain, &self.receipt_jwks)
-                    .map(|()| chain.len())
-            })
+        self.receipt_cache
+            .load(&self.receipt_log, &self.receipt_jwks)
+            .ok()
+            .and_then(|chain| chain.verified().then_some(chain.len()))
             .unwrap_or(0)
     }
 
     /// The tool names recorded on every receipt appended after index `before` —
     /// the tools this turn's provider iterations invoked, in receipt order.
     fn tools_called_since(&self, before: usize) -> Vec<String> {
-        match ardur_fused_runtime::load_persisted_chain(&self.receipt_log) {
-            Ok(chain) => {
-                if let Err(e) = ardur_fused_runtime::verify_persisted_chain_with_jwks(
-                    &chain,
-                    &self.receipt_jwks,
-                ) {
-                    tracing::warn!(error = %e, "receipt chain verification failed; discarding tool-call data");
+        match self
+            .receipt_cache
+            .load(&self.receipt_log, &self.receipt_jwks)
+        {
+            Ok(loaded) => {
+                if let Some(error) = loaded.verify_error() {
+                    tracing::warn!(
+                        error,
+                        "receipt chain verification failed; discarding tool-call data"
+                    );
                     return Vec::new();
                 }
-                chain
-                    .into_iter()
+                loaded
+                    .receipts()
+                    .iter()
                     .skip(before)
                     .flat_map(|receipt| {
                         receipt
                             .body
                             .tool_calls
-                            .into_iter()
-                            .map(|call| call.tool_name)
+                            .iter()
+                            .map(|call| call.tool_name.clone())
                     })
                     .collect()
             }
@@ -1998,6 +2013,7 @@ mod tests {
             discord: Arc::new(OnceLock::new()),
             telegram: Arc::new(OnceLock::new()),
             receipt_jwks: ardur_receipt::Jwks::new(),
+            receipt_cache: Arc::new(VerifiedReceiptCache::new()),
             security_metrics: Arc::new(SecurityMetrics::default()),
             http_turn_timeout: Duration::from_secs(30),
         }
@@ -2083,6 +2099,7 @@ mod tests {
             discord: Arc::new(OnceLock::new()),
             telegram: Arc::new(OnceLock::new()),
             receipt_jwks: ardur_receipt::Jwks::new(),
+            receipt_cache: Arc::new(VerifiedReceiptCache::new()),
             security_metrics: Arc::new(SecurityMetrics::default()),
             http_turn_timeout: Duration::from_secs(30),
         };

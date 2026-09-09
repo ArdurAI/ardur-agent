@@ -431,8 +431,26 @@ pub fn verify_persisted_chain_with_jwks(
     chain: &[PersistedReceipt],
     jwks: &Jwks,
 ) -> Result<(), ReceiptChainError> {
-    let mut previous_jws: Option<&str> = None;
-    for (at, receipt) in chain.iter().enumerate() {
+    verify_persisted_chain_range(chain, jwks, 0)
+}
+
+/// Authenticate `chain[from..]` against `jwks`, using `chain[from - 1]` as the
+/// already-trusted parent when `from > 0`. The prefix is not re-checked; the
+/// caller must have previously verified it (or pass `from == 0`).
+pub(crate) fn verify_persisted_chain_range(
+    chain: &[PersistedReceipt],
+    jwks: &Jwks,
+    from: usize,
+) -> Result<(), ReceiptChainError> {
+    if from > chain.len() {
+        return Ok(());
+    }
+    let mut previous_jws: Option<&str> = if from == 0 {
+        None
+    } else {
+        Some(&chain[from - 1].jws_compact)
+    };
+    for (at, receipt) in chain.iter().enumerate().skip(from) {
         let verified = ReceiptVerifier::verify_compact(&receipt.jws_compact, jwks)
             .map_err(|source| ReceiptChainError::InvalidSignature { at, source })?;
         if verified.body != receipt.body {
