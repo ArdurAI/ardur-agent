@@ -157,6 +157,10 @@ struct HttpTurn {
     /// commit gate as a `CancelProbe`. Unlike `Sender::closed()`, the flag does
     /// not wait for the worker to be scheduled.
     caller_gone: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Set to `true` by the fused runtime the instant the receipt is durable,
+    /// before journal/memory awaits. The HTTP grace path uses this so a billed
+    /// turn never returns 504 (#359 handshake).
+    receipt_persisted: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Drop guard owned by the `submit_chat` future: a client disconnect drops that
@@ -876,12 +880,14 @@ impl AppState {
         // dropping the oneshot, then waits for the worker — so a turn that
         // already committed returns 200 rather than 504-while-billing (#359).
         let caller_gone = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let receipt_persisted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let _caller_gone_on_drop = CallerGoneOnDrop(std::sync::Arc::clone(&caller_gone));
         let turn = HttpTurn {
             message,
             session_id,
             reply: reply_tx,
             caller_gone: std::sync::Arc::clone(&caller_gone),
+            receipt_persisted: std::sync::Arc::clone(&receipt_persisted),
         };
         let Some(work_tx) = self.work_sender() else {
             return Err(ChatSubmitError::WorkerGone);
@@ -901,12 +907,24 @@ impl AppState {
                 // client forever; ARDUR_HTTP_TURN_TIMEOUT_SECS still bounds
                 // worst-case /chat latency (2x). Dropping this future then
                 // cancels the worker via closed() + the drop guard.
-                match tokio::time::timeout(self.http_turn_timeout(), reply_rx).await {
+                match tokio::time::timeout(self.http_turn_timeout(), &mut reply_rx).await {
                     Ok(Ok(Ok(outcome))) => Ok(outcome),
                     Ok(Ok(Err(e))) => Err(ChatSubmitError::Runtime(e)),
                     Ok(Err(_canceled)) => Err(ChatSubmitError::WorkerGone),
                     Err(_grace_elapsed) => {
-                        Err(ChatSubmitError::Runtime(RuntimeError::TurnCancelled))
+                        if receipt_persisted.load(std::sync::atomic::Ordering::SeqCst) {
+                            // Receipt is already durable — never 504 a billed
+                            // turn. Wait for the oneshot (journal/memory may
+                            // still be running). A stuck post-commit path is
+                            // an operational failure, not a timeout.
+                            match reply_rx.await {
+                                Ok(Ok(outcome)) => Ok(outcome),
+                                Ok(Err(e)) => Err(ChatSubmitError::Runtime(e)),
+                                Err(_canceled) => Err(ChatSubmitError::WorkerGone),
+                            }
+                        } else {
+                            Err(ChatSubmitError::Runtime(RuntimeError::TurnCancelled))
+                        }
                     }
                 }
             }
@@ -1269,6 +1287,7 @@ impl Processor {
             session_id,
             mut reply,
             caller_gone,
+            receipt_persisted,
         } = turn;
 
         let token = match self.mint_session_token(now_unix()) {
@@ -1317,9 +1336,12 @@ impl Processor {
         // outcome rather than being needlessly discarded — and the commit-gate
         // probe above covers the residual case where this worker was starved
         // past the provider round entirely.
-        let submit =
-            self.runtime
-                .submit_with_cancellation(request, Default::default(), cancel_probe);
+        let submit = self.runtime.submit_with_cancellation(
+            request,
+            Default::default(),
+            cancel_probe,
+            Some(receipt_persisted),
+        );
         tokio::pin!(submit);
         let submit_result = tokio::select! {
             biased;

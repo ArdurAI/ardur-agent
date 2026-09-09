@@ -8,6 +8,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use ardur_approvals::{ApprovalStatus, ApprovalStore};
@@ -1469,6 +1470,7 @@ impl FusedRuntime {
         Ok(request)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn commit_receipt_and_journal(
         &self,
         _session_id: SessionId,
@@ -1477,6 +1479,7 @@ impl FusedRuntime {
         response: &CompletionResponse,
         signed: &ardur_receipt::SignedReceipt,
         now_ms: u64,
+        committed: Option<&Arc<AtomicBool>>,
     ) -> Result<ReceiptBody, DurableCommitError> {
         let receipt = signed.body().clone();
 
@@ -1490,6 +1493,11 @@ impl FusedRuntime {
             )));
         }
         *self.chain_tail.lock() = Some(Sha256Digest::of(signed.jws_compact().as_bytes()));
+        // #359 handshake: the receipt is durable NOW, before journal/memory
+        // awaits. HTTP uses this so a grace timeout cannot 504 a billed turn.
+        if let Some(flag) = committed {
+            flag.store(true, Ordering::SeqCst);
+        }
 
         if let Some(journal) = &self.journal {
             if iteration == 1 {
@@ -1753,7 +1761,7 @@ pub type CancelProbe = Arc<dyn Fn() -> bool + Send + Sync>;
 #[async_trait::async_trait]
 impl ChatRuntime for FusedRuntime {
     async fn submit(&self, req: SubmitRequest) -> Result<SubmitResult, RuntimeError> {
-        self.submit_inner(req, PerRequestProvisioning::default(), None)
+        self.submit_inner(req, PerRequestProvisioning::default(), None, None)
             .await
     }
 }
@@ -1781,7 +1789,7 @@ impl FusedRuntime {
         req: SubmitRequest,
         provisioning: PerRequestProvisioning,
     ) -> Result<SubmitResult, RuntimeError> {
-        self.submit_inner(req, provisioning, None).await
+        self.submit_inner(req, provisioning, None, None).await
     }
 
     /// Submit a turn with a [`CancelProbe`]: the probe is consulted after every
@@ -1795,8 +1803,9 @@ impl FusedRuntime {
         req: SubmitRequest,
         provisioning: PerRequestProvisioning,
         cancel_probe: CancelProbe,
+        committed: Option<Arc<AtomicBool>>,
     ) -> Result<SubmitResult, RuntimeError> {
-        self.submit_inner(req, provisioning, Some(cancel_probe))
+        self.submit_inner(req, provisioning, Some(cancel_probe), committed)
             .await
     }
 
@@ -1824,6 +1833,7 @@ impl FusedRuntime {
         req: SubmitRequest,
         provisioning: PerRequestProvisioning,
         cancel_probe: Option<CancelProbe>,
+        committed: Option<Arc<AtomicBool>>,
     ) -> Result<SubmitResult, RuntimeError> {
         let session_id = req.session_id;
         let turn_start_ms = self.clock.now_ms().get();
@@ -2197,6 +2207,7 @@ impl FusedRuntime {
                         &response,
                         &signed,
                         iteration_now_ms,
+                        committed.as_ref(),
                     )
                     .await
                 {
@@ -2838,7 +2849,15 @@ impl FusedRuntime {
                 };
 
                 let receipt = match self
-                    .commit_receipt_and_journal(session_id, iteration, &req, &response, &signed, now_ms)
+                    .commit_receipt_and_journal(
+                        session_id,
+                        iteration,
+                        &req,
+                        &response,
+                        &signed,
+                        now_ms,
+                        None,
+                    )
                     .await
                 {
                     Ok(receipt) => {

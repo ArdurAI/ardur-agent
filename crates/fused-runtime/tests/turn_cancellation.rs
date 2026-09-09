@@ -39,6 +39,7 @@ async fn a_caller_gone_at_the_commit_gate_gets_no_receipt() {
             request_for("abandoned turn", &valid_token(), session_id),
             Default::default(),
             probe,
+            None,
         )
         .await;
 
@@ -75,6 +76,7 @@ async fn a_present_caller_commits_normally() {
             request_for("present turn", &valid_token(), session_id),
             Default::default(),
             probe,
+            None,
         )
         .await;
     assert!(
@@ -120,6 +122,7 @@ async fn the_probe_is_consulted_after_the_provider_round_not_before() {
         request_for("mid-flight timeout", &valid_token(), session_id),
         Default::default(),
         Arc::new(probe),
+        None,
     );
     tokio::pin!(submit);
     tokio::select! {
@@ -170,4 +173,114 @@ impl ardur_provider_runtime::Provider for GatedEchoProvider {
     fn rate_card(&self) -> &ardur_provider_runtime::RateCard {
         self.inner.rate_card()
     }
+}
+
+/// Parks on the first journal append so a test can observe the persist flag
+/// while the receipt is already durable and journal/memory still in flight.
+struct ParkingJournal {
+    inner: InMemorySessionJournal,
+    entered: tokio::sync::Notify,
+    unpark: AtomicBool,
+    unpark_notify: tokio::sync::Notify,
+}
+
+#[async_trait::async_trait]
+impl ardur_session_journals::SessionJournal for ParkingJournal {
+    async fn append(
+        &self,
+        entry: ardur_session_journals::JournalEntry,
+    ) -> Result<ardur_session_journals::EntryId, ardur_session_journals::JournalError> {
+        if !self.unpark.load(Ordering::SeqCst) {
+            self.entered.notify_waiters();
+            while !self.unpark.load(Ordering::SeqCst) {
+                self.unpark_notify.notified().await;
+            }
+        }
+        self.inner.append(entry).await
+    }
+
+    async fn replay(
+        &self,
+        session_id: ardur_runtime::SessionId,
+    ) -> Result<Vec<ardur_session_journals::JournalEntry>, ardur_session_journals::JournalError>
+    {
+        self.inner.replay(session_id).await
+    }
+
+    async fn replay_from(
+        &self,
+        session_id: ardur_runtime::SessionId,
+        from: ardur_session_journals::EntryId,
+    ) -> Result<Vec<ardur_session_journals::JournalEntry>, ardur_session_journals::JournalError>
+    {
+        self.inner.replay_from(session_id, from).await
+    }
+
+    async fn close(&self) -> Result<(), ardur_session_journals::JournalError> {
+        self.inner.close().await
+    }
+
+    fn session_id(&self) -> &ardur_runtime::SessionId {
+        self.inner.session_id()
+    }
+}
+
+#[tokio::test]
+async fn persist_flag_is_set_before_journal_append_returns() {
+    // The HTTP grace path needs to know the receipt is durable while journal
+    // (or memory) is still in flight. If the flag only flipped after submit
+    // returned, a grace timeout during journal would still 504 a billed turn.
+    let session_id = ardur_runtime::SessionId::new();
+    let journal = Arc::new(ParkingJournal {
+        inner: InMemorySessionJournal::new(session_id),
+        entered: tokio::sync::Notify::new(),
+        unpark: AtomicBool::new(false),
+        unpark_notify: tokio::sync::Notify::new(),
+    });
+    let entered = &journal.entered;
+    let unpark = &journal.unpark;
+    let unpark_notify = &journal.unpark_notify;
+
+    let root = tempfile::tempdir().expect("tempdir");
+    let receipt_log = root.path().join("receipts.jsonl");
+    let runtime = runtime_builder(Arc::new(EchoProvider::new()))
+        .with_journal(Arc::clone(&journal) as Arc<dyn ardur_session_journals::SessionJournal>)
+        .receipt_log(&receipt_log)
+        .build()
+        .expect("runtime builds");
+
+    let committed = Arc::new(AtomicBool::new(false));
+    let probe: ardur_fused_runtime::CancelProbe = Arc::new(|| false);
+
+    let entered_wait = entered.notified();
+    tokio::pin!(entered_wait);
+    let submit = runtime.submit_with_cancellation(
+        request_for("handshake", &valid_token(), session_id),
+        Default::default(),
+        probe,
+        Some(Arc::clone(&committed)),
+    );
+    tokio::pin!(submit);
+    tokio::select! {
+        biased;
+        () = &mut entered_wait => {}
+        result = &mut submit => panic!("submit finished before journal park: {result:?}"),
+    }
+    assert!(
+        committed.load(Ordering::SeqCst),
+        "receipt persist must flip the flag before journal append awaits"
+    );
+    let chain = load_persisted_chain(&receipt_log).expect("chain load succeeds");
+    assert_eq!(
+        chain.len(),
+        1,
+        "the receipt is already durable at journal park"
+    );
+    unpark.store(true, Ordering::SeqCst);
+    unpark_notify.notify_waiters();
+    let result = submit.await;
+    assert!(
+        result.is_ok(),
+        "unparked journal lets the turn finish: {result:?}"
+    );
 }
