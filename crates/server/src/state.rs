@@ -896,10 +896,18 @@ impl AppState {
             Ok(Err(_canceled)) => Err(ChatSubmitError::WorkerGone),
             Err(_elapsed) => {
                 caller_gone.store(true, std::sync::atomic::Ordering::SeqCst);
-                match reply_rx.await {
-                    Ok(Ok(outcome)) => Ok(outcome),
-                    Ok(Err(e)) => Err(ChatSubmitError::Runtime(e)),
-                    Err(_canceled) => Err(ChatSubmitError::WorkerGone),
+                // Bounded handshake: wait one more timeout window for an
+                // already-committed outcome. A stuck provider cannot hold the
+                // client forever; ARDUR_HTTP_TURN_TIMEOUT_SECS still bounds
+                // worst-case /chat latency (2x). Dropping this future then
+                // cancels the worker via closed() + the drop guard.
+                match tokio::time::timeout(self.http_turn_timeout(), reply_rx).await {
+                    Ok(Ok(Ok(outcome))) => Ok(outcome),
+                    Ok(Ok(Err(e))) => Err(ChatSubmitError::Runtime(e)),
+                    Ok(Err(_canceled)) => Err(ChatSubmitError::WorkerGone),
+                    Err(_grace_elapsed) => {
+                        Err(ChatSubmitError::Runtime(RuntimeError::TurnCancelled))
+                    }
                 }
             }
         }

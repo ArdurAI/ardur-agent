@@ -1925,7 +1925,7 @@ impl FusedRuntime {
             // 3'. cost-gate admit (per iteration).
             let request_digest =
                 GateSha256::of(&serde_json::to_vec(&iter_request.messages).unwrap_or_default());
-            let reservation = match self
+            let mut reservation = match self
                 .gate
                 .admit(AdmissionRequest {
                     cap_token_id: gate_token_id,
@@ -1970,7 +1970,7 @@ impl FusedRuntime {
             self.gate.touch_reservation(reservation.reservation_id);
 
             // #359 commit gate after the provider round.
-            let reservation = self
+            reservation = self
                 .abort_if_caller_gone(session_id, reservation, &cancel_probe)
                 .await?;
 
@@ -1993,6 +1993,12 @@ impl FusedRuntime {
             let mut tool_cost = RuntimeCostTuple::default();
             if wants_tools && !exhausted {
                 for call in &requested {
+                    // #359: do not authorize or invoke further tools once the
+                    // caller is gone — later tools would otherwise run with no
+                    // receipt attesting their effects.
+                    reservation = self
+                        .abort_if_caller_gone(session_id, reservation, &cancel_probe)
+                        .await?;
                     let Some(tool) = self.tools.get(&ToolId::new(&call.name)) else {
                         self.release(reservation).await;
                         let err = RuntimeError::UnknownTool {
@@ -2118,7 +2124,7 @@ impl FusedRuntime {
 
             // #359: recheck after tool.invoke awaits — a timeout during tool
             // execution would otherwise fall through to cost finalize + commit.
-            let reservation = self
+            reservation = self
                 .abort_if_caller_gone(session_id, reservation, &cancel_probe)
                 .await?;
 
@@ -2130,7 +2136,18 @@ impl FusedRuntime {
             //    receipt chain or rolling back each other's journals.
             let combined_cost = response.cost.saturating_add(&tool_cost);
             let (signed, receipt) = {
-                let _commit_guard = self.commit_lock.lock().await;
+                let commit_guard = self.commit_lock.lock().await;
+                // #359: final probe INSIDE the lock, immediately before
+                // finalize/persist. A disconnect while waiting for the lock
+                // would otherwise pass the post-tool probe and still commit.
+                if cancel_probe.as_ref().is_some_and(|probe| probe()) {
+                    drop(commit_guard);
+                    self.release(reservation).await;
+                    let err = RuntimeError::TurnCancelled;
+                    self.fire_error(session_id, LifecyclePhase::Provider, &err)
+                        .await;
+                    return Err(err);
+                }
                 let parent_hash = *self.chain_tail.lock();
                 let body = ReceiptBody {
                     receipt_id: uuid::Uuid::new_v4(),
