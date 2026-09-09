@@ -143,6 +143,28 @@ class GitHubSecurityWorkflowTests(unittest.TestCase):
         )
         self.assertFalse(any(re.search(r"rust /|site /|docker /|security /", c) for c in contexts))
 
+    def test_docker_workflow_publishes_ghcr_on_version_tags(self):
+        docker = (WORKFLOWS / "docker.yml").read_text(encoding="utf-8")
+
+        self.assertIn('tags: ["v*"]', docker)
+        self.assertIn("name: publish-ghcr", docker)
+        self.assertIn("needs: build-healthcheck-scan", docker)
+        self.assertIn(
+            "if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')",
+            docker,
+        )
+        self.assertIn("packages: write", docker)
+        self.assertIn(
+            "docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef",
+            docker,
+        )
+        self.assertIn("registry: ghcr.io", docker)
+        self.assertIn("push: true", docker)
+        self.assertIn("ghcr.io/${repo}", docker)
+        self.assertIn("subject-name: ${{ steps.meta.outputs.image }}", docker)
+        self.assertIn("subject-digest: ${{ steps.push.outputs.digest }}", docker)
+        self.assertNotIn("ghcr.io/ardurai/ardur-agent:latest", docker)
+
     def test_rust_toolchain_is_exactly_pinned(self):
         toolchain = (ROOT / "rust-toolchain.toml").read_text(encoding="utf-8")
 
