@@ -296,10 +296,13 @@ enum GrantAction {
     /// signed `tool.grant.allow.v1` receipt into the local chain.
     ///
     /// The grant is appended to `~/.ardur/grants.json` as a durable operator
-    /// ledger, and an audit receipt is chained into `~/.ardur/receipts/` so the
-    /// decision is tamper-evident. (Server-side enforcement is via the
-    /// `ARDUR_ENABLE_SHELL_TOOL` / `ARDUR_ENABLE_HTTP_TOOL` / `ARDUR_FILE_TOOL_ROOT`
-    /// opt-ins; this records and audits the operator's intent.)
+    /// ledger, an audit receipt is chained into `~/.ardur/receipts/` so the
+    /// decision is tamper-evident, and the next `ardur chat` session consumes
+    /// the ledger: the granted tools register into the fused runtime and their
+    /// capabilities mint into the session cap-token (ARD-457). shell.run and
+    /// file.* grants take effect only with `--scope`. (Server-side enabling is
+    /// via the `ARDUR_ENABLE_SHELL_TOOL` / `ARDUR_ENABLE_HTTP_TOOL` /
+    /// `ARDUR_FILE_TOOL_ROOT` opt-ins.)
     Allow {
         /// The built-in tool id to grant: `shell.run`, `http.fetch`,
         /// `file.read`, `file.write`, or `file.list`.
