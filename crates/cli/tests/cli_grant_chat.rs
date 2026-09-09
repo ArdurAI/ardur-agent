@@ -14,6 +14,10 @@ fn ardur(home: &std::path::Path) -> Command {
         .env_remove("ARDUR_MODEL")
         .env_remove("ARDUR_DATA_DIR")
         .env_remove("ARDUR_DEV_PERMISSIVE_POLICY")
+        // Budget env from the developer shell must not leak into the turn's
+        // cost admission.
+        .env_remove("ARDUR_CLI_BUDGET_CENTS")
+        .env_remove("ARDUR_CLI_PER_TURN_CENTS")
         .env_remove("OPENROUTER_API_KEY")
         .env_remove("OPENAI_API_KEY")
         .env_remove("OPENAI_COMPAT_API_KEY")
@@ -44,7 +48,9 @@ fn granted_chat_turn_runs_and_the_combined_chain_verifies() {
     assert!(home_path.join(".ardur/grants.json").exists());
 
     // The chat turn boots over the grant ledger (registers shell.run, mints its
-    // caps) and completes a fused stub turn without error.
+    // caps) and completes a fused stub turn without error. The registration is
+    // OBSERVABLE: the engine logs each granted tool it activates, so a no-op
+    // consumer fails this assertion.
     let chat = ardur(&home_path)
         .arg("chat")
         .write_stdin("hello granted substrate\n/quit\n")
@@ -52,10 +58,14 @@ fn granted_chat_turn_runs_and_the_combined_chain_verifies() {
         .expect("chat runs");
     assert!(chat.status.success(), "exit: {:?}", chat.status);
     let stdout = String::from_utf8_lossy(&chat.stdout);
+    let stderr = String::from_utf8_lossy(&chat.stderr);
     assert!(
         stdout.contains("[anthropic stub]"),
-        "the fused stub turn should complete with a grant present, got: {stdout}\nstderr: {}",
-        String::from_utf8_lossy(&chat.stderr)
+        "the fused stub turn should complete with a grant present, got: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("registered operator-granted tool") && stderr.contains("shell.run"),
+        "the granted tool's registration log must appear, got stderr: {stderr}"
     );
 
     // Grant receipt + turn receipt live in one chain; it must verify.

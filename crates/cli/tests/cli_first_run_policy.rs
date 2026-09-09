@@ -20,6 +20,8 @@ fn ardur(home: &std::path::Path) -> Command {
         .env_remove("ARDUR_MODEL")
         .env_remove("ARDUR_DATA_DIR")
         .env_remove("ARDUR_DEV_PERMISSIVE_POLICY")
+        .env_remove("ARDUR_CLI_BUDGET_CENTS")
+        .env_remove("ARDUR_CLI_PER_TURN_CENTS")
         .env_remove("ARDUR_CEDAR_POLICY_PATH")
         .env_remove("OPENROUTER_API_KEY")
         .env_remove("OPENAI_API_KEY")

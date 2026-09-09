@@ -1848,8 +1848,10 @@ fn run_grant(args: GrantArgs) -> Result<(), CliError> {
                     "unknown tool `{tool}`; expected one of shell.run, http.fetch, file.read, file.write, file.list"
                 ))
             })?;
-            // Captured before `json!` moves `scope` into the payload.
-            let scope_missing = scope.is_none();
+            // Captured before `json!` moves `scope` into the payload. Trimmed,
+            // so `--scope ""`/whitespace counts as missing — the same predicate
+            // the chat-side consumer (GrantTooling) applies.
+            let scope_missing = scope.as_deref().map(str::trim).is_none_or(str::is_empty);
             // Materialize the state tree so `receipts/` and `keys/` exist before
             // we chain a receipt into them.
             dirs.create()?;
