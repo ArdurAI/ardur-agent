@@ -369,6 +369,7 @@ pub struct AppState {
     data_dir: PathBuf,
     chat_bearer_tokens: Vec<String>,
     admin_bearer_tokens: Vec<String>,
+    cors_origins: Vec<String>,
     tool_allowlist: Vec<String>,
     cost_budget_cents: u64,
     mcp: Option<McpSurface>,
@@ -658,6 +659,7 @@ impl AppState {
             data_dir,
             chat_bearer_tokens: config.chat_bearer_tokens.clone(),
             admin_bearer_tokens: config.admin_bearer_tokens.clone(),
+            cors_origins: config.cors_origins.clone(),
             tool_allowlist,
             cost_budget_cents: config.cost_budget_cents,
             mcp,
@@ -681,6 +683,13 @@ impl AppState {
     #[must_use]
     pub fn admin_bearer_tokens(&self) -> &[String] {
         &self.admin_bearer_tokens
+    }
+
+    /// Exact browser origins allowed to call `/chat` and `/approvals*` (empty =
+    /// no CORS headers).
+    #[must_use]
+    pub fn cors_origins(&self) -> &[String] {
+        &self.cors_origins
     }
 
     /// The configured per-process cost-gate budget, in cents.
@@ -2097,6 +2106,7 @@ mod tests {
             data_dir: tempdir.path().to_path_buf(),
             chat_bearer_tokens: Vec::new(),
             admin_bearer_tokens: Vec::new(),
+            cors_origins: Vec::new(),
             tool_allowlist: Vec::new(),
             cost_budget_cents: 0,
             mcp: None,
@@ -2183,6 +2193,7 @@ mod tests {
             data_dir: tempdir.path().to_path_buf(),
             chat_bearer_tokens: Vec::new(),
             admin_bearer_tokens: Vec::new(),
+            cors_origins: Vec::new(),
             tool_allowlist: Vec::new(),
             cost_budget_cents: 0,
             mcp: None,

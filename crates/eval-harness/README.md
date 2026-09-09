@@ -46,7 +46,7 @@ Content-Type: application/json
 reports:
 
 - **`400`** — the server rejected the request body (empty `message`,
-  unsupported `stream: true`, …). This is a scenario **failure**
+  malformed JSON, …). This is a scenario **failure**
   (`bad_request: …`), not an error — the request was malformed, not the server.
 - **`502`** — the runtime rejected or failed the turn (cost gate denied,
   injection blocked, provider error). Surfaces as an **error** (`runtime: …`).

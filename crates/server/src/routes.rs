@@ -20,7 +20,7 @@ use std::sync::Arc;
 use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::extract::{DefaultBodyLimit, Path, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use serde::{Deserialize, Serialize};
@@ -53,15 +53,21 @@ const HTTP_BODY_LIMIT_BYTES: usize = 64 * 1024;
 /// merged in at the configured path prefix.
 pub fn build_router(state: Arc<AppState>) -> Router {
     let mut router = Router::new()
-        .route("/chat", post(chat))
+        .route("/chat", post(chat).options(cors_preflight))
         .route("/acp", post(acp))
         .route("/healthz", get(healthz))
         .route("/health", get(health))
         .route("/metrics", get(metrics))
         .route("/admin/runtime", get(admin_runtime))
-        .route("/approvals", get(approvals_list))
-        .route("/approvals/{id}/approve", post(approvals_approve))
-        .route("/approvals/{id}/reject", post(approvals_reject))
+        .route("/approvals", get(approvals_list).options(cors_preflight))
+        .route(
+            "/approvals/{id}/approve",
+            post(approvals_approve).options(cors_preflight),
+        )
+        .route(
+            "/approvals/{id}/reject",
+            post(approvals_reject).options(cors_preflight),
+        )
         .route("/openapi.json", get(openapi_json))
         .route("/openapi/clients/rust", get(openapi_rust_client))
         .route("/openapi/clients/python", get(openapi_python_client));
@@ -433,38 +439,42 @@ enum ApprovalDecision {
 /// so the response is self-describing. Admin-bearer gated; fails closed when no
 /// admin tokens are configured.
 async fn approvals_list(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    if let Err(response) = authorize_admin(&state, &headers) {
-        return *response;
-    }
+    let response = async {
+        if let Err(response) = authorize_admin(&state, &headers) {
+            return *response;
+        }
 
-    let dir = state.approvals_dir();
-    let mut cards = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().is_none_or(|e| e != "json") {
-                continue;
-            }
-            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-                continue;
-            };
-            // Only surface records whose id we would also accept on the decide
-            // path — anything else is not a card this API manages.
-            if !valid_approval_id(stem) {
-                continue;
-            }
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&content) {
-                    if let Some(object) = value.as_object_mut() {
-                        object.insert("id".to_string(), json!(stem));
+        let dir = state.approvals_dir();
+        let mut cards = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().is_none_or(|e| e != "json") {
+                    continue;
+                }
+                let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                    continue;
+                };
+                // Only surface records whose id we would also accept on the decide
+                // path — anything else is not a card this API manages.
+                if !valid_approval_id(stem) {
+                    continue;
+                }
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&content) {
+                        if let Some(object) = value.as_object_mut() {
+                            object.insert("id".to_string(), json!(stem));
+                        }
+                        cards.push(value);
                     }
-                    cards.push(value);
                 }
             }
         }
-    }
 
-    (StatusCode::OK, Json(json!(cards))).into_response()
+        (StatusCode::OK, Json(json!(cards))).into_response()
+    }
+    .await;
+    with_cors(&state, &headers, response)
 }
 
 /// `POST /approvals/{id}/approve` — flip a pending card to `approved`.
@@ -473,10 +483,14 @@ async fn approvals_approve(
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    if let Err(response) = authorize_admin(&state, &headers) {
-        return *response;
+    let response = async {
+        if let Err(response) = authorize_admin(&state, &headers) {
+            return *response;
+        }
+        apply_approval_decision(&state, &id, ApprovalDecision::Approve).await
     }
-    apply_approval_decision(&state, &id, ApprovalDecision::Approve).await
+    .await;
+    with_cors(&state, &headers, response)
 }
 
 /// `POST /approvals/{id}/reject` — flip a pending card to `denied`.
@@ -491,11 +505,15 @@ async fn approvals_reject(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if let Err(response) = authorize_admin(&state, &headers) {
-        return *response;
+    let response = async {
+        if let Err(response) = authorize_admin(&state, &headers) {
+            return *response;
+        }
+        let reason = parse_reject_reason(&body);
+        apply_approval_decision(&state, &id, ApprovalDecision::Reject { reason }).await
     }
-    let reason = parse_reject_reason(&body);
-    apply_approval_decision(&state, &id, ApprovalDecision::Reject { reason }).await
+    .await;
+    with_cors(&state, &headers, response)
 }
 
 /// Extract an optional `reason` string from a reject body. Tolerant by design:
@@ -728,6 +746,11 @@ impl From<ChatTurnOutcome> for ChatResponse {
     }
 }
 
+async fn chat(State(state): State<Arc<AppState>>, headers: HeaderMap, body: Bytes) -> Response {
+    let response = chat_inner(state.clone(), headers.clone(), body).await;
+    with_cors(&state, &headers, response)
+}
+
 /// `POST /chat` — the generic synchronous chat entry point.
 ///
 /// Parses the JSON body, runs one turn through the fused runtime via
@@ -736,7 +759,7 @@ impl From<ChatTurnOutcome> for ChatResponse {
 /// the runtime rejects or fails the turn (cost gate denied, injection blocked,
 /// provider error, …); `503` when the bounded worker queue is saturated; `504`
 /// when the HTTP turn wait times out; `200` otherwise.
-async fn chat(State(state): State<Arc<AppState>>, headers: HeaderMap, body: Bytes) -> Response {
+async fn chat_inner(state: Arc<AppState>, headers: HeaderMap, body: Bytes) -> Response {
     if let Err(response) = authorize_chat(&state, &headers) {
         return *response;
     }
@@ -754,9 +777,8 @@ async fn chat(State(state): State<Arc<AppState>>, headers: HeaderMap, body: Byte
         return bad_request("`message` is required and must be non-empty".to_string());
     }
 
-    // Streaming (SSE) is the P1.5 follow-up — for now, we accept the flag and
-    // return a mock SSE stream that yields the consolidated reply as a single
-    // event. This unblocks the API contract while full streaming is implemented.
+    // Streaming returns fused-runtime events as `text/event-stream`. A dropped
+    // body cancels the in-flight turn before receipt/journal/memory side effects.
     if request.stream {
         return stream_chat(state, request.message, request.session_id).await;
     }
@@ -1078,6 +1100,55 @@ fn acp_prompt_for_request(request: &AcpRequest) -> Result<String, AcpErrorObject
 /// Verify the `POST /chat` bearer token before body processing or provider work.
 fn authorize_chat(state: &AppState, headers: &HeaderMap) -> Result<(), Box<Response>> {
     authorize_bearer(state.chat_bearer_tokens(), headers).map_err(|()| Box::new(unauthorized()))
+}
+
+/// Reflect an allowlisted `Origin` onto PWA-facing responses. Empty allowlist
+/// (the default) emits no CORS headers.
+fn with_cors(state: &AppState, headers: &HeaderMap, mut response: Response) -> Response {
+    let Some(origin) = allowed_cors_origin(state, headers) else {
+        return response;
+    };
+    let Ok(origin_value) = HeaderValue::from_str(origin) else {
+        return response;
+    };
+    let headers_mut = response.headers_mut();
+    headers_mut.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin_value);
+    headers_mut.insert(header::VARY, HeaderValue::from_static("Origin"));
+    headers_mut.insert(
+        header::ACCESS_CONTROL_ALLOW_HEADERS,
+        HeaderValue::from_static("Authorization, Content-Type, Accept"),
+    );
+    headers_mut.insert(
+        header::ACCESS_CONTROL_ALLOW_METHODS,
+        HeaderValue::from_static("GET, POST, OPTIONS"),
+    );
+    response
+}
+
+fn allowed_cors_origin<'a>(state: &'a AppState, headers: &'a HeaderMap) -> Option<&'a str> {
+    let presented = headers.get(header::ORIGIN)?.to_str().ok()?;
+    state
+        .cors_origins()
+        .iter()
+        .any(|allowed| allowed == presented)
+        .then_some(presented)
+}
+
+/// CORS preflight for `/chat` and `/approvals*`. Never requires a bearer token
+/// (the browser does not send `Authorization` on OPTIONS).
+async fn cors_preflight(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    response = with_cors(&state, &headers, response);
+    if response
+        .headers()
+        .contains_key(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+    {
+        response.headers_mut().insert(
+            header::ACCESS_CONTROL_MAX_AGE,
+            HeaderValue::from_static("600"),
+        );
+    }
+    response
 }
 
 /// Verify the admin bearer token. Empty admin token config fails closed.

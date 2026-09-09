@@ -48,6 +48,7 @@ fn test_config(data_dir: &tempfile::TempDir) -> Config {
         bind_addr: "127.0.0.1:0".to_string(),
         chat_bearer_tokens: vec![CHAT_TOKEN.to_string()],
         admin_bearer_tokens: Vec::new(),
+        cors_origins: Vec::new(),
         dev_permissive_policy: true,
         model: "claude-opus-4-8".to_string(),
         cost_budget_cents: 10_000,

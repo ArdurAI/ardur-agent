@@ -1,8 +1,11 @@
+import { contentTextFromPayload, splitSse } from './sse.js';
+
 const transcript = document.querySelector('#transcript');
 const form = document.querySelector('#chat-form');
 const messageInput = document.querySelector('#message');
 const serverUrlInput = document.querySelector('#server-url');
 const bearerTokenInput = document.querySelector('#bearer-token');
+const adminTokenInput = document.querySelector('#admin-token');
 const installButton = document.querySelector('#install-button');
 const pushButton = document.querySelector('#enable-push');
 const pushStatus = document.querySelector('#push-status');
@@ -27,9 +30,18 @@ function serverUrl(path) {
   return new URL(path, serverUrlInput.value.replace(/\/?$/, '/')).toString();
 }
 
-function authHeaders() {
-  const token = bearerTokenInput.value.trim();
+function bearerHeaders(tokenInput) {
+  const token = tokenInput.value.trim();
   return token ? { Authorization: ['Bearer', token].join(' ') } : {};
+}
+
+function chatHeaders() {
+  return bearerHeaders(bearerTokenInput);
+}
+
+function adminHeaders() {
+  const token = adminTokenInput.value.trim();
+  return token ? bearerHeaders(adminTokenInput) : chatHeaders();
 }
 
 async function streamChat(message) {
@@ -40,7 +52,7 @@ async function streamChat(message) {
     headers: {
       'Content-Type': 'application/json',
       Accept: 'text/event-stream',
-      ...authHeaders(),
+      ...chatHeaders(),
     },
     body: JSON.stringify({ message, stream: true }),
   });
@@ -54,19 +66,10 @@ async function streamChat(message) {
   while (true) {
     const { value, done } = await reader.read();
     if (done) break;
-    buffer += value;
-    const events = buffer.split('\n\n');
-    buffer = events.pop() || '';
-    for (const event of events) {
-      const data = event
-        .split('\n')
-        .filter((line) => line.startsWith('data:'))
-        .map((line) => line.slice(5).trimStart())
-        .join('\n');
-      if (!data || data === '[DONE]') continue;
-      const parsed = JSON.parse(data);
-      if (parsed.error) throw new Error(parsed.error);
-      assistant.textContent += parsed.delta || parsed.reply || parsed.text || '';
+    const split = splitSse(buffer, value);
+    buffer = split.buffer;
+    for (const parsed of split.payloads) {
+      assistant.textContent += contentTextFromPayload(parsed);
     }
   }
   if (!assistant.textContent.trim()) assistant.textContent = '[no reply text returned]';
@@ -145,7 +148,7 @@ async function submitApproval(action) {
   approvalStatus.textContent = `${action} pending…`;
   const response = await fetch(serverUrl(`/approvals/${encodeURIComponent(approvalId)}/${action}`), {
     method: 'POST',
-    headers: authHeaders(),
+    headers: adminHeaders(),
   });
   approvalStatus.textContent = response.ok
     ? `${action} recorded.`
