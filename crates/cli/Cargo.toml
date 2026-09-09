@@ -36,6 +36,10 @@ ardur-cost-gate = { workspace = true }
 # Phase-2 fused runtime — the FusedRuntime the default chat path drives through
 # its full ten-stage pipeline.
 ardur-fused-runtime = { workspace = true }
+# ARD-457 — the hardened built-in tools (`shell.run`, `http.fetch`, `file.*`)
+# the CLI chat engine registers from the operator grant ledger, plus the
+# registry the fused runtime invokes through.
+ardur-tool-registry = { workspace = true }
 # ARD-139 — the shared on-disk approval-card store `ardur approvals` reads
 # and decides against.
 ardur-approvals = { workspace = true }

@@ -49,11 +49,12 @@ use ardur_provider_runtime::{
 use ardur_provider_selector as provider_selector;
 use ardur_runtime::{CapTokenRef, ChatMessage, ChatRuntime, SessionId, SubmitRequest};
 use ardur_session_journals::FileSessionJournal;
+use ardur_tool_registry::{BuiltinOpts, HttpFetchOpts, ToolId, ToolRegistry};
 
 use crate::config::Config;
 use crate::engine::TurnOutcome;
 use crate::error::CliError;
-use crate::state::StateDirs;
+use crate::state::{GrantRecord, StateDirs, read_grant_records};
 use crate::stream::{StreamOutcome, drive_fused_turn};
 
 /// The audience the session cap-token is scoped to (matches the runtime's
@@ -75,6 +76,118 @@ const STEER_CAPABILITY: &str = "input.steer";
 const INTERRUPT_CAPABILITY: &str = "input.interrupt";
 /// The session cap-token's lifetime, in seconds (one hour from process start).
 const CAP_TTL_SECS: u64 = 3_600;
+
+/// The tool side of the operator grant ledger (ARD-457): a [`ToolRegistry`]
+/// holding every granted hardened built-in, plus the exact tool ids and `cap.*`
+/// labels that must be minted into the session cap-token for those tools to be
+/// invokable. Registration alone is dead-on-`CapDenied`; capability minting
+/// alone points at tools that do not exist — both halves come from the same
+/// pass here, mirroring the server's boot invariant.
+///
+/// Fail-closed mapping rules:
+/// - `shell.run` is registered ONLY with a scope (the allowlist pattern). A
+///   scope-less shell grant is skipped with a warning — never the dev-only
+///   unrestricted shell (`BuiltinOpts::shell_allowlist: None`).
+/// - `file.*` grants register ONLY with a scope (the confinement root).
+/// - `http.fetch` without a scope registers localhost-only (the strict default).
+/// - Unknown tool ids in the ledger are skipped with a warning.
+struct GrantTooling {
+    registry: ToolRegistry,
+    extra_allowlist: Vec<String>,
+}
+
+impl GrantTooling {
+    fn from_records(records: &[GrantRecord]) -> Self {
+        let mut opts = BuiltinOpts::default();
+        let mut wanted: Vec<&GrantRecord> = Vec::new();
+        for record in records {
+            match record.tool.as_str() {
+                "shell.run" => match record.scope.as_deref().map(str::trim) {
+                    Some(scope) if !scope.is_empty() => {
+                        opts.enable_shell = true;
+                        opts.shell_allowlist = Some(vec![scope.to_string()]);
+                        wanted.push(record);
+                    }
+                    _ => tracing::warn!(
+                        tool = "shell.run",
+                        "grant has no --scope; skipping (never registers the unrestricted shell)"
+                    ),
+                },
+                "http.fetch" => {
+                    let allowlist = record
+                        .scope
+                        .as_deref()
+                        .map(|s| {
+                            s.split(',')
+                                .map(str::trim)
+                                .filter(|h| !h.is_empty())
+                                .map(str::to_string)
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    opts.http = Some(HttpFetchOpts {
+                        enable: true,
+                        allowlist,
+                        ..HttpFetchOpts::default()
+                    });
+                    wanted.push(record);
+                }
+                tool @ ("file.read" | "file.write" | "file.list") => {
+                    match record.scope.as_deref().map(str::trim) {
+                        Some(root) if !root.is_empty() => {
+                            opts.file_root = Some(std::path::PathBuf::from(root));
+                            wanted.push(record);
+                        }
+                        _ => tracing::warn!(
+                            tool,
+                            "grant has no --scope (root dir); skipping (file tools stay unregistered)"
+                        ),
+                    }
+                }
+                other => tracing::warn!(tool = other, "unknown tool in grant ledger; skipping"),
+            }
+        }
+
+        let mut registry = ToolRegistry::new();
+        if opts.enable_shell || opts.file_root.is_some() || opts.http.is_some() {
+            if let Err(e) = registry.register_builtins(opts) {
+                tracing::warn!(error = %e, "grant-driven built-in registration failed; no grant tools active");
+                return Self {
+                    registry,
+                    extra_allowlist: Vec::new(),
+                };
+            }
+        }
+
+        // Only capabilities whose tool ACTUALLY registered join the session
+        // allowlist — the server's ARD-457 invariant, mirrored.
+        let mut extra_allowlist = Vec::new();
+        for record in wanted {
+            if registry.get(&ToolId::new(&record.tool)).is_some() {
+                extra_allowlist.push(record.tool.clone());
+                extra_allowlist.extend(record.capabilities.iter().cloned());
+            }
+        }
+        extra_allowlist.sort();
+        extra_allowlist.dedup();
+        Self {
+            registry,
+            extra_allowlist,
+        }
+    }
+
+    fn from_ledger(dirs: &StateDirs) -> Self {
+        match read_grant_records(dirs) {
+            Ok(records) => Self::from_records(&records),
+            Err(e) => {
+                // A corrupt ledger must not block chat; the fail-closed default
+                // (no grant tools) is the safe reading of unparseable intent.
+                tracing::warn!(error = %e, "could not read the grant ledger; no grant tools active");
+                Self::from_records(&[])
+            }
+        }
+    }
+}
 /// The default per-turn cents ceiling when `ARDUR_CLI_PER_TURN_CENTS` is unset,
 /// capped at the session budget so a tiny budget still affords a turn.
 const DEFAULT_PER_TURN_CENTS: u64 = 100;
@@ -158,6 +271,12 @@ impl FusedEngine {
         let receipt_key = dirs.load_or_create_receipt_key()?;
         let policies = dirs.load_cedar_policies()?;
 
+        // ARD-457: consume the operator grant ledger — the granted hardened
+        // tools register into the session's tool registry and their tool ids +
+        // cap.* labels mint into the session cap-token below. No ledger (or a
+        // corrupt one) means no grant tools: fail-closed, as before.
+        let grant_tooling = GrantTooling::from_ledger(dirs);
+
         let subject = dirs.local_subject();
         let holder = GateHolderId(subject.clone());
 
@@ -166,6 +285,18 @@ impl FusedEngine {
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
+        let mut tool_allowlist = vec![
+            TOOL.to_string(),
+            ardur_memory::MEMORY_READ_CAPABILITY.to_string(),
+            ardur_memory::MEMORY_WRITE_CAPABILITY.to_string(),
+            SESSION_CHECKPOINT_CAPABILITY.to_string(),
+            SESSION_ROLLBACK_CAPABILITY.to_string(),
+            CONTEXT_COMPACT_CAPABILITY.to_string(),
+            BACKGROUND_TASK_CAPABILITY.to_string(),
+            STEER_CAPABILITY.to_string(),
+            INTERRUPT_CAPABILITY.to_string(),
+        ];
+        tool_allowlist.extend(grant_tooling.extra_allowlist.iter().cloned());
         let cap = issuer
             .issue(
                 CapHolderId(subject.clone()),
@@ -175,17 +306,7 @@ impl FusedEngine {
                     // The verifier checks the per-turn cost (1 unit) against this
                     // ceiling, so it must be at least 1.
                     budget_remaining: budget_cents.max(1),
-                    tool_allowlist: vec![
-                        TOOL.to_string(),
-                        ardur_memory::MEMORY_READ_CAPABILITY.to_string(),
-                        ardur_memory::MEMORY_WRITE_CAPABILITY.to_string(),
-                        SESSION_CHECKPOINT_CAPABILITY.to_string(),
-                        SESSION_ROLLBACK_CAPABILITY.to_string(),
-                        CONTEXT_COMPACT_CAPABILITY.to_string(),
-                        BACKGROUND_TASK_CAPABILITY.to_string(),
-                        STEER_CAPABILITY.to_string(),
-                        INTERRUPT_CAPABILITY.to_string(),
-                    ],
+                    tool_allowlist,
                 },
             )
             .map_err(|e| CliError::State(format!("minting the session cap-token: {e}")))?;
@@ -235,6 +356,9 @@ impl FusedEngine {
         .projected_envelope(envelope)
         .with_memory(memory.clone())
         .with_journal(Arc::new(journal))
+        // ARD-457: the operator-granted hardened tools (empty registry when no
+        // grants exist — fail-closed).
+        .with_tools(Arc::new(grant_tooling.registry))
         // ARD-H1: install the built-in injection-defense signatures so `ardur
         // chat` scans prompts too, rather than shipping stage 4.5 inert.
         .with_default_injection_filters()
@@ -717,4 +841,92 @@ fn per_turn_cents(budget_cents: u64) -> u64 {
         .and_then(|s| s.trim().parse::<u64>().ok())
         .unwrap_or_else(|| budget_cents.min(DEFAULT_PER_TURN_CENTS))
         .max(1)
+}
+
+#[cfg(test)]
+mod grant_tooling_tests {
+    use super::*;
+
+    fn record(tool: &str, caps: &[&str], scope: Option<&str>) -> GrantRecord {
+        GrantRecord {
+            tool: tool.to_string(),
+            capabilities: caps.iter().map(|s| s.to_string()).collect(),
+            scope: scope.map(str::to_string),
+            subject: "cli://localhost-test".to_string(),
+            granted_at_ms: 1,
+            receipt_id: Some(uuid::Uuid::new_v4().to_string()),
+        }
+    }
+
+    #[test]
+    fn empty_ledger_registers_nothing_and_adds_no_caps() {
+        let tooling = GrantTooling::from_records(&[]);
+        assert!(tooling.registry.list().is_empty());
+        assert!(tooling.extra_allowlist.is_empty());
+    }
+
+    #[test]
+    fn shell_grant_with_scope_registers_and_mints_caps() {
+        let records = [record(
+            "shell.run",
+            &["cap.shell_exec", "cap.process_spawn"],
+            Some("git|cargo"),
+        )];
+        let tooling = GrantTooling::from_records(&records);
+        assert!(tooling.registry.get(&ToolId::new("shell.run")).is_some());
+        for cap in ["shell.run", "cap.shell_exec", "cap.process_spawn"] {
+            assert!(
+                tooling.extra_allowlist.iter().any(|c| c == cap),
+                "`{cap}` must join the session allowlist"
+            );
+        }
+    }
+
+    #[test]
+    fn shell_grant_without_scope_never_registers_the_unrestricted_shell() {
+        let records = [record(
+            "shell.run",
+            &["cap.shell_exec", "cap.process_spawn"],
+            None,
+        )];
+        let tooling = GrantTooling::from_records(&records);
+        assert!(tooling.registry.get(&ToolId::new("shell.run")).is_none());
+        assert!(tooling.extra_allowlist.is_empty());
+    }
+
+    #[test]
+    fn file_grants_register_only_with_a_root_scope() {
+        let records = [
+            record("file.read", &["cap.fs_read"], Some("/tmp/ardur-files")),
+            record("file.write", &["cap.fs_write"], None), // scope-less: skipped
+        ];
+        let tooling = GrantTooling::from_records(&records);
+        assert!(tooling.registry.get(&ToolId::new("file.read")).is_some());
+        assert!(tooling.extra_allowlist.iter().any(|c| c == "cap.fs_read"));
+        assert!(
+            !tooling.extra_allowlist.iter().any(|c| c == "cap.fs_write"),
+            "a scope-less file.write grant must not mint cap.fs_write"
+        );
+    }
+
+    #[test]
+    fn http_grant_without_scope_registers_localhost_only_and_mints_network_cap() {
+        let records = [record("http.fetch", &["cap.network_out"], None)];
+        let tooling = GrantTooling::from_records(&records);
+        assert!(tooling.registry.get(&ToolId::new("http.fetch")).is_some());
+        assert!(
+            tooling
+                .extra_allowlist
+                .iter()
+                .any(|c| c == "cap.network_out")
+        );
+    }
+
+    #[test]
+    fn unknown_ledger_tools_are_skipped() {
+        let records = [record("nuke.everything", &["cap.all"], Some("*"))];
+        let tooling = GrantTooling::from_records(&records);
+        assert!(tooling.registry.list().is_empty());
+        assert!(tooling.extra_allowlist.is_empty());
+    }
 }

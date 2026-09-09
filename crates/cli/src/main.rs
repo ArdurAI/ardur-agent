@@ -1817,9 +1817,10 @@ fn tool_grant_capabilities(tool: &str) -> Option<Vec<&'static str>> {
     }
 }
 
-/// The operator grant ledger file.
+/// The operator grant ledger file. Shared with the lib (the chat engine reads
+/// the same path) so the writer and consumer can never drift apart.
 fn grants_path(dirs: &StateDirs) -> PathBuf {
-    dirs.root.join("grants.json")
+    ardur_cli::grants_path(dirs)
 }
 
 /// Read the recorded grants (a JSON array), returning an empty list when the
@@ -1844,6 +1845,8 @@ fn run_grant(args: GrantArgs) -> Result<(), CliError> {
                     "unknown tool `{tool}`; expected one of shell.run, http.fetch, file.read, file.write, file.list"
                 ))
             })?;
+            // Captured before `json!` moves `scope` into the payload.
+            let scope_missing = scope.is_none();
             // Materialize the state tree so `receipts/` and `keys/` exist before
             // we chain a receipt into them.
             dirs.create()?;
@@ -1873,6 +1876,20 @@ fn run_grant(args: GrantArgs) -> Result<(), CliError> {
                 "granted `{tool}` ({}) — receipt {receipt_id}",
                 caps.join(", ")
             );
+            // ARD-457 consumption rules (crates/cli/src/fused.rs::GrantTooling):
+            // shell.run and file.* grants only take effect with a scope. Say so
+            // at grant time rather than letting the operator discover a no-op.
+            if scope_missing {
+                match tool.as_str() {
+                    "shell.run" => println!(
+                        "note: shell.run grants need --scope \"<allowlist pattern>\" (e.g. \"git|cargo\") to take effect; without one the grant is skipped"
+                    ),
+                    "file.read" | "file.write" | "file.list" => println!(
+                        "note: file tool grants need --scope \"<root dir>\" to take effect; without one the grant is skipped"
+                    ),
+                    _ => {}
+                }
+            }
             Ok(())
         }
         GrantAction::List => {
