@@ -81,7 +81,7 @@ pub use secure_io::{
     write_private_file_atomic_no_follow, write_private_file_no_follow,
 };
 pub use slash::{apply_theme_command, phase1_help};
-pub use state::{SessionMetadata, StateDirs};
+pub use state::{SessionMetadata, StateDirs, dev_permissive_policy_enabled};
 pub use stream::{RenderCtx, StreamOutcome, drive_fused_turn, drive_turn};
 pub use theme::{Attr, Role, Theme, ThemeName};
 pub use toolbox::{MAX_BOX_COLS, SessionCost, TurnStats, render_cost_line, render_tool_call_box};
@@ -1140,6 +1140,29 @@ async fn run_chat_message(
             history.pop();
             let _ = std::io::stdout().flush();
             eprintln!("error: {e}");
+            // #408: a policy denial on an install with no policy file means the
+            // fail-closed default fired — tell the operator how to proceed
+            // instead of leaving them with a bare Cedar reason.
+            if matches!(e, CliError::Runtime(RuntimeError::PolicyDenied { .. })) {
+                print_missing_policy_hint();
+            }
+        }
+    }
+}
+
+/// #408: print the missing-policy remediation hint — only when no Cedar policy
+/// file exists, so a denial under an operator-written policy (a REAL deny) does
+/// not produce vacuous guidance. Shared by the buffered and streamed error paths.
+fn print_missing_policy_hint() {
+    if let Ok(dirs) = StateDirs::resolve() {
+        if !dirs.cedar_path().exists() {
+            eprintln!(
+                "hint: no Cedar policy file at {} — the runtime is fail-closed by default.",
+                dirs.cedar_path().display()
+            );
+            eprintln!(
+                "      run `ardur setup` to write a starter policy, or set ARDUR_DEV_PERMISSIVE_POLICY=true for local development."
+            );
         }
     }
 }
@@ -1165,6 +1188,16 @@ async fn run_streamed_message(
                     u64::from(usage.tokens_out),
                     outcome.cost_cents.unwrap_or(0) as f64 / 100.0,
                 );
+            }
+            // #408: streamed turns render a Cedar denial into `outcome.error`
+            // (no typed error crosses this boundary) — emit the same narrowly
+            // gated hint when the denial is a policy denial and no policy file
+            // exists. The file-absence check inside the helper keeps this from
+            // firing under a real operator policy.
+            if let Some(err) = &outcome.error {
+                if err.contains("policy denied") {
+                    print_missing_policy_hint();
+                }
             }
             apply_streamed_outcome_to_history(history, outcome);
         }

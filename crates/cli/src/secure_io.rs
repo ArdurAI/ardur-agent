@@ -244,6 +244,28 @@ pub fn create_private_file_no_follow(path: &Path, bytes: &[u8]) -> io::Result<()
     write_open_file(file, bytes)
 }
 
+/// Create-new with no partial writes left behind: if the content write or sync
+/// fails AFTER the exclusive create succeeded, the leftover file is removed so
+/// later create-new callers do not mistake the partial file for an existing
+/// one. An open-level failure (permissions, parent missing) created nothing and
+/// removes nothing.
+pub fn create_private_file_no_follow_or_clean(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    // An open-level failure (permissions, parent missing) created nothing;
+    // `?` returns without touching the destination.
+    #[cfg(unix)]
+    let file = open_private_file_unix(path, true)?;
+    #[cfg(not(unix))]
+    let file = open_private_file_portable(path, true)?;
+    match write_open_file(file, bytes) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            // O_EXCL proved we created the file, so removing it is safe.
+            let _ = std::fs::remove_file(path);
+            Err(e)
+        }
+    }
+}
+
 /// Replace an owner-only regular file in place without following symlinks.
 pub fn write_private_file_no_follow(path: &Path, bytes: &[u8]) -> io::Result<()> {
     #[cfg(unix)]

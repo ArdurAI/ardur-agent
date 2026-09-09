@@ -24,9 +24,10 @@ use std::process::ExitCode;
 
 use ardur_cli::{
     ChatArgs, CliError, Config, DEFAULT_DRIVER_INTERVAL_SECS, ScheduleRecord, SessionMetadata,
-    StateDirs, directory_modified_no_follow, list_directory_names_no_follow, read_schedule_records,
-    read_string_no_follow, remove_directory_tree_no_follow, run_chat, run_schedule_fire,
-    run_schedule_run, write_private_file_atomic_no_follow, write_private_file_no_follow,
+    StateDirs, dev_permissive_policy_enabled, directory_modified_no_follow,
+    list_directory_names_no_follow, read_schedule_records, read_string_no_follow,
+    remove_directory_tree_no_follow, run_chat, run_schedule_fire, run_schedule_run,
+    write_private_file_atomic_no_follow, write_private_file_no_follow,
 };
 use ardur_session_journals::{
     JournalEntry, default_secret_patterns, redact_entries_default, redact_text,
@@ -565,9 +566,17 @@ fn run_doctor(args: DoctorArgs) -> Result<(), CliError> {
     let cedar_path = root.join("cedar.policies");
     if cedar_path.is_file() {
         checks.push(json!({"name": "cedar_policy", "status": "ok"}));
+    } else if dev_permissive_policy_enabled() {
+        // The file-presence warning would be noise: turns are currently
+        // permitted by the explicit dev fallback. Parsed with the runtime's
+        // own normalized truthy rule (1/true/yes/on, case/space-insensitive).
+        checks.push(json!({"name": "cedar_policy", "status": "ok", "present": false, "note": "no policy file; dev-permissive fallback active (ARDUR_DEV_PERMISSIVE_POLICY)"}));
     } else {
         warnings += 1;
-        checks.push(json!({"name": "cedar_policy", "status": "warn", "present": false, "note": "policy file not found"}));
+        // #408 / codex review: `ardur setup` writes only the HOME-resolved
+        // `~/.ardur`, so when `--state-dir` inspects another directory the
+        // remedy text must name the inspected path explicitly.
+        checks.push(json!({"name": "cedar_policy", "status": "warn", "present": false, "note": format!("policy file not found at {} — `ardur setup` writes a starter policy under the HOME-resolved ~/.ardur; for this state directory, write or copy a cedar.policies into it", cedar_path.display())}));
     }
 
     // 7. Disk usage
@@ -604,7 +613,8 @@ fn run_doctor(args: DoctorArgs) -> Result<(), CliError> {
 
 /// Interactive setup wizard for first-time Ardur configuration.
 fn run_setup(args: SetupArgs) -> Result<(), CliError> {
-    let root = StateDirs::resolve()?.root;
+    let dirs = StateDirs::resolve()?;
+    let root = dirs.root.clone();
     std::fs::create_dir_all(&root)?;
     for sub in ["memory", "journals", "receipts", "keys", "logs"] {
         std::fs::create_dir_all(root.join(sub))?;
@@ -617,6 +627,7 @@ fn run_setup(args: SetupArgs) -> Result<(), CliError> {
         let config = Config::default();
         write_config(&config_path, &config)?;
         println!("created default config at {}", config_path.display());
+        write_starter_policy_line(&dirs)?;
         return Ok(());
     }
 
@@ -659,6 +670,7 @@ fn run_setup(args: SetupArgs) -> Result<(), CliError> {
         budget_cents,
     };
     write_config(&config_path, &config)?;
+    write_starter_policy_line(&dirs)?;
 
     println!();
     println!(
@@ -677,6 +689,24 @@ fn config_path(path: Option<PathBuf>) -> Result<PathBuf, CliError> {
     path.or_else(Config::default_path).ok_or_else(|| {
         CliError::State("cannot resolve a config path (HOME/USERPROFILE unset)".to_string())
     })
+}
+
+/// Write the scoped starter Cedar policy on first run and print the outcome
+/// (#408). Without a policy file the runtime boots fail-closed (deny-all), so
+/// a fresh `ardur chat` would otherwise be denied with no obvious remedy. An
+/// existing operator policy file is never overwritten.
+fn write_starter_policy_line(dirs: &StateDirs) -> Result<(), CliError> {
+    match dirs.write_starter_cedar_policy_if_absent()? {
+        Some(path) => println!(
+            "created starter Cedar policy at {} (permits chat + tools; edit to tighten)",
+            path.display()
+        ),
+        None => println!(
+            "kept existing Cedar policy at {}",
+            dirs.cedar_path().display()
+        ),
+    }
+    Ok(())
 }
 
 fn state_root(path: Option<PathBuf>) -> Result<PathBuf, CliError> {
