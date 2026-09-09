@@ -113,6 +113,11 @@ struct GrantTooling {
     /// after registration).
     #[cfg(test)]
     http_hosts: Vec<String>,
+    /// Whether the merged grant set includes a scope-less (localhost-only)
+    /// http grant; when true the tool is built with localhost admitted
+    /// alongside the allowlist. Kept for tests.
+    #[cfg(test)]
+    http_localhost: bool,
 }
 
 impl GrantTooling {
@@ -244,14 +249,9 @@ impl GrantTooling {
             }
         }
         if http_granted {
-            if http_localhost && !http_hosts.is_empty() {
-                http_hosts.extend([
-                    "localhost".to_string(),
-                    "127.0.0.1".to_string(),
-                    "::1".to_string(),
-                ]);
-            }
-            let tool = HttpFetchTool::new().with_allowlist(http_hosts.clone());
+            let tool = HttpFetchTool::new()
+                .with_allowlist(http_hosts.clone())
+                .with_localhost_allowed(http_localhost);
             if let Err(e) = registry.register(Box::new(tool)) {
                 tracing::warn!(error = %e, "http.fetch registration failed");
             }
@@ -287,6 +287,8 @@ impl GrantTooling {
             extra_allowlist,
             #[cfg(test)]
             http_hosts,
+            #[cfg(test)]
+            http_localhost,
         }
     }
 
@@ -1209,13 +1211,11 @@ mod grant_tooling_tests {
         ];
         let tooling = GrantTooling::from_records(&records);
         assert!(tooling.registry.get(&ToolId::new("http.fetch")).is_some());
-        for host in ["example.com", "localhost", "127.0.0.1", "::1"] {
-            assert!(
-                tooling.http_hosts.iter().any(|h| h == host),
-                "merged allowlist must keep `{host}`: {:?}",
-                tooling.http_hosts
-            );
-        }
+        // The scoped hosts union; localhost intent rides the tool's
+        // allow_localhost knob (covers the FULL loopback range, not literals —
+        // tool-registry tests assert 127.0.0.2/::1 admission).
+        assert!(tooling.http_hosts.iter().any(|h| h == "example.com"));
+        assert!(tooling.http_localhost);
 
         // A scoped grant alone must NOT gain localhost.
         let scoped_only = GrantTooling::from_records(&[record(
@@ -1223,7 +1223,7 @@ mod grant_tooling_tests {
             &["cap.network_out"],
             Some("example.com"),
         )]);
-        assert!(!scoped_only.http_hosts.iter().any(|h| h == "localhost"));
+        assert!(!scoped_only.http_localhost);
     }
 
     #[test]

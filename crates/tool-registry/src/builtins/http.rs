@@ -209,6 +209,12 @@ pub struct HttpFetchTool {
     schema: ToolSchema,
     allowlist: Vec<String>,
     allow_private_ips: bool,
+    /// When true, localhost (the bare name and every loopback literal) is
+    /// admitted in addition to the configured allowlist — the grant-union case:
+    /// a scope-less grant means localhost-only, and that intent must survive a
+    /// scoped grant joining the union (ARD-457 review). Default false: a
+    /// configured allowlist alone does NOT admit localhost.
+    allow_localhost: bool,
     max_bytes: usize,
     redirect_limit: usize,
     caps: Vec<Capability>,
@@ -290,6 +296,7 @@ impl HttpFetchTool {
             schema,
             allowlist: Vec::new(),
             allow_private_ips: false,
+            allow_localhost: false,
             max_bytes: DEFAULT_MAX_BYTES,
             redirect_limit: DEFAULT_REDIRECT_LIMIT,
             caps: vec![Capability::NetworkOut],
@@ -327,6 +334,17 @@ impl HttpFetchTool {
         self
     }
 
+    /// Also admit localhost (the bare name and every loopback literal) on top
+    /// of a configured allowlist — the grant-union case, where a scope-less
+    /// (localhost-only) grant must not lose localhost when a scoped grant adds
+    /// other hosts (ARD-457). Without this, a non-empty allowlist matches only
+    /// its patterns.
+    #[must_use]
+    pub fn with_localhost_allowed(mut self, allow: bool) -> Self {
+        self.allow_localhost = allow;
+        self
+    }
+
     /// Override the default 1 MiB body ceiling.
     #[must_use]
     pub fn with_max_bytes(mut self, max_bytes: usize) -> Self {
@@ -347,6 +365,9 @@ impl HttpFetchTool {
     /// the strict default that permits only localhost unless private-IP access
     /// was granted.
     fn check_host_allowed(&self, host: &Host<&str>, host_str: &str) -> Result<(), ToolError> {
+        if self.allow_localhost && host_is_localhost(host) {
+            return Ok(());
+        }
         if !self.allowlist.is_empty() {
             if self.allowlist.iter().any(|p| pattern_matches(p, host_str)) {
                 return Ok(());
@@ -610,5 +631,52 @@ impl Tool for HttpFetchTool {
 
     fn required_capabilities(&self) -> &[Capability] {
         &self.caps
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Assert `check_host_allowed` on the host embedded in `url`. The Url
+    /// binding lives in the test body so the borrowed Host<&str> stays valid.
+    fn check(tool: &HttpFetchTool, url: &str) -> Result<(), ToolError> {
+        let parsed = url::Url::parse(url).expect("url parses");
+        let host = parsed.host().expect("host present");
+        let host_str = match &host {
+            Host::Domain(d) => d.to_string(),
+            Host::Ipv4(ip) => ip.to_string(),
+            Host::Ipv6(ip) => ip.to_string(),
+        };
+        tool.check_host_allowed(&host, &host_str)
+    }
+
+    #[test]
+    fn localhost_allowed_knob_admits_full_loopback_on_top_of_an_allowlist() {
+        let tool = HttpFetchTool::new()
+            .with_allowlist(vec!["example.com".to_string()])
+            .with_localhost_allowed(true);
+        assert!(check(&tool, "http://example.com/").is_ok());
+        assert!(check(&tool, "http://localhost/").is_ok());
+        // Every IPv4 loopback literal — not just 127.0.0.1 (ARD-457 review).
+        assert!(check(&tool, "http://127.0.0.2/").is_ok());
+        assert!(check(&tool, "http://[::1]/").is_ok());
+        assert!(check(&tool, "http://other.com/").is_err());
+    }
+
+    #[test]
+    fn allowlist_without_the_knob_still_excludes_localhost() {
+        let tool = HttpFetchTool::new().with_allowlist(vec!["example.com".to_string()]);
+        assert!(check(&tool, "http://example.com/").is_ok());
+        assert!(check(&tool, "http://localhost/").is_err());
+        assert!(check(&tool, "http://127.0.0.1/").is_err());
+    }
+
+    #[test]
+    fn empty_allowlist_remains_localhost_only() {
+        let tool = HttpFetchTool::new();
+        assert!(check(&tool, "http://localhost/").is_ok());
+        assert!(check(&tool, "http://127.0.0.2/").is_ok());
+        assert!(check(&tool, "http://example.com/").is_err());
     }
 }

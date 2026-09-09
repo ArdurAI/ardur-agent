@@ -100,3 +100,61 @@ fn grant_without_scope_prints_the_consumption_note_for_shell() {
         "a scope-less shell grant must print the consumption note, got: {stdout}"
     );
 }
+
+#[test]
+fn file_grants_record_the_canonical_absolute_scope() {
+    // ARD-457 review: `--scope .` must not mean "whatever directory chat later
+    // starts in" — the durable ledger records the canonical absolute path
+    // resolved at grant time, and a scope that does not resolve is rejected.
+    let home = tempfile::tempdir().expect("temp HOME");
+    let home_path = home.path().canonicalize().expect("canonical temp HOME");
+    let scope_dir = tempfile::tempdir().expect("scope dir");
+
+    let grant = ardur(&home_path)
+        .args(["grant", "allow", "file.read", "--scope", "."])
+        .current_dir(scope_dir.path())
+        .output()
+        .expect("grant runs");
+    assert!(
+        grant.status.success(),
+        "grant failed: {}",
+        String::from_utf8_lossy(&grant.stderr)
+    );
+
+    let ledger: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(home_path.join(".ardur/grants.json")).expect("ledger"),
+    )
+    .expect("grant ledger parses");
+    let recorded = ledger[0]["scope"].as_str().expect("scope recorded");
+    assert_eq!(
+        recorded,
+        std::fs::canonicalize(scope_dir.path())
+            .expect("canonical")
+            .display()
+            .to_string(),
+        "a relative scope must be recorded as the canonical absolute path"
+    );
+    assert!(std::path::Path::new(recorded).is_absolute());
+
+    // A scope that does not resolve to an existing directory is rejected.
+    let bad = ardur(&home_path)
+        .args([
+            "grant",
+            "allow",
+            "file.read",
+            "--scope",
+            "./definitely-not-here",
+        ])
+        .current_dir(scope_dir.path())
+        .output()
+        .expect("grant runs");
+    assert!(
+        !bad.status.success(),
+        "a nonexistent scope must be rejected"
+    );
+    assert!(
+        String::from_utf8_lossy(&bad.stderr).contains("does not resolve"),
+        "rejection must explain the resolution failure: {}",
+        String::from_utf8_lossy(&bad.stderr)
+    );
+}

@@ -1852,6 +1852,24 @@ fn run_grant(args: GrantArgs) -> Result<(), CliError> {
             // so `--scope ""`/whitespace counts as missing — the same predicate
             // the chat-side consumer (GrantTooling) applies.
             let scope_missing = scope.as_deref().map(str::trim).is_none_or(str::is_empty);
+            // Durable file-tool scopes must not depend on the chat process's
+            // cwd (ARD-457 review): resolve them to absolute canonical paths AT
+            // GRANT TIME — a scope that does not resolve to an existing
+            // directory is rejected outright rather than recorded as a relative
+            // path that would later mean "whatever directory chat happens to
+            // start in".
+            let scope = match (tool.as_str(), scope) {
+                ("file.read" | "file.write" | "file.list", Some(s)) => {
+                    let trimmed = s.trim();
+                    let resolved = std::fs::canonicalize(trimmed).map_err(|e| {
+                        CliError::State(format!(
+                            "file tool scope `{trimmed}` does not resolve to an existing directory: {e}"
+                        ))
+                    })?;
+                    Some(resolved.display().to_string())
+                }
+                (_, other) => other,
+            };
             // Materialize the state tree so `receipts/` and `keys/` exist before
             // we chain a receipt into them.
             dirs.create()?;
@@ -1890,7 +1908,7 @@ fn run_grant(args: GrantArgs) -> Result<(), CliError> {
                         "note: shell.run grants need --scope \"<allowlist prefix>\" (e.g. \"git|cargo\") to take effect; without one the grant is skipped. The allowlist is a prefix gate, not a sandbox — commands run through the system shell, so chaining (`git; uname`) is not confined. Grant only prefixes that are safe with arbitrary arguments."
                     ),
                     "file.read" | "file.write" | "file.list" => println!(
-                        "note: file tool grants need --scope \"<root dir>\" to take effect; without one the grant is skipped"
+                        "note: file grants need --scope <directory> to take effect; the path is resolved to an absolute canonical form at grant time. Without a scope the grant is skipped"
                     ),
                     _ => {}
                 }
