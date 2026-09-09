@@ -107,6 +107,15 @@ pub enum RuntimeError {
     #[error("provider unavailable")]
     ProviderUnavailable,
 
+    /// The caller abandoned the turn before its side effects committed — an
+    /// HTTP turn timeout or a client hang-up. Emitted at the commit gate: after
+    /// the provider round but before the receipt/journal/billing commit, so the
+    /// caller who already saw 504 is never billed for a receipt they never
+    /// received (#359). Distinct from every denial: nothing rejected the turn;
+    /// the caller simply went away.
+    #[error("turn cancelled by caller before side effects committed")]
+    TurnCancelled,
+
     /// A lifecycle hook vetoed the turn before it reached the provider. Carries
     /// the id of the hook that blocked and the reason it gave. See §11.17
     /// (`ardur-lifecycle-hooks`): a pre-submit hook returning `Veto` aborts the

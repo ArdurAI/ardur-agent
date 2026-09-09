@@ -103,8 +103,8 @@ pub use reconcile::{
     ReconciliationAction, ReconciliationError, ReconciliationReport, ReconciliationStrategy,
 };
 pub use runtime::{
-    BackgroundTaskOutcome, CheckpointInfo, CheckpointOutcome, CompactOutcome, FusedRuntime,
-    PerRequestProvisioning, RollbackOutcome,
+    BackgroundTaskOutcome, CancelProbe, CheckpointInfo, CheckpointOutcome, CompactOutcome,
+    FusedRuntime, PerRequestProvisioning, RollbackOutcome,
 };
 pub use shared::{SharedBudget, SharedDenyList};
 pub use streaming::{FusedEvent, StageKind};
