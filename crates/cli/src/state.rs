@@ -28,8 +28,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::CliError;
 use crate::secure_io::{
-    create_private_file_no_follow, read_file_no_follow, read_string_no_follow,
-    write_private_file_atomic_no_follow,
+    create_private_file_no_follow, create_private_file_no_follow_or_clean, read_file_no_follow,
+    read_string_no_follow, write_private_file_atomic_no_follow,
 };
 
 /// The deny-all Cedar bundle used when no `cedar.policies` file is present.
@@ -161,10 +161,11 @@ impl StateDirs {
     ///
     /// Uses create-new-only semantics (O_EXCL on Unix): a policy file that
     /// appears concurrently — configuration management, a second `setup` — is
-    /// reported as "kept", never replaced.
+    /// reported as "kept", never replaced. A failed content write removes the
+    /// partial file so a later setup can retry cleanly.
     pub fn write_starter_cedar_policy_if_absent(&self) -> Result<Option<PathBuf>, CliError> {
         let path = self.cedar_path();
-        match create_private_file_no_follow(&path, STARTER_CEDAR_POLICY.as_bytes()) {
+        match create_private_file_no_follow_or_clean(&path, STARTER_CEDAR_POLICY.as_bytes()) {
             Ok(()) => Ok(Some(path)),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
             Err(e) => Err(CliError::Io(e)),
@@ -327,7 +328,10 @@ fn current_workspace_name() -> Option<String> {
 }
 
 /// Whether the explicit local-development permissive Cedar fallback is enabled.
-fn dev_permissive_policy_enabled() -> bool {
+/// Normalized truthy rule: 1/true/yes/on, case- and surrounding-space
+/// insensitive. Public so the binary's operator surfaces (e.g. `doctor`) report
+/// the same fallback state the runtime enforces.
+pub fn dev_permissive_policy_enabled() -> bool {
     std::env::var("ARDUR_DEV_PERMISSIVE_POLICY")
         .map(|value| {
             matches!(

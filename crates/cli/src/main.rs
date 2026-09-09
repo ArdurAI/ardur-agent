@@ -24,9 +24,10 @@ use std::process::ExitCode;
 
 use ardur_cli::{
     ChatArgs, CliError, Config, DEFAULT_DRIVER_INTERVAL_SECS, ScheduleRecord, SessionMetadata,
-    StateDirs, directory_modified_no_follow, list_directory_names_no_follow, read_schedule_records,
-    read_string_no_follow, remove_directory_tree_no_follow, run_chat, run_schedule_fire,
-    run_schedule_run, write_private_file_atomic_no_follow, write_private_file_no_follow,
+    StateDirs, dev_permissive_policy_enabled, directory_modified_no_follow,
+    list_directory_names_no_follow, read_schedule_records, read_string_no_follow,
+    remove_directory_tree_no_follow, run_chat, run_schedule_fire, run_schedule_run,
+    write_private_file_atomic_no_follow, write_private_file_no_follow,
 };
 use ardur_session_journals::{
     JournalEntry, default_secret_patterns, redact_entries_default, redact_text,
@@ -565,13 +566,11 @@ fn run_doctor(args: DoctorArgs) -> Result<(), CliError> {
     let cedar_path = root.join("cedar.policies");
     if cedar_path.is_file() {
         checks.push(json!({"name": "cedar_policy", "status": "ok"}));
-    } else if std::env::var("ARDUR_DEV_PERMISSIVE_POLICY")
-        .ok()
-        .is_some_and(|v| v == "true")
-    {
+    } else if dev_permissive_policy_enabled() {
         // The file-presence warning would be noise: turns are currently
-        // permitted by the explicit dev fallback.
-        checks.push(json!({"name": "cedar_policy", "status": "ok", "present": false, "note": "no policy file; dev-permissive fallback active (ARDUR_DEV_PERMISSIVE_POLICY=true)"}));
+        // permitted by the explicit dev fallback. Parsed with the runtime's
+        // own normalized truthy rule (1/true/yes/on, case/space-insensitive).
+        checks.push(json!({"name": "cedar_policy", "status": "ok", "present": false, "note": "no policy file; dev-permissive fallback active (ARDUR_DEV_PERMISSIVE_POLICY)"}));
     } else {
         warnings += 1;
         // #408 / codex review: `ardur setup` writes only the HOME-resolved
