@@ -104,7 +104,7 @@ pub use reconcile::{
 };
 pub use runtime::{
     BackgroundTaskOutcome, CancelProbe, CheckpointInfo, CheckpointOutcome, CompactOutcome,
-    FusedRuntime, PerRequestProvisioning, RollbackOutcome,
+    FusedRuntime, PerRequestProvisioning, RollbackOutcome, TurnCommitHandshake,
 };
 pub use shared::{SharedBudget, SharedDenyList};
 pub use streaming::{FusedEvent, StageKind};

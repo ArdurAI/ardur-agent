@@ -8,7 +8,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
 use ardur_approvals::{ApprovalStatus, ApprovalStore};
@@ -1479,7 +1479,7 @@ impl FusedRuntime {
         response: &CompletionResponse,
         signed: &ardur_receipt::SignedReceipt,
         now_ms: u64,
-        committed: Option<&Arc<AtomicBool>>,
+        committed: Option<&Arc<TurnCommitHandshake>>,
     ) -> Result<ReceiptBody, DurableCommitError> {
         let receipt = signed.body().clone();
 
@@ -1487,16 +1487,25 @@ impl FusedRuntime {
         // journal append, boot reconciliation sees a durable orphan receipt and
         // can append a synthetic journal entry. The inverse (journal-only residue)
         // is not reconstructable from the receipt chain.
+        let previously_committed = committed.is_some_and(|h| h.ever_committed());
+        if let Some(handshake) = committed {
+            if !handshake.begin_persist() {
+                return Err(DurableCommitError::BeforeReceipt(
+                    RuntimeError::TurnCancelled,
+                ));
+            }
+        }
         if let Err(e) = self.persist_receipt(signed.jws_compact()) {
+            if let Some(handshake) = committed {
+                handshake.abort_persist(previously_committed);
+            }
             return Err(DurableCommitError::BeforeReceipt(RuntimeError::Internal(
                 anyhow::anyhow!("receipt persist failed before journal append: {e}"),
             )));
         }
         *self.chain_tail.lock() = Some(Sha256Digest::of(signed.jws_compact().as_bytes()));
-        // #359 handshake: the receipt is durable NOW, before journal/memory
-        // awaits. HTTP uses this so a grace timeout cannot 504 a billed turn.
-        if let Some(flag) = committed {
-            flag.store(true, Ordering::SeqCst);
+        if let Some(handshake) = committed {
+            handshake.finish_persist();
         }
 
         if let Some(journal) = &self.journal {
@@ -1744,6 +1753,115 @@ impl FusedRuntime {
     }
 }
 
+/// Atomic #359 handshake between the HTTP caller and receipt persist.
+///
+/// `request_cancel` only succeeds against Live. `begin_persist` only succeeds
+/// against Live or Committed. A grace timeout concurrent with `persist_receipt`'s
+/// write+fsync therefore sees Persisting and waits, instead of 504-while-billing.
+pub struct TurnCommitHandshake {
+    phase: AtomicU8,
+}
+
+const HS_LIVE: u8 = 0;
+const HS_CANCELLED: u8 = 1;
+const HS_PERSISTING: u8 = 2;
+const HS_COMMITTED: u8 = 3;
+
+impl TurnCommitHandshake {
+    /// A live handshake: not cancelled, no persist in flight.
+    #[must_use]
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            phase: AtomicU8::new(HS_LIVE),
+        })
+    }
+
+    /// Mark the caller gone, but only if persist has not already begun.
+    pub fn request_cancel(&self) {
+        let _ =
+            self.phase
+                .compare_exchange(HS_LIVE, HS_CANCELLED, Ordering::SeqCst, Ordering::SeqCst);
+    }
+
+    /// True only when cancel won against Live (no persist has begun).
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.phase.load(Ordering::SeqCst) == HS_CANCELLED
+    }
+
+    /// Persist write+fsync is in flight, or at least one receipt is durable.
+    /// HTTP must not 504 in either case.
+    #[must_use]
+    pub fn must_wait_for_outcome(&self) -> bool {
+        matches!(
+            self.phase.load(Ordering::SeqCst),
+            HS_PERSISTING | HS_COMMITTED
+        )
+    }
+
+    /// At least one receipt has finished persist (not merely in flight).
+    #[must_use]
+    pub fn ever_committed(&self) -> bool {
+        self.phase.load(Ordering::SeqCst) == HS_COMMITTED
+    }
+
+    /// Claim the right to run `persist_receipt`. False if cancel already won.
+    pub fn begin_persist(&self) -> bool {
+        loop {
+            match self.phase.load(Ordering::SeqCst) {
+                HS_LIVE => {
+                    if self
+                        .phase
+                        .compare_exchange(
+                            HS_LIVE,
+                            HS_PERSISTING,
+                            Ordering::SeqCst,
+                            Ordering::SeqCst,
+                        )
+                        .is_ok()
+                    {
+                        return true;
+                    }
+                }
+                HS_COMMITTED => {
+                    if self
+                        .phase
+                        .compare_exchange(
+                            HS_COMMITTED,
+                            HS_PERSISTING,
+                            Ordering::SeqCst,
+                            Ordering::SeqCst,
+                        )
+                        .is_ok()
+                    {
+                        return true;
+                    }
+                }
+                HS_CANCELLED => return false,
+                HS_PERSISTING => return true,
+                _ => return false,
+            }
+        }
+    }
+
+    /// Receipt write+fsync succeeded.
+    pub fn finish_persist(&self) {
+        self.phase.store(HS_COMMITTED, Ordering::SeqCst);
+    }
+
+    /// Receipt write failed; revert to Live (or Committed if a prior round billed).
+    pub fn abort_persist(&self, previously_committed: bool) {
+        self.phase.store(
+            if previously_committed {
+                HS_COMMITTED
+            } else {
+                HS_LIVE
+            },
+            Ordering::SeqCst,
+        );
+    }
+}
+
 /// A synchronous probe reporting whether the turn's caller has gone away.
 /// Consulted at the commit gate (after each provider round and again after
 /// tool execution, immediately before the receipt/journal/billing commit): a
@@ -1803,7 +1921,7 @@ impl FusedRuntime {
         req: SubmitRequest,
         provisioning: PerRequestProvisioning,
         cancel_probe: CancelProbe,
-        committed: Option<Arc<AtomicBool>>,
+        committed: Option<Arc<TurnCommitHandshake>>,
     ) -> Result<SubmitResult, RuntimeError> {
         self.submit_inner(req, provisioning, Some(cancel_probe), committed)
             .await
@@ -1833,7 +1951,7 @@ impl FusedRuntime {
         req: SubmitRequest,
         provisioning: PerRequestProvisioning,
         cancel_probe: Option<CancelProbe>,
-        committed: Option<Arc<AtomicBool>>,
+        committed: Option<Arc<TurnCommitHandshake>>,
     ) -> Result<SubmitResult, RuntimeError> {
         let session_id = req.session_id;
         let turn_start_ms = self.clock.now_ms().get();
@@ -1905,6 +2023,7 @@ impl FusedRuntime {
         //          back in, or aborts with `ToolLoopExhausted`.
         let mut iteration: u32 = 0;
         let mut total_cost = RuntimeCostTuple::default();
+        let mut last_ok: Option<SubmitResult> = None;
 
         let (receipt, final_content) = loop {
             iteration += 1;
@@ -1980,9 +2099,16 @@ impl FusedRuntime {
             self.gate.touch_reservation(reservation.reservation_id);
 
             // #359 commit gate after the provider round.
-            reservation = self
+            reservation = match self
                 .abort_if_caller_gone(session_id, reservation, &cancel_probe)
-                .await?;
+                .await
+            {
+                Ok(reservation) => reservation,
+                Err(RuntimeError::TurnCancelled) => {
+                    return last_ok.ok_or(RuntimeError::TurnCancelled);
+                }
+                Err(err) => return Err(err),
+            };
 
             // The tool calls (if any) the model requested this round.
             let requested: Vec<ToolCall> = match &response.finish_reason {
@@ -2006,9 +2132,16 @@ impl FusedRuntime {
                     // #359: do not authorize or invoke further tools once the
                     // caller is gone — later tools would otherwise run with no
                     // receipt attesting their effects.
-                    reservation = self
+                    reservation = match self
                         .abort_if_caller_gone(session_id, reservation, &cancel_probe)
-                        .await?;
+                        .await
+                    {
+                        Ok(reservation) => reservation,
+                        Err(RuntimeError::TurnCancelled) => {
+                            return last_ok.ok_or(RuntimeError::TurnCancelled);
+                        }
+                        Err(err) => return Err(err),
+                    };
                     let Some(tool) = self.tools.get(&ToolId::new(&call.name)) else {
                         self.release(reservation).await;
                         let err = RuntimeError::UnknownTool {
@@ -2134,9 +2267,16 @@ impl FusedRuntime {
 
             // #359: recheck after tool.invoke awaits — a timeout during tool
             // execution would otherwise fall through to cost finalize + commit.
-            reservation = self
+            reservation = match self
                 .abort_if_caller_gone(session_id, reservation, &cancel_probe)
-                .await?;
+                .await
+            {
+                Ok(reservation) => reservation,
+                Err(RuntimeError::TurnCancelled) => {
+                    return last_ok.ok_or(RuntimeError::TurnCancelled);
+                }
+                Err(err) => return Err(err),
+            };
 
             // 6. receipt: mint over the provider response, recording the tool
             //    calls and the combined (provider + tool) cost, chained onto the
@@ -2156,7 +2296,7 @@ impl FusedRuntime {
                     let err = RuntimeError::TurnCancelled;
                     self.fire_error(session_id, LifecyclePhase::Provider, &err)
                         .await;
-                    return Err(err);
+                    return last_ok.ok_or(err);
                 }
                 let parent_hash = *self.chain_tail.lock();
                 let body = ReceiptBody {
@@ -2227,6 +2367,9 @@ impl FusedRuntime {
                         }
                         self.fire_error(session_id, LifecyclePhase::Receipt, &err)
                             .await;
+                        if matches!(err, RuntimeError::TurnCancelled) {
+                            return last_ok.ok_or(err);
+                        }
                         return Err(err);
                     }
                     Err(DurableCommitError::AfterReceipt(err)) => {
@@ -2327,6 +2470,11 @@ impl FusedRuntime {
             //     runs here.
 
             total_cost = total_cost.saturating_add(&combined_cost);
+            last_ok = Some(SubmitResult {
+                receipt_id: ReceiptId(receipt.receipt_id),
+                response: ChatMessage::assistant(response.content.clone()),
+                cost: total_cost,
+            });
 
             // Termination: a response with no tool calls is the final answer; a
             // tool-wanting response at the iteration ceiling aborts; otherwise we

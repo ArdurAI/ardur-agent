@@ -249,7 +249,7 @@ async fn persist_flag_is_set_before_journal_append_returns() {
         .build()
         .expect("runtime builds");
 
-    let committed = Arc::new(AtomicBool::new(false));
+    let handshake = ardur_fused_runtime::TurnCommitHandshake::new();
     let probe: ardur_fused_runtime::CancelProbe = Arc::new(|| false);
 
     let entered_wait = entered.notified();
@@ -258,7 +258,7 @@ async fn persist_flag_is_set_before_journal_append_returns() {
         request_for("handshake", &valid_token(), session_id),
         Default::default(),
         probe,
-        Some(Arc::clone(&committed)),
+        Some(Arc::clone(&handshake)),
     );
     tokio::pin!(submit);
     tokio::select! {
@@ -267,8 +267,8 @@ async fn persist_flag_is_set_before_journal_append_returns() {
         result = &mut submit => panic!("submit finished before journal park: {result:?}"),
     }
     assert!(
-        committed.load(Ordering::SeqCst),
-        "receipt persist must flip the flag before journal append awaits"
+        handshake.ever_committed(),
+        "receipt persist must flip the handshake before journal append awaits"
     );
     let chain = load_persisted_chain(&receipt_log).expect("chain load succeeds");
     assert_eq!(
@@ -283,4 +283,27 @@ async fn persist_flag_is_set_before_journal_append_returns() {
         result.is_ok(),
         "unparked journal lets the turn finish: {result:?}"
     );
+}
+
+#[test]
+fn cancel_loses_to_in_flight_persist() {
+    let hs = ardur_fused_runtime::TurnCommitHandshake::new();
+    assert!(hs.begin_persist());
+    hs.request_cancel();
+    assert!(
+        hs.must_wait_for_outcome(),
+        "cancel must not overwrite Persisting"
+    );
+    assert!(!hs.is_cancelled());
+    hs.finish_persist();
+    assert!(hs.ever_committed());
+}
+
+#[test]
+fn cancel_wins_before_persist_begins() {
+    let hs = ardur_fused_runtime::TurnCommitHandshake::new();
+    hs.request_cancel();
+    assert!(!hs.begin_persist());
+    assert!(hs.is_cancelled());
+    assert!(!hs.must_wait_for_outcome());
 }
