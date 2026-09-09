@@ -6,10 +6,9 @@
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
-use p256::EncodedPoint;
 use p256::ecdsa::{SigningKey, VerifyingKey};
+use p256::elliptic_curve::Generate;
 use p256::pkcs8::{DecodePrivateKey, EncodePrivateKey, LineEnding};
-use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
 
 use crate::error::ReceiptError;
@@ -22,7 +21,7 @@ pub struct Es256SigningKey(SigningKey);
 impl Es256SigningKey {
     /// Generate a fresh key from the operating-system CSPRNG.
     pub fn generate() -> Self {
-        Self(SigningKey::random(&mut OsRng))
+        Self(SigningKey::generate())
     }
 
     /// Parse a PKCS#8 PEM-encoded private key.
@@ -65,13 +64,13 @@ impl Es256PublicKey {
     /// `SHA256(public_key_bytes)`, where the bytes are the SEC1 uncompressed
     /// encoding.
     pub fn key_id(&self) -> String {
-        let point = self.0.to_encoded_point(false);
+        let point = self.0.to_sec1_point(false);
         Sha256Digest::of(point.as_bytes()).to_hex()[..16].to_string()
     }
 
     /// Render as a JWK, with `kid` set to this key's [`Es256PublicKey::key_id`].
     pub fn to_jwk(&self) -> JwksKey {
-        let point = self.0.to_encoded_point(false);
+        let point = self.0.to_sec1_point(false);
         JwksKey {
             kid: self.key_id(),
             kty: "EC".to_string(),
@@ -91,12 +90,12 @@ impl Es256PublicKey {
         }
         let x = decode_coord(&jwk.x)?;
         let y = decode_coord(&jwk.y)?;
-        let point = EncodedPoint::from_affine_coordinates(
-            p256::FieldBytes::from_slice(&x),
-            p256::FieldBytes::from_slice(&y),
-            false,
-        );
-        let key = VerifyingKey::from_encoded_point(&point)
+        // SEC1 uncompressed point: 0x04 || x || y.
+        let mut sec1 = [0u8; 65];
+        sec1[0] = 0x04;
+        sec1[1..33].copy_from_slice(&x);
+        sec1[33..65].copy_from_slice(&y);
+        let key = VerifyingKey::from_sec1_bytes(&sec1)
             .map_err(|e| ReceiptError::Malformed(format!("invalid JWK point: {e}")))?;
         Ok(Self(key))
     }

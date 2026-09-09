@@ -73,7 +73,8 @@ fn legacy_signed_jws(key: &Es256SigningKey, body: &ReceiptBody, attention_share:
 
     let sig: P256Signature = signing_key.sign(signing_input.as_bytes());
     // Match the signer/verifier's canonical low-S requirement (ARD-483).
-    let sig = sig.normalize_s().unwrap_or(sig);
+    // ecdsa 0.17: normalize_s() always returns the low-S form.
+    let sig = sig.normalize_s();
     format!("{signing_input}.{}", B64URL.encode(sig.to_bytes()))
 }
 
