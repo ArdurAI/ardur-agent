@@ -41,6 +41,8 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
@@ -145,6 +147,19 @@ jobs:
           docker inspect ardur-ci-smoke --format '{{json .State.Health}}'
           exit 1
 
+      - name: Require tag ancestry on origin/dev or origin/main
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin dev main
+          if git merge-base --is-ancestor HEAD origin/dev \
+            || git merge-base --is-ancestor HEAD origin/main; then
+            echo "tagged commit is reachable from origin/dev or origin/main"
+          else
+            echo "::error::refusing GHCR publish: tag is not on origin/dev or origin/main"
+            exit 1
+          fi
+
       - name: Log in to GHCR
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
         uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
@@ -153,7 +168,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Push the scanned image to GHCR
+      - name: Push an unadvertised digest for attestation
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
         id: publish
         run: |
@@ -161,9 +176,11 @@ jobs:
           repo="$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
           image="ghcr.io/${repo}"
           tag="${GITHUB_REF_NAME}"
-          docker tag ardur-agent:ci "${image}:${tag}"
-          docker push "${image}:${tag}"
-          digest="$(docker inspect --format='{{index .RepoDigests 0}}' "${image}:${tag}")"
+          scratch="${image}:sha-${GITHUB_SHA}"
+          release="${image}:${tag}"
+          docker tag ardur-agent:ci "${scratch}"
+          docker push "${scratch}"
+          digest="$(docker inspect --format='{{index .RepoDigests 0}}' "${scratch}")"
           digest="${digest##*@}"
           case "${digest}" in
             sha256:*) ;;
@@ -171,6 +188,8 @@ jobs:
           esac
           echo "image=${image}" >> "${GITHUB_OUTPUT}"
           echo "digest=${digest}" >> "${GITHUB_OUTPUT}"
+          echo "scratch=${scratch}" >> "${GITHUB_OUTPUT}"
+          echo "release=${release}" >> "${GITHUB_OUTPUT}"
 
       - name: Attest published GHCR image provenance
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
@@ -178,3 +197,10 @@ jobs:
         with:
           subject-name: ${{ steps.publish.outputs.image }}
           subject-digest: ${{ steps.publish.outputs.digest }}
+
+      - name: Promote attested image to the version tag
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+          docker tag ardur-agent:ci "${{ steps.publish.outputs.release }}"
+          docker push "${{ steps.publish.outputs.release }}"

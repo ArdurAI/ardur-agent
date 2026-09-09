@@ -155,10 +155,14 @@ class GitHubSecurityWorkflowTests(unittest.TestCase):
         self.assertNotIn("push: true", docker)
         self.assertIn("docker tag ardur-agent:ci", jobs)
         self.assertIn("docker push", jobs)
-        self.assertIn(
-            "if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')",
-            jobs,
+        self.assertIn("merge-base --is-ancestor", jobs)
+        self.assertIn(":sha-${GITHUB_SHA}", jobs)
+        self.assertIn("Promote attested image to the version tag", jobs)
+        tag_if = (
+            "if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')"
         )
+        self.assertEqual(jobs.count(tag_if), 5, jobs)
+        self.assertIn(tag_if, jobs)
         self.assertIn(
             "docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef",
             jobs,

@@ -33,12 +33,16 @@ anywhere in a trusted state path, so canonicalize:
 ```sh
 cd /path/to/ardur-agent
 
-# Pin toolchain/cargo homes BEFORE replacing HOME. Otherwise rustup looks
-# under $FRESH/.rustup and either re-downloads or fails offline, and
-# Codex/Claude CLI login state under the real home becomes invisible.
-export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
-export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+# The CLI stores state under $HOME/.ardur (it does not honor ARDUR_DATA_DIR).
+# Capture the real home first so rustup and logged-in CLIs keep working
+# after HOME is swapped.
+ORIG_HOME="$HOME"
+export RUSTUP_HOME="${RUSTUP_HOME:-$ORIG_HOME/.rustup}"
+export CARGO_HOME="${CARGO_HOME:-$ORIG_HOME/.cargo}"
 export PATH="${CARGO_HOME}/bin:${PATH}"
+# Codex/Claude CLI login state lives under the original home.
+export CODEX_HOME="${CODEX_HOME:-$ORIG_HOME/.codex}"
+export CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$ORIG_HOME/.claude}"
 
 FRESH="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/ardur-fresh.XXXXXX")" && pwd -P)"
 export HOME="$FRESH"
@@ -138,10 +142,18 @@ cp .env.example .env
 # provider from section 3. Do not commit .env.
 
 # ardur-server reads process env via Config::from_env; it does not load .env.
+# Source, then override container-oriented defaults from .env.example:
+# ARDUR_DATA_DIR=/var/lib/ardur is not writable for a host-side cargo run,
+# and ARDUR_MODEL=claude-opus-4-8 will overwrite the live provider model
+# from section 3.
 set -a
 . ./.env
 set +a
+export ARDUR_DATA_DIR="${HOME}/.ardur"
 export ARDUR_CEDAR_POLICY_PATH="${HOME}/.ardur/cedar.policies"
+export ARDUR_PROVIDER=ollama
+export ARDUR_MODEL=llama3.2:1b
+# If section 3 used a different backend/model, re-export those here instead.
 
 cargo run -p ardur-server
 # In a second terminal, expose HTTPS (ngrok or equivalent) and set the
@@ -175,6 +187,15 @@ docker run -d --name ardur-fresh-smoke --rm -p 3000:3000 \
   -e ARDUR_PROVIDER=ollama \
   ghcr.io/ardurai/ardur-agent:<tag>
 trap 'docker rm -f ardur-fresh-smoke >/dev/null 2>&1 || true' EXIT
+ok=0
+for _ in $(seq 1 15); do
+  if curl -fsS http://127.0.0.1:3000/healthz >/dev/null; then
+    ok=1
+    break
+  fi
+  sleep 2
+done
+test "$ok" -eq 1
 curl -fsS http://127.0.0.1:3000/healthz
 ```
 
