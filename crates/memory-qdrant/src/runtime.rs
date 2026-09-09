@@ -110,8 +110,8 @@ impl QdrantMemoryRuntime {
             .build()
             .map_err(|e| MemoryError::Backend(format!("building tokio runtime: {e}")))?;
 
-        let client = client_from_config(&config, config.timeout_secs)?;
-        let snapshot_client = client_from_config(&config, config.snapshot_timeout_secs)?;
+        let client = client_from_config(&config, config.timeout_secs, false)?;
+        let snapshot_client = client_from_config(&config, config.snapshot_timeout_secs, true)?;
 
         Ok(Self {
             client,
@@ -682,13 +682,24 @@ impl MemoryRuntime for QdrantMemoryRuntime {
 }
 
 /// Build a Qdrant gRPC client with an explicit request timeout.
-fn client_from_config(config: &QdrantMemoryConfig, timeout_secs: u64) -> Result<Qdrant> {
+///
+/// `skip_compat` disables the client's synchronous version probe. The snapshot
+/// client uses this so its longer deadline is not applied to boot-time health
+/// checks (#371 / qdrant-client default compatibility check).
+fn client_from_config(
+    config: &QdrantMemoryConfig,
+    timeout_secs: u64,
+    skip_compat: bool,
+) -> Result<Qdrant> {
     let mut builder = Qdrant::from_url(&config.url);
     if let Some(key) = &config.api_key {
         builder = builder.api_key(key.clone());
     }
+    builder = builder.timeout(std::time::Duration::from_secs(timeout_secs));
+    if skip_compat {
+        builder = builder.skip_compatibility_check();
+    }
     builder
-        .timeout(std::time::Duration::from_secs(timeout_secs))
         .build()
         .map_err(|e| MemoryError::Backend(format!("building qdrant client: {e}")))
 }

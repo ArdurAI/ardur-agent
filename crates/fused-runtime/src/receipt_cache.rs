@@ -5,17 +5,20 @@
 //! and every `/metrics` scrape, so a long-lived process degraded linearly with
 //! the log (#355).
 //!
-//! This cache keys on `(path, file length, mtime)`. An unchanged file is a hit
-//! and skips both the re-read and the signatures. When the file has only grown
-//! and the previously verified prefix is byte-identical, only the appended tail
-//! is authenticated. A shrink, rewrite, or prefix mismatch forces a full
-//! re-verify.
+//! Every load re-reads the log (IO is cheap next to ES256). The cache then
+//! compares the loaded compact-JWS bytes and the caller's JWKS against the last
+//! verified snapshot:
+//!
+//! * identical JWS + same JWKS → hit, skip signatures
+//! * trusted prefix + growth → authenticate only the tail
+//! * rewrite, shrink, JWKS change, or prior verify failure → full re-verify
+//!
+//! Caching is keyed on the loaded contents, not `(len, mtime)`, so a same-size
+//! rewrite or a torn read vs a concurrent append cannot poison the next scrape.
 
-use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::SystemTime;
 
 use ardur_receipt::Jwks;
 use parking_lot::Mutex;
@@ -36,8 +39,7 @@ pub struct VerifiedReceiptCache {
 #[derive(Debug)]
 struct CacheInner {
     path: Option<PathBuf>,
-    file_len: u64,
-    modified: Option<SystemTime>,
+    jwks: Jwks,
     receipts: Arc<Vec<PersistedReceipt>>,
     verify_error: Option<String>,
 }
@@ -86,7 +88,8 @@ impl LoadedReceiptChain {
 /// Instrumentation counters for the #355 regression tests.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ReceiptCacheStats {
-    /// Times a load returned the cached chain without touching disk or JWKS.
+    /// Times a load skipped ES256 because the on-disk compact-JWS bytes matched a
+    /// previously verified chain under the same JWKS.
     pub hits: u64,
     /// Receipts authenticated by a full-chain verify.
     pub receipts_fully_verified: u64,
@@ -107,8 +110,7 @@ impl VerifiedReceiptCache {
         Self {
             inner: Mutex::new(CacheInner {
                 path: None,
-                file_len: 0,
-                modified: None,
+                jwks: Jwks::new(),
                 receipts: Arc::new(Vec::new()),
                 verify_error: None,
             }),
@@ -129,13 +131,16 @@ impl VerifiedReceiptCache {
         }
     }
 
-    /// Load `path` and authenticate it against `jwks`, reusing prior work when
-    /// the file has not changed (or has only grown).
+    /// Load `path` and authenticate it against `jwks`, reusing prior ES256 work
+    /// when the loaded compact-JWS bytes have not changed (or have only grown)
+    /// under the same JWKS.
     ///
-    /// A missing file is an empty, verified chain. I/O and malformed-line
-    /// failures surface as [`ReceiptChainError`]; a signature/linkage failure is
-    /// returned as [`LoadedReceiptChain::verified`] `== false` rather than `Err`,
-    /// matching the `/metrics` scrape contract.
+    /// Every call re-reads the log so a concurrent append or same-size rewrite
+    /// cannot be cached under stale metadata. A missing file is an empty,
+    /// verified chain. I/O and malformed-line failures surface as
+    /// [`ReceiptChainError`]; a signature/linkage failure is returned as
+    /// [`LoadedReceiptChain::verified`] `== false` rather than `Err`, matching
+    /// the `/metrics` scrape contract.
     ///
     /// # Errors
     /// [`ReceiptChainError::Io`] or [`ReceiptChainError::Malformed`] from the
@@ -146,29 +151,18 @@ impl VerifiedReceiptCache {
         jwks: &Jwks,
     ) -> Result<LoadedReceiptChain, ReceiptChainError> {
         let path = path.as_ref();
-        let meta = match std::fs::metadata(path) {
-            Ok(meta) => Some(meta),
-            Err(err) if err.kind() == ErrorKind::NotFound => None,
-            Err(err) => return Err(ReceiptChainError::Io(err)),
-        };
+        let chain = load_persisted_chain(path)?;
 
-        if let Some(hit) = self.try_hit(path, meta.as_ref()) {
+        if let Some(hit) = self.try_content_hit(path, jwks, &chain) {
             return Ok(hit);
         }
-
-        let chain = load_persisted_chain(path)?;
-        // Torn-tail repair inside the loader can shrink the file; re-stat so the
-        // cache key matches what is actually on disk now.
-        let meta = match std::fs::metadata(path) {
-            Ok(meta) => Some(meta),
-            Err(err) if err.kind() == ErrorKind::NotFound => None,
-            Err(err) => return Err(ReceiptChainError::Io(err)),
-        };
 
         let prefix_len = {
             let inner = self.inner.lock();
             let same_path = inner.path.as_deref() == Some(path);
+            let same_jwks = inner.jwks == *jwks;
             let prefix_matches = same_path
+                && same_jwks
                 && inner.verify_error.is_none()
                 && inner.receipts.len() <= chain.len()
                 && inner
@@ -194,16 +188,11 @@ impl VerifiedReceiptCache {
 
         let verify_error = verify.err().map(|err| err.to_string());
         let receipts = Arc::new(chain);
-        let (file_len, modified) = match meta {
-            Some(meta) => (meta.len(), meta.modified().ok()),
-            None => (0, None),
-        };
 
         {
             let mut inner = self.inner.lock();
             inner.path = Some(path.to_path_buf());
-            inner.file_len = file_len;
-            inner.modified = modified;
+            inner.jwks = jwks.clone();
             inner.receipts = receipts.clone();
             inner.verify_error = verify_error.clone();
         }
@@ -214,24 +203,29 @@ impl VerifiedReceiptCache {
         })
     }
 
-    fn try_hit(&self, path: &Path, meta: Option<&std::fs::Metadata>) -> Option<LoadedReceiptChain> {
+    fn try_content_hit(
+        &self,
+        path: &Path,
+        jwks: &Jwks,
+        chain: &[PersistedReceipt],
+    ) -> Option<LoadedReceiptChain> {
         let inner = self.inner.lock();
-        if inner.path.as_deref() != Some(path) {
-            return None;
-        }
-        let is_hit = match meta {
-            Some(meta) => inner.file_len == meta.len() && inner.modified == meta.modified().ok(),
-            None => {
-                inner.file_len == 0 && inner.receipts.is_empty() && inner.verify_error.is_none()
-            }
-        };
-        if !is_hit {
+        let exact = inner.path.as_deref() == Some(path)
+            && inner.jwks == *jwks
+            && inner.verify_error.is_none()
+            && inner.receipts.len() == chain.len()
+            && inner
+                .receipts
+                .iter()
+                .zip(chain.iter())
+                .all(|(cached, loaded)| cached.jws_compact == loaded.jws_compact);
+        if !exact {
             return None;
         }
         self.hits.fetch_add(1, Ordering::Relaxed);
         Some(LoadedReceiptChain {
             receipts: inner.receipts.clone(),
-            verify_error: inner.verify_error.clone(),
+            verify_error: None,
         })
     }
 }
@@ -366,16 +360,16 @@ mod tests {
         let cache = VerifiedReceiptCache::new();
         cache.load(&path, &jwks).expect("first load");
 
-        // A longer chain whose prefix JWS does not match the cached prefix is a
-        // rewrite, not an append — length change also defeats the mtime cache.
-        write_log(&path, &sign_chain(&key, 3));
+        // A different valid chain of the same length is a rewrite, not an append.
+        // Content comparison (not len/mtime) is what detects this.
+        write_log(&path, &sign_chain(&key, 2));
         let loaded = cache.load(&path, &jwks).expect("rewritten load");
         assert!(loaded.verified());
         assert_eq!(
             cache.stats(),
             ReceiptCacheStats {
                 hits: 0,
-                receipts_fully_verified: 5,
+                receipts_fully_verified: 4,
                 receipts_tail_verified: 0,
             },
             "a rewritten prefix must not be trusted as an incremental tail"
@@ -424,5 +418,32 @@ mod tests {
         let second = cache.load(&path, &jwks).expect("missing hit");
         assert!(second.verified());
         assert_eq!(cache.stats().hits, 1);
+    }
+
+    #[test]
+    fn jwks_change_forces_a_full_reverify() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("chain.jsonl");
+        let key = Es256SigningKey::generate();
+        let jwks = Jwks::from_public_key(&key.public_key());
+        write_log(&path, &sign_chain(&key, 2));
+
+        let cache = VerifiedReceiptCache::new();
+        assert!(cache.load(&path, &jwks).expect("trusted load").verified());
+
+        let other = Jwks::from_public_key(&Es256SigningKey::generate().public_key());
+        let loaded = cache.load(&path, &other).expect("rotated load");
+        assert!(
+            !loaded.verified(),
+            "a chain verified under key A must not report verified under key B"
+        );
+        assert_eq!(
+            cache.stats(),
+            ReceiptCacheStats {
+                hits: 0,
+                receipts_fully_verified: 4,
+                receipts_tail_verified: 0,
+            }
+        );
     }
 }
