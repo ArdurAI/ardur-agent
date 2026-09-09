@@ -372,10 +372,11 @@ the fused runtime.
 ## Production
 
 Version tags matching `v*` publish `ghcr.io/<owner>/<repo>:<tag>` (lowercase)
-from `.github/workflows/docker.yml` after the image scan job is green. A
-GitHub Release published for the same tag runs `.github/workflows/release.yml`
-(SBOM, SHA256SUMS, keyless cosign, provenance). Fresh-machine validation steps
-are in [docs/fresh-machine.md](docs/fresh-machine.md). Pre-release tags do not
+from `.github/workflows/docker.yml` by tagging the same `ardur-agent:ci`
+image that already passed Trivy and `/healthz`. A GitHub Release published
+for the same tag runs `.github/workflows/release.yml` (SBOM, SHA256SUMS,
+keyless cosign, provenance). Fresh-machine validation steps are in
+[docs/fresh-machine.md](docs/fresh-machine.md). Pre-release tags do not
 receive a `:latest` tag.
 
 ```sh

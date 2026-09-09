@@ -31,13 +31,21 @@ On macOS `/tmp` is a symlink to `/private/tmp`; the CLI refuses a symlink
 anywhere in a trusted state path, so canonicalize:
 
 ```sh
+cd /path/to/ardur-agent
+
+# Pin toolchain/cargo homes BEFORE replacing HOME. Otherwise rustup looks
+# under $FRESH/.rustup and either re-downloads or fails offline, and
+# Codex/Claude CLI login state under the real home becomes invisible.
+export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
+export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+export PATH="${CARGO_HOME}/bin:${PATH}"
+
 FRESH="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/ardur-fresh.XXXXXX")" && pwd -P)"
 export HOME="$FRESH"
 unset ARDUR_DATA_DIR ARDUR_DEV_PERMISSIVE_POLICY
 unset ARDUR_CEDAR_POLICY_PATH ARDUR_CLI_BUDGET_CENTS ARDUR_CLI_PER_TURN_CENTS
 # Offline path must not inherit a live provider from the developer shell.
 unset ARDUR_PROVIDER ARDUR_MODEL
-cd /path/to/ardur-agent
 ```
 
 ## 2. Offline stub path (required)
@@ -112,8 +120,10 @@ Pass criteria:
 - The reply is not `[anthropic stub]`.
 - A new receipt is appended; `receipts verify` still reports
   `ES256 signatures OK`.
-- Cost is recorded on the receipt (non-zero cents for billed providers;
-  Ollama/Codex/Claude-CLI may be zero).
+- Cost: Anthropic/OpenRouter usually record non-zero cents. Ollama, Codex,
+  Claude-CLI, and `openai-compat` (zero rate card unless the gateway sends
+  `usage.cost`) may record 0c. A non-stub reply plus a new receipt is the
+  pass criterion.
 
 If the chosen credential is missing, record `missing` and stop this path.
 
@@ -126,6 +136,12 @@ channel. Public channels are out of scope for beta validation.
 cp .env.example .env
 # Fill SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET, SLACK_APP_ID, and the
 # provider from section 3. Do not commit .env.
+
+# ardur-server reads process env via Config::from_env; it does not load .env.
+set -a
+. ./.env
+set +a
+export ARDUR_CEDAR_POLICY_PATH="${HOME}/.ardur/cedar.policies"
 
 cargo run -p ardur-server
 # In a second terminal, expose HTTPS (ngrok or equivalent) and set the
@@ -145,17 +161,20 @@ If `SLACK_BOT_TOKEN` (or the signing secret / app id) is missing, record
 ## 5. Published container (after a `v*` tag)
 
 `.github/workflows/docker.yml` publishes only on version tags, and only after
-`build-healthcheck-scan` is green:
+the same job's Trivy gate and `/healthz` smoke have passed. It tags and
+pushes the scanned `ardur-agent:ci` image (not a second build).
 
 ```sh
 # Image name is lowercase; the GitHub org/repo may not be.
 docker pull ghcr.io/ardurai/ardur-agent:<tag>
-docker run --rm -p 3000:3000 \
+docker run -d --name ardur-fresh-smoke --rm -p 3000:3000 \
+  -e ARDUR_BIND_ADDR=0.0.0.0:3000 \
   -e SLACK_BOT_TOKEN=dummy \
   -e SLACK_SIGNING_SECRET=dummy \
   -e SLACK_APP_ID=dummy \
   -e ARDUR_PROVIDER=ollama \
   ghcr.io/ardurai/ardur-agent:<tag>
+trap 'docker rm -f ardur-fresh-smoke >/dev/null 2>&1 || true' EXIT
 curl -fsS http://127.0.0.1:3000/healthz
 ```
 

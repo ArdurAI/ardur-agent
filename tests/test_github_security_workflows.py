@@ -145,25 +145,28 @@ class GitHubSecurityWorkflowTests(unittest.TestCase):
 
     def test_docker_workflow_publishes_ghcr_on_version_tags(self):
         docker = (WORKFLOWS / "docker.yml").read_text(encoding="utf-8")
+        header, jobs = docker.split("jobs:", 1)
 
-        self.assertIn('tags: ["v*"]', docker)
-        self.assertIn("name: publish-ghcr", docker)
-        self.assertIn("needs: build-healthcheck-scan", docker)
+        self.assertIn('tags: ["v*"]', header)
+        self.assertNotIn("packages: write", header)
+        self.assertIn("packages: write", jobs)
+        self.assertNotIn("name: publish-ghcr", docker)
+        self.assertNotIn(":latest", docker)
+        self.assertNotIn("push: true", docker)
+        self.assertIn("docker tag ardur-agent:ci", jobs)
+        self.assertIn("docker push", jobs)
         self.assertIn(
             "if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')",
-            docker,
+            jobs,
         )
-        self.assertIn("packages: write", docker)
         self.assertIn(
             "docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef",
-            docker,
+            jobs,
         )
-        self.assertIn("registry: ghcr.io", docker)
-        self.assertIn("push: true", docker)
-        self.assertIn("ghcr.io/${repo}", docker)
-        self.assertIn("subject-name: ${{ steps.meta.outputs.image }}", docker)
-        self.assertIn("subject-digest: ${{ steps.push.outputs.digest }}", docker)
-        self.assertNotIn("ghcr.io/ardurai/ardur-agent:latest", docker)
+        self.assertIn("registry: ghcr.io", jobs)
+        self.assertIn("ghcr.io/${repo}", jobs)
+        self.assertIn("subject-name: ${{ steps.publish.outputs.image }}", jobs)
+        self.assertIn("subject-digest: ${{ steps.publish.outputs.digest }}", jobs)
 
     def test_rust_toolchain_is_exactly_pinned(self):
         toolchain = (ROOT / "rust-toolchain.toml").read_text(encoding="utf-8")
