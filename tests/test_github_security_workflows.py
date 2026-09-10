@@ -164,7 +164,7 @@ class GitHubSecurityWorkflowTests(unittest.TestCase):
         self.assertEqual(jobs.count(tag_if), 5, jobs)
         self.assertIn(tag_if, jobs)
         self.assertIn(
-            "docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef",
+            "docker/login-action@dbcb813823bdd20940b903addbd779551569679f",
             jobs,
         )
         self.assertIn("registry: ghcr.io", jobs)
