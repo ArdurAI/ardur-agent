@@ -64,28 +64,53 @@ pub fn is_valid_session_id(id: &str) -> bool {
     ) && !id.contains('\\')
 }
 
-/// Resolve a caller-supplied session id to its journal file by matching it
-/// against the directory entries actually present under the sessions root —
-/// the returned path is built from the matched entry's own name, never by
-/// joining the raw id. Combined with [`is_valid_session_id`], this confines
-/// every journal read to `<journal-dir>/sessions/<existing-dir>/`. An id that
-/// is invalid or names no existing session resolves to `None`.
-fn resolve_journal_path(journal_dir: &Path, session_id: &str) -> Option<PathBuf> {
-    if !is_valid_session_id(session_id) {
-        return None;
-    }
+/// One session enumerated from a single `read_dir` pass over the sessions
+/// root: its id (the directory name) and the journal file inside it. Every
+/// path is built from the enumerated entry's own name — never by joining a
+/// caller-supplied string — so all journal reads stay confined to
+/// `<journal-dir>/sessions/`. A missing `sessions/` directory is an empty
+/// list; any other `read_dir`/dirent failure propagates (matching the
+/// pre-confinement error contract).
+fn enumerate_sessions(journal_dir: &Path) -> anyhow::Result<Vec<(String, PathBuf)>> {
     let root = sessions_root(journal_dir);
-    let read_dir = fs::read_dir(&root).ok()?;
-    for dirent in read_dir.flatten() {
-        if !dirent.file_type().is_ok_and(|t| t.is_dir()) {
+    let read_dir = match fs::read_dir(&root) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e.into()),
+    };
+    let mut out = Vec::new();
+    for dirent in read_dir {
+        let dirent = dirent?;
+        if !dirent.file_type()?.is_dir() {
             continue;
         }
         let name = dirent.file_name();
-        if name.to_str() == Some(session_id) {
-            return Some(root.join(name).join("journal.jsonl"));
+        let Some(id) = name.to_str().map(str::to_string) else {
+            continue;
+        };
+        let path = root.join(&name).join("journal.jsonl");
+        if !path.is_file() {
+            continue;
         }
+        out.push((id, path));
     }
-    None
+    Ok(out)
+}
+
+/// Resolve a caller-supplied session id to its journal file by matching it
+/// against the sessions actually present ([`enumerate_sessions`]) — the
+/// returned path was built from the matched entry's own name, never by
+/// joining the raw id. Combined with [`is_valid_session_id`], this confines
+/// every journal read to `<journal-dir>/sessions/<existing-dir>/`. An id that
+/// is invalid or names no existing session resolves to `Ok(None)`; a failure
+/// to enumerate (other than a missing root) propagates.
+fn resolve_journal_path(journal_dir: &Path, session_id: &str) -> anyhow::Result<Option<PathBuf>> {
+    if !is_valid_session_id(session_id) {
+        return Ok(None);
+    }
+    Ok(enumerate_sessions(journal_dir)?
+        .into_iter()
+        .find_map(|(id, path)| (id == session_id).then_some(path)))
 }
 
 /// The `at` (millisecond) timestamp an entry records.
@@ -123,9 +148,10 @@ fn cost_cents(entry: &JournalEntry) -> Option<u64> {
 /// The session id is resolved via [`resolve_journal_path`] — validated and
 /// matched against real directory entries before any file is opened — so an
 /// id that would traverse outside `<journal-dir>/sessions/` (or names no
-/// existing session) reads as "no such session" (empty).
+/// existing session) reads as "no such session" (empty). Enumeration
+/// failures other than a missing sessions root propagate.
 pub fn read_entries(journal_dir: &Path, session_id: &str) -> anyhow::Result<Vec<JournalEntry>> {
-    let Some(path) = resolve_journal_path(journal_dir, session_id) else {
+    let Some(path) = resolve_journal_path(journal_dir, session_id)? else {
         return Ok(Vec::new());
     };
     read_entries_at(&path)
@@ -149,29 +175,8 @@ fn read_entries_at(path: &Path) -> anyhow::Result<Vec<JournalEntry>> {
 /// first (by file mtime). A missing or empty `sessions/` directory is an empty
 /// list rather than an error.
 pub fn list_sessions(journal_dir: &Path) -> anyhow::Result<Vec<SessionSummary>> {
-    let root = sessions_root(journal_dir);
-    let read_dir = match fs::read_dir(&root) {
-        Ok(rd) => rd,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(e.into()),
-    };
-
     let mut out = Vec::new();
-    for dirent in read_dir {
-        let dirent = dirent?;
-        if !dirent.file_type()?.is_dir() {
-            continue;
-        }
-        let name = dirent.file_name();
-        let Some(id) = name.to_str().map(str::to_string) else {
-            continue;
-        };
-        // Build the path from the enumerated directory entry itself — never
-        // by joining a string id — so every read stays under `sessions/`.
-        let path = root.join(&name).join("journal.jsonl");
-        if !path.is_file() {
-            continue;
-        }
+    for (id, path) in enumerate_sessions(journal_dir)? {
         let modified_ms = fs::metadata(&path)
             .and_then(|m| m.modified())
             .ok()
@@ -235,14 +240,14 @@ pub fn page(
 
 /// Aggregate cents settled per session (summing every `CostFinalized`), for the
 /// "top expensive sessions" cost view. Sessions with no settled cost are
-/// omitted.
+/// omitted. A single enumeration pass reads each journal exactly once.
 pub fn cents_by_session(journal_dir: &Path) -> anyhow::Result<Vec<(String, u64)>> {
     let mut out = Vec::new();
-    for summary in list_sessions(journal_dir)? {
-        let entries = read_entries(journal_dir, &summary.id)?;
+    for (id, path) in enumerate_sessions(journal_dir)? {
+        let entries = read_entries_at(&path)?;
         let cents: u64 = entries.iter().filter_map(cost_cents).sum();
         if cents > 0 {
-            out.push((summary.id, cents));
+            out.push((id, cents));
         }
     }
     out.sort_by_key(|t| std::cmp::Reverse(t.1));
@@ -312,5 +317,40 @@ mod tests {
         .expect("inside journal");
         let entries = read_entries(&journal_dir, "sess-ok").expect("read");
         assert_eq!(entries.len(), 1, "confined id reads its own journal");
+    }
+
+    /// A missing sessions root reads as empty, but an unreadable one is an
+    /// error — resolution must not swallow I/O failures into "no session"
+    /// (the pre-confinement contract propagated everything except NotFound).
+    #[test]
+    #[cfg(unix)]
+    fn read_entries_propagates_unreadable_sessions_root() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let journal_dir = dir.path().join("journals");
+
+        // Missing root: empty, not an error.
+        assert!(
+            read_entries(&journal_dir, "sess-a")
+                .expect("read")
+                .is_empty(),
+            "missing sessions/ is an empty journal"
+        );
+
+        // Unreadable root: an error, not a silent empty read.
+        let root = journal_dir.join("sessions");
+        fs::create_dir_all(&root).expect("sessions root");
+        let mut perms = fs::metadata(&root).expect("meta").permissions();
+        perms.set_mode(0o000);
+        fs::set_permissions(&root, perms.clone()).expect("chmod 000");
+        // Root can still read a 000 directory; skip there (e.g. docker CI).
+        let denied = fs::read_dir(&root).is_err();
+        let result = read_entries(&journal_dir, "sess-a");
+        perms.set_mode(0o755);
+        fs::set_permissions(&root, perms).expect("chmod back");
+        if denied {
+            result.expect_err("unreadable sessions/ must propagate the error");
+        }
     }
 }
