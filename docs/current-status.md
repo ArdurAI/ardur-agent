@@ -19,18 +19,23 @@ reviewed code baseline and was re-verified against it.
 - Required GitHub workflows were green before each merge, and the full
   dev-push check set (CodeQL, CodeQL/Rust, Trivy, build-healthcheck-scan,
   cargo-deny, hugo, macos-15/stable, ubuntu-latest/stable, qdrant integration
-  `--ignored`) is green on the baseline commit. DCO runs on PRs and was green
-  before each merge.
+  `--ignored`) is green on the baseline commit: CI run
+  [34328847792](https://github.com/ArdurAI/ardur-agent/actions/runs/34328847792),
+  docker run
+  [34328847810](https://github.com/ArdurAI/ardur-agent/actions/runs/34328847810),
+  site-deploy run
+  [34328847846](https://github.com/ArdurAI/ardur-agent/actions/runs/34328847846).
+  DCO runs on PRs and was green before each merge.
 - Container release path: `.github/workflows/docker.yml` publishes
   `ghcr.io/ardurai/ardur-agent:<tag>` on `v*` tags — the same image that
   passed the job's Trivy gate and `/healthz` smoke, with build-provenance
-  attestation. It does not float `:latest` on pre-releases.
-- Release supply-chain path: `.github/workflows/release.yml`
-  (`release-supply-chain` / `release-sbom-sign`) runs when a GitHub Release is
-  published for the tag: it builds release binaries, generates an SPDX SBOM
-  and SHA256SUMS, signs assets with keyless cosign, and attaches build
-  provenance.
-- Fresh-machine validation: [docs/fresh-machine.md](fresh-machine.md) is the
+  attestation. It never tags `:latest`.
+- Release supply-chain path: the `release-supply-chain` workflow
+  (`.github/workflows/release.yml`, job `release-sbom-sign`) runs when a
+  GitHub Release is published for the tag: it builds release binaries,
+  generates an SPDX SBOM and SHA256SUMS, signs assets with keyless cosign,
+  and attaches build provenance.
+- Fresh-machine runbook: [docs/fresh-machine.md](fresh-machine.md) is the
   operator runbook for the offline stub, one live provider, a private Slack
   channel, and the published-container smoke.
 - Local no-key baseline on this review:
@@ -155,8 +160,9 @@ The platform tool crates are also implemented as explicit integration surfaces:
   commit gate (`#359` / `#421`): a flag set synchronously in the dropping
   thread is consulted after each provider round and before the
   receipt/journal/billing commit, so an abandoned turn releases its cost
-  reservation and mints no receipt. Covered by
-  `crates/fused-runtime/tests/turn_cancellation.rs` and
+  reservation and mints no final receipt. Intermediate tool-loop receipts from
+  earlier rounds can still survive such a cancel — see `#422` below. Covered
+  by `crates/fused-runtime/tests/turn_cancellation.rs` and
   `crates/server/tests/chat_turn_timeout.rs`.
 - `GET /approvals`, `POST /approvals/{id}/approve`, and
   `POST /approvals/{id}/reject` are admin-bearer gated, persist to the same
@@ -175,7 +181,10 @@ hardening and operator work.
 - Hardened shell/file/http tools exist but stay off until an operator grant or
   server env opt-in (ARD-457).
 - `shell.run`'s allowlist is a prefix gate, not full argv confinement (`#420`).
-- Tool-loop intermediate receipts survive a later-round cancel (`#422`).
+- Tool-loop intermediate receipts survive a later-round cancel (`#422`): a turn
+  cancelled mid-loop can leave earlier-round tool receipts in the chain without
+  a final settled receipt, so the chain can record cost for a turn the caller
+  never saw finish.
 - Local STT/TTS providers exist in `ardur-media-audio`, but the server currently
   auto-registers Whisper transcription only.
 - Approval *propose* (the agent creating a pending card before an irreversible
