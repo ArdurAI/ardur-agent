@@ -138,6 +138,11 @@ impl Provider for InstrumentedProvider {
 
         match result {
             Ok(stream) => {
+                // Record the requested model as the initial `gen_ai.response.model`.
+                // If the stream emits a `ServedModel` event (carrying the actual
+                // model the provider served), the wrapper overwrites this with
+                // the real value. This is the streaming analogue of the
+                // `response_model_attr()` fallback used in the `complete()` path.
                 span.record("gen_ai.response.model", requested_model.0.as_str());
                 Ok(Box::pin(InstrumentedProviderStream::new(
                     stream, rate_card, span,
@@ -204,6 +209,9 @@ impl Stream for InstrumentedProviderStream {
                     let priced = this.rate_card.price(*usage);
                     record_usage(&this.span, *usage, priced.cents);
                 }
+                Ok(StreamEvent::ServedModel(model)) if !this.saw_error => {
+                    this.span.record("gen_ai.response.model", model.as_str());
+                }
                 Ok(StreamEvent::Finish(reason)) if !this.saw_error => {
                     this.span.record(
                         "gen_ai.response.finish_reasons",
@@ -220,7 +228,8 @@ impl Stream for InstrumentedProviderStream {
                 | Ok(StreamEvent::ToolCallStart(_))
                 | Ok(StreamEvent::ToolCallDelta { .. })
                 | Ok(StreamEvent::Usage(_))
-                | Ok(StreamEvent::Finish(_)) => {}
+                | Ok(StreamEvent::Finish(_))
+                | Ok(StreamEvent::ServedModel(_)) => {}
             }
         }
 

@@ -2,10 +2,11 @@
 
 use std::path::{Path, PathBuf};
 
-use ardur_cli::CliError;
+use ardur_cli::{CliError, read_string_no_follow, write_private_file_atomic_no_follow};
 use clap::{Args, Subcommand};
 
 use crate::StateDirs;
+use crate::state_id::sanitize_state_id;
 
 /// Arguments to `ardur persona`.
 #[derive(Args)]
@@ -67,7 +68,7 @@ fn read_personas(root: &Path) -> Result<Vec<PersonaRecord>, CliError> {
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for entry in entries.flatten() {
             if entry.path().extension().is_some_and(|e| e == "json") {
-                if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                if let Ok(content) = read_string_no_follow(&entry.path()) {
                     if let Ok(v) = serde_json::from_str::<PersonaRecord>(&content) {
                         records.push(v);
                     }
@@ -99,7 +100,7 @@ pub fn run_persona(args: PersonaArgs) -> Result<(), CliError> {
         PersonaAction::Active => {
             let active_path = active_persona_path(&root);
             if active_path.is_file() {
-                let content = std::fs::read_to_string(&active_path)?;
+                let content = read_string_no_follow(&active_path)?;
                 let record: PersonaRecord =
                     serde_json::from_str(&content).map_err(|e| CliError::State(e.to_string()))?;
                 println!(
@@ -112,6 +113,7 @@ pub fn run_persona(args: PersonaArgs) -> Result<(), CliError> {
             }
         }
         PersonaAction::Set { name } => {
+            sanitize_state_id(&name)?;
             let records = read_personas(&root)?;
             let found = records.iter().any(|r| r.name == name);
             if !found {
@@ -120,24 +122,34 @@ pub fn run_persona(args: PersonaArgs) -> Result<(), CliError> {
             for r in records {
                 let mut r = r;
                 r.is_active = r.name == name;
+                // `r.name` comes from a JSON file on disk, not the `name`
+                // argument above — a hand-edited persona file could carry a
+                // `name` field that diverges from its own filename, so it
+                // needs its own traversal check before being reused to build
+                // a write path.
+                sanitize_state_id(&r.name)?;
                 let path = dir.join(format!("{}.json", r.name));
-                std::fs::write(
+                write_private_file_atomic_no_follow(
                     &path,
-                    serde_json::to_string_pretty(&r).map_err(|e| CliError::State(e.to_string()))?,
+                    serde_json::to_string_pretty(&r)
+                        .map_err(|e| CliError::State(e.to_string()))?
+                        .as_bytes(),
                 )?;
             }
-            std::fs::write(
-                active_persona_path(&root),
+            write_private_file_atomic_no_follow(
+                &active_persona_path(&root),
                 serde_json::to_string_pretty(&PersonaRecord {
                     name: name.clone(),
                     is_active: true,
                     ..Default::default()
                 })
-                .map_err(|e| CliError::State(e.to_string()))?,
+                .map_err(|e| CliError::State(e.to_string()))?
+                .as_bytes(),
             )?;
             println!("active persona set to {name}");
         }
         PersonaAction::Create { name, file } => {
+            sanitize_state_id(&name)?;
             let mut record = PersonaRecord {
                 name: name.clone(),
                 display_name: name.clone(),
@@ -152,10 +164,11 @@ pub fn run_persona(args: PersonaArgs) -> Result<(), CliError> {
                     serde_json::from_str(&content).map_err(|e| CliError::State(e.to_string()))?;
                 record.name = name.clone();
             }
-            std::fs::write(
-                dir.join(format!("{name}.json")),
+            write_private_file_atomic_no_follow(
+                &dir.join(format!("{name}.json")),
                 serde_json::to_string_pretty(&record)
-                    .map_err(|e| CliError::State(e.to_string()))?,
+                    .map_err(|e| CliError::State(e.to_string()))?
+                    .as_bytes(),
             )?;
             println!("created persona {name}");
         }
@@ -176,6 +189,7 @@ pub fn run_persona(args: PersonaArgs) -> Result<(), CliError> {
             }
         }
         PersonaAction::Remove { name } => {
+            sanitize_state_id(&name)?;
             let path = dir.join(format!("{name}.json"));
             if !path.is_file() {
                 return Err(CliError::State(format!("persona `{name}` not found")));
@@ -183,7 +197,7 @@ pub fn run_persona(args: PersonaArgs) -> Result<(), CliError> {
             std::fs::remove_file(&path)?;
             let active_path = active_persona_path(&root);
             if active_path.is_file() {
-                if let Ok(content) = std::fs::read_to_string(&active_path) {
+                if let Ok(content) = read_string_no_follow(&active_path) {
                     if let Ok(record) = serde_json::from_str::<PersonaRecord>(&content) {
                         if record.name == name {
                             std::fs::remove_file(&active_path)?;
@@ -213,10 +227,11 @@ pub fn run_persona(args: PersonaArgs) -> Result<(), CliError> {
                         .unwrap_or(&record.name)
                         .to_string();
                     record.name = base.clone();
-                    std::fs::write(
-                        dir.join(format!("{base}.json")),
+                    write_private_file_atomic_no_follow(
+                        &dir.join(format!("{base}.json")),
                         serde_json::to_string_pretty(&record)
-                            .map_err(|e| CliError::State(e.to_string()))?,
+                            .map_err(|e| CliError::State(e.to_string()))?
+                            .as_bytes(),
                     )?;
                     installed += 1;
                 }

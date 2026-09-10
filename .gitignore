@@ -49,3 +49,4 @@ handoff/
 # Local nested clones / backups
 ardur-agent/
 ardur-agent.mirror.backup/
+.worktrees/

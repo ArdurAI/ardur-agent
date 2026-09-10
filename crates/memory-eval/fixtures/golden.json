@@ -1,0 +1,129 @@
+{
+  "name": "ardur-engineering-memory-v1",
+  "docs": [
+    {
+      "id": "d-port",
+      "kind": "note",
+      "text": "ardur-server binds to port 8080 by default; set ARDUR_PORT to override the listen port."
+    },
+    {
+      "id": "d-port-old",
+      "kind": "note",
+      "stale": true,
+      "text": "Legacy note: ardur-server listened on port 9090 before the 8080 change."
+    },
+    {
+      "id": "d-rrf",
+      "kind": "markdown",
+      "text": "Hybrid retrieval fuses dense embedding results and BM25 lexical results with Reciprocal Rank Fusion at k equals 60, per Cormack 2009."
+    },
+    {
+      "id": "d-bm25-file",
+      "kind": "code",
+      "text": "crates/bm25-index/src/lib.rs implements the Bm25Index type over a Tantivy inverted index for lexical search."
+    },
+    {
+      "id": "d-embed-file",
+      "kind": "code",
+      "text": "crates/embeddings/src/lib.rs defines the Embedder trait, the FastEmbedEmbedder, and the deterministic MockEmbedder used in tests."
+    },
+    {
+      "id": "d-attention",
+      "kind": "markdown",
+      "text": "Decision: attention_score is stored as a milli-attention u64 integer so cost receipts stay byte-stable and the tuple keeps Eq for exact ledger math."
+    },
+    {
+      "id": "d-provider-stream",
+      "kind": "note",
+      "text": "The Anthropic and OpenAI providers support SSE token streaming; the Ollama provider streams NDJSON chunks."
+    },
+    {
+      "id": "d-provider-nostream",
+      "kind": "note",
+      "text": "The Codex and Claude CLI subprocess providers do not support token streaming; they return the full completion at once."
+    },
+    {
+      "id": "d-recordid-before",
+      "kind": "note",
+      "text": "Before the 2026-06 memory migration, a RecordId was a plain string identifier assigned by the caller."
+    },
+    {
+      "id": "d-recordid-after",
+      "kind": "note",
+      "text": "After the 2026-06 memory migration, a RecordId wraps a time-ordered UUIDv7 minted by the store."
+    },
+    {
+      "id": "d-cap-token",
+      "kind": "markdown",
+      "text": "A cap-token is a Biscuit; its jti is a UUIDv4 exposed as VerifiedClaims.token_id and receipted as the cap_token_id."
+    },
+    {
+      "id": "d-etxtbsy",
+      "kind": "transcript",
+      "text": "provider-codex retries the subprocess spawn on ETXTBSY, the Text file busy error, up to five times to dodge an inherited-fd fork exec race."
+    },
+    {
+      "id": "d-cli-render",
+      "kind": "markdown",
+      "text": "The CLI renders assistant markdown with comrak and syntect syntax highlighting under the default night theme."
+    },
+    {
+      "id": "d-slack",
+      "kind": "note",
+      "text": "Inbound Slack webhooks route through the messaging-gateway into the FusedRuntime and the reply is posted back to Slack."
+    }
+  ],
+  "queries": [
+    {
+      "id": "q-port",
+      "query": "what port does ardur-server bind to by default",
+      "query_type": "factoid",
+      "relevant": { "d-port": 3 },
+      "expected_citations": ["d-port"],
+      "contradiction": { "current": "d-port", "superseded": "d-port-old" }
+    },
+    {
+      "id": "q-bm25-file",
+      "query": "which file implements the Bm25Index lexical index",
+      "query_type": "file_path",
+      "relevant": { "d-bm25-file": 3, "d-rrf": 1 },
+      "expected_citations": ["d-bm25-file"]
+    },
+    {
+      "id": "q-embedder",
+      "query": "where is the Embedder trait and MockEmbedder defined",
+      "query_type": "file_path",
+      "relevant": { "d-embed-file": 3 }
+    },
+    {
+      "id": "q-attention",
+      "query": "why is attention_score stored as a milli-attention integer",
+      "query_type": "decision_history",
+      "relevant": { "d-attention": 3 }
+    },
+    {
+      "id": "q-streaming",
+      "query": "which providers support SSE token streaming",
+      "query_type": "factoid",
+      "relevant": { "d-provider-stream": 3, "d-provider-nostream": 1 }
+    },
+    {
+      "id": "q-nostream",
+      "query": "which subprocess providers do not support token streaming",
+      "query_type": "negation",
+      "relevant": { "d-provider-nostream": 3 }
+    },
+    {
+      "id": "q-recordid",
+      "query": "what type was a RecordId before the 2026-06 migration",
+      "query_type": "temporal",
+      "relevant": { "d-recordid-before": 3, "d-recordid-after": 1 }
+    },
+    {
+      "id": "q-etxtbsy",
+      "query": "how does provider-codex handle the Text file busy spawn error",
+      "query_type": "multi_hop",
+      "relevant": { "d-etxtbsy": 3 }
+    }
+  ]
+}

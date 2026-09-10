@@ -6,7 +6,7 @@ use ardur_media_audio::{
     ContentClass, DiarizationMode, LocalSpeechToTextProvider, LocalSttConfig,
     LocalTextToSpeechProvider, LocalTtsConfig, MediaProvider, MissionId, TextToSpeechProvider,
     TextToSpeechRequest, TranscribeFileRequest, TranscriptFormat, TranscriptionProvider,
-    VoiceSpeakTool,
+    UnixTsMillis, VoiceSpeakTool,
 };
 use ardur_media_decode::AudioFormat;
 use ardur_runtime::{CapTokenRef, SessionId};
@@ -45,7 +45,7 @@ fn request(provider_id: AudioProviderId, model_id: AudioModelId) -> TranscribeFi
         max_speakers: None,
         export_format: TranscriptFormat::Json,
         mission_id: MissionId::new("mission.local-voice-test"),
-        requested_at: 1,
+        requested_at: UnixTsMillis(1),
     }
 }
 
@@ -89,6 +89,40 @@ async fn local_stt_provider_invokes_configured_command_and_transcribes_audio() {
     assert!(!transcript.receipt_hash.as_str().is_empty());
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn local_stt_transcriptions_compose_concurrently() {
+    // M0: two transcriptions driven with `join!` both complete. The provider is
+    // genuinely async now (the external command + temp-file I/O go through
+    // `tokio::process`/`tokio::fs`), so they compose concurrently rather than
+    // each parking a runtime worker for the whole command duration.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let script = write_executable_script(
+        temp.path(),
+        "local-stt.sh",
+        "#!/bin/sh\ntest -s \"$1\" || exit 7\nprintf 'concurrent transcript\\n'\n",
+    );
+    let provider = LocalSpeechToTextProvider::new(LocalSttConfig::new(script))
+        .expect("local provider config is valid");
+    let provider_id = provider.media_provider_id().clone();
+    let model_id = AudioModelId::new("local-test-model");
+
+    // Bind the tokens to locals so they outlive the joined futures that borrow them.
+    let token_a = token(provider_id.clone());
+    let token_b = token(provider_id.clone());
+    let (first, second) = tokio::join!(
+        provider.transcribe_file(&token_a, request(provider_id.clone(), model_id.clone())),
+        provider.transcribe_file(&token_b, request(provider_id.clone(), model_id.clone())),
+    );
+    assert_eq!(
+        first.expect("first transcription").segments[0].text,
+        "concurrent transcript"
+    );
+    assert_eq!(
+        second.expect("second transcription").segments[0].text,
+        "concurrent transcript"
+    );
+}
+
 #[tokio::test]
 async fn local_tts_provider_uses_stdout_audio_and_records_receipt_hash() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -106,7 +140,7 @@ async fn local_tts_provider_uses_stdout_audio_and_records_receipt_hash() {
             format: AudioFormat::Wav,
             model_id: provider.default_model_id().clone(),
             mission_id: MissionId::new("mission.local-tts-test"),
-            requested_at: 1,
+            requested_at: UnixTsMillis(1),
         })
         .await
         .expect("local TTS succeeds");
@@ -163,7 +197,7 @@ async fn local_tts_rejects_empty_text_before_spawning() {
             format: AudioFormat::Wav,
             model_id: provider.default_model_id().clone(),
             mission_id: MissionId::new("mission.local-tts-test"),
-            requested_at: 1,
+            requested_at: UnixTsMillis(1),
         })
         .await
         .expect_err("empty text rejected locally");

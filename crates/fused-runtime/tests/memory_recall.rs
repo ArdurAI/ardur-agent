@@ -10,6 +10,15 @@ mod support;
 use support::{EchoProvider, HOLDER, request_for, runtime_builder, valid_token};
 
 fn memory_fact(subject: &str, object: &str, receipt_id: uuid::Uuid) -> MemoryRecord {
+    memory_fact_with_confidence(subject, object, 0.9, receipt_id)
+}
+
+fn memory_fact_with_confidence(
+    subject: &str,
+    object: &str,
+    confidence: f64,
+    receipt_id: uuid::Uuid,
+) -> MemoryRecord {
     let mut rec = MemoryRecord::new(
         HolderId::from(subject),
         RecordKind::Fact,
@@ -18,7 +27,7 @@ fn memory_fact(subject: &str, object: &str, receipt_id: uuid::Uuid) -> MemoryRec
             "object": object,
             "source": "session-journal",
             "workspace_id": subject,
-            "confidence": 0.9,
+            "confidence": confidence,
         }),
         UnixTsMillis(1_750_000_000_000),
         UnixTsMillis(1_750_000_000_000),
@@ -121,5 +130,128 @@ async fn denied_turn_does_not_recall_or_inject_memory() {
     assert!(
         provider.last_request().is_none(),
         "no memory context reached provider"
+    );
+}
+
+#[tokio::test]
+async fn recall_respects_configured_k_limit() {
+    let provider = Arc::new(EchoProvider::new());
+    let memory = Arc::new(InMemoryMemoryRuntime::new());
+    for i in 0..4 {
+        memory
+            .record(memory_fact(
+                HOLDER,
+                &format!("tea recall candidate {i}"),
+                uuid::Uuid::new_v4(),
+            ))
+            .expect("record candidate");
+    }
+
+    let runtime = runtime_builder(provider.clone())
+        .with_memory(memory)
+        .memory_recall_k(2)
+        .build()
+        .expect("runtime builds");
+
+    runtime
+        .submit(request_for(
+            "tea",
+            &valid_token(),
+            ardur_runtime::SessionId::new(),
+        ))
+        .await
+        .expect("turn succeeds");
+
+    let request = provider.last_request().expect("provider saw request");
+    let recall_block = request
+        .messages
+        .iter()
+        .find(|m| m.content.contains("Relevant memories"))
+        .map(|m| m.content.as_str())
+        .expect("memory context is injected");
+    let injected = recall_block
+        .lines()
+        .filter(|line| line.trim_start().starts_with("- id="))
+        .count();
+    assert_eq!(
+        injected, 2,
+        "recall block must obey configured K: {recall_block}"
+    );
+}
+
+#[tokio::test]
+async fn recall_threshold_excludes_weak_same_subject_hits() {
+    let provider = Arc::new(EchoProvider::new());
+    let memory = Arc::new(InMemoryMemoryRuntime::new());
+    memory
+        .record(memory_fact_with_confidence(
+            HOLDER,
+            "blue green deploy requires warming the standby pool",
+            0.9,
+            uuid::Uuid::new_v4(),
+        ))
+        .expect("record strong memory");
+    memory
+        .record(memory_fact_with_confidence(
+            HOLDER,
+            "blue notebook lives on the kitchen counter",
+            0.9,
+            uuid::Uuid::new_v4(),
+        ))
+        .expect("record weak memory");
+    memory
+        .record(memory_fact_with_confidence(
+            HOLDER,
+            "blue green deploy with stale confidence should stay out",
+            0.2,
+            uuid::Uuid::new_v4(),
+        ))
+        .expect("record low-confidence memory");
+    memory
+        .record(memory_fact(
+            HOLDER,
+            "unrelated espresso preference",
+            uuid::Uuid::new_v4(),
+        ))
+        .expect("record irrelevant memory");
+
+    let runtime = runtime_builder(provider.clone())
+        .with_memory(memory)
+        .memory_recall_threshold(0.67)
+        .build()
+        .expect("runtime builds");
+
+    runtime
+        .submit(request_for(
+            "blue green deploy",
+            &valid_token(),
+            ardur_runtime::SessionId::new(),
+        ))
+        .await
+        .expect("turn succeeds");
+
+    let request = provider.last_request().expect("provider saw request");
+    let joined = request
+        .messages
+        .iter()
+        .map(|m| m.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n---\n");
+
+    assert!(
+        joined.contains("blue green deploy requires warming the standby pool"),
+        "strong relevant memory is injected: {joined}"
+    );
+    assert!(
+        !joined.contains("blue notebook lives on the kitchen counter"),
+        "weak same-subject lexical hit is excluded by threshold: {joined}"
+    );
+    assert!(
+        !joined.contains("stale confidence should stay out"),
+        "below-threshold confidence is excluded even when query terms match: {joined}"
+    );
+    assert!(
+        !joined.contains("unrelated espresso preference"),
+        "irrelevant same-subject memory is not injected: {joined}"
     );
 }

@@ -27,6 +27,9 @@ ardur-provider-runtime = { workspace = true }
 # Shared value types the provider call speaks in — `CostTuple` (the billed
 # cost), `ProviderId` (the registry key), and `Role` (the prompt turn kind).
 ardur-runtime = { workspace = true }
+# Retry+backoff+jitter, timeout, and circuit-breaker wrapping the outbound
+# HTTP call — the shared resilience layer for external call boundaries.
+ardur-resilience = { workspace = true }
 # Object-safe async `Provider::complete`.
 async-trait = { workspace = true }
 # Live OpenRouter HTTP client. rustls-tls matches the Anthropic backend (no

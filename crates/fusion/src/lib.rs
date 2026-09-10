@@ -123,7 +123,17 @@ pub fn reciprocal_rank_fusion(
     let mut fused: HashMap<String, f64> = HashMap::new();
     for list in &result_lists {
         for (rank, &i) in ranked_indices(list).iter().enumerate() {
-            *fused.entry(list[i].doc_id.clone()).or_insert(0.0) += 1.0 / (rank as f64 + k);
+            let contribution = 1.0 / (rank as f64 + k);
+            // Reuse the existing accumulator when this doc was already surfaced by
+            // another list — the overlap RRF exists to reward, and the common case
+            // for dense+sparse hybrid recall. Only clone the `doc_id` into the map
+            // on first insertion, never on a repeat hit. Behaviour is identical to
+            // `*fused.entry(id.clone()).or_insert(0.0) += contribution`.
+            if let Some(acc) = fused.get_mut(&list[i].doc_id) {
+                *acc += contribution;
+            } else {
+                fused.insert(list[i].doc_id.clone(), contribution);
+            }
         }
     }
     finalize(fused, top_k)

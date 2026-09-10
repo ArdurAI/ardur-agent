@@ -60,28 +60,66 @@ fn default_secret_patterns() -> Vec<regex::Regex> {
         .collect()
 }
 
+/// Ceiling on a single file's size for the secrets scan, checked via
+/// `fs::metadata` before it's read. `ardur audit secrets`/`run` is meant to
+/// be pointed at an *untrusted* checkout (the `oss-contributor` workflow
+/// does exactly this), so a single large file — a data blob, a vendored
+/// bundle, a multi-GB binary — must not be buffered into memory before the
+/// regex pass ever runs.
+const MAX_SCAN_FILE_BYTES: u64 = 10 * 1024 * 1024; // 10 MiB
+
 fn scan_for_secrets(path: &Path) -> Result<Vec<serde_json::Value>, CliError> {
     let patterns = default_secret_patterns();
     let mut findings = Vec::new();
     if path.is_file() {
-        scan_file(path, &patterns, &mut findings)?;
+        scan_file(path, &patterns, &mut findings);
     } else if path.is_dir() {
         for entry in ignore::Walk::new(path).flatten() {
             let p = entry.path();
             if p.is_file() {
-                scan_file(p, &patterns, &mut findings)?;
+                scan_file(p, &patterns, &mut findings);
             }
         }
     }
     Ok(findings)
 }
 
-fn scan_file(
-    path: &Path,
-    patterns: &[regex::Regex],
-    findings: &mut Vec<serde_json::Value>,
-) -> Result<(), CliError> {
-    let text = std::fs::read_to_string(path)?;
+/// Scans one file for secret patterns, skipping (not aborting the caller's
+/// walk over) anything that can't be scanned as text: unreadable metadata,
+/// a read failure, a file over [`MAX_SCAN_FILE_BYTES`], or non-UTF-8
+/// content. The overwhelming majority of files in a real checkout —
+/// images, compiled objects, `node_modules` artifacts — are binary, and a
+/// secrets scan hitting the first one of those should not abort the whole
+/// command; every skip is still reported on stderr so scan coverage stays
+/// visible rather than silently incomplete.
+fn scan_file(path: &Path, patterns: &[regex::Regex], findings: &mut Vec<serde_json::Value>) {
+    let metadata = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("audit: skipping {} ({e})", path.display());
+            return;
+        }
+    };
+    if metadata.len() > MAX_SCAN_FILE_BYTES {
+        eprintln!(
+            "audit: skipping {} ({} bytes exceeds the {MAX_SCAN_FILE_BYTES}-byte scan cap)",
+            path.display(),
+            metadata.len()
+        );
+        return;
+    }
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("audit: skipping {} ({e})", path.display());
+            return;
+        }
+    };
+    let Ok(text) = std::str::from_utf8(&bytes) else {
+        // Binary/non-UTF-8 content isn't secret-scannable as text; this is
+        // the expected, common case (not an error), so no stderr note.
+        return;
+    };
     for (line_no, line) in text.lines().enumerate() {
         for pat in patterns {
             if pat.is_match(line) {
@@ -94,7 +132,6 @@ fn scan_file(
             }
         }
     }
-    Ok(())
 }
 
 fn generate_sbom(lockfile: &Path) -> Result<serde_json::Value, CliError> {

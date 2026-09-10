@@ -95,6 +95,7 @@ impl<R: ChatRuntime> CapVerifyingRuntime<R> {
     }
 }
 
+#[async_trait::async_trait]
 impl<R: ChatRuntime> ChatRuntime for CapVerifyingRuntime<R> {
     async fn submit(&self, req: SubmitRequest) -> Result<SubmitResult, RuntimeError> {
         // An empty token string is "missing", not "denied" — match the echo

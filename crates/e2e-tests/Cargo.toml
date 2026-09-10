@@ -31,6 +31,7 @@ ardur-cedar-policy = { workspace = true }
 # (it is no other crate's library dep), so it is pulled in by an explicit path.
 ardur-cli = { path = "../cli" }
 ardur-cost-gate = { workspace = true }
+ardur-cron = { workspace = true }
 ardur-fused-runtime = { workspace = true }
 ardur-lifecycle-hooks = { workspace = true }
 ardur-memory = { workspace = true }
@@ -40,6 +41,11 @@ ardur-hooks-openclaw-compat = { workspace = true }
 # The durable Qdrant memory backend — the `scenario_qdrant_memory_persistence`
 # scenario drives a fused turn through it, then reconnects to prove durability.
 ardur-memory-qdrant = { workspace = true }
+# The retrieval-quality eval harness + its deterministic embedder — the
+# `scenario_memory_retrieval_eval` scenario measures the hybrid baseline
+# hermetically (Finding 5 recall harness).
+ardur-memory-eval = { workspace = true }
+ardur-embeddings = { workspace = true }
 ardur-messaging-gateway = { workspace = true }
 ardur-multi-agent = { workspace = true }
 ardur-provider-runtime = { workspace = true }
@@ -66,6 +72,7 @@ tempfile = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
+futures = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 parking_lot = { workspace = true }

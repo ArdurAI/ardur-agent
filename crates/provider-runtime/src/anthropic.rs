@@ -410,16 +410,7 @@ fn assistant_message(m: &ChatMessage) -> serde_json::Value {
     })
 }
 
-/// Parse the `retry-after` header (whole seconds) into milliseconds, defaulting
-/// to `0` when absent or unparseable.
-fn parse_retry_after_ms(headers: &reqwest::header::HeaderMap) -> u64 {
-    headers
-        .get(reqwest::header::RETRY_AFTER)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.trim().parse::<u64>().ok())
-        .map(|secs| secs.saturating_mul(1000))
-        .unwrap_or(0)
-}
+use crate::retry::parse_retry_after_ms;
 
 /// Map a non-2xx HTTP response onto the crate's [`ProviderError`] taxonomy.
 fn map_http_error(code: u16, retry_after_ms: u64, body: &str, model: &ModelId) -> ProviderError {

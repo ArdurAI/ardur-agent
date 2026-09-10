@@ -8,6 +8,8 @@
 use std::fs;
 use std::path::Path;
 
+use ardur_admin::approvals::ServerConfig;
+use ardur_admin::auth::{BasicAuth, BearerAuth};
 use ardur_admin::build_router;
 use ardur_admin::state::AppState;
 use ardur_session_journals::{
@@ -92,7 +94,7 @@ fn append_receipt(
                 "tool_name": name,
                 "arguments_digest": "0".repeat(64),
                 "output_digest": "0".repeat(64),
-                "cost": { "tokens_in": 0, "tokens_out": 0, "cents": 0, "wall_ms": 0, "attention_score": 0.0 },
+                "cost": { "tokens_in": 0, "tokens_out": 0, "cents": 0, "wall_ms": 0, "attention_score": 0 },
             })
         })
         .collect();
@@ -102,14 +104,14 @@ fn append_receipt(
         "verb": verb,
         "issued_at": issued_ms,
         "subject": "user:test",
-        "cap_token_id": "tok-test",
+        "cap_token_id": "00000000-0000-0000-0000-000000000abc",
         "payload_digest": "0".repeat(64),
         "cost": {
             "tokens_in": tokens_in,
             "tokens_out": tokens_out,
             "cents": cents,
             "wall_ms": 250,
-            "attention_score": 0.0
+            "attention_score": 0
         },
         "tool_calls": tool_calls,
     });
@@ -139,14 +141,14 @@ fn append_receipt_with_provider(
         "verb": verb,
         "issued_at": issued_ms,
         "subject": "user:test",
-        "cap_token_id": "tok-test",
+        "cap_token_id": "00000000-0000-0000-0000-000000000abc",
         "payload_digest": "0".repeat(64),
         "cost": {
             "tokens_in": 1,
             "tokens_out": 1,
             "cents": cents,
             "wall_ms": 250,
-            "attention_score": 0.0
+            "attention_score": 0
         },
         "provider": provider,
     });
@@ -182,6 +184,25 @@ impl Fixture {
 
     fn server(&self) -> TestServer {
         let state = AppState::new(&self.journal_dir, &self.receipt_store);
+        TestServer::new(build_router(state.shared()))
+    }
+
+    fn server_with_bearer(&self, tokens: Vec<&str>) -> TestServer {
+        let state = AppState::new(&self.journal_dir, &self.receipt_store).with_bearer_auth(
+            BearerAuth::from_tokens(tokens.into_iter().map(str::to_string).collect()),
+        );
+        TestServer::new(build_router(state.shared()))
+    }
+
+    fn server_with_basic(&self, user_pass: &str) -> TestServer {
+        let state = AppState::new(&self.journal_dir, &self.receipt_store)
+            .with_basic_auth(BasicAuth::from_user_pass(user_pass));
+        TestServer::new(build_router(state.shared()))
+    }
+
+    fn server_with_approvals(&self, base_url: &str, admin_token: &str) -> TestServer {
+        let state = AppState::new(&self.journal_dir, &self.receipt_store)
+            .with_approvals_server(ServerConfig::new(base_url, admin_token));
         TestServer::new(build_router(state.shared()))
     }
 }
@@ -256,6 +277,38 @@ async fn journal_endpoint_returns_entries() {
     assert_eq!(entries[0]["kind"], "UserMessage");
     assert_eq!(entries[0]["content"], "first");
     assert_eq!(entries[1]["kind"], "AssistantMessage");
+}
+
+#[tokio::test]
+async fn journal_endpoint_redacts_secret_shaped_content() {
+    let fx = Fixture::new();
+    write_journal(
+        &fx.journal_dir,
+        "sess-secret",
+        &[
+            user_msg(
+                "here's my key sk-abcdefghijklmnopqrstuvwxyz, don't share it",
+                UnixTsMillis::from(1u64),
+            ),
+            assistant_msg("got it, noted safely", UnixTsMillis::from(2u64)),
+        ],
+    );
+
+    let res = fx.server().get("/api/sessions/sess-secret/journal").await;
+    res.assert_status_ok();
+    let page: Value = res.json();
+    let entries = page["entries"].as_array().unwrap();
+    let user_content = entries[0]["content"].as_str().unwrap();
+    assert!(
+        user_content.contains("<REDACTED>"),
+        "secret-shaped content should be redacted: {user_content}"
+    );
+    assert!(
+        !user_content.contains("sk-abcdefghijklmnopqrstuvwxyz"),
+        "the raw key must not appear in the response: {user_content}"
+    );
+    // Ordinary content is untouched.
+    assert_eq!(entries[1]["content"], "got it, noted safely");
 }
 
 #[tokio::test]
@@ -533,6 +586,35 @@ async fn dashboard_html_renders() {
     assert!(html.contains("Cost by provider"));
     assert!(html.contains("Recent sessions"));
     assert!(html.contains("Recent receipts"));
+    assert!(html.contains("Trust Center"));
+    assert!(html.contains("Receipt chain"));
+    assert!(html.contains("Capability wallet"));
+    assert!(
+        html.contains("Policy debugger not configured"),
+        "no --policy-bundle was configured for this fixture, so the debugger form should not render"
+    );
+}
+
+#[tokio::test]
+async fn dashboard_html_renders_policy_debugger_form_when_configured() {
+    use ardur_cedar_policy::{CedarPolicyBundle, PolicyBundle, PolicySource};
+
+    let fx = Fixture::new();
+    let policies = CedarPolicyBundle::load(PolicySource::Embedded(
+        "permit(principal, action, resource);".to_string(),
+    ))
+    .unwrap();
+    let state = AppState::new(&fx.journal_dir, &fx.receipt_store).with_policies(policies);
+    let server = TestServer::new(build_router(state.shared()));
+
+    let res = server.get("/").await;
+    res.assert_status_ok();
+    let html = res.text();
+    assert!(
+        html.contains("hx-get=\"/api/trust/policy/debug\""),
+        "policy debugger form should render when policies are configured"
+    );
+    assert!(!html.contains("Policy debugger not configured"));
 }
 
 #[tokio::test]
@@ -548,9 +630,9 @@ async fn trust_center_wallet_receipts_and_policy_debugger() {
             "verb": "llm.completion.minted.v1",
             "issued_at": issued_ms,
             "subject": "user:test",
-            "cap_token_id": "tok-test",
+            "cap_token_id": "00000000-0000-0000-0000-000000000abc",
             "payload_digest": "0".repeat(64),
-            "cost": { "tokens_in": 1, "tokens_out": 1, "cents": 1, "wall_ms": 1, "attention_score": 0.0 },
+            "cost": { "tokens_in": 1, "tokens_out": 1, "cents": 1, "wall_ms": 1, "attention_score": 0 },
             "provider": "anthropic",
         });
         let payload = B64URL.encode(serde_json::to_vec(&body).unwrap());
@@ -614,12 +696,45 @@ async fn trust_center_wallet_receipts_and_policy_debugger() {
 }
 
 #[tokio::test]
+async fn policy_bundle_loads_from_file_like_the_binarys_policy_bundle_flag() {
+    // Exercises the exact `PolicySource::File` path `main.rs`'s
+    // `--policy-bundle <path>` flag uses (as opposed to the `Embedded` source
+    // the other trust-center test uses), so a real on-disk `.cedar` file is
+    // covered, not just an inline string.
+    use ardur_cedar_policy::{CedarPolicyBundle, PolicyBundle, PolicySource};
+
+    let fx = Fixture::new();
+    let policy_path = fx.journal_dir.join("policy.cedar");
+    fs::write(
+        &policy_path,
+        r#"permit(principal, action == Action::"Submit", resource);"#,
+    )
+    .unwrap();
+
+    let policies = CedarPolicyBundle::load(PolicySource::File(policy_path)).unwrap();
+    assert_eq!(policies.policy_count(), 1);
+
+    let state = AppState::new(&fx.journal_dir, &fx.receipt_store).with_policies(policies);
+    let server = TestServer::new(build_router(state.shared()));
+    let debug: Value = server
+        .get(
+            "/api/trust/policy/debug?principal=User::%22alice%22&action=Action::%22Submit%22&resource=Session::%22s1%22",
+        )
+        .await
+        .json();
+    assert_eq!(debug["decision"], "Allow");
+}
+
+#[tokio::test]
 async fn read_only_no_write_endpoints() {
     let fx = Fixture::new();
     let server = fx.server();
 
-    // Every route is GET-only: a write method on a known path is 405 Method
-    // Not Allowed (never a 2xx). There is no handler that mutates anything.
+    // Every artifact-observability route is GET-only: a write method on a
+    // known path is 405 Method Not Allowed (never a 2xx). No handler here
+    // mutates any journal/receipt/memory artifact directly — the one
+    // deliberate exception, /api/operator/approvals* (a proxy to
+    // ardur-server's own write API), is covered by its own tests below.
     for (method, path) in [
         ("POST", "/api/sessions"),
         ("PUT", "/api/receipts"),
@@ -645,4 +760,298 @@ async fn read_only_no_write_endpoints() {
 /// A deterministic UUIDv4-shaped string for fixture receipt ids.
 fn uuid(n: u8) -> String {
     format!("{n:08x}-0000-4000-8000-000000000000")
+}
+
+#[tokio::test]
+async fn bearer_auth_rejects_missing_and_wrong_token() {
+    let fx = Fixture::new();
+    let server = fx.server_with_bearer(vec!["correct-token"]);
+
+    let res = server.get("/api/sessions").await;
+    assert_eq!(res.status_code().as_u16(), 401, "no header should be 401");
+
+    let res = server
+        .get("/api/sessions")
+        .add_header("Authorization", "Bearer wrong-token")
+        .await;
+    assert_eq!(res.status_code().as_u16(), 401, "wrong token should be 401");
+}
+
+#[tokio::test]
+async fn bearer_auth_accepts_correct_token() {
+    let fx = Fixture::new();
+    let server = fx.server_with_bearer(vec!["correct-token"]);
+
+    let res = server
+        .get("/api/sessions")
+        .add_header("Authorization", "Bearer correct-token")
+        .await;
+    res.assert_status_ok();
+}
+
+#[tokio::test]
+async fn bearer_auth_accepts_any_of_multiple_configured_tokens() {
+    let fx = Fixture::new();
+    let server = fx.server_with_bearer(vec!["token-a", "token-b"]);
+
+    for token in ["token-a", "token-b"] {
+        let res = server
+            .get("/healthz")
+            .add_header("Authorization", format!("Bearer {token}"))
+            .await;
+        res.assert_status_ok();
+    }
+}
+
+#[tokio::test]
+async fn basic_auth_still_works_standalone() {
+    let fx = Fixture::new();
+    let server = fx.server_with_basic("admin:secret");
+
+    let res = server.get("/healthz").await;
+    assert_eq!(res.status_code().as_u16(), 401, "no header should be 401");
+
+    let encoded = base64::engine::general_purpose::STANDARD.encode("admin:secret");
+    let res = server
+        .get("/healthz")
+        .add_header("Authorization", format!("Basic {encoded}"))
+        .await;
+    res.assert_status_ok();
+}
+
+#[tokio::test]
+async fn no_auth_configured_passes_through() {
+    let fx = Fixture::new();
+    let res = fx.server().get("/healthz").await;
+    res.assert_status_ok();
+}
+
+#[tokio::test]
+async fn operator_approvals_returns_503_when_unconfigured() {
+    let fx = Fixture::new();
+    let server = fx.server();
+    for (method, path) in [
+        ("get", "/api/operator/approvals"),
+        ("post", "/api/operator/approvals/abc/approve"),
+        ("post", "/api/operator/approvals/abc/reject"),
+    ] {
+        let res = match method {
+            "get" => server.get(path).await,
+            "post" => server.post(path).await,
+            _ => unreachable!(),
+        };
+        assert_eq!(res.status_code().as_u16(), 503, "{path} should be 503");
+    }
+}
+
+#[tokio::test]
+async fn operator_approvals_list_proxies_to_ardur_server() {
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let mock = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/approvals"))
+        .and(header("Authorization", "Bearer admin-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            { "id": "card-1", "status": "pending" }
+        ])))
+        .mount(&mock)
+        .await;
+
+    let fx = Fixture::new();
+    let server = fx.server_with_approvals(&mock.uri(), "admin-token");
+    let res = server.get("/api/operator/approvals").await;
+    res.assert_status_ok();
+    let cards: Value = res.json();
+    assert_eq!(cards[0]["id"], "card-1");
+}
+
+#[tokio::test]
+async fn operator_approvals_approve_proxies_to_ardur_server() {
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/approvals/card-1/approve"))
+        .and(header("Authorization", "Bearer admin-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "card-1", "status": "approved"
+        })))
+        .mount(&mock)
+        .await;
+
+    let fx = Fixture::new();
+    let server = fx.server_with_approvals(&mock.uri(), "admin-token");
+    let res = server.post("/api/operator/approvals/card-1/approve").await;
+    res.assert_status_ok();
+    assert_eq!(
+        res.header("HX-Trigger"),
+        "approvalsChanged",
+        "a successful decision must fire the event #approvals-list listens for, \
+         so the dashboard picks up the new status without a fixed poll"
+    );
+    let card: Value = res.json();
+    assert_eq!(card["status"], "approved");
+}
+
+#[tokio::test]
+async fn operator_approvals_reject_forwards_the_reason() {
+    use wiremock::matchers::{body_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/approvals/card-1/reject"))
+        .and(body_json(serde_json::json!({ "reason": "too risky" })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "card-1", "status": "denied", "deny_reason": "too risky"
+        })))
+        .mount(&mock)
+        .await;
+
+    let fx = Fixture::new();
+    let server = fx.server_with_approvals(&mock.uri(), "admin-token");
+    let res = server
+        .post("/api/operator/approvals/card-1/reject")
+        .json(&serde_json::json!({ "reason": "too risky" }))
+        .await;
+    res.assert_status_ok();
+    assert_eq!(res.header("HX-Trigger"), "approvalsChanged");
+    let card: Value = res.json();
+    assert_eq!(card["status"], "denied");
+}
+
+#[tokio::test]
+async fn operator_approvals_rejects_malformed_id_without_a_network_call() {
+    // No mock server configured at all — if this reached the network it
+    // would fail to connect and surface as a 502, not a 400.
+    let fx = Fixture::new();
+    let server = fx.server_with_approvals("http://127.0.0.1:1", "admin-token");
+    let res = server
+        .post("/api/operator/approvals/../escape/approve")
+        .await;
+    // Axum's router itself normalizes/rejects `..` in a path segment before
+    // the handler ever runs; either a 400 from admin-ui's own validation or
+    // a 404 from the router not matching the route proves the same thing —
+    // the malformed id never reached the proxy.
+    let code = res.status_code().as_u16();
+    assert!(
+        code == 400 || code == 404,
+        "malformed id should never reach the network layer, got {code}"
+    );
+}
+
+#[tokio::test]
+async fn operator_approvals_maps_ardur_server_401_to_502() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let mock = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/approvals"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&mock)
+        .await;
+
+    let fx = Fixture::new();
+    // Deliberately wrong token from admin-ui's point of view — ardur-server
+    // rejects it, which must surface as admin-ui's *own* 502 (a proxy
+    // failure), not a 401 (which would be indistinguishable from admin-ui's
+    // own auth gate rejecting the caller).
+    let server = fx.server_with_approvals(&mock.uri(), "stale-token");
+    let res = server.get("/api/operator/approvals").await;
+    assert_eq!(res.status_code().as_u16(), 502);
+}
+
+#[tokio::test]
+async fn operator_approvals_failed_decision_does_not_fire_the_refresh_event() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/approvals/card-1/approve"))
+        .respond_with(ResponseTemplate::new(409).set_body_json(serde_json::json!({
+            "error": "approval already decided", "status": "approved"
+        })))
+        .mount(&mock)
+        .await;
+
+    let fx = Fixture::new();
+    let server = fx.server_with_approvals(&mock.uri(), "admin-token");
+    let res = server.post("/api/operator/approvals/card-1/approve").await;
+    assert_eq!(res.status_code().as_u16(), 409);
+    assert!(
+        res.headers().get("HX-Trigger").is_none(),
+        "a failed decision must not fire approvalsChanged — nothing to refresh to"
+    );
+}
+
+#[tokio::test]
+async fn operator_approvals_html_fragment_renders_cards_with_action_buttons() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let mock = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/approvals"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            { "id": "card-1", "status": "pending" },
+            { "id": "card-2", "status": "approved" },
+        ])))
+        .mount(&mock)
+        .await;
+
+    let fx = Fixture::new();
+    let server = fx.server_with_approvals(&mock.uri(), "admin-token");
+    let res = server.get("/operator/approvals").await;
+    res.assert_status_ok();
+    let html = res.text();
+    assert!(html.contains("card-1"));
+    assert!(html.contains("card-2"));
+    assert!(
+        html.contains("hx-post=\"/api/operator/approvals/card-1/approve\""),
+        "pending card should show an approve action: {html}"
+    );
+    assert!(
+        html.contains("hx-post=\"/api/operator/approvals/card-1/reject\""),
+        "pending card should show a reject action: {html}"
+    );
+    assert!(
+        !html.contains("hx-post=\"/api/operator/approvals/card-2/approve\""),
+        "an already-decided card should not show action buttons: {html}"
+    );
+}
+
+#[tokio::test]
+async fn operator_approvals_html_fragment_shows_error_on_proxy_failure() {
+    let fx = Fixture::new();
+    // Nothing listening on this port — a genuine connection failure.
+    let server = fx.server_with_approvals("http://127.0.0.1:1", "admin-token");
+    let res = server.get("/operator/approvals").await;
+    res.assert_status_ok();
+    let html = res.text();
+    assert!(html.contains("Could not reach ardur-server"));
+}
+
+#[tokio::test]
+async fn dashboard_html_shows_approvals_section_state() {
+    let fx = Fixture::new();
+
+    let res = fx.server().get("/").await;
+    let html = res.text();
+    assert!(html.contains("Approvals"));
+    assert!(html.contains("Approvals proxy not configured"));
+
+    let state = AppState::new(&fx.journal_dir, &fx.receipt_store)
+        .with_approvals_server(ServerConfig::new("http://127.0.0.1:1", "token"));
+    let server = TestServer::new(build_router(state.shared()));
+    let res = server.get("/").await;
+    let html = res.text();
+    assert!(
+        html.contains("hx-get=\"/operator/approvals\""),
+        "configured approvals proxy should render the lazy-loading container: {html}"
+    );
 }

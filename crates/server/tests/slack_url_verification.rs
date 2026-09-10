@@ -10,7 +10,7 @@ use axum::http::{Request, StatusCode};
 async fn signed_url_verification_echoes_challenge() {
     let dir = tempfile::tempdir().expect("tempdir");
     let config = support::test_config(&dir, None);
-    let router = support::boot_router(&config);
+    let router = support::boot_router(&config).await;
 
     let ts = support::now_unix_string();
     let body = serde_json::json!({

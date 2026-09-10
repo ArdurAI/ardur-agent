@@ -9,11 +9,12 @@ use uuid::Uuid;
 // outgoing message carries the same handle, so re-use rather than redefine.
 use ardur_runtime::CapTokenRef;
 
-/// A Unix timestamp in milliseconds since the epoch.
-// TODO §4.0 Phase 2: consolidate on one shared workspace time type — cost-gate
-// (§11.14) defines an identical alias today; both should collapse into it once
-// it exists, so receipts and gateways stamp time from a single source.
-pub type UnixTsMillis = u64;
+// A Unix timestamp in milliseconds since the epoch. Re-exported from the
+// workspace-canonical `ardur-core-types` so receipts and gateways stamp time
+// from a single `UnixTsMillis` newtype (the collapse this crate's alias long
+// anticipated). Its wire form is the bare millisecond integer, so message
+// received/delivered timestamps are unchanged.
+pub use ardur_core_types::UnixTsMillis;
 
 /// Identifier of a delivery channel — a URI-shaped string such as
 /// `"in-process://default"` or `"slack://workspace/channel"`. The

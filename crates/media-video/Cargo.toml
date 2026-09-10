@@ -1,0 +1,39 @@
+[package]
+name = "ardur-media-video"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The decode crate owns shared media format declarations consumed by this
+# domain crate and later sandboxed frame-sampling phases.
+ardur-media-decode = { workspace = true }
+# Video operations are authorized by the same capability token handle the
+# runtime uses for turns and tools.
+ardur-runtime = { workspace = true }
+# The video.* tools expose generation/describe/analyze through the shared
+# tool layer so fused-runtime cap-token + Cedar enforcement gates every call.
+ardur-tool-registry = { workspace = true }
+# Provider-returned text (on-screen OCR, action labels, scene summaries) is
+# untrusted content from an external video; it is scanned before it re-enters
+# agent context.
+ardur-injection-defense = { workspace = true }
+# Object-safe async trait methods for provider adapters.
+async-trait = { workspace = true }
+base64 = { workspace = true }
+hex = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+url = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
+
+[dev-dependencies]
+# Receipt constants are tested against the current canonical receipt grammar.
+ardur-receipt = { workspace = true }
+tokio = { workspace = true }
+wiremock = { workspace = true }

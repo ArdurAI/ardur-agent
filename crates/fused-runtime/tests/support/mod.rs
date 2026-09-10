@@ -6,14 +6,16 @@
 
 #![allow(dead_code)] // each test file uses a different subset.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, LazyLock};
 
 use ardur_cap_token::{
     BiscuitCapTokenIssuer, CapScope, CapTokenIssuer, HolderId as CapHolderId, KeyPair, PublicKey,
 };
 use ardur_cedar_policy::{CedarPolicyBundle, PolicyBundle, PolicySource};
-use ardur_cost_gate::{Clock, CostTuple as GateCostTuple, HolderId as GateHolderId, ManualClock};
+use ardur_cost_gate::{
+    Clock, CostTuple as GateCostTuple, HolderId as GateHolderId, ManualClock, UnixTsMillis,
+};
 use ardur_fused_runtime::FusedRuntimeBuilder;
 use ardur_lifecycle_hooks::{
     HookDecision, HookError, HookId, LifecycleHook, PostReceiptCtx, PreSubmitCtx,
@@ -63,10 +65,13 @@ pub fn cap_root() -> PublicKey {
     cap_issuer().public_key()
 }
 
-/// A fresh receipt signing key (determinism across calls is unnecessary for the
-/// in-process tests — the chain links are re-derived from the JWS bytes).
+static RECEIPT_KEY: LazyLock<Es256SigningKey> = LazyLock::new(Es256SigningKey::generate);
+
+/// The process-stable receipt signing key. Restart tests rebuild runtimes over
+/// persisted receipt logs, so every builder in one test process must use the
+/// same expected signer just as production reloads the persisted private key.
 pub fn receipt_key() -> Es256SigningKey {
-    Es256SigningKey::generate()
+    RECEIPT_KEY.clone()
 }
 
 /// A permissive Cedar bundle — one unconditional `permit` — so the
@@ -149,7 +154,7 @@ pub fn gate_holder_for(subject: &str) -> GateHolderId {
 
 /// A deterministic manual clock pinned at [`NOW_MS`].
 pub fn manual_clock() -> Arc<dyn Clock> {
-    Arc::new(ManualClock::new(NOW_MS))
+    Arc::new(ManualClock::new(UnixTsMillis(NOW_MS)))
 }
 
 /// A budget that comfortably covers the default envelope.
@@ -321,7 +326,7 @@ impl Provider for BillingProvider {
                 tokens_out: 0,
                 cents: self.cents,
                 wall_ms: 0,
-                attention_score: 0.0,
+                attention_score: 0,
             },
             raw_provider_response: None,
         })
@@ -378,7 +383,7 @@ impl LifecycleHook for CapturingPostReceiptCostHook {
     async fn on_post_receipt(&self, ctx: &PostReceiptCtx<'_>) -> Result<(), HookError> {
         self.observed.lock().push(ObservedPostReceiptCost {
             ctx_cost: ctx.cost,
-            receipt_cost: ctx.receipt.cost.clone(),
+            receipt_cost: ctx.receipt.cost,
             response_cost: ctx.response.cost,
         });
         Ok(())

@@ -44,7 +44,7 @@ async fn boot_with_hybrid() {
     // The whole hybrid substrate wires without panicking: Qdrant connects, the
     // embedder loads, the collection initialises, and the retriever is wrapped
     // behind the `Arc<dyn MemoryRuntime>` seam the fused runtime consumes.
-    let state = support::boot_stub(&config);
+    let state = support::boot_stub(&config).await;
     assert_eq!(state.data_dir(), dir.path());
 
     // The sparse half is a file-backed BM25 index under `memory/bm25`, so the

@@ -1,12 +1,13 @@
 # Multi-stage build for ardur-server.
 #
-# Builder: rust:1.96-slim currently tracks Debian 13/trixie, matching the
-# distroless runtime base below.
+# Builder: rust:1.98-slim currently tracks Debian 13/trixie, matching the
+# distroless runtime base below. Both base images are pinned to manifest-list
+# digests so CI/release builds do not silently float to new base contents.
 # Runtime: distroless cc-debian13 nonroot. The healthcheck is a small Rust
 # binary, so the runtime image does not need curl/wget/shell packages.
 # ARD-303: Docker build is validated in CI with a /healthz smoke test.
 
-FROM rust:1.96-slim AS builder
+FROM rust:1.98-slim@sha256:17d1ba895198f9934c6314ec5346a0d5115372f3243390c3d731e242f35c2f27 AS builder
 
 # pkg-config + libssl-dev cover openssl-sys transitive dependencies. g++ provides
 # libstdc++ for native ML/search dependencies at the final link step.
@@ -23,11 +24,13 @@ WORKDIR /build
 COPY . .
 
 RUN cargo build --release --bin ardur-server --bin ardur-healthcheck
+RUN mkdir -p /ardur-data
 
-FROM gcr.io/distroless/cc-debian13:nonroot
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:c31ff9abcb1910f3ab25c7957bdaf0bfe12a01eb546e8df2282f1c8f682b606c
 
 COPY --from=builder /build/target/release/ardur-server /usr/local/bin/ardur-server
 COPY --from=builder /build/target/release/ardur-healthcheck /usr/local/bin/ardur-healthcheck
+COPY --from=builder --chown=nonroot:nonroot /ardur-data/ /var/lib/ardur/
 
 WORKDIR /var/lib/ardur
 EXPOSE 3000

@@ -114,7 +114,7 @@ impl Provider for BillingProvider {
                 tokens_out: 0,
                 cents: self.cents,
                 wall_ms: 0,
-                attention_score: 0.0,
+                attention_score: 0,
             },
             raw_provider_response: None,
         })

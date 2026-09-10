@@ -24,6 +24,7 @@ mod config;
 mod mcp;
 pub mod openapi;
 mod routes;
+pub mod security_events;
 mod state;
 
 pub use config::{Config, ConfigError, LogFormat, MemoryBackend, MissingEnvVar};
@@ -34,5 +35,5 @@ pub use mcp::{
 pub use routes::build_router;
 pub use state::{
     AUDIENCE, AppState, CAP_TTL_SECS, ChatSubmitError, ChatTurnOutcome, GATEWAY_SUBJECT,
-    McpSurface, TOOL,
+    McpSurface, TOOL, issuer_public_key,
 };

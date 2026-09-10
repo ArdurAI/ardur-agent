@@ -2,7 +2,13 @@
 # Pre-policy (before PR #24 merged 2026-06-02 14:02:40 -0500)
 7b49f60
 c086428
+93436dd
+3d551b3
 # In-flight at policy enforcement (squash-merged within ~3h of #24)
 77e3a71
 de9ae77
 d82725f
+# Pushed directly to dev on 2026-07-08 (no PR, so dco.yml never ran on it):
+# "fix(security): ARD-300 gates follow-up". Exempt so the dev -> main
+# promotion passes Check DCO sign-off.
+47910170e7633d8f9cfcb8d518bdfba3afba0927

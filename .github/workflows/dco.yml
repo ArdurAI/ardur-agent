@@ -10,18 +10,27 @@ on:
   pull_request:
     branches: [main, dev]
 
+permissions:
+  contents: read
+
 jobs:
   dco:
     name: Check DCO sign-off
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
 
       - name: Check Signed-off-by on all PR commits
         run: |
           set -uo pipefail
+
+          # Dependabot commits are exempt — the bot cannot sign off.
+          if [ "${{ github.event.pull_request.user.login }}" = "dependabot[bot]" ]; then
+            echo "SKIP (dependabot): all commits exempt from DCO"
+            exit 0
+          fi
 
           # Load exempt short-SHAs (drop comments and blank lines, take 1st field).
           EXEMPT="$(grep -vE '^[[:space:]]*(#|$)' .github/dco-exempt-shas.txt | awk '{print $1}')"

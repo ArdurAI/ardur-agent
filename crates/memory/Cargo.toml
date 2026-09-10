@@ -10,6 +10,10 @@ repository.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+# HolderId, ReceiptId, and UnixTsMillis are owned by the workspace's leaf
+# `core-types` crate and re-exported here so memory records name the same
+# holder/receipt/timestamp types as the receipt and cost layers.
+ardur-core-types = { workspace = true }
 ardur-cap-token = { workspace = true }
 ardur-cedar-policy = { workspace = true }
 # `v4` (random) ids for records; the workspace default is `v7` for the runtime's

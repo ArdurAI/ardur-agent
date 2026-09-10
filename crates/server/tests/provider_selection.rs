@@ -85,8 +85,13 @@ async fn server_boots_with_ollama_provider_selection() {
     // The whole substrate boots over the selected provider without panicking,
     // and lays down the persistent state directory layout.
     let tools = Arc::new(ardur_server::example_registry("ollama", "in-memory"));
-    let state = AppState::boot(&config, provider, tools).expect("AppState boots over ollama");
-    assert_eq!(state.data_dir(), dir.path());
+    let state = AppState::boot(&config, provider, tools)
+        .await
+        .expect("AppState boots over ollama");
+    assert_eq!(
+        state.data_dir(),
+        &dir.path().canonicalize().expect("canonicalize tempdir")
+    );
     for sub in ["memory", "journals", "receipts", "keys"] {
         assert!(
             dir.path().join(sub).is_dir(),
@@ -107,8 +112,13 @@ async fn server_boots_with_codex_provider_selection() {
     assert_eq!(provider.id().0, "codex");
 
     let tools = Arc::new(ardur_server::example_registry("codex", "in-memory"));
-    let state = AppState::boot(&config, provider, tools).expect("AppState boots over codex");
-    assert_eq!(state.data_dir(), dir.path());
+    let state = AppState::boot(&config, provider, tools)
+        .await
+        .expect("AppState boots over codex");
+    assert_eq!(
+        state.data_dir(),
+        &dir.path().canonicalize().expect("canonicalize tempdir")
+    );
 }
 
 #[tokio::test]
@@ -129,7 +139,11 @@ async fn server_boots_with_openai_compat_provider_selection() {
     );
 
     let tools = Arc::new(ardur_server::example_registry("openai-compat", "in-memory"));
-    let state =
-        AppState::boot(&config, provider, tools).expect("AppState boots over openai-compat");
-    assert_eq!(state.data_dir(), dir.path());
+    let state = AppState::boot(&config, provider, tools)
+        .await
+        .expect("AppState boots over openai-compat");
+    assert_eq!(
+        state.data_dir(),
+        &dir.path().canonicalize().expect("canonicalize tempdir")
+    );
 }

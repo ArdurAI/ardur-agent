@@ -13,7 +13,7 @@ const ADMIN_TOKEN: &str = "openapi-admin-token-000000000000";
 async fn openapi_json_exposes_existing_server_endpoints() {
     let dir = tempfile::tempdir().expect("tempdir");
     let config = support::test_config_with_admin(&dir, None, vec![ADMIN_TOKEN.to_string()]);
-    let router = support::boot_router(&config);
+    let router = support::boot_router(&config).await;
 
     // OpenAPI endpoints are bearer-gated — no token returns 401.
     let unauthed = Request::builder()
@@ -62,7 +62,7 @@ fn generated_clients_include_health_chat_and_auth_surfaces() {
 async fn generated_rust_client_works_against_server() {
     let dir = tempfile::tempdir().expect("tempdir");
     let config = support::test_config(&dir, None);
-    let router = support::boot_router(&config);
+    let router = support::boot_router(&config).await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {

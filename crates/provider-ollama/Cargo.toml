@@ -30,6 +30,9 @@ ardur-provider-runtime = { workspace = true }
 # Shared value types the provider call speaks in — `CostTuple` (the billed
 # cost), `ProviderId` (the registry key), and `Role` (the prompt turn kind).
 ardur-runtime = { workspace = true }
+# Retry+backoff+jitter and circuit-breaker wrapping outbound HTTP calls — the
+# shared resilience layer for external call boundaries.
+ardur-resilience = { workspace = true }
 # Object-safe async `Provider::complete`.
 async-trait = { workspace = true }
 # Live Ollama HTTP client. rustls-tls matches the other backends (no
@@ -44,10 +47,12 @@ futures = { workspace = true }
 serde = { workspace = true }
 # Request/response bodies and the retained raw upstream JSON.
 serde_json = { workspace = true }
+# `tokio::time::timeout` bounds the streaming handshake (`send()`) so a peer that
+# accepts the TCP connection but never sends response headers cannot hang the
+# turn. Only the `time` driver is needed here; reqwest already pulls tokio in.
+tokio = { workspace = true, features = ["time"] }
 
 [dev-dependencies]
-# The async `complete` calls need a runtime to poll them.
-tokio = { workspace = true }
 # Stands in for the Ollama endpoint so the round-trip is asserted without a
 # running daemon or a cloud key (matches the workspace's HTTP-mock convention).
 wiremock = { workspace = true }

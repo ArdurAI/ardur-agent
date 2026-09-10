@@ -23,7 +23,10 @@ fn boot_with_selector_env<const N: usize>(
     let mut command = Command::cargo_bin("ardur").expect("the `ardur` binary builds");
     command
         .arg("chat")
-        .env("HOME", home.path())
+        .env(
+            "HOME",
+            home.path().canonicalize().expect("canonical temp HOME"),
+        )
         .env("ARDUR_PROVIDER", selector)
         // Strip the ambient key so the *only* reason a real backend is wired is
         // the selector — never a fallback to the offline Anthropic stub.
@@ -50,7 +53,10 @@ fn boot_with_invalid_selector(selector: &str) -> (String, String, std::process::
     let output = Command::cargo_bin("ardur")
         .expect("the `ardur` binary builds")
         .arg("chat")
-        .env("HOME", home.path())
+        .env(
+            "HOME",
+            home.path().canonicalize().expect("canonical temp HOME"),
+        )
         .env("ARDUR_PROVIDER", selector)
         .env_remove("ANTHROPIC_API_KEY")
         .write_stdin("/quit\n")

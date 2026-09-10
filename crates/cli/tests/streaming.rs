@@ -8,12 +8,13 @@
 //! Output is captured into a byte buffer through an unstyled (plain) theme so the
 //! assertions match the no-ANSI rendering.
 
-use ardur_cli::{RenderCtx, StreamOutcome, Theme, ThemeName, drive_turn};
+use ardur_cli::{RenderCtx, StreamOutcome, Theme, ThemeName, drive_fused_turn, drive_turn};
+use ardur_fused_runtime::FusedEvent;
 use ardur_provider_runtime::{
     CompletionRequest, CompletionResponse, FinishReason, ModelId, Provider, ProviderError,
     ProviderStream, RateCard, StreamEvent, Usage,
 };
-use ardur_runtime::{CostTuple, ProviderId, ToolCall};
+use ardur_runtime::{CostTuple, ProviderId, ReceiptId, RuntimeError, ToolCall};
 use async_trait::async_trait;
 
 /// A mock backend whose `stream()` replays a scripted event sequence and whose
@@ -240,6 +241,173 @@ async fn no_stream_flag_uses_complete() {
         "--no-stream must not consume the stream, got: {output:?}"
     );
     assert_eq!(outcome.content, "complete-path-response");
+}
+
+#[tokio::test]
+async fn fused_stream_renders_pipeline_events_and_accumulates_usage() {
+    let usage = Usage {
+        tokens_in: 1000,
+        tokens_out: 1000,
+        cost_cents: None,
+    };
+    let receipt_id = ReceiptId(uuid::Uuid::new_v4());
+    let events: Vec<Result<FusedEvent, RuntimeError>> = vec![
+        Ok(FusedEvent::Content("auditable ".to_string())),
+        Ok(FusedEvent::Content("stream".to_string())),
+        Ok(FusedEvent::ToolCallStart {
+            id: "call-1".to_string(),
+            name: "search_web".to_string(),
+        }),
+        Ok(FusedEvent::ToolCallDelta {
+            id: "call-1".to_string(),
+            delta: r#"{"query":"rust"}"#.to_string(),
+        }),
+        Ok(FusedEvent::ToolCallResult {
+            id: "call-1".to_string(),
+            result: serde_json::json!({"ok": true}),
+        }),
+        Ok(FusedEvent::Usage(usage)),
+        Ok(FusedEvent::Receipt {
+            receipt_id,
+            chain_hash: "00".repeat(32),
+            cost_cents: 9,
+        }),
+        Ok(FusedEvent::Finish(FinishReason::Stop)),
+    ];
+    let mut output = Vec::new();
+    let theme = Theme::named(ThemeName::Night).plain();
+    let ctx = RenderCtx::new(&theme, 80);
+
+    let outcome = drive_fused_turn(futures::stream::iter(events), &mut output, &ctx)
+        .await
+        .expect("fused stream renders");
+    let output = String::from_utf8(output).expect("UTF-8 output");
+
+    assert!(output.contains("auditable stream"), "{output}");
+    assert!(output.contains("tool · search_web"), "{output}");
+    assert_eq!(outcome.content, "auditable stream");
+    assert_eq!(outcome.usage, Some(usage));
+    assert_eq!(outcome.tool_calls, vec!["search_web"]);
+    assert_eq!(outcome.receipt_ids, vec![receipt_id]);
+    assert_eq!(
+        outcome.committed_assistant_messages,
+        vec!["auditable stream"]
+    );
+    assert_eq!(outcome.cost_cents, Some(9));
+    assert!(outcome.error.is_none());
+}
+
+#[tokio::test]
+async fn fused_stream_cost_line_matches_the_sum_of_round_costs() {
+    let reported = Usage {
+        tokens_in: 1,
+        tokens_out: 1,
+        cost_cents: Some(17),
+    };
+    let estimated = Usage {
+        tokens_in: 1000,
+        tokens_out: 1000,
+        cost_cents: None,
+    };
+    let first_receipt = ReceiptId(uuid::Uuid::new_v4());
+    let second_receipt = ReceiptId(uuid::Uuid::new_v4());
+    // Receipt costs are authoritative and may include paid-tool charges in
+    // addition to provider token pricing.
+    let events: Vec<Result<FusedEvent, RuntimeError>> = vec![
+        Ok(FusedEvent::Content("tool plan".to_string())),
+        Ok(FusedEvent::Usage(reported)),
+        Ok(FusedEvent::Receipt {
+            receipt_id: first_receipt,
+            chain_hash: "11".repeat(32),
+            cost_cents: 24,
+        }),
+        Ok(FusedEvent::Content("final answer".to_string())),
+        Ok(FusedEvent::Usage(estimated)),
+        Ok(FusedEvent::Receipt {
+            receipt_id: second_receipt,
+            chain_hash: "22".repeat(32),
+            cost_cents: 7,
+        }),
+        Ok(FusedEvent::Finish(FinishReason::Stop)),
+    ];
+    let mut output = Vec::new();
+    let theme = Theme::named(ThemeName::Night).plain();
+    let ctx = RenderCtx::new(&theme, 80);
+    let expected = 31;
+
+    let outcome = drive_fused_turn(futures::stream::iter(events), &mut output, &ctx)
+        .await
+        .expect("fused stream renders");
+    let output = String::from_utf8(output).expect("UTF-8 output");
+
+    assert_eq!(outcome.cost_cents, Some(expected));
+    assert_eq!(outcome.receipt_ids, vec![first_receipt, second_receipt]);
+    assert_eq!(
+        outcome.committed_assistant_messages,
+        vec!["tool plan", "final answer"]
+    );
+    assert_eq!(
+        outcome.usage.expect("aggregated usage").cost_cents,
+        None,
+        "a mixed reported/estimated aggregate must not expose a partial provider cost"
+    );
+    assert!(
+        output.contains(&format!("${:.2}", expected as f64 / 100.0)),
+        "displayed cost must match fused round accounting: {output}"
+    );
+}
+
+#[tokio::test]
+async fn fused_stream_surfaces_errors_without_committing_partial_history() {
+    let events: Vec<Result<FusedEvent, RuntimeError>> = vec![
+        Ok(FusedEvent::Content("partial".to_string())),
+        Err(RuntimeError::ProviderUnavailable),
+    ];
+    let mut output = Vec::new();
+    let theme = Theme::named(ThemeName::Night).plain();
+    let ctx = RenderCtx::new(&theme, 80);
+
+    let outcome = drive_fused_turn(futures::stream::iter(events), &mut output, &ctx)
+        .await
+        .expect("fused stream renders");
+    let output = String::from_utf8(output).expect("UTF-8 output");
+
+    assert!(output.contains("partial"), "{output}");
+    assert!(output.contains("provider unavailable"), "{output}");
+    assert_eq!(outcome.content, "partial");
+    assert!(outcome.receipt_ids.is_empty());
+    assert!(outcome.error.is_some());
+}
+
+#[tokio::test]
+async fn fused_stream_reports_a_commit_even_when_a_later_stage_errors() {
+    let receipt_id = ReceiptId(uuid::Uuid::new_v4());
+    let events: Vec<Result<FusedEvent, RuntimeError>> = vec![
+        Ok(FusedEvent::Content("durable".to_string())),
+        Ok(FusedEvent::Usage(Usage {
+            tokens_in: 2,
+            tokens_out: 3,
+            cost_cents: None,
+        })),
+        Ok(FusedEvent::Receipt {
+            receipt_id,
+            chain_hash: "33".repeat(32),
+            cost_cents: 5,
+        }),
+        Err(RuntimeError::CostCeilingExceeded),
+    ];
+    let mut output = Vec::new();
+    let theme = Theme::named(ThemeName::Night).plain();
+    let ctx = RenderCtx::new(&theme, 80);
+
+    let outcome = drive_fused_turn(futures::stream::iter(events), &mut output, &ctx)
+        .await
+        .expect("fused stream renders");
+
+    assert_eq!(outcome.content, "durable");
+    assert_eq!(outcome.receipt_ids, vec![receipt_id]);
+    assert_eq!(outcome.cost_cents, Some(5));
+    assert!(outcome.error.is_some());
 }
 
 /// A serde round-trip of the shared cost type the rate card produces — the E2E

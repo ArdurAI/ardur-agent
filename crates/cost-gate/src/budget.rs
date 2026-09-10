@@ -37,7 +37,11 @@ pub trait BudgetStore: Send + Sync {
 
     /// Credit a signed `delta` back to the holder named by `handle` (the
     /// `reserved - actual` refund, or a full credit on release).
-    async fn refund(&self, handle: ReservationHandle, delta: CostDelta) -> Result<(), BudgetError>;
+    async fn refund(
+        &self,
+        handle: ReservationHandle,
+        delta: CostDelta,
+    ) -> Result<(CostTuple, CostTuple), BudgetError>;
 
     /// Atomically merge `add` into the holder's balance — creating the account
     /// from zero if it does not exist yet — and return the resulting balance.
@@ -88,6 +92,24 @@ impl InMemoryBudgetStore {
         });
         entry.balance = balance;
         entry.version = entry.version.wrapping_add(1);
+    }
+
+    /// Synchronous refund — the sync body of [`BudgetStore::refund`], exposed so
+    /// a release-on-drop guard can refund a cancelled reservation without an
+    /// await point (ARD-488). Same semantics: credits `delta` to the handle's
+    /// holder and bumps the version.
+    pub fn refund_sync(
+        &self,
+        handle: ReservationHandle,
+        delta: CostDelta,
+    ) -> Result<(), BudgetError> {
+        let mut accounts = self.accounts.write();
+        let acct = accounts
+            .get_mut(&handle.holder)
+            .ok_or(BudgetError::HolderNotFound)?;
+        acct.balance = acct.balance.apply_delta(&delta);
+        acct.version = acct.version.wrapping_add(1);
+        Ok(())
     }
 }
 
@@ -140,14 +162,20 @@ impl BudgetStore for InMemoryBudgetStore {
         }
     }
 
-    async fn refund(&self, handle: ReservationHandle, delta: CostDelta) -> Result<(), BudgetError> {
+    async fn refund(
+        &self,
+        handle: ReservationHandle,
+        delta: CostDelta,
+    ) -> Result<(CostTuple, CostTuple), BudgetError> {
         let mut accounts = self.accounts.write();
         let acct = accounts
             .get_mut(&handle.holder)
             .ok_or(BudgetError::HolderNotFound)?;
+        let before = acct.balance;
         acct.balance = acct.balance.apply_delta(&delta);
+        let after = acct.balance;
         acct.version = acct.version.wrapping_add(1);
-        Ok(())
+        Ok((before, after))
     }
 
     async fn provision_merge(

@@ -59,8 +59,8 @@ async fn happy_path_round_trips_with_usage_and_cost() {
     assert!(matches!(resp.finish_reason, FinishReason::Stop));
     assert_eq!(resp.usage.tokens_in, 12);
     assert_eq!(resp.usage.tokens_out, 3);
-    // 0.0234 USD → 2.34¢ → 2¢, with the token counts carried onto the tuple.
-    assert_eq!(resp.cost.cents, 2);
+    // 0.0234 USD → 2.34¢ → 3¢ (ceil, ARD-495), with the token counts carried onto the tuple.
+    assert_eq!(resp.cost.cents, 3);
     assert_eq!(resp.cost.tokens_in, 12);
     assert_eq!(resp.cost.tokens_out, 3);
     assert!(resp.raw_provider_response.is_some());

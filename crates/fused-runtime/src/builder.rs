@@ -16,15 +16,18 @@
 //! than whoever the caller claims. The Cedar **resource** is likewise derived
 //! per-request, from the session id.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use ardur_approvals::ApprovalStore;
 use ardur_cedar_policy::{ActionRef, CedarPolicyBundle};
 use ardur_cost_gate::{
     Clock, CostEnvelope, CostTuple as GateCostTuple, HolderId as GateHolderId,
     InMemoryCostAdmissionGate, SystemClock,
 };
+use ardur_hooks_openclaw_compat::{OpenClawHookConfig, OpenClawHookRegistryExt};
 use ardur_injection_defense::FilterRegistry;
 use ardur_lifecycle_hooks::HookRegistry;
 use ardur_memory::MemoryRuntime;
@@ -34,7 +37,7 @@ use ardur_session_journals::SessionJournal;
 use ardur_tool_registry::ToolRegistry;
 use parking_lot::Mutex;
 
-use crate::receipts::{ReceiptChainError, load_persisted_chain, verify_persisted_chain};
+use crate::receipts::{ReceiptChainError, load_persisted_chain, verify_persisted_chain_with_jwks};
 use crate::reconcile::{ReconciliationError, ReconciliationReport, ReconciliationStrategy};
 use crate::runtime::{COMPLETION_VERB, FusedRuntime};
 use crate::shared::{SharedBudget, SharedDenyList};
@@ -57,6 +60,13 @@ const DEFAULT_MAX_TOOL_ITERATIONS: u32 = 5;
 /// §6.0 — the default per-tool-call deadline in seconds, overridable via
 /// `ARDUR_TOOL_TIMEOUT_SECS`.
 const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 30;
+/// ARD-491 — the default per-turn cap on accumulated streamed assistant content
+/// (bytes), overridable via `ARDUR_STREAM_CONTENT_MAX_BYTES`.
+const DEFAULT_STREAM_CONTENT_MAX_BYTES: usize = 1 << 20; // 1 MiB
+/// ARD-230/266 — default number of memories recalled into a provider turn.
+const DEFAULT_MEMORY_RECALL_K: usize = 5;
+/// ARD-230/266 — default minimum recall relevance/confidence for injection.
+const DEFAULT_MEMORY_RECALL_THRESHOLD: f32 = 0.5;
 
 /// The default max tool iterations, read from `ARDUR_TOOL_MAX_ITERATIONS` (a
 /// positive integer) and otherwise [`DEFAULT_MAX_TOOL_ITERATIONS`].
@@ -77,6 +87,38 @@ fn default_tool_timeout() -> Duration {
         .filter(|&n| n > 0)
         .unwrap_or(DEFAULT_TOOL_TIMEOUT_SECS);
     Duration::from_secs(secs)
+}
+
+/// ARD-491 — the default streamed-content cap, read from
+/// `ARDUR_STREAM_CONTENT_MAX_BYTES` (a positive integer) and otherwise
+/// [`DEFAULT_STREAM_CONTENT_MAX_BYTES`].
+fn default_stream_content_max_bytes() -> usize {
+    std::env::var("ARDUR_STREAM_CONTENT_MAX_BYTES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_STREAM_CONTENT_MAX_BYTES)
+}
+
+/// The default memory recall count, read from `ARDUR_MEMORY_RECALL_K` (positive
+/// integer) and otherwise [`DEFAULT_MEMORY_RECALL_K`].
+fn default_memory_recall_k() -> usize {
+    std::env::var("ARDUR_MEMORY_RECALL_K")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_MEMORY_RECALL_K)
+}
+
+/// The default memory recall threshold, read from
+/// `ARDUR_MEMORY_RECALL_THRESHOLD` (`0.0..=1.0`) and otherwise
+/// [`DEFAULT_MEMORY_RECALL_THRESHOLD`].
+fn default_memory_recall_threshold() -> f32 {
+    std::env::var("ARDUR_MEMORY_RECALL_THRESHOLD")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .filter(|v| (0.0..=1.0).contains(v))
+        .unwrap_or(DEFAULT_MEMORY_RECALL_THRESHOLD)
 }
 
 /// Builder for [`FusedRuntime`]. See the module docs for the default policy.
@@ -104,12 +146,17 @@ pub struct FusedRuntimeBuilder {
     registry: Arc<HookRegistry>,
     injection_filters: FilterRegistry,
     memory: Option<Arc<dyn MemoryRuntime + Send + Sync>>,
+    memory_recall_k: usize,
+    memory_recall_threshold: f32,
     journal: Option<Arc<dyn SessionJournal>>,
     receipt_log: Option<PathBuf>,
     reconciliation_strategy: ReconciliationStrategy,
     tools: Arc<ToolRegistry>,
     max_tool_iterations: u32,
     tool_timeout: Duration,
+    stream_content_max_bytes: usize,
+    approvals: Option<ApprovalStore>,
+    approval_gated_capabilities: HashSet<String>,
 }
 
 impl FusedRuntimeBuilder {
@@ -147,12 +194,17 @@ impl FusedRuntimeBuilder {
             registry: Arc::new(HookRegistry::new()),
             injection_filters: FilterRegistry::new(),
             memory: None,
+            memory_recall_k: default_memory_recall_k(),
+            memory_recall_threshold: default_memory_recall_threshold(),
             journal: None,
             receipt_log: None,
             reconciliation_strategy: ReconciliationStrategy::default(),
             tools: Arc::new(ToolRegistry::new()),
             max_tool_iterations: default_max_tool_iterations(),
             tool_timeout: default_tool_timeout(),
+            stream_content_max_bytes: default_stream_content_max_bytes(),
+            approvals: None,
+            approval_gated_capabilities: HashSet::new(),
         }
     }
 
@@ -272,6 +324,22 @@ impl FusedRuntimeBuilder {
         self
     }
 
+    /// Register OpenClaw-format hooks from a parsed config into the lifecycle
+    /// hook registry (ARD-427). The hooks are translated via
+    /// [`OpenClawHookRegistryExt::register_openclaw_hooks`] with the safe
+    /// no-op runner — subprocess execution is not wired here.
+    ///
+    /// Returns the translation report on success, or a registration error.
+    pub fn with_openclaw_hooks(
+        mut self,
+        config: &OpenClawHookConfig,
+    ) -> Result<Self, ardur_hooks_openclaw_compat::OpenClawHookRegistrationError> {
+        Arc::get_mut(&mut self.registry)
+            .expect("registry is not shared before build")
+            .register_openclaw_hooks(config)?;
+        Ok(self)
+    }
+
     /// Wire an injection-defense [`FilterRegistry`] into stage 4.5 (ARD-48): the
     /// fused runtime scans every outbound prompt through it after the pre-submit
     /// hooks and before the provider dispatch. A `Block` verdict aborts the turn
@@ -285,6 +353,19 @@ impl FusedRuntimeBuilder {
     pub fn with_injection_filters(mut self, filters: FilterRegistry) -> Self {
         self.injection_filters = filters;
         self
+    }
+
+    /// Install the built-in injection-defense signature set into stage 4.5 — the
+    /// fail-closed default the shipped server and CLI boot with (ARD-H1).
+    ///
+    /// The library default is an empty registry (opt-in, so tests and embedders
+    /// are unaffected), but a product that faces untrusted prompts should call
+    /// this so the stage actually scans rather than passing everything through.
+    /// Equivalent to `with_injection_filters(FilterRegistry::with_builtin_defaults())`;
+    /// callers wanting extra filters can build their own registry instead.
+    #[must_use]
+    pub fn with_default_injection_filters(self) -> Self {
+        self.with_injection_filters(FilterRegistry::with_builtin_defaults())
     }
 
     /// **§6.0.** Wire the tool registry the tool-execution stage advertises to the
@@ -310,6 +391,19 @@ impl FusedRuntimeBuilder {
         self
     }
 
+    /// **ARD-491.** The per-turn cap (bytes) on accumulated streamed assistant
+    /// content. A stream whose concatenated content deltas exceed it aborts the
+    /// turn with [`RuntimeError::StreamedContentCapExceeded`] (no partial
+    /// response enters the auditable chain). Defaults to
+    /// `ARDUR_STREAM_CONTENT_MAX_BYTES` (else 1 MiB).
+    #[must_use]
+    pub fn stream_content_max_bytes(mut self, max: usize) -> Self {
+        if max > 0 {
+            self.stream_content_max_bytes = max;
+        }
+        self
+    }
+
     /// **§6.0.** The per-tool-call deadline. A tool that overruns it aborts the
     /// turn with
     /// [`RuntimeError::ToolTimeout`](ardur_runtime::RuntimeError::ToolTimeout).
@@ -317,6 +411,30 @@ impl FusedRuntimeBuilder {
     #[must_use]
     pub fn tool_timeout(mut self, timeout: Duration) -> Self {
         self.tool_timeout = timeout;
+        self
+    }
+
+    /// **ARD-139.** Wire the shared on-disk approval-card store a gated tool
+    /// call proposes into. Defaults to **unset**, which makes the
+    /// approval-gate stage a no-op regardless of
+    /// [`with_approval_gated_capabilities`](Self::with_approval_gated_capabilities)
+    /// — so a runtime that does not opt in behaves exactly as before this
+    /// stage existed.
+    #[must_use]
+    pub fn with_approvals(mut self, approvals: ApprovalStore) -> Self {
+        self.approvals = Some(approvals);
+        self
+    }
+
+    /// **ARD-139.** The [`Capability`](ardur_tool_registry::Capability) label
+    /// set that requires human approval before a tool call carrying it may
+    /// proceed, even once the cap-token/cedar checks already allow it.
+    /// Defaults to **empty**, which gates nothing — so a runtime that does
+    /// not opt in behaves exactly as before this stage existed. A no-op
+    /// unless [`with_approvals`](Self::with_approvals) is also configured.
+    #[must_use]
+    pub fn with_approval_gated_capabilities(mut self, capabilities: HashSet<String>) -> Self {
+        self.approval_gated_capabilities = capabilities;
         self
     }
 
@@ -333,6 +451,25 @@ impl FusedRuntimeBuilder {
     #[must_use]
     pub fn with_memory(mut self, memory: Arc<dyn MemoryRuntime + Send + Sync>) -> Self {
         self.memory = Some(memory);
+        self
+    }
+
+    /// Configure how many relevant memories are injected before provider
+    /// dispatch. A value of `0` disables recall injection while leaving memory
+    /// writes enabled.
+    #[must_use]
+    pub fn memory_recall_k(mut self, k: usize) -> Self {
+        self.memory_recall_k = k;
+        self
+    }
+
+    /// Configure the minimum recall relevance/confidence for context injection.
+    /// Values outside `0.0..=1.0` are ignored in favour of the current setting.
+    #[must_use]
+    pub fn memory_recall_threshold(mut self, threshold: f32) -> Self {
+        if (0.0..=1.0).contains(&threshold) {
+            self.memory_recall_threshold = threshold;
+        }
         self
     }
 
@@ -375,7 +512,9 @@ impl FusedRuntimeBuilder {
         let chain_tail = match &self.receipt_log {
             Some(path) => {
                 let chain = load_persisted_chain(path)?;
-                verify_persisted_chain(&chain)?;
+                let receipt_jwks =
+                    ardur_receipt::Jwks::from_public_key(&self.receipt_key.public_key());
+                verify_persisted_chain_with_jwks(&chain, &receipt_jwks)?;
                 chain
                     .last()
                     .map(|r| ardur_receipt::Sha256Digest::of(r.jws_compact.as_bytes()))
@@ -393,6 +532,10 @@ impl FusedRuntimeBuilder {
         if let Some(cap) = self.provision_cap {
             gate = gate.with_provision_cap(cap);
         }
+        // ARD-488: the runtime hands `Arc` clones of the gate to per-turn
+        // release-on-drop guards, so a cancelled turn can refund its hold from
+        // `Drop` without an await point.
+        let gate = Arc::new(gate);
 
         let gate_provider_id = ardur_cost_gate::ProviderId(self.provider.id().0);
         let gate_model_id = ardur_cost_gate::ModelId(self.model.0.clone());
@@ -422,13 +565,19 @@ impl FusedRuntimeBuilder {
             registry: self.registry,
             injection_filters: self.injection_filters,
             memory: self.memory,
+            memory_recall_k: self.memory_recall_k,
+            memory_recall_threshold: self.memory_recall_threshold,
             journal: self.journal,
             chain_tail: Mutex::new(chain_tail),
+            commit_lock: tokio::sync::Mutex::new(()),
             receipt_log: self.receipt_log,
             reconciliation_strategy: self.reconciliation_strategy,
             tools: self.tools,
             max_tool_iterations: self.max_tool_iterations,
             tool_timeout: self.tool_timeout,
+            stream_content_max_bytes: self.stream_content_max_bytes,
+            approvals: self.approvals,
+            approval_gated_capabilities: self.approval_gated_capabilities,
         })
     }
 

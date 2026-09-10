@@ -29,7 +29,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use ardur_cedar_policy::{CedarPolicyBundle, PolicyBundle, PolicySource};
-use ardur_cost_gate::CostEnvelope;
+use ardur_cost_gate::{CostEnvelope, ManualClock, UnixTsMillis};
 use ardur_fused_runtime::{load_persisted_chain, verify_persisted_chain};
 use ardur_injection_defense::{FilterRegistry, PatternBasedFilter};
 use ardur_lifecycle_hooks::HookRegistry;
@@ -99,6 +99,53 @@ impl Provider for ScriptedProvider {
     }
 }
 
+/// A provider that advances the injected runtime clock after returning the first
+/// response. This proves per-tool cap-token checks use the current time instead
+/// of the turn-start timestamp.
+struct ClockAdvancingProvider {
+    inner: ScriptedProvider,
+    clock: Arc<ManualClock>,
+    advance_ms: u64,
+}
+
+impl ClockAdvancingProvider {
+    fn new(
+        responses: Vec<CompletionResponse>,
+        default: CompletionResponse,
+        clock: Arc<ManualClock>,
+        advance_ms: u64,
+    ) -> Self {
+        Self {
+            inner: ScriptedProvider::new(responses, default),
+            clock,
+            advance_ms,
+        }
+    }
+}
+
+#[async_trait]
+impl Provider for ClockAdvancingProvider {
+    async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
+        let response = self.inner.complete(req).await;
+        if self.inner.call_count() == 1 {
+            self.clock.advance(self.advance_ms);
+        }
+        response
+    }
+
+    fn id(&self) -> ProviderId {
+        self.inner.id()
+    }
+
+    fn supports_streaming(&self) -> bool {
+        false
+    }
+
+    fn rate_card(&self) -> &RateCard {
+        self.inner.rate_card()
+    }
+}
+
 /// A `ToolUse` response asking for `name` with `args`.
 fn tool_call(id: &str, name: &str, args: serde_json::Value) -> CompletionResponse {
     tool_call_with_cost(id, name, args, CostTuple::default())
@@ -140,7 +187,7 @@ fn envelope_for(cost: CostTuple) -> CostEnvelope {
         tokens_out_max: cost.tokens_out as u32,
         cents_max: cost.cents as u32,
         wall_ms_max: cost.wall_ms as u32,
-        attention_score_max: cost.attention_score.ceil() as u32,
+        attention_score_max: cost.attention_score as u32,
     }
 }
 
@@ -396,6 +443,39 @@ async fn single_round_trip() {
         provider.call_count(),
         2,
         "one call requested the tool, the second produced the answer"
+    );
+}
+
+#[tokio::test]
+async fn tool_cap_token_expiry_is_rechecked_at_tool_invocation_time() {
+    let invocations = Arc::new(AtomicUsize::new(0));
+    let clock = Arc::new(ManualClock::new(UnixTsMillis(support::NOW_MS)));
+    let provider = Arc::new(ClockAdvancingProvider::new(
+        vec![tool_call("call_1", "echo", json!({}))],
+        stop("default"),
+        clock.clone(),
+        2_000,
+    ));
+    let runtime = runtime_builder(provider)
+        .clock(clock)
+        .with_tools(counted_registry("echo", invocations.clone()))
+        .build()
+        .expect("runtime builds");
+    let expires_before_tool = support::mint_token(support::NOW_UNIX + 1, 1_000_000);
+
+    let err = runtime
+        .submit(user_request(
+            "use eventually expired tool",
+            &expires_before_tool,
+        ))
+        .await
+        .expect_err("tool re-verification uses the advanced clock and rejects expiry");
+
+    assert!(matches!(err, RuntimeError::CapTokenExpired), "got {err:?}");
+    assert_eq!(
+        invocations.load(Ordering::SeqCst),
+        0,
+        "expired token must be rejected before the tool is invoked"
     );
 }
 
@@ -661,21 +741,21 @@ async fn post_receipt_hook_cost_matches_combined_receipt_cost_for_tool_turn() {
         tokens_out: 3,
         cents: 5,
         wall_ms: 7,
-        attention_score: 0.25,
+        attention_score: 250,
     };
     let tool_cost = CostTuple {
         tokens_in: 11,
         tokens_out: 13,
         cents: 17,
         wall_ms: 19,
-        attention_score: 0.5,
+        attention_score: 500,
     };
     let expected = CostTuple {
         tokens_in: 13,
         tokens_out: 16,
         cents: 22,
         wall_ms: 26,
-        attention_score: 0.75,
+        attention_score: 750,
     };
     let tool_name = "priced.tool";
     let provider = Arc::new(ScriptedProvider::new(

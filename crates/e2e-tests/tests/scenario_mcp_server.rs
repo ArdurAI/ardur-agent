@@ -28,15 +28,31 @@ use serde_json::json;
 /// port. Returns the base MCP endpoint URL (`http://addr/mcp/ardur`).
 async fn spawn_server(bearer: &str) -> String {
     let data_dir = tempfile::tempdir().expect("tempdir");
+    // macOS tempdirs live under /var/folders/... (where /var symlinks to
+    // /private/var); the schema-migration guard refuses symlinks in trusted
+    // state paths, so canonicalize the data_dir before passing it to the server.
+    let canonical_data_dir = data_dir
+        .path()
+        .canonicalize()
+        .expect("canonicalize tempdir");
     let config = Config {
         anthropic_api_key: String::new(),
-        slack_bot_token: "xoxb-e2e".to_string(),
-        slack_signing_secret: "e2e-signing-secret-0000000000".to_string(),
-        slack_app_id: "A0E2EMCP".to_string(),
-        data_dir: data_dir.path().to_path_buf(),
+        enable_shell_tool: false,
+        shell_allowlist: Vec::new(),
+        enable_http_tool: false,
+        http_allowlist: Vec::new(),
+        file_tool_root: None,
+        http_turn_timeout: std::time::Duration::from_secs(30),
+        slack_enabled: true,
+        slack_bot_token: Some("xoxb-e2e".to_string()),
+        slack_signing_secret: Some("e2e-signing-secret-0000000000".to_string()),
+        slack_app_id: Some("A0E2EMCP".to_string()),
+        slack_allowed_senders: Vec::new(),
+        data_dir: canonical_data_dir,
         bind_addr: "127.0.0.1:0".to_string(),
         chat_bearer_tokens: vec!["e2e-chat-token".to_string()],
         admin_bearer_tokens: Vec::new(),
+        cors_origins: Vec::new(),
         dev_permissive_policy: true,
         model: "claude-opus-4-8".to_string(),
         cost_budget_cents: 10_000,
@@ -58,7 +74,9 @@ async fn spawn_server(bearer: &str) -> String {
     let provider: Arc<dyn Provider> =
         Arc::new(AnthropicProvider::stub(ModelId::new(&config.model)));
     let tools = Arc::new(ardur_server::example_registry("stub", "in-memory"));
-    let state = AppState::boot(&config, provider, tools).expect("server boots with MCP enabled");
+    let state = AppState::boot(&config, provider, tools)
+        .await
+        .expect("server boots with MCP enabled");
     let router = build_router(state);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")

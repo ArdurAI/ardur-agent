@@ -56,8 +56,10 @@ pub use types::{
 };
 
 /// The principal a budget is held against (a runtime profile, agent, org, or
-/// session). Opaque string identifier — typically a SPIFFE-style URI. Mirrors
-/// `ardur-cap-token`'s holder identity so a cap-token can later resolve to the
-/// budget it spends against (Phase 2).
-#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub struct HolderId(pub String);
+/// session). Opaque string identifier — typically a SPIFFE-style URI.
+///
+/// Re-exported from `ardur-core-types`, the workspace's shared primitive crate,
+/// so the cost gate, cap-token, receipt, and memory layers all name the one
+/// `HolderId` — a cap-token holder resolves to the budget it spends against
+/// without a cross-crate conversion.
+pub use ardur_core_types::HolderId;

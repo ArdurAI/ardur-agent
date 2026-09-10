@@ -24,7 +24,7 @@ fn incoming_dm(channel: &str, text: &str) -> IncomingMessage {
         channel_id: ChannelId(channel.to_string()),
         sender: SenderRef("user:alice".to_string()),
         body: MessageBody::Text(text.to_string()),
-        received_at: 0,
+        received_at: ardur_messaging_gateway::UnixTsMillis(0),
         thread_id: None::<ThreadId>,
     }
 }

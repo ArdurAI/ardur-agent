@@ -44,7 +44,9 @@ tools, and skills for both the CLI and the server. The full operator runbook —
 every provider, the Qdrant/hybrid memory backends, the four chat channels, MCP,
 skills, OpenTelemetry, and the HTTP surface — lives in **[RUN.md](RUN.md)**.
 For the current implementation inventory, see
-**[docs/current-status.md](docs/current-status.md)**.
+**[docs/current-status.md](docs/current-status.md)**. Fresh-install validation
+(offline stub, one live provider, private Slack) is
+**[docs/fresh-machine.md](docs/fresh-machine.md)**.
 
 ## Agent Bootstrap
 
@@ -112,7 +114,7 @@ that POSTs to `/chat`.
 
 **Skills.** Filesystem `SKILL.md` skills (YAML frontmatter + Markdown body, with
 progressive disclosure via `@./file.md` references) register as tools from
-`ARDUR_SKILLS_DIRS`. Nine example skills ship under
+`ARDUR_SKILLS_DIRS`. Ten example skills ship under
 [`examples/skills/`](examples/skills/).
 
 ## Architecture

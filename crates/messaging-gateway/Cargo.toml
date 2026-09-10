@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+# `UnixTsMillis` is the workspace-canonical timestamp newtype, owned by the leaf
+# `core-types` crate and re-exported here instead of a local `u64` alias.
+ardur-core-types = { workspace = true }
 # The §1.0 runtime owns `CapTokenRef` (the capability handle a turn is
 # authorized by). An outgoing message carries the same handle, so we re-export
 # rather than redefine — the runtime and the gateway must not drift into two

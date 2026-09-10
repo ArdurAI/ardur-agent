@@ -107,6 +107,15 @@ pub enum RuntimeError {
     #[error("provider unavailable")]
     ProviderUnavailable,
 
+    /// The caller abandoned the turn before its side effects committed — an
+    /// HTTP turn timeout or a client hang-up. Emitted at the commit gate: after
+    /// the provider round but before the receipt/journal/billing commit, so the
+    /// caller who already saw 504 is never billed for a receipt they never
+    /// received (#359). Distinct from every denial: nothing rejected the turn;
+    /// the caller simply went away.
+    #[error("turn cancelled by caller before side effects committed")]
+    TurnCancelled,
+
     /// A lifecycle hook vetoed the turn before it reached the provider. Carries
     /// the id of the hook that blocked and the reason it gave. See §11.17
     /// (`ardur-lifecycle-hooks`): a pre-submit hook returning `Veto` aborts the
@@ -193,6 +202,53 @@ pub enum RuntimeError {
     ToolTimeout {
         /// The tool whose invocation exceeded the per-call deadline.
         tool: String,
+    },
+
+    /// A provider's streamed response exceeded the per-turn accumulated-content
+    /// cap (env `ARDUR_STREAM_CONTENT_MAX_BYTES`). The streamed turn is aborted
+    /// and no receipt/journal/memory record is produced — a partial, never-
+    /// finished response must not enter the auditable chain (ARD-491).
+    #[error("streamed content cap exceeded: {actual} bytes > {limit} limit")]
+    StreamedContentCapExceeded {
+        /// The configured byte limit on accumulated streamed assistant content.
+        limit: usize,
+        /// The accumulated byte count when the cap was breached.
+        actual: usize,
+    },
+
+    /// A tool call was gated on human approval rather than allowed or denied
+    /// outright — a "denied-pending" outcome on the cap-token/cedar path,
+    /// distinct from a hard [`CapDenied`](RuntimeError::CapDenied)/
+    /// [`PolicyDenied`](RuntimeError::PolicyDenied): the call is neither
+    /// allowed nor rejected, it is *proposed* for an operator to decide.
+    /// Carries the id of the pending approval card the runtime created (or
+    /// found already pending, for a retried identical call) in the shared
+    /// approvals store, and the tool/reason the gate cited. The caller
+    /// surfaces this as "awaiting approval" rather than a failure; the same
+    /// tool call proceeds once an operator approves the card and the turn
+    /// is resubmitted.
+    #[error("tool `{tool}` requires approval: card `{approval_id}` is pending ({reason})")]
+    ApprovalRequired {
+        /// The id of the pending approval card.
+        approval_id: String,
+        /// The tool whose call is gated.
+        tool: String,
+        /// Why the call was gated (e.g. which capability is approval-gated).
+        reason: String,
+    },
+
+    /// A tool call's approval card was rejected by an operator. Distinct
+    /// from [`ApprovalRequired`](RuntimeError::ApprovalRequired): the call
+    /// already went through propose→decide and the decision was "no" — a
+    /// resubmitted identical call fails here rather than proposing again.
+    #[error("tool `{tool}` approval `{approval_id}` was rejected: {reason}")]
+    ApprovalRejected {
+        /// The id of the rejected approval card.
+        approval_id: String,
+        /// The tool whose call was gated.
+        tool: String,
+        /// The operator's stated reason for rejecting, if any.
+        reason: String,
     },
 
     /// No command was registered under the dispatched name.

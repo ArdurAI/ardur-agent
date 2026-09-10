@@ -5,8 +5,8 @@
 //! [`ardur_server`] axum router (driven in-process via
 //! `tower::ServiceExt::oneshot`), routed through the real [`AppState`] →
 //! [`FusedRuntime`](ardur_fused_runtime::FusedRuntime) pipeline over a stub
-//! provider, and the assistant's reply is observed landing on a wiremock
-//! `chat.postMessage`.
+//! provider, and the assistant's reply is observed as progressive Slack delivery:
+//! a wiremock `chat.postMessage` placeholder followed by `chat.update`.
 //!
 //! Unlike the per-crate suite in `crates/server/tests`, this scenario lives in
 //! the cross-crate host — proving the binary's wiring composes with the rest of
@@ -52,7 +52,7 @@ fn now_unix_string() -> String {
 
 #[tokio::test]
 async fn server_routes_signed_slack_message_through_runtime_to_chat_post_message() {
-    // Mock Slack's outbound `chat.postMessage`.
+    // Mock Slack's progressive outbound delivery.
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/chat.postMessage"))
@@ -63,18 +63,43 @@ async fn server_routes_signed_slack_message_through_runtime_to_chat_post_message
         })))
         .mount(&server)
         .await;
+    Mock::given(method("POST"))
+        .and(path("/chat.update"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "ok": true,
+            "ts": "1700000000.000900",
+            "channel": "C0DEPLOY"
+        })))
+        .mount(&server)
+        .await;
 
     // Boot the *real* server state over a stub provider + tempdir.
     let data_dir = tempfile::tempdir().expect("tempdir");
+    // macOS tempdirs live under /var/folders/... (where /var symlinks to
+    // /private/var); the schema-migration guard refuses symlinks in trusted
+    // state paths, so canonicalize before passing to the server.
+    let canonical_data_dir = data_dir
+        .path()
+        .canonicalize()
+        .expect("canonicalize tempdir");
     let config = Config {
         anthropic_api_key: String::new(),
-        slack_bot_token: BOT_TOKEN.to_string(),
-        slack_signing_secret: SIGNING_SECRET.to_string(),
-        slack_app_id: APP_ID.to_string(),
-        data_dir: data_dir.path().to_path_buf(),
+        enable_shell_tool: false,
+        shell_allowlist: Vec::new(),
+        enable_http_tool: false,
+        http_allowlist: Vec::new(),
+        file_tool_root: None,
+        http_turn_timeout: std::time::Duration::from_secs(30),
+        slack_enabled: true,
+        slack_bot_token: Some(BOT_TOKEN.to_string()),
+        slack_signing_secret: Some(SIGNING_SECRET.to_string()),
+        slack_app_id: Some(APP_ID.to_string()),
+        slack_allowed_senders: vec!["U0DEPLOY".to_string()],
+        data_dir: canonical_data_dir,
         bind_addr: "127.0.0.1:0".to_string(),
         chat_bearer_tokens: vec!["e2e-chat-token".to_string()],
         admin_bearer_tokens: Vec::new(),
+        cors_origins: Vec::new(),
         dev_permissive_policy: true,
         model: "claude-opus-4-8".to_string(),
         cost_budget_cents: 10_000,
@@ -96,7 +121,9 @@ async fn server_routes_signed_slack_message_through_runtime_to_chat_post_message
     let provider: Arc<dyn Provider> =
         Arc::new(AnthropicProvider::stub(ModelId::new(&config.model)));
     let tools = Arc::new(ardur_server::example_registry("stub", "in-memory"));
-    let state = AppState::boot(&config, provider, tools).expect("the server boots");
+    let state = AppState::boot(&config, provider, tools)
+        .await
+        .expect("the server boots");
     let router = build_router(state);
 
     // A genuine, signed inbound user message.
@@ -131,9 +158,9 @@ async fn server_routes_signed_slack_message_through_runtime_to_chat_post_message
         "the webhook acks the event"
     );
 
-    // The reply lands on the mocked Slack within the deadline.
-    let sent = wait_for_post(&server, Duration::from_secs(10)).await;
-    assert_eq!(sent.len(), 1, "exactly one reply was posted");
+    // The progressive reply lands on the mocked Slack within the deadline.
+    let sent = wait_for_posts(&server, 2, Duration::from_secs(10)).await;
+    assert_eq!(sent.len(), 2, "placeholder post plus final update");
 
     let posted: serde_json::Value =
         serde_json::from_slice(&sent[0].body).expect("posted body is JSON");
@@ -141,30 +168,61 @@ async fn server_routes_signed_slack_message_through_runtime_to_chat_post_message
         posted["channel"], "C0DEPLOY",
         "reply targets the source channel"
     );
+    assert_eq!(posted["text"], "…", "the placeholder is posted immediately");
+    let updated: serde_json::Value =
+        serde_json::from_slice(&sent[1].body).expect("updated body is JSON");
+    assert_eq!(updated["channel"], "C0DEPLOY");
     assert_eq!(
-        posted["text"], "[anthropic stub]",
-        "the runtime's response crosses the wire as the reply"
+        updated["ts"], "1700000000.000900",
+        "the update targets the placeholder message"
+    );
+    assert_eq!(
+        updated["text"], "[anthropic stub]",
+        "the runtime's streamed response crosses the wire as the final edit"
     );
 
     // Boot persisted the receipt chain + journal — the deployment is durable.
+    // The worker persists the receipt chain asynchronously and can lag the final
+    // Slack post it precedes, so poll for the file (as the reply wait does) rather
+    // than checking it the instant the posts land — an instant check races the
+    // write under CI load (macOS runner flake).
+    let receipt_chain = data_dir.path().join("receipts/chain.jsonl");
     assert!(
-        data_dir.path().join("receipts/chain.jsonl").is_file(),
+        wait_for_file(&receipt_chain, Duration::from_secs(10)).await,
         "the turn's receipt was persisted"
     );
 }
 
-/// Poll the mock until it has recorded at least one request, or `timeout`
+/// Poll for `path` to become a file, up to `timeout`; `true` once it exists.
+async fn wait_for_file(path: &std::path::Path, timeout: Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if path.is_file() {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+/// Poll the mock until it has recorded at least `count` requests, or `timeout`
 /// elapses (panicking — the worker should always post within it).
-async fn wait_for_post(server: &MockServer, timeout: Duration) -> Vec<wiremock::Request> {
+async fn wait_for_posts(
+    server: &MockServer,
+    count: usize,
+    timeout: Duration,
+) -> Vec<wiremock::Request> {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         if let Some(requests) = server.received_requests().await {
-            if !requests.is_empty() {
+            if requests.len() >= count {
                 return requests;
             }
         }
         if tokio::time::Instant::now() >= deadline {
-            panic!("timed out waiting for the worker to POST chat.postMessage");
+            panic!("timed out waiting for the worker's progressive Slack calls");
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }

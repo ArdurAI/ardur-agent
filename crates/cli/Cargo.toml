@@ -36,6 +36,13 @@ ardur-cost-gate = { workspace = true }
 # Phase-2 fused runtime — the FusedRuntime the default chat path drives through
 # its full ten-stage pipeline.
 ardur-fused-runtime = { workspace = true }
+# ARD-457 — the hardened built-in tools (`shell.run`, `http.fetch`, `file.*`)
+# the CLI chat engine registers from the operator grant ledger, plus the
+# registry the fused runtime invokes through.
+ardur-tool-registry = { workspace = true }
+# ARD-139 — the shared on-disk approval-card store `ardur approvals` reads
+# and decides against.
+ardur-approvals = { workspace = true }
 # §11.0 Cedar — the policy bundle the fused runtime authorizes turns against.
 ardur-cedar-policy = { workspace = true }
 # §7.0 memory — the bi-temporal sink stage 9 records each turn into.
@@ -68,6 +75,7 @@ syntect = { workspace = true }
 crossterm = { workspace = true }
 
 anyhow = { workspace = true }
+async-trait = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -81,19 +89,42 @@ regex = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 base64 = { workspace = true }
-rand = "0.8"
+# O_NOFOLLOW for race-resistant private state and session export opens on Unix.
+libc = { workspace = true }
+rustix = { workspace = true }
+# ARD-317: signed marketplace capability manifests use ES256/P-256 public keys.
+p256 = { workspace = true }
+rand = "0.10"
 # ARD-143: schedule / cron CLI.
 chrono = { workspace = true }
 ardur-cron = { workspace = true }
+# §9.4: operator-facing cron management surface.
+ardur-cron-ui = { workspace = true }
+ardur-webhook = { workspace = true }
 # ARD-144/145: connector HTTP fetch.
 reqwest = { workspace = true }
+# R1: URL host parsing for the SSRF-hardened `ardur fetch` path (mirrors
+# crates/tool-registry's http.fetch host/IP classification).
+url = { workspace = true }
 # ARD-120/121/132: supply-chain audit tooling.
 ignore = { workspace = true }
 cargo-lock = { workspace = true }
+# Crash-safe atomic writes for the backup archive and the restored state tree.
+ardur-durability = { workspace = true }
+# `ardur backup` — state-tree archive create/restore. Restore verifies the
+# restored receipt chain's hash linkage (via ardur-fused-runtime, already a
+# dependency above) before swapping it into place.
+tar = { workspace = true }
+flate2 = { workspace = true }
+# §8.1 marketplace search index: BM25 lexical search (default) and optional
+# local-embedding semantic reranking (--semantic) over installed skills/plugins.
+ardur-bm25-index = { workspace = true }
+ardur-embeddings = { workspace = true }
 
 [dev-dependencies]
 # Integration tests are a separate crate; they re-declare the deps they name.
 assert_cmd = { workspace = true }
+predicates = { workspace = true }
 tokio = { workspace = true }
 ardur-runtime = { workspace = true }
 ardur-cost-gate = { workspace = true }

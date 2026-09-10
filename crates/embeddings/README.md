@@ -45,7 +45,7 @@ exercise retrieval/fusion logic in unit tests without downloading a real model.
 use ardur_embeddings::{Embedder, MockEmbedder};
 # async fn run() {
 let e = MockEmbedder::new(384);
-let v = e.embed(vec!["hello".into()]).await.unwrap();
+let v = e.embed(vec!["hello".into()]).await?;
 # }
 ```
 

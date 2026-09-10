@@ -74,7 +74,7 @@ fn transcribe_request(
         max_speakers: None,
         export_format: TranscriptFormat::Json,
         mission_id: MissionId::new("mission.epic-tools"),
-        requested_at: 1,
+        requested_at: ardur_media_audio::UnixTsMillis(1),
     }
 }
 

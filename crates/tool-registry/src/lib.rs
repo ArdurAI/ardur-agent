@@ -62,13 +62,15 @@ mod tool;
 
 pub use builtins::{
     BuiltinOpts, HttpFetchOpts, HttpFetchTool, ListDirTool, ReadFileTool, ShellTool, WriteFileTool,
+    is_internal_ip,
 };
 pub use capability::Capability;
 pub use echo::EchoTool;
 pub use error::{RegistryError, ToolError};
 pub use health::HealthCheckTool;
 pub use mcp::{
-    ArdurMcpServer, RemoteMcpTool, RemoteMcpToolset, bearer_token_allowed, extract_bearer_token,
+    ArdurMcpServer, MCP_CAPABILITY, McpResilienceConfig, RemoteMcpTool, RemoteMcpToolset,
+    bearer_token_allowed, extract_bearer_token,
 };
 pub use registry::ToolRegistry;
 pub use skills::{Skill, SkillError, SkillFrontmatter, SkillLoader, SkillTool};

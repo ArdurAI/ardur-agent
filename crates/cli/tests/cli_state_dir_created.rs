@@ -17,7 +17,10 @@ fn first_run_creates_the_state_directories_and_keys() {
     let output = Command::cargo_bin("ardur")
         .expect("the `ardur` binary builds")
         .arg("chat")
-        .env("HOME", home.path())
+        .env(
+            "HOME",
+            home.path().canonicalize().expect("canonical temp HOME"),
+        )
         .env_remove("ANTHROPIC_API_KEY")
         .write_stdin("")
         .output()

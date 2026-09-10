@@ -1,0 +1,22 @@
+[package]
+name = "ardur-core-types"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The shared serde-serializable primitive types every cost/receipt/runtime
+# crate speaks in. Kept dependency-light on purpose: this is the workspace's
+# leaf-most crate so any other crate can depend on it without a cycle.
+serde = { workspace = true }
+sha2 = { workspace = true }
+# Workspace pins v7; the ids owned here (ReceiptId, TokenId) are v4 per §11.14
+# Phase 1, so opt v4 in on top of the shared pin (Cargo unifies the features).
+uuid = { workspace = true, features = ["v4"] }
+
+[dev-dependencies]
+# Property tests for the cost-tuple ledger arithmetic (moved here with the type).
+proptest = "1"
+serde_json = { workspace = true }

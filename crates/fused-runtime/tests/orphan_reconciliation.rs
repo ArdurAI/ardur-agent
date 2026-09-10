@@ -138,6 +138,37 @@ async fn reconcile_no_orphans_is_noop() {
 }
 
 #[tokio::test]
+async fn reconciliation_ignores_receipts_owned_by_other_session_journals() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let receipt_log = root.path().join("receipts.jsonl");
+    let first_session = SessionId::new();
+    let second_session = SessionId::new();
+    run_clean_turns(root.path(), &receipt_log, first_session, &["first"]).await;
+
+    let (runtime, second_journal, _p) = restart_over(
+        root.path(),
+        &receipt_log,
+        second_session,
+        ReconciliationStrategy::AppendSyntheticJournal,
+    );
+    let report = runtime
+        .reconcile_receipts(false)
+        .await
+        .expect("cross-session reconciliation succeeds");
+    assert_eq!(report.receipt_count, 0);
+    assert_eq!(report.orphan_receipt_count(), 0);
+    assert_eq!(report.action, ReconciliationAction::NoOrphans);
+    assert!(
+        second_journal
+            .replay(second_session)
+            .await
+            .expect("second journal replays")
+            .is_empty(),
+        "a new session must not inherit synthetic entries for another session's receipts"
+    );
+}
+
+#[tokio::test]
 async fn reconcile_one_orphan_appends_synthetic_journal_entry() {
     let root = tempfile::tempdir().expect("tempdir");
     let receipt_log = root.path().join("receipts.jsonl");
@@ -265,6 +296,44 @@ async fn reconcile_one_orphan_truncate_strategy_removes_receipt() {
             chain[0].jws_compact.as_bytes()
         )),
         "turn three chained onto the retained tail, not the removed orphan"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn reconcile_truncate_unique_temp_avoids_symlink_collision() {
+    use std::os::unix::fs::symlink;
+
+    let root = tempfile::tempdir().expect("tempdir");
+    let receipt_log = root.path().join("receipts.jsonl");
+    let session_id = SessionId::new();
+    run_clean_turns(root.path(), &receipt_log, session_id, &["one", "two"]).await;
+    drop_last_journal_lines(&journal_path(root.path(), session_id), 1);
+    let _original_chain = std::fs::read(&receipt_log).expect("original receipt log");
+
+    let victim = root.path().join("victim.txt");
+    std::fs::write(&victim, b"must-not-change").expect("victim created");
+    // The old predictable temp name is no longer used — unique UUID paths
+    // prevent symlink collisions. Reconciliation should succeed.
+    symlink(&victim, root.path().join(".receipts.jsonl.reconcile-tmp"))
+        .expect("malicious temp symlink at old predictable name");
+
+    let (runtime, _journal, _p) = restart_over(
+        root.path(),
+        &receipt_log,
+        session_id,
+        ReconciliationStrategy::TruncateOrphans,
+    );
+    // Reconciliation succeeds because the unique temp file name doesn't collide.
+    let report = runtime
+        .reconcile_receipts(false)
+        .await
+        .expect("reconciliation succeeds with unique temp path");
+    assert!(report.orphan_receipt_count() > 0, "orphan was reconciled");
+    assert_eq!(
+        std::fs::read(&victim).expect("victim readable"),
+        b"must-not-change",
+        "victim untouched"
     );
 }
 
@@ -400,4 +469,175 @@ async fn reconcile_idempotent_on_repeat_runs() {
         after_first, after_second,
         "a repeat sweep appends no further recovery entries"
     );
+}
+
+/// Drop only the assistant entries whose receipt ids are listed, preserving all
+/// other journal lines. This models a mixed crash residue more precisely than a
+/// simple tail truncation: committed turns can exist before, between, and after
+/// orphaned receipts.
+fn drop_assistant_entries_for_receipts(path: &Path, ids: &[uuid::Uuid]) {
+    let contents = std::fs::read_to_string(path).expect("journal readable");
+    let mut kept = Vec::new();
+
+    for line in contents.lines().filter(|l| !l.is_empty()) {
+        let entry: JournalEntry = serde_json::from_str(line).expect("journal line decodes");
+        let should_drop = match entry {
+            JournalEntry::AssistantMessage { receipt_id, .. } => ids.contains(&receipt_id.0),
+            _ => false,
+        };
+        if !should_drop {
+            kept.push(line);
+        }
+    }
+
+    let mut rewritten = kept.join("\n");
+    if !rewritten.is_empty() {
+        rewritten.push('\n');
+    }
+    std::fs::write(path, rewritten).expect("journal rewritable");
+}
+
+#[tokio::test]
+async fn reconcile_mixed_committed_and_orphaned_receipts_appends_recovery_entries() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let receipt_log = root.path().join("receipts.jsonl");
+    let session_id = SessionId::new();
+
+    run_clean_turns(
+        root.path(),
+        &receipt_log,
+        session_id,
+        &["one", "two", "three", "four"],
+    )
+    .await;
+
+    let chain = load_persisted_chain(&receipt_log).expect("chain loads");
+    assert_eq!(chain.len(), 4, "four receipts are durable");
+    let orphan_ids = vec![chain[1].body.receipt_id, chain[3].body.receipt_id];
+
+    // Mixed residue: turn one and turn three remain journaled; turn two is a
+    // non-tail orphan that turn three chains through, and turn four is a tail
+    // orphan. AppendSyntheticJournal must recover both without mutating the
+    // durable chain.
+    drop_assistant_entries_for_receipts(&journal_path(root.path(), session_id), &orphan_ids);
+
+    let (runtime, journal, _p) = restart_over(
+        root.path(),
+        &receipt_log,
+        session_id,
+        ReconciliationStrategy::AppendSyntheticJournal,
+    );
+    let before = journal.replay(session_id).await.expect("replay");
+    assert_eq!(
+        journaled_ids(&before),
+        vec![chain[0].body.receipt_id, chain[2].body.receipt_id],
+        "the pre-reconcile journal accounts for the committed turns only"
+    );
+
+    let report = runtime
+        .reconcile_receipts(false)
+        .await
+        .expect("mixed reconcile succeeds");
+    assert_eq!(report.receipt_count, 4);
+    assert_eq!(report.journaled_receipt_count, 2);
+    assert_eq!(report.orphan_receipt_ids, orphan_ids);
+    assert_eq!(
+        report.action,
+        ReconciliationAction::AppendedSyntheticJournal { count: 2 },
+        "one visible recovery entry is appended per orphan"
+    );
+
+    let chain_after = load_persisted_chain(&receipt_log).expect("chain reloads");
+    assert_eq!(
+        chain_after.len(),
+        4,
+        "append recovery preserves the receipt log"
+    );
+    verify_persisted_chain(&chain_after).expect("mixed recovery leaves the chain valid");
+
+    let after = journal
+        .replay(session_id)
+        .await
+        .expect("replay after recovery");
+    let after_ids = journaled_ids(&after);
+    for receipt in &chain_after {
+        assert!(
+            after_ids.contains(&receipt.body.receipt_id),
+            "receipt {} is journal-visible after reconciliation",
+            receipt.body.receipt_id
+        );
+    }
+
+    let second = runtime
+        .reconcile_receipts(false)
+        .await
+        .expect("second mixed reconcile");
+    assert_eq!(second.orphan_receipt_count(), 0);
+    assert_eq!(second.action, ReconciliationAction::NoOrphans);
+}
+
+#[tokio::test]
+async fn reconcile_one_hundred_tail_orphan_iterations_leave_zero_orphans() {
+    for iteration in 0..100 {
+        let root = tempfile::tempdir().expect("tempdir");
+        let receipt_log = root.path().join("receipts.jsonl");
+        let session_id = SessionId::new();
+
+        run_clean_turns(
+            root.path(),
+            &receipt_log,
+            session_id,
+            &["stable prefix", "crash residue"],
+        )
+        .await;
+        drop_last_journal_lines(&journal_path(root.path(), session_id), 1);
+
+        let (runtime, journal, _p) = restart_over(
+            root.path(),
+            &receipt_log,
+            session_id,
+            ReconciliationStrategy::AppendSyntheticJournal,
+        );
+        let report = runtime
+            .reconcile_receipts(false)
+            .await
+            .unwrap_or_else(|err| panic!("iteration {iteration}: reconcile failed: {err:?}"));
+        assert_eq!(
+            report.orphan_receipt_count(),
+            1,
+            "iteration {iteration}: exactly one tail orphan is detected"
+        );
+        assert_eq!(
+            report.action,
+            ReconciliationAction::AppendedSyntheticJournal { count: 1 },
+            "iteration {iteration}: the orphan is healed by a recovery entry"
+        );
+
+        let chain = load_persisted_chain(&receipt_log)
+            .unwrap_or_else(|err| panic!("iteration {iteration}: chain reload failed: {err:?}"));
+        verify_persisted_chain(&chain)
+            .unwrap_or_else(|err| panic!("iteration {iteration}: chain invalid: {err:?}"));
+        let journaled = journal
+            .replay(session_id)
+            .await
+            .unwrap_or_else(|err| panic!("iteration {iteration}: replay failed: {err:?}"));
+        let journaled = journaled_ids(&journaled);
+        let remaining_orphans = chain
+            .iter()
+            .filter(|receipt| !journaled.contains(&receipt.body.receipt_id))
+            .count();
+        assert_eq!(
+            remaining_orphans, 0,
+            "iteration {iteration}: zero orphan receipts remain after recovery"
+        );
+
+        let second = runtime
+            .reconcile_receipts(false)
+            .await
+            .unwrap_or_else(|err| {
+                panic!("iteration {iteration}: second reconcile failed: {err:?}")
+            });
+        assert_eq!(second.orphan_receipt_count(), 0);
+        assert_eq!(second.action, ReconciliationAction::NoOrphans);
+    }
 }

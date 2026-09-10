@@ -247,3 +247,42 @@ async fn live_stream_hits_real_endpoint() {
         "the live run reports output tokens"
     );
 }
+
+/// ARD-M7: a server that accepts the TCP connection but never sends response
+/// headers must not hang the streaming handshake forever. `stream_ndjson`
+/// bounds `send()` (which resolves on response headers, before the body), so a
+/// silent peer fails fast with a `NetworkFailure` rather than blocking the turn.
+#[tokio::test]
+async fn streaming_handshake_times_out_when_headers_never_arrive() {
+    use std::time::{Duration, Instant};
+
+    use ardur_provider_runtime::ProviderError;
+
+    // Accept connections but never write an HTTP response back.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let _accept = tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((sock, _)) = listener.accept().await {
+            held.push(sock); // keep the socket open, send nothing
+        }
+    });
+
+    let provider = OllamaProvider::new(
+        OllamaConfig::new()
+            .base_url(format!("http://{addr}"))
+            .default_model("llama3.2")
+            .request_timeout(Duration::from_millis(200)),
+    );
+
+    let started = Instant::now();
+    match provider.stream_ndjson(chat_req("llama3.2")).await {
+        Err(ProviderError::NetworkFailure(_)) => {}
+        Err(other) => panic!("expected a NetworkFailure handshake timeout, got {other:?}"),
+        Ok(_) => panic!("a silent server must not yield a live stream"),
+    }
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the handshake was bounded, not left hanging"
+    );
+}

@@ -23,9 +23,12 @@ candidates, the Plan Corpus verification backlog, and the required non-
 interference rules for parallel sessions.
 
 If the generic Linear connector shows a workspace or team other than
-`ardur-agent` / `ARD`, do **not** claim that work. The bootstrap uses the
-Keychain-backed helper at `architect/tools/linear_graphql.py` and must be the
-source for ARD work discovery.
+`ardur-agent` / `ARD`, do **not** claim that work. The private
+`architect/tools/linear_graphql.py` helper is preferred when present, but the
+public bootstrap must degrade cleanly: it may use `LINEAR_ARDUR_AGENT_KEY` /
+`LINEAR_API_KEY` or the matching Keychain item to query ARD directly, and when
+no ARD credential is available it reports GitHub/public contribution fallback
+steps instead of blocking checkout-level bootstrap.
 
 ## Source Hierarchy
 

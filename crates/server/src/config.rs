@@ -1,6 +1,8 @@
 //! [`Config`] — the server's startup configuration, read from the environment.
 //!
-//! Every knob has an env var; the Slack credentials are always required, the
+//! Every knob has an env var; the Slack channel is auto-detected (present
+//! `SLACK_BOT_TOKEN` → all three Slack credentials required, absent → Slack
+//! disabled and the server boots HTTP-only for `/chat`), the
 //! [`anthropic_api_key`] is required only when the Anthropic backend is selected
 //! (the `ARDUR_PROVIDER` default), and the rest default. [`Config::from_env`] is
 //! the production path; tests build a [`Config`] by hand (with a tempdir
@@ -13,8 +15,10 @@
 
 use std::fmt;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use ardur_provider_selector::{ProviderKind, SELECTOR_ENV};
+use ardur_tool_registry::{BuiltinOpts, HttpFetchOpts};
 
 /// How the process emits tracing events.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,13 +53,25 @@ pub struct Config {
     /// live Anthropic provider reads the key from the environment itself, so this
     /// field is informational — tests inject a stub provider and leave it empty.
     pub anthropic_api_key: String,
-    /// Slack bot token (`SLACK_BOT_TOKEN`) for `chat.postMessage`.
-    pub slack_bot_token: String,
-    /// Slack signing secret (`SLACK_SIGNING_SECRET`) for inbound HMAC verification.
-    pub slack_signing_secret: String,
+    /// Whether the Slack channel is enabled (auto-detected: `true` when
+    /// `SLACK_BOT_TOKEN` is present). When `false`, the server boots HTTP-only —
+    /// `/chat` works, but the `/slack/events` route is not mounted and no Slack
+    /// adapter is built. Derived from the three `slack_*` credentials being
+    /// `Some`.
+    pub slack_enabled: bool,
+    /// Slack bot token (`SLACK_BOT_TOKEN`) for `chat.postMessage`. `None` when
+    /// Slack is disabled (HTTP-only boot).
+    pub slack_bot_token: Option<String>,
+    /// Slack signing secret (`SLACK_SIGNING_SECRET`) for inbound HMAC
+    /// verification. `None` when Slack is disabled.
+    pub slack_signing_secret: Option<String>,
     /// Slack app id (`SLACK_APP_ID`) — namespaces channel ids and drops the
-    /// bot's own messages (loop-prevention).
-    pub slack_app_id: String,
+    /// bot's own messages (loop-prevention). `None` when Slack is disabled.
+    pub slack_app_id: Option<String>,
+    /// Inbound Slack sender allowlist (`SLACK_ALLOWED_SENDERS`, CSV). Deny-
+    /// by-default (ARD-475): empty drops every sender, so the operator must
+    /// list the Slack user ids permitted to command the bot.
+    pub slack_allowed_senders: Vec<String>,
     /// Root of persistent state (`ARDUR_DATA_DIR`, default `./data`): the
     /// `memory/`, `journals/`, `receipts/`, and `keys/` subdirectories.
     pub data_dir: PathBuf,
@@ -69,6 +85,11 @@ pub struct Config {
     /// (`ARDUR_ADMIN_BEARER_TOKENS`, comma-separated). When empty, admin routes
     /// deny every request with `401` (fail-closed).
     pub admin_bearer_tokens: Vec<String>,
+    /// Exact browser origins allowed to call `/chat` and `/approvals*` from a
+    /// separately-hosted PWA (`ARDUR_CORS_ORIGINS`, comma-separated
+    /// `http(s)://host[:port]` values). Empty (the default) emits no CORS
+    /// headers — fail-closed. `*` and `null` are refused at config load.
+    pub cors_origins: Vec<String>,
     /// Explicit development escape hatch for the embedded permissive Cedar policy
     /// (`ARDUR_DEV_PERMISSIVE_POLICY=true`). Production boots without a configured
     /// policy use a deny-all policy, and a configured-but-missing path is an error.
@@ -137,6 +158,37 @@ pub struct Config {
     /// Optional Qdrant collection override (`QDRANT_COLLECTION`). Tests can set
     /// this field directly instead of mutating process-global environment.
     pub qdrant_collection: Option<String>,
+    /// **ARD-457.** Register the hardened §6.1 `shell.run` built-in tool
+    /// (`ARDUR_ENABLE_SHELL_TOOL`, default `false`). Fail-closed: enabling it
+    /// *requires* a non-empty [`shell_allowlist`](Self::shell_allowlist) — the
+    /// server never registers the unrestricted, dev-only shell — so an
+    /// enable-without-allowlist is rejected at [`from_env`](Self::from_env).
+    pub enable_shell_tool: bool,
+    /// The command allowlist for `shell.run` (`ARDUR_SHELL_ALLOWLIST`, CSV of
+    /// `|`-separated command prefixes, e.g. `git|cargo,ls`). Empty unless
+    /// [`enable_shell_tool`](Self::enable_shell_tool) is set (and then required
+    /// to be non-empty).
+    pub shell_allowlist: Vec<String>,
+    /// **ARD-457.** Register the §6.2 `http.fetch` built-in tool
+    /// (`ARDUR_ENABLE_HTTP_TOOL`, default `false`). SSRF defense stays on
+    /// (private/internal IPs are never reachable); an empty
+    /// [`http_allowlist`](Self::http_allowlist) confines it to localhost.
+    pub enable_http_tool: bool,
+    /// Host allowlist for `http.fetch` (`ARDUR_HTTP_ALLOWLIST`, CSV; exact,
+    /// `*.example.com`, or `*`). Empty leaves the tool able to reach only
+    /// localhost. Ignored unless [`enable_http_tool`](Self::enable_http_tool).
+    pub http_allowlist: Vec<String>,
+    /// **ARD-457.** Root directory confining the `file.read`/`file.write`/
+    /// `file.list` built-in tools (`ARDUR_FILE_TOOL_ROOT`). `Some(root)`
+    /// registers all three confined to it; `None` registers no file tool.
+    pub file_tool_root: Option<PathBuf>,
+    /// How long a synchronous `POST /chat` (and ACP) turn may run before the
+    /// HTTP surface stops waiting on it (`ARDUR_HTTP_TURN_TIMEOUT_SECS`, default
+    /// `30`). When the wait elapses the client receives `504`; the worker
+    /// observes the dropped reply channel and cancels the in-flight turn before
+    /// it commits a receipt or bills cost, so the `504` is never paired with a
+    /// silently-billed turn (issue #359). Must be a positive number of seconds.
+    pub http_turn_timeout: Duration,
 }
 
 /// A required environment variable was unset or empty.
@@ -169,12 +221,17 @@ impl fmt::Debug for Config {
                 "anthropic_api_key",
                 &redacted_present(&self.anthropic_api_key),
             )
-            .field("slack_bot_token", &redacted_present(&self.slack_bot_token))
+            .field("slack_enabled", &self.slack_enabled)
+            .field(
+                "slack_bot_token",
+                &redacted_present_opt(self.slack_bot_token.as_deref()),
+            )
             .field(
                 "slack_signing_secret",
-                &redacted_present(&self.slack_signing_secret),
+                &redacted_present_opt(self.slack_signing_secret.as_deref()),
             )
             .field("slack_app_id", &self.slack_app_id)
+            .field("slack_allowed_senders", &self.slack_allowed_senders)
             .field("data_dir", &self.data_dir)
             .field("bind_addr", &self.bind_addr)
             .field(
@@ -185,6 +242,7 @@ impl fmt::Debug for Config {
                 "admin_bearer_tokens",
                 &redacted_count(self.admin_bearer_tokens.len()),
             )
+            .field("cors_origins", &self.cors_origins)
             .field("dev_permissive_policy", &self.dev_permissive_policy)
             .field("model", &self.model)
             .field("cost_budget_cents", &self.cost_budget_cents)
@@ -205,6 +263,12 @@ impl fmt::Debug for Config {
             .field("memory_backend", &self.memory_backend)
             .field("qdrant_url", &self.qdrant_url)
             .field("qdrant_collection", &self.qdrant_collection)
+            .field("enable_shell_tool", &self.enable_shell_tool)
+            .field("shell_allowlist", &self.shell_allowlist)
+            .field("enable_http_tool", &self.enable_http_tool)
+            .field("http_allowlist", &self.http_allowlist)
+            .field("file_tool_root", &self.file_tool_root)
+            .field("http_turn_timeout", &self.http_turn_timeout)
             .finish()
     }
 }
@@ -214,6 +278,15 @@ fn redacted_present(value: &str) -> &'static str {
         "<unset>"
     } else {
         "<redacted>"
+    }
+}
+
+/// Redact an optional secret: `<redacted>` when present and non-empty, `<unset>`
+/// otherwise (mirrors [`redacted_present`] for `Option<&str>` fields).
+fn redacted_present_opt(value: Option<&str>) -> &'static str {
+    match value {
+        Some(v) if !v.is_empty() => "<redacted>",
+        _ => "<unset>",
     }
 }
 
@@ -237,10 +310,17 @@ impl Config {
     /// `ARDUR_MEMORY=hybrid` selects the §7.0c dense+sparse retriever over that
     /// same store (the default `in_memory` backend needs no Qdrant).
     ///
+    /// The Slack channel is auto-detected: when `SLACK_BOT_TOKEN` is present, all
+    /// three Slack credentials (`SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`,
+    /// `SLACK_APP_ID`) are required — a partial configuration fails closed. When
+    /// `SLACK_BOT_TOKEN` is absent, Slack is disabled and the server boots
+    /// HTTP-only (`/chat` still works; `/slack/events` is not mounted). This
+    /// mirrors the opt-in shape of the Matrix/Discord/Telegram channels.
+    ///
     /// # Errors
     /// [`MissingEnvVar`] naming the first required variable that is unset or
-    /// empty (`SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`, `SLACK_APP_ID`,
-    /// `ANTHROPIC_API_KEY` when the Anthropic backend is selected, and
+    /// empty (`SLACK_SIGNING_SECRET` or `SLACK_APP_ID` when `SLACK_BOT_TOKEN` is
+    /// present, `ANTHROPIC_API_KEY` when the Anthropic backend is selected, and
     /// `QDRANT_URL` when the Qdrant memory backend is selected).
     pub fn from_env() -> Result<Self, ConfigError> {
         // The Anthropic key gates only the Anthropic backend; under any other
@@ -308,16 +388,82 @@ impl Config {
             require("TELEGRAM_BOT_TOKEN")?;
         }
 
+        // The Slack channel is auto-detected on `SLACK_BOT_TOKEN`, mirroring the
+        // opt-in shape of the channels above: present → all three credentials are
+        // required (a partial config fails closed), absent → Slack disabled and
+        // the server boots HTTP-only for `/chat`. Slack is the sole channel that
+        // used to be unconditionally required; now nothing forces it.
+        let (slack_enabled, slack_bot_token, slack_signing_secret, slack_app_id) =
+            if optional("SLACK_BOT_TOKEN").is_some() {
+                (
+                    true,
+                    Some(require("SLACK_BOT_TOKEN")?),
+                    Some(require("SLACK_SIGNING_SECRET")?),
+                    Some(require("SLACK_APP_ID")?),
+                )
+            } else {
+                (false, None, None, None)
+            };
+
+        // ARD-457: the hardened §6.1 built-in tools are opt-in and fail-closed.
+        // Nothing registers unless the operator sets these; the default boot is
+        // behaviourally unchanged. Enabling the shell tool *requires* a non-empty
+        // allowlist — the unrestricted, dev-only shell is never registered on a
+        // server — so an enable-without-allowlist is rejected here rather than
+        // silently downgraded (mirrors the Matrix/Discord conditional-require).
+        let enable_shell_tool = optional("ARDUR_ENABLE_SHELL_TOOL")
+            .as_deref()
+            .is_some_and(is_truthy);
+        let shell_allowlist = parse_csv(optional("ARDUR_SHELL_ALLOWLIST").as_deref());
+        if enable_shell_tool && shell_allowlist.is_empty() {
+            return Err(ConfigError::Invalid {
+                var: "ARDUR_ENABLE_SHELL_TOOL",
+                reason: "enabling shell.run requires a non-empty ARDUR_SHELL_ALLOWLIST; \
+                         the unrestricted dev-only shell is never registered on a server"
+                    .to_string(),
+            });
+        }
+        let enable_http_tool = optional("ARDUR_ENABLE_HTTP_TOOL")
+            .as_deref()
+            .is_some_and(is_truthy);
+        let http_allowlist = parse_csv(optional("ARDUR_HTTP_ALLOWLIST").as_deref());
+        let file_tool_root = optional("ARDUR_FILE_TOOL_ROOT").map(PathBuf::from);
+
+        // The synchronous-turn wait ceiling. A slow-but-legitimate turn (a long
+        // tool loop, a slow provider) should be able to outlast the default 30s
+        // without the operator having to fork the code — so it is a knob, not a
+        // constant. A zero or unparseable value is rejected rather than silently
+        // treated as "no timeout".
+        let http_turn_timeout = match optional("ARDUR_HTTP_TURN_TIMEOUT_SECS") {
+            None => Duration::from_secs(30),
+            Some(raw) => {
+                let secs = raw.parse::<u64>().map_err(|e| ConfigError::Invalid {
+                    var: "ARDUR_HTTP_TURN_TIMEOUT_SECS",
+                    reason: format!("`{raw}` is not a valid u64: {e}"),
+                })?;
+                if secs == 0 {
+                    return Err(ConfigError::Invalid {
+                        var: "ARDUR_HTTP_TURN_TIMEOUT_SECS",
+                        reason: "must be a positive number of seconds".to_string(),
+                    });
+                }
+                Duration::from_secs(secs)
+            }
+        };
+
         Ok(Self {
             anthropic_api_key,
-            slack_bot_token: require("SLACK_BOT_TOKEN")?,
-            slack_signing_secret: require("SLACK_SIGNING_SECRET")?,
-            slack_app_id: require("SLACK_APP_ID")?,
+            slack_enabled,
+            slack_bot_token,
+            slack_signing_secret,
+            slack_app_id,
+            slack_allowed_senders: parse_csv(optional("SLACK_ALLOWED_SENDERS").as_deref()),
             data_dir: optional("ARDUR_DATA_DIR")
                 .map_or_else(|| PathBuf::from("./data"), PathBuf::from),
             bind_addr: optional("ARDUR_BIND_ADDR").unwrap_or_else(|| "127.0.0.1:3000".to_string()),
             chat_bearer_tokens: parse_csv(optional("ARDUR_CHAT_BEARER_TOKENS").as_deref()),
             admin_bearer_tokens: parse_csv(optional("ARDUR_ADMIN_BEARER_TOKENS").as_deref()),
+            cors_origins: parse_cors_origins(optional("ARDUR_CORS_ORIGINS").as_deref())?,
             dev_permissive_policy: optional("ARDUR_DEV_PERMISSIVE_POLICY")
                 .as_deref()
                 .is_some_and(is_truthy),
@@ -360,8 +506,126 @@ impl Config {
             memory_backend,
             qdrant_url,
             qdrant_collection: optional("QDRANT_COLLECTION"),
+            enable_shell_tool,
+            shell_allowlist,
+            enable_http_tool,
+            http_allowlist,
+            file_tool_root,
+            http_turn_timeout,
         })
     }
+
+    /// **ARD-457.** Map the operator's opt-ins to the [`BuiltinOpts`] that
+    /// [`register_builtins`](ardur_tool_registry::ToolRegistry::register_builtins)
+    /// consumes, preserving the fail-closed posture:
+    ///
+    /// - The shell tool is registered only with `Some(allowlist)` — never the
+    ///   unrestricted [`ShellTool::without_allowlist`](ardur_tool_registry::ShellTool::without_allowlist).
+    ///   [`from_env`](Self::from_env) already rejected an enable-without-allowlist,
+    ///   and even an (impossible) empty list is fail-closed (denies every command).
+    /// - `http.fetch` keeps SSRF defense on (`allow_private_ips: false`).
+    /// - The file tools register only when a root is configured.
+    ///
+    /// With no opt-ins set, every field is off and `register_builtins` is a no-op,
+    /// so the default boot registers no hardened tool.
+    #[must_use]
+    pub fn builtin_tool_opts(&self) -> BuiltinOpts {
+        BuiltinOpts {
+            enable_shell: self.enable_shell_tool,
+            // Always `Some` when the shell is enabled, so the unrestricted shell
+            // (`None`) is never constructed here.
+            shell_allowlist: self.enable_shell_tool.then(|| self.shell_allowlist.clone()),
+            file_root: self.file_tool_root.clone(),
+            http: self.enable_http_tool.then(|| HttpFetchOpts {
+                enable: true,
+                allowlist: self.http_allowlist.clone(),
+                // SSRF stays on and the ceilings keep their strict defaults.
+                ..HttpFetchOpts::default()
+            }),
+            enable_media: false,
+        }
+    }
+}
+
+/// Parse `ARDUR_CORS_ORIGINS` into exact `scheme://host[:port]` origins.
+///
+/// Fail-closed: wildcard (`*`), the string `null`, credentials, paths, queries,
+/// and fragments are rejected. Callers that need a PWA on another origin must
+/// list that origin explicitly.
+fn parse_cors_origins(value: Option<&str>) -> Result<Vec<String>, ConfigError> {
+    parse_csv(value)
+        .into_iter()
+        .map(|raw| parse_cors_origin(&raw))
+        .collect()
+}
+
+fn parse_cors_origin(raw: &str) -> Result<String, ConfigError> {
+    const VAR: &str = "ARDUR_CORS_ORIGINS";
+    let origin = raw.trim();
+    if origin == "*" || origin.eq_ignore_ascii_case("null") {
+        return Err(ConfigError::Invalid {
+            var: VAR,
+            reason: "wildcard and `null` origins are refused; list explicit http(s) origins"
+                .to_string(),
+        });
+    }
+    if origin.len() > 253 || !origin.is_ascii() {
+        return Err(ConfigError::Invalid {
+            var: VAR,
+            reason: "origin must be ASCII and at most 253 characters".to_string(),
+        });
+    }
+    // Allow a single trailing slash (browsers sometimes send it); extra path
+    // characters — including `//` — stay rejected.
+    let origin = match origin.strip_suffix('/') {
+        Some(rest) if rest.ends_with('/') => {
+            return Err(ConfigError::Invalid {
+                var: VAR,
+                reason: format!("`{raw}` is not a scheme://host[:port] origin"),
+            });
+        }
+        Some(rest) => rest,
+        None => origin,
+    };
+    let rest = origin
+        .strip_prefix("https://")
+        .or_else(|| origin.strip_prefix("http://"))
+        .ok_or_else(|| ConfigError::Invalid {
+            var: VAR,
+            reason: format!("`{raw}` is not an http(s) origin"),
+        })?;
+    if rest.is_empty()
+        || rest.contains('/')
+        || rest.contains('?')
+        || rest.contains('#')
+        || rest.contains('@')
+        || rest.contains('\\')
+        || rest.contains(' ')
+    {
+        return Err(ConfigError::Invalid {
+            var: VAR,
+            reason: format!("`{raw}` is not a scheme://host[:port] origin"),
+        });
+    }
+    let host = match rest.rsplit_once(':') {
+        Some((host, port)) => {
+            if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(ConfigError::Invalid {
+                    var: VAR,
+                    reason: format!("`{raw}` has an invalid port"),
+                });
+            }
+            host
+        }
+        None => rest,
+    };
+    if host.is_empty() || host.starts_with('.') || host.ends_with('.') {
+        return Err(ConfigError::Invalid {
+            var: VAR,
+            reason: format!("`{raw}` has an empty or invalid host"),
+        });
+    }
+    Ok(origin.to_string())
 }
 
 /// Parse a comma-separated token list, trimming whitespace and dropping empties.
@@ -426,13 +690,55 @@ fn optional(key: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{MemoryBackend, parse_memory_backend};
+    use super::{MemoryBackend, parse_cors_origin, parse_cors_origins, parse_memory_backend};
 
     #[test]
     fn parses_explicit_in_memory_literal() {
         assert_eq!(
             parse_memory_backend(Some("in_memory")).expect("in_memory parses"),
             MemoryBackend::InMemory
+        );
+    }
+
+    #[test]
+    fn cors_origin_accepts_loopback_with_port() {
+        assert_eq!(
+            parse_cors_origin("http://127.0.0.1:4173").expect("loopback origin"),
+            "http://127.0.0.1:4173"
+        );
+        assert_eq!(
+            parse_cors_origin("https://chat.example.com/").expect("trailing slash stripped"),
+            "https://chat.example.com"
+        );
+    }
+
+    #[test]
+    fn cors_origin_refuses_wildcard_null_and_paths() {
+        for bad in [
+            "*",
+            "null",
+            "https://evil.example/path",
+            "https://pwa.example.com//",
+            "ftp://x",
+            "http://",
+        ] {
+            assert!(
+                parse_cors_origin(bad).is_err(),
+                "expected {bad} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn cors_origins_csv_parses_two_explicit_origins() {
+        let origins = parse_cors_origins(Some("http://127.0.0.1:4173, https://pwa.example.com"))
+            .expect("csv origins");
+        assert_eq!(
+            origins,
+            vec![
+                "http://127.0.0.1:4173".to_string(),
+                "https://pwa.example.com".to_string()
+            ]
         );
     }
 }

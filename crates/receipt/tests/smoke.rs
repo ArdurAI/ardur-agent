@@ -14,14 +14,15 @@ fn sample_body(verb: &str) -> ReceiptBody {
         verb: VerbObject::new(verb).expect("test verb is well-formed"),
         issued_at: UnixTsMillis(1_700_000_000_000),
         subject: HolderId("spiffe://ardur/user/alice".to_string()),
-        cap_token_id: TokenId("jti-0001".to_string()),
+        cap_token_id: TokenId(uuid::Uuid::from_u128(0x0001)),
         payload_digest: Sha256Digest::of(b"event-payload"),
+        session_id: None,
         cost: CostTuple {
             tokens_in: 100,
             tokens_out: 50,
             cents: 2,
             wall_ms: 1_200,
-            attention_score: 0.5,
+            attention_score: 500,
         },
         tool_calls: Vec::new(),
         provider: None,
@@ -63,7 +64,7 @@ fn chain_3_receipts() {
     .unwrap();
 
     let chain = vec![r0, r1, r2];
-    ardur_receipt::verify_chain(&chain).expect("freshly built chain verifies");
+    ardur_receipt::verify_chain(&chain, &jwks).expect("freshly built chain verifies");
 
     assert!(
         chain[0].body().parent_hash.is_none(),
@@ -102,12 +103,40 @@ fn chain_tampered() {
     .unwrap();
 
     let tampered = vec![alt_genesis, r1];
-    match ardur_receipt::verify_chain(&tampered) {
+    match ardur_receipt::verify_chain(&tampered, &Jwks::from_public_key(&key.public_key())) {
         Err(ReceiptError::BrokenChain(broken)) => {
             assert_eq!(broken.at, 1);
             assert_ne!(broken.expected, broken.actual);
         }
         other => panic!("expected BrokenChain at index 1, got {other:?}"),
+    }
+}
+
+#[test]
+fn chain_rejects_forged_signature() {
+    // ARD-479: a receipt whose parent_hash links correctly but whose JWS was
+    // signed by a stranger key must NOT pass verify_chain. Its kid is absent
+    // from the JWKS, so the per-receipt signature check now rejects it.
+    let key = Es256SigningKey::generate();
+    let jwks = Jwks::from_public_key(&key.public_key());
+
+    let r0 = ReceiptSigner::sign(
+        ReceiptChain::append(None, sample_body("cap.issued.allow.v1")),
+        &key,
+    )
+    .unwrap();
+    // Same body (so parent_hash still links to r0), signed by a stranger.
+    let stranger = Es256SigningKey::generate();
+    let forged_r1 = ReceiptSigner::sign(
+        ReceiptChain::append(Some(&r0), sample_body("cost.admission.allow.v1")),
+        &stranger,
+    )
+    .unwrap();
+
+    let chain = vec![r0, forged_r1];
+    match ardur_receipt::verify_chain(&chain, &jwks) {
+        Err(ReceiptError::UnknownKid(_)) => (),
+        other => panic!("expected UnknownKid from forged signature, got {other:?}"),
     }
 }
 

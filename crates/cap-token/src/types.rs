@@ -8,8 +8,10 @@ use crate::error::{CapTokenError, map_parse_error};
 
 /// The principal a cap-token is issued to (a runtime profile, agent, or
 /// session). Opaque string identifier — typically a SPIFFE-style URI.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct HolderId(pub String);
+///
+/// Re-exported from `ardur-core-types` so the cap-token holder identity is the
+/// same type the cost gate, receipt, and memory layers speak.
+pub use ardur_core_types::HolderId;
 
 /// The capability scope a cap-token grants: the audience it is valid for, when
 /// it expires, the spend ceiling, and the tools it may invoke. These become the
@@ -126,10 +128,10 @@ pub struct RequiredCaveats {
 
 /// The claims carried by a verified token, returned once every caveat (the
 /// authority block's and every attenuation's) has been satisfied by the
-/// request. These are the *issued* claims read from the authority block; the
-/// effective authority a request must satisfy may be narrower (each attenuation
-/// further constrains it), which is why verification enforces the caveats
-/// rather than re-deriving them from these claims.
+/// request. These are the token's effective claims after applying recognized
+/// narrowing checks from attenuation blocks, so downstream policy/resource
+/// evaluation sees the same tool and budget authority the Biscuit verifier
+/// enforced for the request.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VerifiedClaims {
     /// Stable per-token identifier (UUIDv4), suitable as a receipt's
@@ -139,11 +141,11 @@ pub struct VerifiedClaims {
     pub audience: String,
     /// The principal the token is bound to.
     pub subject: HolderId,
-    /// The issued expiry, as Unix seconds.
+    /// The effective expiry, as Unix seconds.
     pub expires_unix: u64,
-    /// The issued spend ceiling.
+    /// The effective spend ceiling.
     pub budget_remaining: u64,
-    /// The issued tool allowlist.
+    /// The effective tool allowlist.
     pub tool_allowlist: Vec<String>,
 }
 

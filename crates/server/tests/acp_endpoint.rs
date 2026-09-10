@@ -8,7 +8,7 @@ use serde_json::json;
 async fn post_acp_accepts_initialize_and_mints_receipt() {
     let dir = tempfile::tempdir().expect("tempdir");
     let config = support::test_config(&dir, None);
-    let router = support::boot_router(&config);
+    let router = support::boot_router(&config).await;
     let body = serde_json::to_vec(&AcpMessage::Request(AcpRequest::new(
         1_i64,
         ACP_METHOD_INITIALIZE,
@@ -55,7 +55,7 @@ async fn post_acp_accepts_initialize_and_mints_receipt() {
 async fn post_acp_rejects_missing_bearer_and_invalid_messages() {
     let dir = tempfile::tempdir().expect("tempdir");
     let config = support::test_config(&dir, None);
-    let router = support::boot_router(&config);
+    let router = support::boot_router(&config).await;
 
     let (status, _) = support::oneshot(
         router.clone(),
@@ -88,7 +88,7 @@ async fn post_acp_rejects_missing_bearer_and_invalid_messages() {
 async fn post_acp_rejects_unsupported_methods_without_forwarding_params() {
     let dir = tempfile::tempdir().expect("tempdir");
     let config = support::test_config(&dir, None);
-    let router = support::boot_router(&config);
+    let router = support::boot_router(&config).await;
     let body = serde_json::to_vec(&AcpMessage::Request(AcpRequest::new(
         99_i64,
         "fs/read_text_file",

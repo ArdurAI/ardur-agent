@@ -1,5 +1,15 @@
 # ardur-agent Deep Security & Code Audit Report
 
+> ⚠️ **STALE — POINT-IN-TIME SNAPSHOT, NOT CURRENT POSTURE (do not triage from this).**
+> This machine-generated report reflects `dev` as of **2026-06-17** and has **not**
+> been kept in sync with the code. Several findings below are already fixed or were
+> never accurate against current source — e.g. the "timing attack, `admin-ui/src/auth.rs`
+> `==` compare" is false (`crates/admin-ui/src/auth.rs` uses `subtle::ConstantTimeEq::ct_eq`),
+> and other cited line numbers no longer correspond. Treat this file as a historical
+> artifact only. For current security posture use the latest deep review under
+> `reviews/` (e.g. `reviews/DEEP-CODE-REVIEW-2026-07-12.md`) and verify every claim
+> against `HEAD` before acting on it. (reviews/DEEP-CODE-REVIEW-2026-07-12.md M10)
+
 **Date:** 2026-06-17
 **Auditor:** Hermes Agent
 **Scope:** Full codebase (crates/)

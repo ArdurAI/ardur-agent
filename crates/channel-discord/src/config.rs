@@ -37,8 +37,9 @@ pub struct DiscordConfig {
     pub application_id: u64,
     /// The gateway intents to subscribe to (default [`DEFAULT_INTENTS`]).
     pub intents: GatewayIntents,
-    /// Channel-id allowlist. Empty means "all channels"; otherwise inbound
-    /// messages from channels not in this list are dropped.
+    /// Channel-id allowlist. Deny-by-default (ARD-475): empty means drop *all*
+    /// channels; otherwise inbound messages from channels not in this list are
+    /// dropped. The operator must explicitly list the channels the bot may read.
     pub allowed_channel_ids: Vec<u64>,
 }
 

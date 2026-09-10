@@ -1,10 +1,12 @@
 //! [`SlackAdapter`] — the Slack backend for the §4.0 [`MessagingGateway`]
 //! contract.
 
+use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use hmac::{Hmac, KeyInit, Mac};
+use parking_lot::Mutex;
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -49,6 +51,14 @@ pub struct SlackAdapter {
     app_id: String,
     http: reqwest::Client,
     base_url: String,
+    /// Inbound sender (Slack user id) allowlist. Deny-by-default (ARD-475):
+    /// an empty set drops every sender; otherwise only listed user ids may
+    /// command the bot.
+    allowed_senders: HashSet<String>,
+    /// Default in-memory duplicate-delivery guard (ARD-481): timestamp skew
+    /// stops stale signed requests, while this cache rejects the same valid
+    /// Slack signature if it is replayed again inside the freshness window.
+    replay_cache: Mutex<HashMap<String, u64>>,
 }
 
 impl SlackAdapter {
@@ -61,6 +71,8 @@ impl SlackAdapter {
             app_id,
             http: reqwest::Client::new(),
             base_url: DEFAULT_BASE_URL.to_owned(),
+            allowed_senders: HashSet::new(),
+            replay_cache: Mutex::new(HashMap::new()),
         }
     }
 
@@ -73,17 +85,45 @@ impl SlackAdapter {
         let bot_token = read_env("SLACK_BOT_TOKEN")?;
         let signing_secret = read_env("SLACK_SIGNING_SECRET")?;
         let app_id = read_env("SLACK_APP_ID")?;
+        // ARD-475: optional comma-separated sender allowlist (deny-by-default —
+        // unset/empty drops every sender, so the operator must list the Slack
+        // user ids permitted to command the bot).
+        let allowed_senders = std::env::var("SLACK_ALLOWED_SENDERS")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .map(|v| {
+                v.split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         Ok(Self::new(
             SecretString::from(bot_token),
             SecretString::from(signing_secret),
             app_id,
-        ))
+        )
+        .with_allowed_senders(allowed_senders))
     }
 
     /// Override the Web-API base URL (e.g. point at a mock server in tests).
     #[must_use]
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = base_url.into();
+        self
+    }
+
+    /// Restrict inbound messages to senders whose Slack user id is in `senders`
+    /// (ARD-475). Deny-by-default: an empty set drops every sender, so the
+    /// operator must list the user ids permitted to command the bot.
+    #[must_use]
+    pub fn with_allowed_senders<I, S>(mut self, senders: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.allowed_senders = senders.into_iter().map(Into::into).collect();
         self
     }
 
@@ -166,6 +206,65 @@ impl SlackAdapter {
         })
     }
 
+    /// POST `chat.update` for an existing message and return the updated message `ts`.
+    ///
+    /// # Errors
+    /// Same transport and Slack API error classes as [`post_message`](Self::post_message).
+    pub async fn update_message(
+        &self,
+        channel: &str,
+        ts: &str,
+        text: &str,
+        blocks: Option<Value>,
+    ) -> Result<String, SlackError> {
+        let url = format!("{}/chat.update", self.base_url);
+        let mut payload = json!({ "channel": channel, "ts": ts, "text": text });
+        if let Some(blocks) = blocks {
+            payload["blocks"] = blocks;
+        }
+
+        let resp = self
+            .http
+            .post(&url)
+            .bearer_auth(self.bot_token.expose_secret())
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| SlackError::NetworkFailure(e.to_string()))?;
+
+        let retry_after_ms = resp
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .map(|secs| secs.saturating_mul(1_000));
+
+        if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return Err(SlackError::RateLimited {
+                retry_after_ms: retry_after_ms.unwrap_or(0),
+            });
+        }
+
+        let parsed: PostMessageResponse = resp
+            .json()
+            .await
+            .map_err(|e| SlackError::ParseError(e.to_string()))?;
+
+        if parsed.ok {
+            return Ok(parsed.ts.unwrap_or_else(|| ts.to_owned()));
+        }
+
+        Err(match parsed.error.as_deref().unwrap_or("") {
+            "not_in_channel" => SlackError::Forbidden,
+            "channel_not_found" => SlackError::ChannelNotFound,
+            "invalid_auth" => SlackError::Unauthorized,
+            "ratelimited" => SlackError::RateLimited {
+                retry_after_ms: retry_after_ms.unwrap_or(0),
+            },
+            other => SlackError::Upstream(other.to_owned()),
+        })
+    }
+
     /// Verify and parse an inbound Events-API request, using the current wall
     /// clock for the replay check.
     ///
@@ -183,8 +282,8 @@ impl SlackAdapter {
     /// `now_unix` (seconds) — the deterministic core
     /// [`parse_event`](Self::parse_event) delegates to.
     ///
-    /// Verification order: replay-window check on the timestamp, then the
-    /// constant-time HMAC signature check, then JSON parsing.
+    /// Verification order: replay-window check on the timestamp, constant-time
+    /// HMAC signature check, duplicate-delivery replay check, then JSON parsing.
     ///
     /// # Errors
     /// - [`SlackError::ParseError`] if the timestamp header or body is malformed.
@@ -213,6 +312,12 @@ impl SlackAdapter {
         // Signature: v0=HMAC-SHA256(signing_secret, "v0:{ts}:{body}").
         self.verify_signature(&headers.signature, &headers.timestamp, body)?;
 
+        // ARD-481: Slack's timestamp freshness window alone still accepts the
+        // same signed body repeatedly for five minutes. After proving the HMAC
+        // is valid, remember the signature and reject duplicates inside the
+        // window by default.
+        self.reject_duplicate_replay(&headers.signature, ts, now_unix)?;
+
         let envelope: EventEnvelope = serde_json::from_str(body)
             .map_err(|e| SlackError::ParseError(format!("malformed event body: {e}")))?;
 
@@ -235,6 +340,15 @@ impl SlackAdapter {
                 // bot author.)
                 let own_app = event.app_id.as_deref() == Some(self.app_id.as_str());
                 if own_app || event.bot_id.is_some() {
+                    return Ok(SlackEvent::Ignored);
+                }
+                // ARD-475: deny-by-default sender allowlist. An empty allowlist
+                // drops every sender; otherwise only listed Slack user ids may
+                // command the bot. (Slack's HMAC only proves the request came
+                // from Slack — any user's message is signed — so this is the
+                // control that restricts *which* users can drive the agent.)
+                let user = event.user.as_deref().unwrap_or("");
+                if !self.allowed_senders.contains(user) {
                     return Ok(SlackEvent::Ignored);
                 }
                 Ok(SlackEvent::Message(message_to_incoming(
@@ -267,6 +381,27 @@ impl SlackAdapter {
         } else {
             Err(SlackError::InvalidSignature)
         }
+    }
+
+    /// Reject duplicate signed inbound deliveries within the configured replay
+    /// window. Called only after the timestamp and HMAC have already verified,
+    /// so attacker-supplied invalid signatures cannot fill the cache.
+    fn reject_duplicate_replay(
+        &self,
+        signature: &str,
+        timestamp: u64,
+        now_unix: u64,
+    ) -> Result<(), SlackError> {
+        let mut cache = self.replay_cache.lock();
+        cache.retain(|_, seen_ts| now_unix.abs_diff(*seen_ts) <= REPLAY_WINDOW_SECONDS);
+
+        let key = format!("{timestamp}:{signature}");
+        if cache.insert(key, timestamp).is_some() {
+            return Err(SlackError::Replay {
+                age_seconds: now_unix.abs_diff(timestamp),
+            });
+        }
+        Ok(())
     }
 
     /// Resolve an [`OutgoingMessage`] target into the Slack `channel` argument.
@@ -304,10 +439,12 @@ fn now_seconds() -> u64 {
 
 /// Current wall-clock time in Unix milliseconds.
 fn now_millis() -> UnixTsMillis {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+    UnixTsMillis(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0),
+    )
 }
 
 /// Read a required environment variable, mapping absence to

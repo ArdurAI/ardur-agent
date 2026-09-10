@@ -40,3 +40,15 @@ fn rounds_to_whole_cents() {
     });
     assert_eq!(cost.cents, 2);
 }
+
+#[test]
+fn sub_cent_cost_rounds_up_to_one_cent_ard_495() {
+    // 1k input only @ 0.3¢/1k = 0.3¢ → must charge 1¢, never 0 (a 0¢ turn
+    // would be admitted, executed, and finalized free — a budget bypass).
+    let cost = RateCard::anthropic_2026_q2_v1().price(Usage {
+        tokens_in: 1_000,
+        tokens_out: 0,
+        ..Default::default()
+    });
+    assert_eq!(cost.cents, 1, "sub-cent cost must not round to 0 (ARD-495)");
+}

@@ -20,10 +20,12 @@ pub struct SystemClock;
 impl Clock for SystemClock {
     fn now_ms(&self) -> UnixTsMillis {
         // A clock set before the epoch is nonsensical; treat it as the epoch.
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis().min(u128::from(u64::MAX)) as u64)
-            .unwrap_or(0)
+        UnixTsMillis(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis().min(u128::from(u64::MAX)) as u64)
+                .unwrap_or(0),
+        )
     }
 }
 
@@ -35,7 +37,7 @@ pub struct ManualClock(AtomicU64);
 impl ManualClock {
     /// A clock fixed at `start_ms`.
     pub fn new(start_ms: UnixTsMillis) -> Self {
-        Self(AtomicU64::new(start_ms))
+        Self(AtomicU64::new(start_ms.get()))
     }
 
     /// Jump the clock forward by `delta_ms`.
@@ -45,12 +47,12 @@ impl ManualClock {
 
     /// Set the clock to an absolute `ms`.
     pub fn set(&self, ms: UnixTsMillis) {
-        self.0.store(ms, Ordering::SeqCst);
+        self.0.store(ms.get(), Ordering::SeqCst);
     }
 }
 
 impl Clock for ManualClock {
     fn now_ms(&self) -> UnixTsMillis {
-        self.0.load(Ordering::SeqCst)
+        UnixTsMillis(self.0.load(Ordering::SeqCst))
     }
 }

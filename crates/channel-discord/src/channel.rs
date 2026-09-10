@@ -24,8 +24,8 @@ use ardur_messaging_gateway::{
 };
 
 use serenity::all::{
-    ChannelId as DiscordChannelId, Client, Context, EventHandler, GatewayIntents, Http, Message,
-    Ready,
+    ChannelId as DiscordChannelId, Client, Context, EditMessage, EventHandler, GatewayIntents,
+    Http, Message, MessageId as DiscordMessageId, Ready,
 };
 
 use crate::config::DiscordConfig;
@@ -62,9 +62,11 @@ struct Forwarder {
 }
 
 impl Forwarder {
-    /// Whether `channel_id` is permitted (empty allowlist = all channels).
+    /// Whether `channel_id` is permitted. Deny-by-default (ARD-475): an empty
+    /// allowlist drops every channel, so the operator must explicitly allow the
+    /// channels the bot may read — matching the Matrix adapter.
     fn channel_allowed(&self, channel_id: u64) -> bool {
-        self.allowed_channels.is_empty() || self.allowed_channels.contains(&channel_id)
+        !self.allowed_channels.is_empty() && self.allowed_channels.contains(&channel_id)
     }
 
     /// Gate, echo-filter, and forward one inbound Discord message.
@@ -95,7 +97,7 @@ impl Forwarder {
             body: MessageBody::Text(msg.content.clone()),
             // serenity's `Timestamp` exposes whole-second Unix time; scale to the
             // gateway's millisecond convention.
-            received_at: (msg.timestamp.unix_timestamp().max(0) as u64) * 1000,
+            received_at: UnixTsMillis((msg.timestamp.unix_timestamp().max(0) as u64) * 1000),
             thread_id: None,
         };
 
@@ -200,6 +202,34 @@ impl DiscordChannel {
         Ok(sent.id.to_string())
     }
 
+    /// Edit a previously-sent Discord channel message.
+    ///
+    /// # Errors
+    /// - [`DiscordError::InvalidChannelId`] if `channel_id` is not a `u64`.
+    /// - [`DiscordError::Send`] if `message_id` is malformed or Discord rejects the edit.
+    pub async fn edit_text(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        text: &str,
+    ) -> Result<String, DiscordError> {
+        let channel = channel_id
+            .parse::<u64>()
+            .map_err(|_| DiscordError::InvalidChannelId(channel_id.to_owned()))?;
+        let message = message_id
+            .parse::<u64>()
+            .map_err(|_| DiscordError::Send(format!("invalid discord message id: {message_id}")))?;
+        let edited = DiscordChannelId::new(channel)
+            .edit_message(
+                &self.http,
+                DiscordMessageId::new(message),
+                EditMessage::new().content(text),
+            )
+            .await
+            .map_err(|e| DiscordError::Send(e.to_string()))?;
+        Ok(edited.id.to_string())
+    }
+
     /// Resolve an [`OutgoingMessage`] target into a channel id string.
     fn target_channel(target: &MessageTarget) -> Result<String, DiscordError> {
         match target {
@@ -266,8 +296,40 @@ impl MessagingGateway for DiscordChannel {
 
 /// Current wall-clock time in Unix milliseconds (saturating to 0 before the epoch).
 fn now_millis() -> UnixTsMillis {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+    UnixTsMillis(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn channel_allowed_is_deny_by_default() {
+        // ARD-475: an empty allowlist denies every channel (previously it allowed
+        // all); a configured allowlist admits only its members.
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let deny_all = Forwarder {
+            tx,
+            allowed_channels: Arc::new(HashSet::new()),
+            bot_id: 0,
+            channel_prefix: "discord://0".to_string(),
+        };
+        assert!(!deny_all.channel_allowed(1));
+        assert!(!deny_all.channel_allowed(0));
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let allow_one = Forwarder {
+            tx,
+            allowed_channels: Arc::new([42u64].into_iter().collect()),
+            bot_id: 0,
+            channel_prefix: "discord://0".to_string(),
+        };
+        assert!(allow_one.channel_allowed(42));
+        assert!(!allow_one.channel_allowed(43));
+    }
 }

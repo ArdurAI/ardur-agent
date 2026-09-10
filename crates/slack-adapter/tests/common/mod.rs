@@ -33,7 +33,10 @@ pub fn test_adapter(base_url: Option<String>) -> SlackAdapter {
         SecretString::from(BOT_TOKEN.to_string()),
         SecretString::from(SIGNING_SECRET.to_string()),
         APP_ID.to_string(),
-    );
+    )
+    // ARD-475: the parse fixtures send from these two test users, so allowlist
+    // them to keep the deny-by-default gate from dropping the happy-path msgs.
+    .with_allowed_senders(["U12345", "U99999"]);
     match base_url {
         Some(url) => adapter.with_base_url(url),
         None => adapter,

@@ -73,10 +73,12 @@ pub trait MessagingGateway: Send + Sync {
 /// Current wall-clock time in Unix milliseconds (saturating to 0 before the
 /// epoch, which cannot occur in practice).
 fn now_millis() -> UnixTsMillis {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+    UnixTsMillis(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0),
+    )
 }
 
 /// An in-memory gateway that loops sent messages straight back as inbound ones.

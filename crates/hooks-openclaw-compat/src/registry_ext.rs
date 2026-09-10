@@ -192,7 +192,9 @@ impl LifecycleHook for OpenClawLifecycleHook {
             canonical_event: self.entry.canonical_event,
             command: self.entry.command.clone(),
             session_id: ctx.session_id.0.to_string(),
-            cap_token: ctx.receipt.cap_token_id.0.clone(),
+            // The receipt's cap-token id is now a UUID (`ardur_core_types::TokenId`);
+            // the openclaw invocation carries it as its string form.
+            cap_token: ctx.receipt.cap_token_id.0.to_string(),
             source_entry_index: self.entry.source_entry_index,
         };
         match self.runner.run(invocation).await {

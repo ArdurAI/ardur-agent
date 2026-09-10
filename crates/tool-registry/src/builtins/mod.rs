@@ -28,7 +28,7 @@ mod media;
 mod shell;
 
 pub use files::{ListDirTool, ReadFileTool, WriteFileTool};
-pub use http::HttpFetchTool;
+pub use http::{HttpFetchTool, is_internal_ip};
 pub use media::{ImageAnalyzeTool, ImageGenerateTool, SttTool, TtsTool, VoiceNoteTool};
 pub use shell::ShellTool;
 

@@ -103,7 +103,9 @@ pub enum ReconciliationAction {
 /// The outcome of one reconciliation sweep over the receipt log + journal.
 #[derive(Clone, Debug)]
 pub struct ReconciliationReport {
-    /// Receipts present in the on-disk chain at the time of the sweep.
+    /// Receipts assigned to this journal's session id at the time of the sweep.
+    /// Legacy receipts without a session id and receipts owned by other journals
+    /// are authenticated as part of the complete chain but excluded here.
     pub receipt_count: usize,
     /// Distinct receipt ids the journal accounts for (via `AssistantMessage`
     /// entries) at the time of the sweep.

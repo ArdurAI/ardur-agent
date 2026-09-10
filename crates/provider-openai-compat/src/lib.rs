@@ -51,7 +51,7 @@ use std::time::Duration;
 
 use ardur_provider_runtime::{
     CompletionRequest, CompletionResponse, FinishReason, ModelId, Provider, ProviderError,
-    ProviderStream, RateCard, ToolCall, Usage,
+    ProviderStream, RateCard, ToolCall, Usage, parse_retry_after_ms,
 };
 use ardur_runtime::{ChatMessage, CostTuple, ProviderId, Role};
 use async_trait::async_trait;
@@ -555,17 +555,6 @@ fn role_str(role: Role) -> &'static str {
     }
 }
 
-/// Parse the `retry-after` header (whole seconds) into milliseconds, defaulting
-/// to `0` when absent or unparseable.
-fn parse_retry_after_ms(headers: &reqwest::header::HeaderMap) -> u64 {
-    headers
-        .get(reqwest::header::RETRY_AFTER)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.trim().parse::<u64>().ok())
-        .map(|secs| secs.saturating_mul(1000))
-        .unwrap_or(0)
-}
-
 /// Map a non-2xx OpenAI-compatible response onto the crate's [`ProviderError`]
 /// taxonomy. The common error body is `{ "error": { "message", "code", … } }`;
 /// its message and code, when present, are surfaced in the mapped error.
@@ -721,7 +710,7 @@ impl ChatCompletion {
             tokens_out: u64::from(usage.tokens_out),
             cents,
             wall_ms: 0,
-            attention_score: 0.0,
+            attention_score: 0,
         };
 
         CompletionResponse {
@@ -749,11 +738,14 @@ fn map_finish_reason(reason: Option<&str>, tool_calls: Vec<ToolCall>) -> FinishR
     }
 }
 
-/// Convert an optional dollar cost into whole US cents, rounding to the nearest
-/// cent. Missing cost (OpenAI proper and many compatible endpoints) is `0`.
-fn dollars_to_cents(cost: Option<f64>) -> u64 {
+/// Convert an optional dollar cost into whole US cents, rounding UP to the next
+/// cent (minimum 1¢ for any positive cost — ARD-495: sub-cent costs must not
+/// round to 0 and bypass the budget). Missing cost is `0`.
+pub(crate) fn dollars_to_cents(cost: Option<f64>) -> u64 {
     match cost {
-        Some(dollars) if dollars.is_finite() && dollars > 0.0 => (dollars * 100.0).round() as u64,
+        Some(dollars) if dollars.is_finite() && dollars > 0.0 => {
+            ((dollars * 100.0).ceil() as u64).max(1)
+        }
         _ => 0,
     }
 }
@@ -803,9 +795,12 @@ mod tests {
     }
 
     #[test]
-    fn dollars_round_to_nearest_cent_and_default_zero() {
-        assert_eq!(dollars_to_cents(Some(0.014)), 1);
-        assert_eq!(dollars_to_cents(Some(0.026)), 3);
+    fn dollars_round_up_to_whole_cent_and_never_zero() {
+        // ARD-495: a positive cost rounds UP, never down to 0.
+        assert_eq!(dollars_to_cents(Some(0.003)), 1, "0.3¢ -> 1¢, not 0");
+        assert_eq!(dollars_to_cents(Some(0.014)), 2, "1.4¢ -> 2¢ (ceil)");
+        assert_eq!(dollars_to_cents(Some(0.026)), 3, "2.6¢ -> 3¢");
+        assert_eq!(dollars_to_cents(Some(0.05)), 5);
         assert_eq!(dollars_to_cents(None), 0);
         assert_eq!(dollars_to_cents(Some(0.0)), 0);
         assert_eq!(dollars_to_cents(Some(f64::NAN)), 0);
@@ -958,7 +953,7 @@ mod tests {
         assert_eq!(resp.usage.tokens_out, 2);
         assert_eq!(resp.cost.tokens_in, 11);
         assert_eq!(resp.cost.tokens_out, 2);
-        assert_eq!(resp.cost.cents, 1); // 0.0123 USD → 1.23¢ → 1¢
+        assert_eq!(resp.cost.cents, 2); // 0.0123 USD → 1.23¢ → 2¢ (ceil, ARD-495)
         assert!(resp.raw_provider_response.is_some());
     }
 

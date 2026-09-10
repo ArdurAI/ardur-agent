@@ -212,7 +212,7 @@ impl Provider for FakeProvider {
                         tokens_out: 7,
                         cents: cost_cents,
                         wall_ms: 123,
-                        attention_score: 0.0,
+                        attention_score: 0,
                     },
                     raw_provider_response,
                 })
@@ -231,7 +231,7 @@ impl Provider for FakeProvider {
                         tokens_out: 1,
                         cents: 1,
                         wall_ms: 1,
-                        attention_score: 0.0,
+                        attention_score: 0,
                     },
                     raw_provider_response: None,
                 })

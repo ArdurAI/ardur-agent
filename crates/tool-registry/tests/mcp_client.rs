@@ -6,7 +6,7 @@ mod common;
 
 use common::{registry_with_examples, spawn_mcp_server, test_context};
 
-use ardur_tool_registry::{RemoteMcpToolset, ToolId};
+use ardur_tool_registry::{MCP_CAPABILITY, RemoteMcpToolset, ToolId};
 use serde_json::json;
 
 /// The toolset fetches the shim server's `tools/list` and surfaces each entry as
@@ -53,4 +53,32 @@ async fn remote_tool_call_forwards_over_mcp() {
     assert_eq!(out.content["status"], "ok");
     assert_eq!(out.content["provider"], "anthropic");
     assert_eq!(out.content["memory_backend"], "in-memory");
+}
+
+/// ARD-478: every remote-MCP-sourced tool declares the blanket `cap.mcp`
+/// capability, so the fused runtime's cap-token/Cedar gate authorizes it
+/// against the issuing cap-token's scope instead of short-circuiting on empty
+/// caps (the previous bypass).
+#[tokio::test]
+async fn remote_mcp_tool_declares_mcp_capability() {
+    let url = spawn_mcp_server(registry_with_examples()).await;
+    let toolset = RemoteMcpToolset::connect(url, None)
+        .await
+        .expect("connect to shim server");
+    let tools = toolset.into_tools().await.expect("fetch tools");
+    assert!(!tools.is_empty(), "shim exposes at least one tool");
+    for tool in &tools {
+        let caps = tool.required_capabilities();
+        assert!(
+            !caps.is_empty(),
+            "remote MCP tool {:?} must declare a capability (ARD-478)",
+            tool.id().0
+        );
+        assert!(
+            caps.iter().any(|c| c.as_str() == MCP_CAPABILITY),
+            "remote MCP tool {:?} must declare {}",
+            tool.id().0,
+            MCP_CAPABILITY
+        );
+    }
 }

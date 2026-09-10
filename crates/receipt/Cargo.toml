@@ -10,10 +10,9 @@ repository.workspace = true
 # JWS-ES256 over NIST P-256 (sign/verify) + PKCS#8 PEM key custody. Pinned at
 # the workspace level (features ecdsa, pkcs8, pem); see the root Cargo.toml.
 p256 = { workspace = true }
-# OsRng for key generation — p256's `SigningKey::random` needs a CSPRNG;
-# signing itself is deterministic (RFC 6979), so no RNG on the hot path.
-rand_core = { workspace = true }
-sha2 = { workspace = true }
+# Key generation uses p256's ambient-CSPRNG `Generate` impl; signing itself is
+# deterministic (RFC 6979), so no RNG on the hot path.
+ardur-core-types = { workspace = true }
 base64 = { workspace = true }
 regex = { workspace = true }
 once_cell = { workspace = true }

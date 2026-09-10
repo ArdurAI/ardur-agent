@@ -504,22 +504,33 @@ fn execute_step(step: &FlowStep, state: &mut TaskRuntimeState, timeout_ms: u32) 
     true
 }
 
-/// In-memory orchestrator used by tests and downstream contract checks.
+/// In-memory orchestrator used by downstream contract checks.
 #[derive(Clone, Debug, Default)]
-pub struct MockTaskFlowOrchestrator {
+pub struct InMemoryTaskFlowOrchestrator {
     states: Arc<Mutex<HashMap<TaskId, TaskRuntimeState>>>,
 }
 
-impl MockTaskFlowOrchestrator {
-    /// Create a mock orchestrator with no tasks.
+impl InMemoryTaskFlowOrchestrator {
+    /// Create an in-memory orchestrator with no tasks.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// Lock the state map, recovering the guard if the mutex was poisoned by a
+    /// panic in another operation (L12). The state is a plain map with no
+    /// cross-field invariant a poison could corrupt, so recovering matches the
+    /// graceful poison handling of the production-default orchestrator instead
+    /// of propagating the panic to every subsequent caller.
+    fn lock_states(&self) -> std::sync::MutexGuard<'_, HashMap<TaskId, TaskRuntimeState>> {
+        self.states
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 }
 
 #[async_trait]
-impl TaskFlowOrchestrator for MockTaskFlowOrchestrator {
+impl TaskFlowOrchestrator for InMemoryTaskFlowOrchestrator {
     async fn create_task(
         &self,
         _token: &VerifiedClaims,
@@ -542,10 +553,7 @@ impl TaskFlowOrchestrator for MockTaskFlowOrchestrator {
             .as_ref()
             .and_then(|dag| dag.root.as_step().cloned());
 
-        self.states
-            .lock()
-            .expect("mock state lock poisoned")
-            .insert(task_id, state);
+        self.lock_states().insert(task_id, state);
         Ok(TaskHandle { task_id })
     }
 
@@ -554,7 +562,7 @@ impl TaskFlowOrchestrator for MockTaskFlowOrchestrator {
         _token: &VerifiedClaims,
         task_id: TaskId,
     ) -> Result<(), TaskFlowError> {
-        let mut states = self.states.lock().expect("mock state lock poisoned");
+        let mut states = self.lock_states();
         let state = states
             .get_mut(&task_id)
             .ok_or(TaskFlowError::TaskNotFound(task_id))?;
@@ -565,9 +573,7 @@ impl TaskFlowOrchestrator for MockTaskFlowOrchestrator {
     }
 
     async fn get_task_state(&self, task_id: TaskId) -> Result<TaskRuntimeState, TaskFlowError> {
-        self.states
-            .lock()
-            .expect("mock state lock poisoned")
+        self.lock_states()
             .get(&task_id)
             .cloned()
             .ok_or(TaskFlowError::TaskNotFound(task_id))
@@ -586,11 +592,47 @@ impl TaskFlowOrchestrator for MockTaskFlowOrchestrator {
             ));
         }
 
-        let mut states = self.states.lock().expect("mock state lock poisoned");
+        let mut states = self.lock_states();
         let state = states
             .get_mut(&task_id)
             .ok_or(TaskFlowError::TaskNotFound(task_id))?;
         state.step_outcomes.insert(step_id, StepOutcome::Succeeded);
         Ok(())
+    }
+}
+
+/// Backward-compatible alias for pre-ARD-280 callers. New code should use
+/// [`InMemoryTaskFlowOrchestrator`] so production examples do not imply this is
+/// a mock-only path.
+pub type MockTaskFlowOrchestrator = InMemoryTaskFlowOrchestrator;
+
+#[cfg(test)]
+mod poison_tests {
+    use super::*;
+
+    /// L12: a mutex poisoned by a panic in one operation must not make every
+    /// later call panic — `lock_states` recovers the guard and the map stays
+    /// usable, matching the default orchestrator's graceful posture.
+    #[test]
+    fn lock_states_recovers_from_a_poisoned_mutex() {
+        let orchestrator = InMemoryTaskFlowOrchestrator::new();
+        let states = orchestrator.states.clone();
+
+        let joined = std::thread::spawn(move || {
+            let _guard = states.lock().expect("first lock is not yet poisoned");
+            panic!("poison the task-state lock");
+        })
+        .join();
+        assert!(joined.is_err(), "the helper thread panicked as intended");
+        assert!(
+            orchestrator.states.is_poisoned(),
+            "the mutex is now poisoned"
+        );
+
+        // The recovery helper returns a usable guard instead of panicking.
+        let task_id = TaskId::new();
+        let mut guard = orchestrator.lock_states();
+        guard.insert(task_id, TaskRuntimeState::new(task_id));
+        assert!(guard.contains_key(&task_id));
     }
 }

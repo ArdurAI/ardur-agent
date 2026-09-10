@@ -42,6 +42,14 @@ pub enum CapTokenError {
     /// that would not parse.
     #[error("malformed cap-token: {0}")]
     Malformed(String),
+
+    /// An attenuation block carried a check the verifier cannot project into
+    /// effective claims. Rejected fail-closed: the token's Datalog still
+    /// enforces the current request, but returning the un-narrowed claims could
+    /// hand a downstream policy check wider authority (e.g. a tool allowlist)
+    /// than the token actually grants. The payload is the offending statement.
+    #[error("cap-token carries an uninterpretable attenuation: {0}")]
+    UnprojectableAttenuation(String),
 }
 
 /// Map a Biscuit parse/verify failure onto a [`CapTokenError`]. A bad signature

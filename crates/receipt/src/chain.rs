@@ -5,7 +5,8 @@
 //! `parent_hash`), mutating any receipt invalidates every link after it.
 
 use crate::error::ReceiptError;
-use crate::jws::SignedReceipt;
+use crate::jws::{ReceiptVerifier, SignedReceipt};
+use crate::keys::Jwks;
 use crate::types::{ReceiptBody, Sha256Digest};
 
 /// Where, and how, a receipt chain's hash linkage first fails.
@@ -32,18 +33,30 @@ impl ReceiptChain {
     }
 }
 
-/// Verify the hash linkage of an ordered slice of signed receipts.
+/// Verify the integrity of an ordered slice of signed receipts.
 ///
-/// Returns `Ok(())` when every receipt's `parent_hash` equals the SHA-256 of
-/// the previous receipt's compact JWS, and the first receipt is a genesis
-/// (`parent_hash == None`). On the first mismatch returns
-/// [`ReceiptError::BrokenChain`] carrying the [`BrokenAt`] location.
+/// Returns `Ok(())` when, for every receipt:
+/// 1. its JWS ES256 signature verifies against the public key resolved from
+///    `jwks` via its `kid` header (ARD-479 — previously only the hash linkage
+///    was checked, so a forged/absent signature passed if the hash linked), and
+/// 2. its `parent_hash` equals the SHA-256 of the previous receipt's compact
+///    JWS (and the first receipt is a genesis, `parent_hash == None`).
+///
+/// Signature verification runs *before* the linkage check, so a receipt with a
+/// forged signature is rejected even if its stored `parent_hash` happens to
+/// link. On the first signature failure the underlying
+/// [`ReceiptError::SignatureInvalid`] / [`ReceiptError::UnknownKid`] /
+/// [`ReceiptError::Malformed`] is returned; on the first linkage mismatch
+/// [`ReceiptError::BrokenChain`] carrying the [`BrokenAt`] location is returned.
 ///
 // TODO §11.14 Phase 2: batch the verified hashes into a binary Merkle tree
 // and check the recomputed root against the Authority-published root.
-pub fn verify_chain(receipts: &[SignedReceipt]) -> Result<(), ReceiptError> {
+pub fn verify_chain(receipts: &[SignedReceipt], jwks: &Jwks) -> Result<(), ReceiptError> {
     let mut prev: Option<&SignedReceipt> = None;
     for (at, receipt) in receipts.iter().enumerate() {
+        // ARD-479: verify the JWS ES256 signature before trusting any derived
+        // data (including this receipt's parent_hash linkage).
+        ReceiptVerifier::verify(receipt, jwks)?;
         let expected = prev.map(|p| Sha256Digest::of(p.jws_compact().as_bytes()));
         let actual = receipt.body().parent_hash;
         if expected != actual {

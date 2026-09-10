@@ -54,12 +54,15 @@ ardur-memory = { workspace = true }
 # The durable Qdrant memory backend, selected at boot via `ARDUR_MEMORY=qdrant`.
 ardur-memory-qdrant = { workspace = true }
 ardur-session-journals = { workspace = true }
+# Crash-safe, symlink-resistant file writes for the on-disk issuer/receipt keys.
+ardur-durability = { workspace = true }
 ardur-receipt = { workspace = true }
 ardur-runtime = { workspace = true }
 ardur-messaging-gateway = { workspace = true }
 # Optional Whisper-backed voice.transcribe tool registration; missing API keys
 # degrade gracefully at boot.
 ardur-media-audio = { workspace = true }
+ardur-media-video = { workspace = true }
 # §6.0 Phase 2 — the tool registry + its MCP bridge. The server exposes ardur's
 # tools over MCP (`ArdurMcpServer` mounted on the Streamable-HTTP transport) and
 # gates the surface with the registry's bearer-token allowlist helpers.
@@ -71,15 +74,21 @@ ardur-hooks-openclaw-compat = { workspace = true }
 # ARD-426: automation — the task-flow orchestrator trait for `ardur task`
 # commands surfaced through the server's API.
 ardur-automation = { workspace = true }
+# §5.1 delegate-task tool — multi-agent orchestration exposed via MCP.
+ardur-delegate-tool = { workspace = true }
 
 # `ardur-cap-token` re-exports `KeyPair`/`PublicKey` but not `PrivateKey`, and
 # loading the persisted issuer key needs `PrivateKey::from_bytes_hex`. Pulled
 # directly, as `crates/e2e-tests` does for the same reason.
 biscuit-auth = { workspace = true }
+# Descriptor-relative, no-follow access to persisted server key material on Unix.
+rustix = { workspace = true }
+uuid = { workspace = true }
 
 # HTTP server + the Slack bot-token / signing-secret custody type.
 axum = { workspace = true }
 tokio = { workspace = true }
+futures = { workspace = true }
 secrecy = { workspace = true }
 
 # Structured logging (env-driven `RUST_LOG`; JSON when `ARDUR_LOG_FORMAT=json`).

@@ -26,7 +26,7 @@ use ardur_messaging_gateway::{
 };
 
 use teloxide::prelude::*;
-use teloxide::types::ChatId;
+use teloxide::types::{ChatId, MessageId};
 
 use crate::config::TelegramConfig;
 use crate::error::TelegramError;
@@ -64,9 +64,11 @@ struct Forwarder {
 }
 
 impl Forwarder {
-    /// Whether `chat_id` is permitted (empty allowlist = all chats).
+    /// Whether `chat_id` is permitted. Deny-by-default (ARD-475): an empty
+    /// allowlist drops every chat, so the operator must explicitly allow the
+    /// chats the bot may read — matching the Matrix adapter.
     fn chat_allowed(&self, chat_id: i64) -> bool {
-        self.allowed_chats.is_empty() || self.allowed_chats.contains(&chat_id)
+        !self.allowed_chats.is_empty() && self.allowed_chats.contains(&chat_id)
     }
 
     /// Gate, echo-filter, and forward one inbound Telegram message.
@@ -98,7 +100,7 @@ impl Forwarder {
             channel_id: ChannelId(format!("{}/{chat_id}", self.channel_prefix)),
             sender: SenderRef(sender),
             body: MessageBody::Text(text.to_owned()),
-            received_at: msg.date.timestamp_millis().max(0) as u64,
+            received_at: UnixTsMillis(msg.date.timestamp_millis().max(0) as u64),
             thread_id: None,
         };
 
@@ -194,6 +196,30 @@ impl TelegramChannel {
         Ok(sent.id.0.to_string())
     }
 
+    /// Edit a previously-sent Telegram chat message.
+    ///
+    /// # Errors
+    /// - [`TelegramError::InvalidChatId`] if `chat_id` is not an `i64`.
+    /// - [`TelegramError::Send`] if `message_id` is malformed or Telegram rejects the edit.
+    pub async fn edit_text(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+        text: &str,
+    ) -> Result<String, TelegramError> {
+        let chat = chat_id
+            .parse::<i64>()
+            .map_err(|_| TelegramError::InvalidChatId(chat_id.to_owned()))?;
+        let message = message_id.parse::<i32>().map_err(|_| {
+            TelegramError::Send(format!("invalid telegram message id: {message_id}"))
+        })?;
+        self.bot
+            .edit_message_text(ChatId(chat), MessageId(message), text)
+            .await
+            .map_err(|e| TelegramError::Send(e.to_string()))?;
+        Ok(message.to_string())
+    }
+
     /// Resolve an [`OutgoingMessage`] target into a chat id string.
     fn target_chat(target: &MessageTarget) -> Result<String, TelegramError> {
         match target {
@@ -260,8 +286,40 @@ impl MessagingGateway for TelegramChannel {
 
 /// Current wall-clock time in Unix milliseconds (saturating to 0 before the epoch).
 fn now_millis() -> UnixTsMillis {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+    UnixTsMillis(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chat_allowed_is_deny_by_default() {
+        // ARD-475: an empty allowlist denies every chat (previously it allowed
+        // all); a configured allowlist admits only its members.
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let deny_all = Forwarder {
+            tx,
+            allowed_chats: Arc::new(HashSet::new()),
+            bot_id: 0,
+            channel_prefix: "telegram://0".to_string(),
+        };
+        assert!(!deny_all.chat_allowed(-100));
+        assert!(!deny_all.chat_allowed(0));
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let allow_one = Forwarder {
+            tx,
+            allowed_chats: Arc::new([-42_i64].into_iter().collect()),
+            bot_id: 0,
+            channel_prefix: "telegram://0".to_string(),
+        };
+        assert!(allow_one.chat_allowed(-42));
+        assert!(!allow_one.chat_allowed(-43));
+    }
 }

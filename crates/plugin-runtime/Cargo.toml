@@ -1,0 +1,35 @@
+# ardur-plugin-runtime — the §8.8 claim-activation governance layer: bridges
+# an admitted plugin's declared Tool/Channel extension claims into the real
+# ToolRegistry/GatewayRegistry, namespaced and capability/cap-token bounded.
+#
+# This crate does NOT load or execute untrusted third-party code (no wasm,
+# process, or container sandbox backend). It governs activation of a
+# *caller-supplied* concrete `Tool`/`MessagingGateway` implementation: the
+# host process (a future sandboxed plugin loader, or a boot-time built-in
+# bridge) is responsible for producing that implementation; this crate
+# enforces that its capabilities stay within what the plugin's signed
+# manifest declared, gives it a namespaced identity no built-in tool/channel
+# can collide with, and derives a cap-token strictly narrower than the
+# plugin's admission token.
+
+[package]
+name = "ardur-plugin-runtime"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ardur-cap-token = { workspace = true }
+ardur-tool-registry = { workspace = true }
+ardur-messaging-gateway = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+ardur-runtime = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }

@@ -1,7 +1,9 @@
 //! Inbound Events-API handling: signature verification, replay protection, and
 //! parsing a signed request body into a [`SlackEvent`].
 
-use ardur_messaging_gateway::{ChannelId, IncomingMessage, MessageBody, SenderRef, ThreadId};
+use ardur_messaging_gateway::{
+    ChannelId, IncomingMessage, MessageBody, SenderRef, ThreadId, UnixTsMillis,
+};
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -116,11 +118,12 @@ pub(crate) fn message_to_incoming(app_id: &str, ev: &InnerEvent) -> IncomingMess
         channel_id: ChannelId(format!("slack://{app_id}/{channel}")),
         sender: SenderRef(ev.user.clone().unwrap_or_default()),
         body: MessageBody::Text(ev.text.clone().unwrap_or_default()),
-        received_at: ev
-            .ts
-            .as_deref()
-            .and_then(slack_ts_to_millis)
-            .unwrap_or_default(),
+        received_at: UnixTsMillis(
+            ev.ts
+                .as_deref()
+                .and_then(slack_ts_to_millis)
+                .unwrap_or_default(),
+        ),
         thread_id: ev.thread_ts.clone().map(ThreadId),
     }
 }

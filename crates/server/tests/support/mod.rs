@@ -51,15 +51,25 @@ pub fn sign(timestamp: &str, body: &str) -> String {
 /// empty — tests inject the stub provider.
 #[must_use]
 pub fn test_config(data_dir: &TempDir, slack_base: Option<String>) -> Config {
+    // macOS tempdirs live under /var/folders/... (where /var symlinks to
+    // /private/var); the schema-migration guard refuses symlinks in trusted
+    // state paths, so canonicalize before passing to the server.
+    let canonical_data_dir = data_dir
+        .path()
+        .canonicalize()
+        .expect("canonicalize tempdir");
     Config {
         anthropic_api_key: String::new(),
-        slack_bot_token: BOT_TOKEN.to_string(),
-        slack_signing_secret: SIGNING_SECRET.to_string(),
-        slack_app_id: APP_ID.to_string(),
-        data_dir: data_dir.path().to_path_buf(),
+        slack_enabled: true,
+        slack_bot_token: Some(BOT_TOKEN.to_string()),
+        slack_signing_secret: Some(SIGNING_SECRET.to_string()),
+        slack_app_id: Some(APP_ID.to_string()),
+        slack_allowed_senders: vec!["U4242".to_string()],
+        data_dir: canonical_data_dir,
         bind_addr: "127.0.0.1:0".to_string(),
         chat_bearer_tokens: vec![CHAT_TOKEN.to_string()],
         admin_bearer_tokens: Vec::new(),
+        cors_origins: Vec::new(),
         dev_permissive_policy: true,
         model: "claude-opus-4-8".to_string(),
         cost_budget_cents: 10_000,
@@ -77,6 +87,28 @@ pub fn test_config(data_dir: &TempDir, slack_base: Option<String>) -> Config {
         memory_backend: MemoryBackend::InMemory,
         qdrant_url: None,
         qdrant_collection: None,
+        enable_shell_tool: false,
+        shell_allowlist: Vec::new(),
+        enable_http_tool: false,
+        http_allowlist: Vec::new(),
+        file_tool_root: None,
+        http_turn_timeout: std::time::Duration::from_secs(30),
+    }
+}
+
+/// A [`Config`] like [`test_config`] but with the Slack channel disabled — the
+/// HTTP-only boot mode. The three `slack_*` credentials are `None`, so
+/// [`AppState::boot`] builds no Slack adapter and [`build_router`] omits the
+/// `/slack/events` route. `/chat` still works.
+#[must_use]
+pub fn test_config_http_only(data_dir: &TempDir) -> Config {
+    Config {
+        slack_enabled: false,
+        slack_bot_token: None,
+        slack_signing_secret: None,
+        slack_app_id: None,
+        slack_allowed_senders: Vec::new(),
+        ..test_config(data_dir, None)
     }
 }
 
@@ -111,16 +143,18 @@ pub fn test_config_with_admin(
 
 /// Boot an [`AppState`] over the deterministic stub provider (no network).
 #[must_use]
-pub fn boot_stub(config: &Config) -> Arc<AppState> {
+pub async fn boot_stub(config: &Config) -> Arc<AppState> {
     let provider: Arc<dyn Provider> =
         Arc::new(AnthropicProvider::stub(ModelId::new(&config.model)));
     let tools = Arc::new(example_registry("stub", "in-memory"));
-    AppState::boot(config, provider, tools).expect("AppState boots")
+    AppState::boot(config, provider, tools)
+        .await
+        .expect("AppState boots")
 }
 
 /// Boot the stub-backed router for `config`.
-pub fn boot_router(config: &Config) -> Router {
-    build_router(boot_stub(config))
+pub async fn boot_router(config: &Config) -> Router {
+    build_router(boot_stub(config).await)
 }
 
 /// Drive a single request through `router` via `oneshot`, returning the status

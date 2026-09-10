@@ -19,12 +19,12 @@ async fn replay_from_a_checkpoint_returns_only_later_entries() {
             JournalEntry::Checkpoint {
                 checkpoint_id: Uuid::new_v4(),
                 summary: "halfway".into(),
-                at: 5_000 + i,
+                at: ardur_session_journals::UnixTsMillis(5_000 + i),
             }
         } else {
             JournalEntry::UserMessage {
                 content: format!("message {i}"),
-                at: 5_000 + i,
+                at: ardur_session_journals::UnixTsMillis(5_000 + i),
             }
         };
         let id = journal.append(entry).await.expect("append");
@@ -51,7 +51,7 @@ async fn replay_from_a_checkpoint_returns_only_later_entries() {
         match entry {
             JournalEntry::UserMessage { content, at } => {
                 assert_eq!(content, &format!("message {i}"));
-                assert_eq!(*at, 5_000 + i);
+                assert_eq!(at.get(), 5_000 + i);
             }
             other => panic!("unexpected entry after checkpoint: {other:?}"),
         }
@@ -65,7 +65,7 @@ async fn replay_from_past_the_end_is_not_found() {
     journal
         .append(JournalEntry::UserMessage {
             content: "only one".into(),
-            at: 1,
+            at: ardur_session_journals::UnixTsMillis(1),
         })
         .await
         .expect("append");

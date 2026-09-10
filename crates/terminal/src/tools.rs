@@ -197,19 +197,20 @@ impl Tool for TerminalSessionTool {
     async fn invoke(
         &self,
         ctx: &ToolContext,
-        args: serde_json::Value,
+        _args: serde_json::Value,
     ) -> Result<ToolOutput, ardur_tool_registry::ToolError> {
+        // Authorize first so an unauthorized caller still sees a capability
+        // denial rather than a not-implemented error.
         ensure_authorized(ctx, Capability::ShellExec)?;
-        let session_id = args
-            .get("session_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("");
-        Ok(ToolOutput {
-            content: json!({"session_id": session_id, "action": action, "status": "ok"}),
-            cost: CostTuple::default(),
-            receipt_data: receipt("terminal.session", BackendKind::Local, action),
-        })
+        // The persistent-session backend does not exist yet. Previously this
+        // returned `{"status":"ok"}` and minted a `permitted` receipt without
+        // creating a session, running the command, or closing anything —
+        // fabricating both a success and a signed audit record for work that
+        // never happened. Fail honestly instead: return an explicit error so
+        // the runtime mints no permitted receipt for the unperformed action.
+        Err(ardur_tool_registry::ToolError::NotImplemented(
+            "terminal.session: persistent session backend is not implemented".to_string(),
+        ))
     }
 
     fn required_capabilities(&self) -> &[Capability] {
@@ -238,5 +239,53 @@ mod tests {
     fn terminal_session_tool_id() {
         let tool = TerminalSessionTool::new();
         assert_eq!(tool.id().as_str(), "terminal.session");
+    }
+
+    fn ctx_with_token(token: &str) -> ToolContext {
+        use ardur_tool_registry::{CapTokenRef, InvocationId, SessionId};
+        ToolContext {
+            cap_token: CapTokenRef(token.to_string()),
+            session_id: SessionId::new(),
+            invocation_id: InvocationId::new(),
+            cwd: std::path::PathBuf::from("."),
+            env: std::collections::HashMap::new(),
+            cost_budget_cents: u32::MAX,
+        }
+    }
+
+    /// Regression for #354: `terminal.session` used to return `{"status":"ok"}`
+    /// and mint a `permitted` receipt without creating a session or running the
+    /// command. It must now fail honestly with `NotImplemented` so the runtime
+    /// mints no permitted receipt for work that never ran.
+    #[tokio::test]
+    async fn terminal_session_fails_honestly_and_mints_no_receipt() {
+        let tool = TerminalSessionTool::new();
+        let ctx = ctx_with_token("cap-token");
+        let result = tool
+            .invoke(
+                &ctx,
+                json!({"session_id": "s1", "action": "exec", "command": "echo hi"}),
+            )
+            .await;
+        match result {
+            Err(ardur_tool_registry::ToolError::NotImplemented(_)) => {}
+            other => panic!("expected NotImplemented, got {other:?}"),
+        }
+    }
+
+    /// The capability check still fires before the not-implemented error, so an
+    /// unauthorized caller sees a capability denial rather than leaking the
+    /// not-implemented state.
+    #[tokio::test]
+    async fn terminal_session_denies_unauthorized_before_not_implemented() {
+        let tool = TerminalSessionTool::new();
+        let ctx = ctx_with_token("");
+        let result = tool
+            .invoke(&ctx, json!({"session_id": "s1", "action": "create"}))
+            .await;
+        assert!(matches!(
+            result,
+            Err(ardur_tool_registry::ToolError::CapabilityDenied(_))
+        ));
     }
 }

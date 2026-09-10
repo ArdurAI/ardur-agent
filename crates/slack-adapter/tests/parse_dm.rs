@@ -37,6 +37,6 @@ fn signed_dm_parses_into_incoming_message() {
         ChannelId(format!("slack://{}/D67890", common::APP_ID))
     );
     // ts "1700000000.200000" (200_000 µs = 200 ms) → 1_700_000_000_200 ms.
-    assert_eq!(msg.received_at, 1_700_000_000_200);
+    assert_eq!(msg.received_at.get(), 1_700_000_000_200);
     assert!(msg.thread_id.is_none(), "a top-level dm has no thread");
 }

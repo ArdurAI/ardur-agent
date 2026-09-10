@@ -1,7 +1,7 @@
 use ardur_media_audio::{
     AudioInput, AudioModelId, AudioProviderId, AudioScope, AudioVerb, AuthorizedAudioToken,
     ContentClass, DiarizationMode, MediaProvider, MissionId, TranscribeFileRequest,
-    TranscriptFormat, TranscriptionProvider, VoiceTranscribeTool, WhisperApiConfig,
+    TranscriptFormat, TranscriptionProvider, UnixTsMillis, VoiceTranscribeTool, WhisperApiConfig,
     WhisperApiTranscriptionProvider,
 };
 use ardur_media_decode::AudioFormat;
@@ -79,7 +79,7 @@ fn request(
         max_speakers: None,
         export_format: TranscriptFormat::Json,
         mission_id: MissionId::new("mission.voice-test"),
-        requested_at: 1,
+        requested_at: UnixTsMillis(1),
     }
 }
 

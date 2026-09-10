@@ -16,8 +16,8 @@ use std::sync::Arc;
 use rmcp::ErrorData as McpError;
 use rmcp::ServerHandler;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, ContentBlock, ListToolsResult, PaginatedRequestParams,
-    ServerCapabilities, ServerInfo, Tool as McpTool,
+    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ListToolsResult,
+    PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool as McpTool,
 };
 use rmcp::service::{RequestContext, RoleServer};
 
@@ -99,7 +99,7 @@ impl ServerHandler for ArdurMcpServer {
         &self,
         request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, McpError> {
+    ) -> Result<CallToolResponse, McpError> {
         let id = ToolId::new(request.name.as_ref());
         let Some(tool) = self.registry.get(&id) else {
             return Err(McpError::invalid_params(
@@ -128,13 +128,16 @@ impl ServerHandler for ArdurMcpServer {
         let ctx = Self::invocation_context();
         match tool.invoke(&ctx, args).await {
             // A successful call returns the tool's content as the structured
-            // result (with a text mirror for non-structured clients).
-            Ok(output) => Ok(CallToolResult::structured(output.content)),
+            // result (with a text mirror for non-structured clients). rmcp 3.x:
+            // wrap in the MRTR CallToolResponse::Complete variant.
+            Ok(output) => Ok(CallToolResponse::Complete(CallToolResult::structured(
+                output.content,
+            ))),
             // A tool failure is reported as an MCP tool-error result (not a
             // protocol error) so the client sees `isError: true` with the cause.
-            Err(e) => Ok(CallToolResult::error(vec![ContentBlock::text(
-                e.to_string(),
-            )])),
+            Err(e) => Ok(CallToolResponse::Complete(CallToolResult::error(vec![
+                ContentBlock::text(e.to_string()),
+            ]))),
         }
     }
 }

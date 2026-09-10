@@ -53,7 +53,7 @@ fn discord_incoming(channel: &str, sender: &str, text: &str) -> IncomingMessage 
         channel_id: ChannelId(format!("discord://{BOT_APP}/{channel}")),
         sender: SenderRef(sender.to_string()),
         body: MessageBody::Text(text.to_string()),
-        received_at: 1_750_000_000_000,
+        received_at: ardur_messaging_gateway::UnixTsMillis(1_750_000_000_000),
         thread_id: None,
     }
 }

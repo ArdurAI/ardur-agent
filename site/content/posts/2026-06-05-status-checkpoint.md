@@ -69,7 +69,7 @@ A bi-temporal store, made durable on Qdrant (#63), with local embeddings
 The tool registry (#15) gained an MCP client and server via the official `rmcp`
 SDK (#64), filesystem `SKILL.md` skills (#69), built-in `shell.run` / `file.*`
 tools with capability gating (#88), and `http.fetch` with SSRF defense (#97).
-Nine example skills ship under `examples/skills/` (#87).
+Ten example skills ship under `examples/skills/` (#87).
 
 ### Surfaces
 

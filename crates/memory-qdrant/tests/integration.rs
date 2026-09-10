@@ -1,11 +1,14 @@
 //! Live Qdrant integration tests for [`QdrantMemoryRuntime`].
 //!
-//! Gated on `QDRANT_INTEGRATION_TEST=1` so CI (which has no Qdrant) skips them.
-//! To run locally:
+//! Each is `#[ignore]`d: it needs a live Qdrant, which CI lacks by default.
+//! `#[ignore]` (not a silent env early-return) keeps them off the default suite,
+//! so a skip reports as `ignored`, never a masked `passed` (#358). Run with
+//! `-- --ignored`:
 //!
 //! ```text
 //! docker run -p 6333:6333 -p 6334:6334 qdrant/qdrant
-//! QDRANT_INTEGRATION_TEST=1 cargo test -p ardur-memory-qdrant --test integration
+//! QDRANT_INTEGRATION_TEST=1 QDRANT_URL=http://localhost:6334 \
+//!   cargo test -p ardur-memory-qdrant --test integration -- --ignored
 //! ```
 //!
 //! Each test uses its own collection name so they do not collide when run in
@@ -16,14 +19,11 @@ use ardur_memory::{
 };
 use ardur_memory_qdrant::{MemorySnapshot, QdrantMemoryConfig, QdrantMemoryRuntime};
 
-/// Skip-or-config: returns `None` (and the caller returns early) unless the gate
-/// var is set. When enabled, builds a config pointed at the given collection.
-fn gate(collection: &str) -> Option<QdrantMemoryConfig> {
-    if std::env::var("QDRANT_INTEGRATION_TEST").as_deref() != Ok("1") {
-        eprintln!("skipping {collection}: set QDRANT_INTEGRATION_TEST=1 to run");
-        return None;
-    }
-    Some(QdrantMemoryConfig::from_env().with_collection_name(collection))
+/// The Qdrant config for `collection`. Endpoint from `QDRANT_URL` (default
+/// `http://localhost:6334`); `#[ignore]` gates these tests, not an env
+/// early-return, so a skip can never masquerade as a pass (#358).
+fn config(collection: &str) -> QdrantMemoryConfig {
+    QdrantMemoryConfig::from_env().with_collection_name(collection)
 }
 
 fn fact(subject: &str, payload: serde_json::Value, t: u64) -> MemoryRecord {
@@ -40,10 +40,9 @@ fn fact(subject: &str, payload: serde_json::Value, t: u64) -> MemoryRecord {
 
 /// Insert a record, then read it back via the bi-temporal "as-of" view.
 #[test]
+#[ignore = "requires a live Qdrant; run with `-- --ignored` (see module docs)"]
 fn insert_then_query() {
-    let Some(cfg) = gate("ardur_it_insert_query") else {
-        return;
-    };
+    let cfg = config("ardur_it_insert_query");
     let rt = QdrantMemoryRuntime::connect(cfg).expect("connect");
     rt.delete_collection().ok();
     rt.init().expect("init");
@@ -65,10 +64,9 @@ fn insert_then_query() {
 /// Invalidation cuts off the chain from the cutoff forward, but history is
 /// retained and the pre-cutoff past is still readable.
 #[test]
+#[ignore = "requires a live Qdrant; run with `-- --ignored` (see module docs)"]
 fn invalidate_preserves_history_and_past() {
-    let Some(cfg) = gate("ardur_it_invalidate") else {
-        return;
-    };
+    let cfg = config("ardur_it_invalidate");
     let rt = QdrantMemoryRuntime::connect(cfg).expect("connect");
     rt.delete_collection().ok();
     rt.init().expect("init");
@@ -121,10 +119,9 @@ fn invalidate_preserves_history_and_past() {
 /// The snapshot hook creates a Qdrant snapshot and records a `MemorySnapshot`
 /// event on the receipt chain.
 #[test]
+#[ignore = "requires a live Qdrant; run with `-- --ignored` (see module docs)"]
 fn snapshot_into_receipt_records_event() {
-    let Some(cfg) = gate("ardur_it_snapshot") else {
-        return;
-    };
+    let cfg = config("ardur_it_snapshot");
     let rt = QdrantMemoryRuntime::connect(cfg).expect("connect");
     rt.delete_collection().ok();
     rt.init().expect("init");
@@ -145,10 +142,9 @@ fn snapshot_into_receipt_records_event() {
 /// readable after the instance is dropped and a fresh one reconnects to the same
 /// collection — a simulated process restart.
 #[test]
+#[ignore = "requires a live Qdrant; run with `-- --ignored` (see module docs)"]
 fn survives_simulated_restart() {
-    let Some(cfg) = gate("ardur_it_restart") else {
-        return;
-    };
+    let cfg = config("ardur_it_restart");
     let user = HolderId::from("user:it-restart");
 
     // First "process": write, then drop the whole backend (its client + runtime).

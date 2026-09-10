@@ -18,6 +18,25 @@ pub enum WebhookError {
     /// The requested endpoint or handler was not found.
     #[error("handler not found: {0}")]
     HandlerNotFound(String),
+    /// An operator action was refused: the cap-token lacked the required scope
+    /// or the caller does not own the target resource (§9.7).
+    #[error("action refused: {0}")]
+    Denied(String),
+    /// Cap-token verification failed (expired, wrong audience, malformed).
+    #[error("cap-token: {0}")]
+    CapToken(String),
+    /// Receipt signing/persistence failed.
+    #[error("receipt: {0}")]
+    Receipt(String),
+    /// A persistence (read/write) failure in a durable store.
+    #[error("store i/o: {0}")]
+    Io(String),
+    /// A (de)serialization failure of a stored record.
+    #[error("serde: {0}")]
+    Serde(String),
+    /// The HMAC signing secret could not be resolved from its environment ref.
+    #[error("signing key resolve failed: {0}")]
+    SigningKeyResolveFailed(String),
     /// Generic internal error (opaque).
     #[error("internal error: {0}")]
     Internal(String),

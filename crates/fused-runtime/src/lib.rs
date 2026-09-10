@@ -86,6 +86,7 @@
 #![warn(missing_docs)]
 
 mod builder;
+mod receipt_cache;
 mod receipts;
 mod reconcile;
 mod runtime;
@@ -93,12 +94,17 @@ mod shared;
 pub mod streaming;
 
 pub use builder::FusedRuntimeBuilder;
+pub use receipt_cache::{LoadedReceiptChain, ReceiptCacheStats, VerifiedReceiptCache};
 pub use receipts::{
-    PersistedReceipt, ReceiptChainError, load_persisted_chain, verify_persisted_chain,
+    PersistedReceipt, ReceiptChainError, load_persisted_chain, mint_control_receipt,
+    verify_persisted_chain, verify_persisted_chain_with_jwks,
 };
 pub use reconcile::{
     ReconciliationAction, ReconciliationError, ReconciliationReport, ReconciliationStrategy,
 };
-pub use runtime::{FusedRuntime, PerRequestProvisioning};
+pub use runtime::{
+    BackgroundTaskOutcome, CancelProbe, CheckpointInfo, CheckpointOutcome, CompactOutcome,
+    FusedRuntime, PerRequestProvisioning, RollbackOutcome, TurnCommitHandshake,
+};
 pub use shared::{SharedBudget, SharedDenyList};
 pub use streaming::{FusedEvent, StageKind};

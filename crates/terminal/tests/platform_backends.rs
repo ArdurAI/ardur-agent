@@ -128,3 +128,43 @@ async fn docker_ssh_and_modal_backends_are_capability_gated_and_receipted() {
         assert_eq!(output.receipt_data["policy"]["decision"], "allow");
     }
 }
+
+/// ARD-476: a command that tries to break out of an allowlisted binary via a
+/// shell operator is rejected at the policy gate — it never reaches a process.
+/// Each payload's first token is the allowlisted `printf`; the tail would have
+/// executed under the old `/bin/sh -c`.
+#[tokio::test]
+async fn terminal_rejects_injection_past_allowlisted_binary() {
+    let backend = Arc::new(LocalBackend::new(TerminalPolicy::allow_commands(vec![
+        "printf",
+    ])));
+    let tool = TerminalExecTool::new(backend);
+
+    for payload in [
+        "printf hi ; rm -rf /tmp/ardur-ard476",
+        "printf hi && reboot",
+        "printf hi | cat",
+        "printf hi > /tmp/ardur-ard476",
+        "printf $(reboot)",
+        "printf `reboot`",
+    ] {
+        let err = tool
+            .invoke(&ctx(), json!({"command": payload, "timeout_secs": 5}))
+            .await
+            .expect_err(&format!("injection payload should be denied: {payload:?}"));
+        assert!(
+            matches!(err, ToolError::Denied { .. }),
+            "expected Denied for {payload:?}, got {err:?}"
+        );
+    }
+
+    // The plain allowlisted command still runs — now via direct exec, no shell.
+    let output = tool
+        .invoke(
+            &ctx(),
+            json!({"command": "printf ardursafe", "timeout_secs": 5}),
+        )
+        .await
+        .expect("plain command runs");
+    assert_eq!(output.content["stdout"], "ardursafe");
+}

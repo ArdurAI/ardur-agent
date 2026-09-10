@@ -17,8 +17,8 @@ use ardur_runtime::SessionId;
 /// [`replay_from`](Self::replay_from) resumes after a checkpoint without
 /// re-reading the history before it.
 ///
-/// The trait is object-safe (`async-trait` boxes the returned futures) so a
-/// `Box<dyn SessionJournal>` can be stored in a [`JournalRegistry`](crate::JournalRegistry),
+/// The trait is object-safe (`async-trait` boxes the returned futures) so an
+/// `Arc<dyn SessionJournal>` can be stored in a [`JournalRegistry`](crate::JournalRegistry),
 /// and `Send + Sync` so one journal can be shared across the tasks of a session.
 #[async_trait]
 pub trait SessionJournal: Send + Sync {

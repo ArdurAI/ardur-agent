@@ -140,7 +140,7 @@ contents.
 | `ARDUR_MEMORY` | Backend | Required / notable env |
 |---|---|---|
 | `in_memory` (default) | In-process §7.0 Phase 1 store | none — **lost on restart** |
-| `qdrant` | Durable, Qdrant-backed §7.0 Phase 2 store | `QDRANT_URL` (**required**); `QDRANT_API_KEY` (cloud only), `QDRANT_COLLECTION` (default `ardur_memory`), `QDRANT_VECTOR_DIM` (default `384`), `EMBED_MODEL` (default `bge-small-en-v1.5`) |
+| `qdrant` | Durable, Qdrant-backed §7.0 Phase 2 store | `QDRANT_URL` (**required**); `QDRANT_API_KEY` (cloud only), `QDRANT_COLLECTION` (default `ardur_memory`), `QDRANT_VECTOR_DIM` (default `384`), `EMBED_MODEL` (default `bge-small-en-v1.5`), `QDRANT_TIMEOUT_SECS` (default `5`, recall fail-fast), `QDRANT_SNAPSHOT_TIMEOUT_SECS` (default `60`, snapshot RPCs) |
 | `hybrid` | §7.0c dense+sparse retriever over the durable store | same as `qdrant` (`QDRANT_URL` **required**) plus a BM25 lexical index persisted under `<ARDUR_DATA_DIR>/memory/bm25` |
 
 The default `in_memory` store is fast but volatile: every fact is gone when the
@@ -168,8 +168,9 @@ ARDUR_MEMORY=hybrid QDRANT_URL=http://localhost:6334 ardur-server
 ```
 
 The collection (Cosine distance, the configured dim) and its payload indexes
-(`subject`, `channel_id`, `session_id`) are created automatically on first boot
-if absent.
+(`subject`, `channel_id`, `session_id`, `correction_chain_root`, and the
+event/validity/invalidation time fields used by read and GC filters) are created
+or reconciled automatically on boot if absent.
 
 ### Embeddings + hybrid retrieval
 
@@ -370,7 +371,18 @@ the fused runtime.
 
 ## Production
 
+Version tags matching `v*` publish `ghcr.io/<owner>/<repo>:<tag>` (lowercase)
+from `.github/workflows/docker.yml` by tagging the same `ardur-agent:ci`
+image that already passed Trivy and `/healthz`. A GitHub Release published
+for the same tag runs `.github/workflows/release.yml` (SBOM, SHA256SUMS,
+keyless cosign, provenance). Fresh-machine validation steps are in
+[docs/fresh-machine.md](docs/fresh-machine.md). Pre-release tags do not
+receive a `:latest` tag.
+
 ```sh
+# After v0.1.0-beta.1 exists:
+docker pull ghcr.io/ardurai/ardur-agent:v0.1.0-beta.1
+
 docker run -d \
     --name ardur-server \
     --restart=unless-stopped \
@@ -378,8 +390,11 @@ docker run -d \
     -v ardur-data:/var/lib/ardur \
     -e ARDUR_BIND_ADDR=0.0.0.0:3000 \
     --env-file .env \
-    ardur-server:latest
+    ghcr.io/ardurai/ardur-agent:v0.1.0-beta.1
 ```
+
+Until a tag is published, build locally with `docker compose up --build` or
+`docker build -t ardur-agent:local .`.
 
 **Do NOT expose port 3000 directly to the public internet.** Always run
 behind a TLS-terminating proxy — nginx, Caddy, Traefik, or a Cloudflare
@@ -716,8 +731,11 @@ skills ship under `examples/skills/`.
 | Method & path                   | Purpose                                                        |
 | ------------------------------- | -------------------------------------------------------------- |
 | `POST /slack/events`            | Slack Events-API webhook (HMAC-verified; replies to channel).  |
-| `POST /chat`                    | Generic synchronous chat — run one turn, get the reply back.   |
+| `POST /chat`                    | Chat — JSON body, or SSE when `stream: true`.                  |
 | `POST /acp`                     | ACP JSON-RPC ingress; bearer-gated and receipt-chained through the fused runtime. |
+| `GET  /approvals`               | List approval cards (admin bearer).                            |
+| `POST /approvals/{id}/approve`  | Flip a pending card to approved and mint a decision receipt.   |
+| `POST /approvals/{id}/reject`   | Flip a pending card to denied and mint a decision receipt.     |
 | `GET  /healthz`                 | Liveness probe with build metadata.                            |
 | `GET  /openapi.json`            | OpenAPI 3.0 document for the mounted HTTP surface.              |
 | `GET  /openapi/clients/rust`    | Generated Rust client source.                                  |
@@ -776,15 +794,23 @@ curl -sS http://localhost:3000/chat \
 
 Status codes:
 
-- `400` — malformed JSON body, a missing/empty `message`, or `stream: true`.
+- `400` — malformed JSON body or a missing/empty `message`.
+- `401` — missing or invalid chat bearer token (fail-closed when none are configured).
 - `502` — the runtime rejected or failed the turn (cost-gate denied, injection
   blocked, provider error, …); the body carries `{"error": "<reason>"}`.
-- `200` — success, with the body above.
+- `503` — the bounded worker queue is full.
+- `504` — the HTTP turn wait timed out.
+- `200` — success. JSON body above when `stream` is omitted/false; SSE when
+  `stream: true`.
 
-**Streaming.** `stream: true` (an SSE `text/event-stream` response of
-`Provider::stream` events) is **not yet implemented** — a `true` value is
-rejected with `400` rather than silently answered with a consolidated body. It
-is a planned P1.5 follow-up.
+**Streaming.** `stream: true` returns `text/event-stream` of fused-runtime
+events (`stage_start` / `stage_end`, `content` with `text`, tool-call frames,
+`usage`, `receipt`, `finish`, in-band `error`). Dropping the response body
+cancels the in-flight turn on a best-effort basis (a fast stream can still
+commit buffered frames; the commit-boundary gate is tracked by #359).
+The static PWA in `web-client/` consumes this contract and appends only
+`type: "content"` text. Cross-origin PWA hosts must be listed in
+`ARDUR_CORS_ORIGINS` (exact `http(s)://host[:port]`; `*` is refused).
 
 ### OpenAPI and generated clients
 
@@ -932,6 +958,16 @@ cargo test -p ardur-fused-runtime --test memory_recall
 `ARDUR_COST_BUDGET_CENTS=10000` caps a single session at $100 of provider
 spend. The cost-gate enforces this server-side and returns a structured
 error to the channel before the next provider call when the ceiling is hit.
+
+## Turn timeout
+
+`ARDUR_HTTP_TURN_TIMEOUT_SECS=30` (default `30`) bounds how long the
+synchronous `POST /chat` and ACP HTTP handlers wait on a single turn before
+returning `504 Gateway Timeout`. Raise it for workloads with long tool loops
+or slow providers. The value must be a positive integer number of seconds; a
+`0` or unparseable value is rejected at boot. When the wait elapses the turn is
+cancelled before it commits a receipt or bills cost, so a `504` never pairs
+with a silently-billed turn the client could not observe.
 
 ## Troubleshooting
 

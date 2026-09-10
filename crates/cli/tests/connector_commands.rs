@@ -71,6 +71,33 @@ fn fetch_rejects_bad_scheme() {
 }
 
 #[test]
+fn fetch_denies_internal_ip_even_when_explicitly_allowlisted() {
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    // R1: the cloud metadata endpoint must be refused by the SSRF IP
+    // blocklist even though the caller put its literal IP on the allowlist —
+    // the host-string allowlist alone is not a substitute for IP-level
+    // classification.
+    let assert = Command::cargo_bin("ardur")
+        .expect("the `ardur` binary builds")
+        .env("HOME", dir.path())
+        .args([
+            "fetch",
+            "--allow-host",
+            "169.254.169.254",
+            "http://169.254.169.254/latest/meta-data/",
+        ])
+        .assert()
+        .failure();
+    let output = assert.get_output();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("SSRF") || stderr.contains("private/internal"),
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
 fn search_stub_succeeds() {
     let assert = Command::cargo_bin("ardur")
         .expect("the `ardur` binary builds")

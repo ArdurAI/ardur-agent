@@ -2,6 +2,8 @@
 //! mints a receipt id, charges nothing, and rejects a request without a cap
 //! token.
 
+use std::sync::Arc;
+
 use ardur_runtime::{
     CapTokenRef, ChatMessage, ChatRuntime, CostTuple, InMemoryRuntime, Role, RuntimeError,
     SessionId, SubmitRequest,
@@ -37,6 +39,30 @@ async fn echoes_last_user_message() {
     assert_eq!(result.response.role, Role::Assistant);
     assert_eq!(result.response.content, "echo this");
     assert_eq!(result.cost, CostTuple::default());
+}
+
+/// H4: `ChatRuntime` is object-safe and its `submit` future is `Send`, so a
+/// turn can be driven behind an `Arc<dyn ChatRuntime>` and spawned onto a
+/// runtime worker. Both facts fail to compile under the old `-> impl Future`
+/// signature — this test *is* the regression guard.
+#[tokio::test]
+async fn submit_is_object_safe_and_send() {
+    // Object safety: erase the concrete type behind a trait object.
+    let runtime: Arc<dyn ChatRuntime> = Arc::new(InMemoryRuntime::new());
+
+    // Send: `tokio::spawn` requires the task future to be `Send + 'static`, so
+    // this only compiles because `submit`'s future is `Send`.
+    let handle = tokio::spawn(async move {
+        runtime
+            .submit(request(vec![ChatMessage::user("spawned")], "cap-xyz"))
+            .await
+    });
+
+    let result = handle
+        .await
+        .expect("the spawned turn joins")
+        .expect("the echo runtime accepts the request");
+    assert_eq!(result.response.content, "spawned");
 }
 
 #[tokio::test]

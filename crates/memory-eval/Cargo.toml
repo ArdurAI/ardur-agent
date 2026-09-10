@@ -1,0 +1,60 @@
+# ardur-memory-eval — the memory *retrieval-quality* eval harness + hybrid-search
+# baseline (Finding 5 of plans/phase-one-plan-advancement-review.md; V3 §294/§394
+# recall harness). This is the "recall harness" the cycle-3
+# MEMORY-V3-EVAL-GATES-SCAFFOLD design doc explicitly left out of scope — it
+# measures retrieval quality (Recall@K / nDCG@K / MRR@K / citation-correctness /
+# stale-memory-rate / contradiction-handling) so memory quality is judged by
+# numbers, not vibes, and it is the baseline any future graph-RAG route must beat.
+#
+# Distinct from `ardur-eval` (crates/eval-harness, §12.9), which POSTs chat
+# prompts to a running server and grades chat answers. This crate runs directly
+# against the retrieval stack (bm25-index + embeddings + fusion) with no chat
+# round-trip.
+[package]
+name = "ardur-memory-eval"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "ardur-memory-eval"
+path = "src/main.rs"
+
+[lib]
+name = "ardur_memory_eval"
+path = "src/lib.rs"
+
+[features]
+default = []
+# Opt in to running the *real* fastembed BGE-M3 dense backend for the true
+# baseline numbers. The `ardur-embeddings` dependency (and thus `MockEmbedder`)
+# is always present; this feature only enables the test/CLI code paths that
+# construct a `FastEmbedEmbedder`, which downloads the model on first use. Off by
+# default so `cargo test --workspace` stays hermetic — the deterministic
+# `MockEmbedder` is blessed by V3 AR-1 for laying the harness shape. Mirrors the
+# E2E stub + gated-live rule.
+live-embed = []
+
+[dependencies]
+# The lexical half of the hybrid baseline (Tantivy BM25, in-RAM for hermetic use).
+ardur-bm25-index = { workspace = true }
+# The dense half: the `Embedder` trait + the deterministic `MockEmbedder` (and,
+# behind `live-embed`, the real `FastEmbedEmbedder`).
+ardur-embeddings = { workspace = true }
+# Reciprocal Rank Fusion (k=60, Cormack SIGIR 2009) — the fusion of the two halves.
+ardur-fusion = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+# `run --format json` and the JSON golden-set fixtures.
+async-trait = { workspace = true }
+# The runner drives the async `Embedder` / `Bm25Index`; the binary needs a runtime.
+tokio = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+tokio = { workspace = true }
+tempfile = { workspace = true }

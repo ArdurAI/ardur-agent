@@ -9,12 +9,15 @@
 //! Phase 1 in-process store would lose the fact here; the Qdrant store recovers
 //! it.
 //!
-//! Gated on `QDRANT_INTEGRATION_TEST=1` (CI has no Qdrant). To run locally:
+//! `#[ignore]`d because it needs a live Qdrant (CI has none by default); the
+//! default suite reports it as `ignored`, never a silent `passed` (#358). Run it
+//! explicitly against a Qdrant — the dedicated CI job does exactly this:
 //!
 //! ```text
 //! docker run -p 6334:6334 qdrant/qdrant
-//! QDRANT_INTEGRATION_TEST=1 \
-//!   cargo test -p ardur-e2e-tests --test scenario_qdrant_memory_persistence
+//! QDRANT_INTEGRATION_TEST=1 QDRANT_URL=http://localhost:6334 \
+//!   cargo test -p ardur-e2e-tests --test scenario_qdrant_memory_persistence \
+//!   -- --ignored
 //! ```
 
 use std::sync::Arc;
@@ -28,23 +31,21 @@ use ardur_runtime::{CapTokenRef, ChatMessage, ChatRuntime, SessionId, SubmitRequ
 const PROMPT: &str = "remember this across a restart";
 const COLLECTION: &str = "ardur_e2e_qdrant_persistence";
 
-/// The Qdrant config for this scenario, or `None` when the gate var is unset.
-fn gate() -> Option<QdrantMemoryConfig> {
-    if std::env::var("QDRANT_INTEGRATION_TEST").as_deref() != Ok("1") {
-        eprintln!("skipping scenario_qdrant_memory_persistence: set QDRANT_INTEGRATION_TEST=1");
-        return None;
-    }
-    Some(QdrantMemoryConfig::from_env().with_collection_name(COLLECTION))
+/// The Qdrant config for this scenario. The endpoint comes from `QDRANT_URL`
+/// (default `http://localhost:6334`); `#[ignore]` — not an env early-return — is
+/// what keeps this off the default suite, so a skip can never masquerade as a
+/// pass (#358).
+fn config() -> QdrantMemoryConfig {
+    QdrantMemoryConfig::from_env().with_collection_name(COLLECTION)
 }
 
 /// The multi-thread flavor matters: the fused turn calls the synchronous
 /// `MemoryRuntime::record` from inside this runtime, and the Qdrant backend
 /// bridges it with `block_in_place`, which requires a multi-threaded runtime.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires a live Qdrant; run with `-- --ignored` (see module docs)"]
 async fn fused_turn_memory_survives_restart() {
-    let Some(cfg) = gate() else {
-        return;
-    };
+    let cfg = config();
 
     let subject = HolderId::from(TEST_HOLDER);
 

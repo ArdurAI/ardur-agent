@@ -78,6 +78,10 @@ impl ReceiptSigner {
             .inner()
             .try_sign(signing_input.as_bytes())
             .map_err(|e| ReceiptError::Malformed(format!("sign: {e}")))?;
+        // ARD-483: emit canonical low-S so the verifier (which rejects high-S)
+        // accepts our own receipts. ecdsa 0.17: normalize_s() always returns
+        // the low-S form.
+        let sig = sig.normalize_s();
         let jws_compact = format!("{signing_input}.{}", B64URL.encode(sig.to_bytes()));
 
         Ok(SignedReceipt::from_parts(jws_compact, body))
@@ -100,7 +104,14 @@ impl ReceiptVerifier {
     /// Verify `receipt`: resolve its `kid` in `jwks`, check the ES256
     /// signature, and decode the body.
     pub fn verify(receipt: &SignedReceipt, jwks: &Jwks) -> Result<VerifiedReceipt, ReceiptError> {
-        let mut parts = receipt.jws_compact().split('.');
+        Self::verify_compact(receipt.jws_compact(), jwks)
+    }
+
+    /// Verify a persisted compact JWS without requiring callers to reconstruct a
+    /// [`SignedReceipt`]. This is the canonical verification entry point for
+    /// receipt logs loaded from disk.
+    pub fn verify_compact(jws_compact: &str, jwks: &Jwks) -> Result<VerifiedReceipt, ReceiptError> {
+        let mut parts = jws_compact.split('.');
         let (header_b64, payload_b64, sig_b64) =
             match (parts.next(), parts.next(), parts.next(), parts.next()) {
                 (Some(h), Some(p), Some(s), None) => (h, p, s),
@@ -122,6 +133,12 @@ impl ReceiptVerifier {
                 header.alg
             )));
         }
+        if header.typ != TYP {
+            return Err(ReceiptError::Malformed(format!(
+                "unsupported typ `{}`",
+                header.typ
+            )));
+        }
 
         let jwk = jwks
             .lookup(&header.kid)
@@ -132,6 +149,14 @@ impl ReceiptVerifier {
             .decode(sig_b64)
             .map_err(|_| ReceiptError::SignatureInvalid)?;
         let sig = Signature::from_slice(&sig_bytes).map_err(|_| ReceiptError::SignatureInvalid)?;
+        // ARD-483: enforce canonical low-S (BIP-62). ECDSA admits a second valid
+        // signature (n - s) for the same key+message; rejecting s > n/2 removes
+        // the malleable twin and pins one signature per (key, message).
+        // ecdsa 0.17: normalize_s() always returns the low-S form, so any input
+        // that differs from its normalized form was high-S.
+        if sig.normalize_s() != sig {
+            return Err(ReceiptError::SignatureInvalid);
+        }
         let signing_input = format!("{header_b64}.{payload_b64}");
         pubkey
             .inner()
@@ -148,5 +173,88 @@ impl ReceiptVerifier {
             body,
             kid: header.kid,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{CostTuple, HolderId, Sha256Digest, TokenId, UnixTsMillis, VerbObject};
+
+    fn sample_body() -> ReceiptBody {
+        ReceiptBody {
+            receipt_id: uuid::Uuid::new_v4(),
+            parent_hash: None,
+            verb: VerbObject::new("cost.admission.allow.v1").unwrap(),
+            issued_at: UnixTsMillis(1_700_000_000_000),
+            subject: HolderId("spiffe://ardur/user/alice".to_string()),
+            cap_token_id: TokenId(uuid::Uuid::from_u128(0x0001)),
+            payload_digest: Sha256Digest::of(b"event-payload"),
+            session_id: None,
+            cost: CostTuple {
+                tokens_in: 100,
+                tokens_out: 50,
+                cents: 2,
+                wall_ms: 1_200,
+                attention_score: 500,
+            },
+            tool_calls: Vec::new(),
+            provider: None,
+        }
+    }
+
+    #[test]
+    fn verify_compact_authenticates_a_persisted_jws_without_reconstructing_signed_receipt() {
+        let key = Es256SigningKey::generate();
+        let jwks = Jwks::from_public_key(&key.public_key());
+        let signed = ReceiptSigner::sign(sample_body(), &key).unwrap();
+
+        let verified = ReceiptVerifier::verify_compact(signed.jws_compact(), &jwks)
+            .expect("persisted compact JWS verifies");
+
+        assert_eq!(verified.body, *signed.body());
+        assert_eq!(verified.kid, key.key_id());
+    }
+
+    /// ARD-483: signing emits canonical low-S, so the high-S-rejecting verifier
+    /// accepts our own receipts.
+    #[test]
+    fn sign_emits_canonical_low_s() {
+        let key = Es256SigningKey::generate();
+        let jwks = Jwks::from_public_key(&key.public_key());
+        let signed = ReceiptSigner::sign(sample_body(), &key).unwrap();
+        let sig_b64 = signed.jws_compact().split('.').nth(2).unwrap();
+        let sig = Signature::from_slice(&B64URL.decode(sig_b64).unwrap()).unwrap();
+        assert_eq!(sig.normalize_s(), sig, "signer must emit low-S");
+        assert!(ReceiptVerifier::verify(&signed, &jwks).is_ok());
+    }
+
+    /// ARD-483: a malleable high-S twin of a valid signature is rejected, even
+    /// though it is mathematically valid for the same key+message.
+    #[test]
+    fn verify_rejects_high_s_malleable_twin() {
+        use std::ops::Neg;
+        let key = Es256SigningKey::generate();
+        let jwks = Jwks::from_public_key(&key.public_key());
+        let signed = ReceiptSigner::sign(sample_body(), &key).unwrap();
+
+        let jws = signed.jws_compact();
+        let mut parts = jws.split('.');
+        let header_b64 = parts.next().unwrap();
+        let payload_b64 = parts.next().unwrap();
+        let sig_b64 = parts.next().unwrap();
+        let sig = Signature::from_slice(&B64URL.decode(sig_b64).unwrap()).unwrap();
+        let low = sig.normalize_s();
+        let high = Signature::from_scalars(low.r(), low.s().neg()).expect("n - s_low is nonzero");
+        let malicious = format!(
+            "{header_b64}.{payload_b64}.{}",
+            B64URL.encode(high.to_bytes())
+        );
+        let forged = SignedReceipt::from_parts(malicious, signed.body().clone());
+
+        match ReceiptVerifier::verify(&forged, &jwks) {
+            Err(ReceiptError::SignatureInvalid) => {}
+            other => panic!("expected SignatureInvalid for high-S twin, got {other:?}"),
+        }
     }
 }

@@ -69,6 +69,7 @@ async fn slack_adapter_sends_and_parses_end_to_end() {
         SecretString::from(SIGNING_SECRET.to_string()),
         APP_ID.to_string(),
     )
+    .with_allowed_senders(["U777"])
     .with_base_url(server.uri());
 
     // Hold it as the trait object the runtime would wire into the registry.

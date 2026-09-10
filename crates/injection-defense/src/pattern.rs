@@ -89,7 +89,13 @@ const BUILTIN_SPECS: &[(&str, &str, FlagCategory, f32)] = &[
     ),
     (
         "delimiter_injection",
-        r"\[\[INST\]\]|<\|im_start\|>",
+        // Chat-template control delimiters used to smuggle a new turn/role:
+        //   - `[INST]` / `[/INST]` (Llama/Mistral), incl. the doubled `[[INST]]`
+        //     and internal-whitespace forms; anchored to exactly INST so
+        //     `[INSTALL]`, `[INSTRUCTIONS]`, `[INFO]`, `a[0]` do not match.
+        //   - `<|im_start|>` (ChatML).
+        //   - `<<SYS>>` / `<</SYS>>` (Llama system block, paired with `[INST]`).
+        r"(?i)\[\s*/?\s*INST\s*\]|<\|im_start\|>|<</?SYS>>",
         FlagCategory::DelimiterAbuse,
         0.85,
     ),

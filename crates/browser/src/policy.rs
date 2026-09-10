@@ -133,6 +133,22 @@ impl BrowserPolicy {
 
     fn check_domain(&self, host: &str, action: &str) -> Result<(), String> {
         if !self.allow_localhost {
+            // ARD-484: reject internal/private/metadata IP literals (RFC1918,
+            // loopback, link-local / cloud-metadata 169.254/16, ULA, IPv4-in-
+            // IPv6, ...) by reusing http.fetch's classifier so the two surfaces
+            // cannot drift. IPv6 literals may arrive bracketed (`[fc00::1]`).
+            // The string blocklist below still handles named hosts (e.g.
+            // `localhost`) and configured entries.
+            let internal_ip = host
+                .trim_matches(|c| c == '[' || c == ']')
+                .parse::<std::net::IpAddr>()
+                .ok()
+                .map(ardur_tool_registry::is_internal_ip);
+            if internal_ip == Some(true) {
+                return Err(format!(
+                    "host {host} is an internal/private IP address (SSRF block)"
+                ));
+            }
             for blocked in &self.blocklist {
                 if host == blocked || host.ends_with(blocked) {
                     return Err(format!("domain {host} is blocklisted"));
@@ -241,6 +257,32 @@ mod tests {
         let policy = BrowserPolicy::default();
         assert!(policy.check_url("https://example.com").is_err());
         assert!(policy.check_url("http://localhost:8080").is_err());
+    }
+
+    #[test]
+    fn policy_rejects_private_and_metadata_ips() {
+        // ARD-484: a wildcard allowlist permits every site, so the only thing
+        // that can reject these is the new SSRF range check (allow_localhost is
+        // false on this policy).
+        let policy = BrowserPolicy::with_allowlist(vec![SiteAction::new("*", "*")]);
+        for url in [
+            "http://169.254.169.254/",   // cloud metadata (link-local)
+            "http://10.0.0.1/",          // RFC1918
+            "http://192.168.1.1/",       // RFC1918
+            "http://172.16.0.1/",        // RFC1918
+            "http://127.0.0.2/",         // loopback range (not just 127.0.0.1)
+            "http://[fc00::1]/",         // IPv6 unique-local
+            "http://[fe80::1]/",         // IPv6 link-local
+            "http://[::ffff:10.0.0.1]/", // IPv4-mapped IPv6
+        ] {
+            assert!(
+                policy.check_url(url).is_err(),
+                "SSRF range check should reject {url}"
+            );
+        }
+        // A public IP and a public domain still pass the wildcard allowlist.
+        assert!(policy.check_url("http://8.8.8.8/").is_ok());
+        assert!(policy.check_url("https://example.com").is_ok());
     }
 
     #[test]
