@@ -51,11 +51,41 @@ fn sessions_root(journal_dir: &Path) -> PathBuf {
     journal_dir.join("sessions")
 }
 
-/// The journal file for one session id.
-fn journal_path(journal_dir: &Path, session_id: &str) -> PathBuf {
-    sessions_root(journal_dir)
-        .join(session_id)
-        .join("journal.jsonl")
+/// Whether `id` is safe to use as the session directory name: exactly one
+/// `Normal` path component (no separators, no `.`/`..`, no root/prefix), so a
+/// caller-supplied id can never escape the sessions root. Backslash is
+/// rejected explicitly — it is a legal byte in Unix file names, so a single
+/// `Normal` component can still smuggle a Windows separator.
+pub fn is_valid_session_id(id: &str) -> bool {
+    let mut components = Path::new(id).components();
+    matches!(
+        (components.next(), components.next()),
+        (Some(std::path::Component::Normal(_)), None)
+    ) && !id.contains('\\')
+}
+
+/// Resolve a caller-supplied session id to its journal file by matching it
+/// against the directory entries actually present under the sessions root —
+/// the returned path is built from the matched entry's own name, never by
+/// joining the raw id. Combined with [`is_valid_session_id`], this confines
+/// every journal read to `<journal-dir>/sessions/<existing-dir>/`. An id that
+/// is invalid or names no existing session resolves to `None`.
+fn resolve_journal_path(journal_dir: &Path, session_id: &str) -> Option<PathBuf> {
+    if !is_valid_session_id(session_id) {
+        return None;
+    }
+    let root = sessions_root(journal_dir);
+    let read_dir = fs::read_dir(&root).ok()?;
+    for dirent in read_dir.flatten() {
+        if !dirent.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
+        let name = dirent.file_name();
+        if name.to_str() == Some(session_id) {
+            return Some(root.join(name).join("journal.jsonl"));
+        }
+    }
+    None
 }
 
 /// The `at` (millisecond) timestamp an entry records.
@@ -89,9 +119,22 @@ fn cost_cents(entry: &JournalEntry) -> Option<u64> {
 
 /// Parse every entry of one session's journal, in append order. Blank lines are
 /// skipped; a malformed line aborts with the parse error (the file is corrupt).
+///
+/// The session id is resolved via [`resolve_journal_path`] — validated and
+/// matched against real directory entries before any file is opened — so an
+/// id that would traverse outside `<journal-dir>/sessions/` (or names no
+/// existing session) reads as "no such session" (empty).
 pub fn read_entries(journal_dir: &Path, session_id: &str) -> anyhow::Result<Vec<JournalEntry>> {
-    let path = journal_path(journal_dir, session_id);
-    let raw = match fs::read_to_string(&path) {
+    let Some(path) = resolve_journal_path(journal_dir, session_id) else {
+        return Ok(Vec::new());
+    };
+    read_entries_at(&path)
+}
+
+/// Parse every entry of the journal file at `path` (a path already produced
+/// by [`resolve_journal_path`] or built from a directory entry we enumerated).
+fn read_entries_at(path: &Path) -> anyhow::Result<Vec<JournalEntry>> {
+    let raw = match fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e.into()),
@@ -119,10 +162,13 @@ pub fn list_sessions(journal_dir: &Path) -> anyhow::Result<Vec<SessionSummary>> 
         if !dirent.file_type()?.is_dir() {
             continue;
         }
-        let Some(id) = dirent.file_name().to_str().map(str::to_string) else {
+        let name = dirent.file_name();
+        let Some(id) = name.to_str().map(str::to_string) else {
             continue;
         };
-        let path = journal_path(journal_dir, &id);
+        // Build the path from the enumerated directory entry itself — never
+        // by joining a string id — so every read stays under `sessions/`.
+        let path = root.join(&name).join("journal.jsonl");
         if !path.is_file() {
             continue;
         }
@@ -133,7 +179,7 @@ pub fn list_sessions(journal_dir: &Path) -> anyhow::Result<Vec<SessionSummary>> 
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
 
-        let entries = read_entries(journal_dir, &id)?;
+        let entries = read_entries_at(&path)?;
         let message_count = entries.iter().filter(|e| is_message(e)).count();
         let last_activity_ms = entries.iter().map(entry_at).max();
         let last_cost_cents = entries.iter().rev().find_map(cost_cents);
@@ -201,4 +247,70 @@ pub fn cents_by_session(journal_dir: &Path) -> anyhow::Result<Vec<(String, u64)>
     }
     out.sort_by_key(|t| std::cmp::Reverse(t.1));
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn valid_session_ids_pass() {
+        for id in [
+            "sess-a",
+            "0192cafe-8a2b-7cde-9f01-234567890abc",
+            "with.dot",
+            "with_underscore",
+        ] {
+            assert!(is_valid_session_id(id), "{id} should be accepted");
+        }
+    }
+
+    #[test]
+    fn traversal_and_multi_component_ids_are_rejected() {
+        for id in [
+            "",
+            ".",
+            "..",
+            "../outside",
+            "a/b",
+            "/etc/hostname",
+            "..\\outside",
+            "a\\b",
+            "sessions/../../x",
+        ] {
+            assert!(!is_valid_session_id(id), "{id:?} must be rejected");
+        }
+    }
+
+    #[test]
+    fn read_entries_confines_ids_to_sessions_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let journal_dir = dir.path().join("journals");
+
+        // A journal OUTSIDE the sessions root, reachable only by traversal.
+        let outside = journal_dir.join("outside");
+        fs::create_dir_all(&outside).expect("outside dir");
+        fs::write(
+            outside.join("journal.jsonl"),
+            "{\"kind\":\"UserMessage\",\"content\":\"leaked\",\"at\":1}\n",
+        )
+        .expect("outside journal");
+
+        // Traversal ids resolve to no session (empty), not the outside file.
+        for id in ["../outside", "..", "outside/../outside"] {
+            let entries = read_entries(&journal_dir, id).expect("read");
+            assert!(entries.is_empty(), "{id:?} must not read outside sessions/");
+        }
+
+        // A legitimate session under sessions/ still reads fine.
+        let inside = journal_dir.join("sessions").join("sess-ok");
+        fs::create_dir_all(&inside).expect("inside dir");
+        fs::write(
+            inside.join("journal.jsonl"),
+            "{\"kind\":\"UserMessage\",\"content\":\"hello\",\"at\":1}\n",
+        )
+        .expect("inside journal");
+        let entries = read_entries(&journal_dir, "sess-ok").expect("read");
+        assert_eq!(entries.len(), 1, "confined id reads its own journal");
+    }
 }
