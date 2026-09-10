@@ -1,15 +1,38 @@
 # Current Status and Ready Features
 
-Implementation baseline reviewed: `dev` at `aee376faa4ce` on 2026-09-09
-(plus the ARD-460 PWA streaming / CORS slice in this change). Feature claims
-below are tied to that reviewed code baseline.
+Implementation baseline reviewed: `dev` at
+`09b40df5019aac77ca8fe32563b2fa8e2aeb2043` on 2026-09-10. This document is the
+release checklist for `v0.1.0-beta.1`: every claim below is tied to that
+reviewed code baseline and was re-verified against it.
 
 ## Repository and Verification Status
 
-- GitHub PRs `#418` (first-run policy UX) and `#419` (ARD-457 CLI grant
-  consumption) are merged into `dev`.
-- Open at this review: `#421` (`#359` commit-gate for caller-abandoned turns).
-- Required GitHub workflows were green before each of the merged PRs above.
+- GitHub PRs merged into `dev` for this baseline:
+  - `#418` — first-run Cedar policy UX (closes `#408`).
+  - `#419` — ARD-457 CLI grant consumption for hardened tools.
+  - `#421` — commit gate for caller-abandoned turns (closes `#359`).
+  - `#424` — incremental receipt verification (`#355`) and Qdrant snapshot
+    timeout (`#371`).
+  - `#423` — GHCR publish on `v*` tags plus the fresh-machine runbook.
+  - `#425` — ARD-460 PWA streaming against fused SSE with fail-closed CORS.
+- No GitHub PRs were open at this review.
+- Required GitHub workflows were green before each merge, and the full
+  dev-push check set (CodeQL, CodeQL/Rust, Trivy, build-healthcheck-scan,
+  cargo-deny, hugo, macos-15/stable, ubuntu-latest/stable, qdrant integration
+  `--ignored`) is green on the baseline commit. DCO runs on PRs and was green
+  before each merge.
+- Container release path: `.github/workflows/docker.yml` publishes
+  `ghcr.io/ardurai/ardur-agent:<tag>` on `v*` tags — the same image that
+  passed the job's Trivy gate and `/healthz` smoke, with build-provenance
+  attestation. It does not float `:latest` on pre-releases.
+- Release supply-chain path: `.github/workflows/release.yml`
+  (`release-supply-chain` / `release-sbom-sign`) runs when a GitHub Release is
+  published for the tag: it builds release binaries, generates an SPDX SBOM
+  and SHA256SUMS, signs assets with keyless cosign, and attaches build
+  provenance.
+- Fresh-machine validation: [docs/fresh-machine.md](fresh-machine.md) is the
+  operator runbook for the offline stub, one live provider, a private Slack
+  channel, and the published-container smoke.
 - Local no-key baseline on this review:
   - `cargo test -p ardur-e2e-tests`
   - `cargo test -p ardur-server --test boot_smoke`
@@ -123,11 +146,18 @@ The platform tool crates are also implemented as explicit integration surfaces:
 
 - `POST /chat` with `stream: true` returns `text/event-stream` of fused-runtime
   events (`stage_start`/`stage_end`, `content`, tool events, `usage`, `receipt`,
-  `finish`, in-band `error`). Dropping the body **attempts** to cancel the turn
-  before receipt/journal/memory side effects; a fast stream can still commit if
-  frames are already buffered (the commit-boundary gate is #359 / PR #421).
-  Covered by `crates/server/tests/streaming.rs`
+  `finish`, in-band `error`). Dropping the body closes the receiver and the
+  worker drops the fused stream, attempting cancellation before
+  receipt/journal/memory side effects commit; a fast stream can still commit if
+  frames are already buffered. Covered by `crates/server/tests/streaming.rs`
   and `crates/e2e-tests/tests/scenario_streaming_chat_sse.rs`.
+- Non-stream turns abandoned by the HTTP timeout or a client hang-up hit the
+  commit gate (`#359` / `#421`): a flag set synchronously in the dropping
+  thread is consulted after each provider round and before the
+  receipt/journal/billing commit, so an abandoned turn releases its cost
+  reservation and mints no receipt. Covered by
+  `crates/fused-runtime/tests/turn_cancellation.rs` and
+  `crates/server/tests/chat_turn_timeout.rs`.
 - `GET /approvals`, `POST /approvals/{id}/approve`, and
   `POST /approvals/{id}/reject` are admin-bearer gated, persist to the same
   on-disk store as `ardur approvals`, and mint decision receipts. This is the
@@ -144,6 +174,8 @@ hardening and operator work.
   same fused-runtime cap-token/Cedar context as normal tool calls.
 - Hardened shell/file/http tools exist but stay off until an operator grant or
   server env opt-in (ARD-457).
+- `shell.run`'s allowlist is a prefix gate, not full argv confinement (`#420`).
+- Tool-loop intermediate receipts survive a later-round cancel (`#422`).
 - Local STT/TTS providers exist in `ardur-media-audio`, but the server currently
   auto-registers Whisper transcription only.
 - Approval *propose* (the agent creating a pending card before an irreversible
@@ -153,9 +185,12 @@ hardening and operator work.
 
 ## Recommended Next Work
 
-1. Land `#421` / `#359` (commit-gate for caller-abandoned turns) if still open.
-2. ARD-463 propose-half: emit pending approval cards before irreversible tools,
+Post-beta follow-ups (not part of the `v0.1.0-beta.1` gate):
+
+1. `#422`: tool-loop intermediate receipts survive a later-round cancel.
+2. `#420`: `shell.run` allowlist argv-exec hardening (prefix gate →
+   confinement).
+3. ARD-463 propose-half: emit pending approval cards before irreversible tools,
    with `RequiresApproval` caveats.
-3. Auto-register local STT/TTS when `ARDUR_LOCAL_STT_COMMAND` /
+4. Auto-register local STT/TTS when `ARDUR_LOCAL_STT_COMMAND` /
    `ARDUR_LOCAL_TTS_COMMAND` are set.
-4. Convert this status into a release checklist before tagging a public build.
