@@ -312,6 +312,39 @@ async fn journal_endpoint_redacts_secret_shaped_content() {
 }
 
 #[tokio::test]
+async fn journal_endpoint_confines_traversal_session_ids() {
+    let fx = Fixture::new();
+    // A journal a traversal id would reach if ids were joined raw: the
+    // sessions root is `<journal_dir>/sessions/`, so `../outside` escapes it.
+    let outside = fx.journal_dir.join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(
+        outside.join("journal.jsonl"),
+        serde_json::to_string(&user_msg("leaked", UnixTsMillis::from(1u64))).unwrap() + "\n",
+    )
+    .unwrap();
+    let server = fx.server();
+
+    // URL-encoded traversal ids must resolve to an empty page, never the
+    // outside file. (%2f = '/', %5c = '\') Bare dot-segments like `%2e%2e`
+    // are excluded here: RFC 3986 dot-segment normalization removes them
+    // client-side before the request is sent, so they never reach the
+    // handler — the journal-layer unit tests cover those raw ids instead.
+    for encoded in ["..%2foutside", "%2e%2e%2foutside", "..%5coutside"] {
+        let res = server
+            .get(&format!("/api/sessions/{encoded}/journal"))
+            .await;
+        res.assert_status_ok();
+        let page: Value = res.json();
+        assert_eq!(
+            page["total"], 0,
+            "id {encoded:?} must not read outside sessions/"
+        );
+        assert_eq!(page["entries"].as_array().unwrap().len(), 0);
+    }
+}
+
+#[tokio::test]
 async fn journal_endpoint_paginates() {
     let fx = Fixture::new();
     let entries: Vec<JournalEntry> = (0..5)

@@ -90,6 +90,8 @@ async fn shell_and_http_opt_in_registers_and_cap_aligns() {
     let opts = BuiltinOpts {
         enable_shell: true,
         shell_allowlist: Some(vec!["echo".to_string()]),
+        enable_shell_exec: false,
+        shell_exec_allowlist: None,
         file_root: None,
         http: Some(HttpFetchOpts {
             enable: true,

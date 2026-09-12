@@ -19,6 +19,10 @@ async-trait = { workspace = true }
 # filesystem off the async runtime: `tokio::process::Command` (timeout-wrapped
 # and `kill_on_drop`), `tokio::time::timeout`, and `tokio::fs`.
 tokio = { workspace = true }
+# §6.1 — `shell.exec` puts each child in its own process group and signals the
+# whole group on timeout, so a forked descendant cannot outlive the call.
+# rustix wraps kill(2) safely; this crate forbids `unsafe`.
+rustix = { workspace = true, features = ["process"] }
 serde = { workspace = true }
 # Tool input/output payloads and JSON-Schema documents are untyped JSON.
 serde_json = { workspace = true }

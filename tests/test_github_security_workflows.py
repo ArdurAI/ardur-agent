@@ -164,7 +164,7 @@ class GitHubSecurityWorkflowTests(unittest.TestCase):
         self.assertEqual(jobs.count(tag_if), 5, jobs)
         self.assertIn(tag_if, jobs)
         self.assertIn(
-            "docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef",
+            "docker/login-action@dbcb813823bdd20940b903addbd779551569679f",
             jobs,
         )
         self.assertIn("registry: ghcr.io", jobs)
@@ -172,11 +172,137 @@ class GitHubSecurityWorkflowTests(unittest.TestCase):
         self.assertIn("subject-name: ${{ steps.publish.outputs.image }}", jobs)
         self.assertIn("subject-digest: ${{ steps.publish.outputs.digest }}", jobs)
 
+    def test_dco_reads_exempt_list_from_the_base_ref(self):
+        """The exempt list must come from base, never the PR head.
+
+        Regression guard for #435: dco.yml read .github/dco-exempt-shas.txt
+        from the checked-out merge ref, so a PR could append its own unsigned
+        SHA and self-exempt. Reading it from the base ref means an exemption
+        only takes effect after it has been reviewed and merged.
+        """
+        dco = (WORKFLOWS / "dco.yml").read_text(encoding="utf-8")
+
+        # The applied list is read out of a resolved source ref...
+        self.assertIn('EXEMPT_RAW="$(git show "${EXEMPT_SOURCE}:${EXEMPT_FILE}")"', dco)
+        self.assertIn('EXEMPT_SOURCE="${BASE}"', dco)
+        # ...and never straight off the working tree.
+        self.assertNotIn(
+            "grep -vE '^[[:space:]]*(#|$)' .github/dco-exempt-shas.txt",
+            dco,
+            "the exempt list must not be read from the checked-out head (#435)",
+        )
+        # A missing file on the source ref must mean "no exemptions", not
+        # "skip the check".
+        self.assertIn('EXEMPT_RAW=""', dco)
+
+    def test_dco_promotion_carve_out_is_narrow(self):
+        """dev -> main may read dev's exempt list, but only that case.
+
+        A base-ref-only read deadlocks the documented recovery path: an
+        unsigned commit pushed straight to dev is exempted by a reviewed PR on
+        dev, so the entry is live on dev but not yet on main, and the
+        promotion that would carry it to main is the very thing blocked.
+        The carve-out must be constrained to a same-repo dev -> main PR so a
+        fork branch merely *named* dev cannot claim it.
+        """
+        dco = (WORKFLOWS / "dco.yml").read_text(encoding="utf-8")
+
+        self.assertIn('HEAD_BRANCH}" = "dev"', dco)
+        self.assertIn('BASE_BRANCH}" = "main"', dco)
+        self.assertIn(
+            'HEAD_REPO}" = "${{ github.repository }}"',
+            dco,
+            "the promotion carve-out must require a same-repo PR, so a fork "
+            "branch named dev cannot claim it",
+        )
+        self.assertIn('EXEMPT_SOURCE="${HEAD}"', dco)
+
+    def test_dco_enforces_append_only_and_full_shas_for_new_exemptions(self):
+        """New exemptions must be full SHAs and may not rewrite history."""
+        dco = (WORKFLOWS / "dco.yml").read_text(encoding="utf-8")
+
+        self.assertIn("append-only", dco)
+        self.assertRegex(
+            dco,
+            r"\^\[0-9a-f\]\{40\}\$",
+            "new exempt entries must be required to be full 40-char SHAs",
+        )
+        self.assertRegex(
+            dco,
+            r"\^\[0-9a-f\]\{7,40\}\$",
+            "applied exempt entries must be validated as lowercase hex",
+        )
+
+    def test_dco_exempt_file_entries_are_hex_shas(self):
+        """The committed exempt list itself must contain only hex SHAs."""
+        raw = (ROOT / ".github" / "dco-exempt-shas.txt").read_text(encoding="utf-8")
+
+        entries = [
+            line.split()[0]
+            for line in raw.splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+        self.assertTrue(entries, "exempt file should not be empty")
+        for entry in entries:
+            self.assertRegex(
+                entry,
+                r"^[0-9a-f]{7,40}$",
+                f"exempt entry {entry!r} must be 7-40 lowercase hex characters",
+            )
+
+    def test_codeowners_guards_the_exemption_policy_files(self):
+        """Files that waive security requirements stay owner-reviewed (#435)."""
+        codeowners = (ROOT / ".github" / "CODEOWNERS").read_text(encoding="utf-8")
+
+        for guarded in (
+            "/.github/dco-exempt-shas.txt",
+            "/.github/workflows/dco.yml",
+            "/.gitleaksignore",
+        ):
+            self.assertIn(guarded, codeowners, f"{guarded} must have an explicit owner")
+
     def test_rust_toolchain_is_exactly_pinned(self):
         toolchain = (ROOT / "rust-toolchain.toml").read_text(encoding="utf-8")
 
         self.assertIn('channel = "1.98.1"', toolchain)
         self.assertNotIn('channel = "stable"', toolchain)
+
+    def test_dockerfile_builder_matches_rust_toolchain_channel(self):
+        """The builder image must be the same rustc patch release as CI.
+
+        Regression guard for #436: the builder was pinned to a `1.98-slim`
+        minor tag, which floated to rustc 1.98.0 while rust-toolchain.toml
+        pinned 1.98.1 — CI-validated artifacts and the released image were
+        built by different compilers. Asserting on the *tag* (not a digest
+        lookup) keeps this test hermetic: no registry access, and a digest
+        bump that silently changes the patch version still fails here.
+        """
+        toolchain = (ROOT / "rust-toolchain.toml").read_text(encoding="utf-8")
+        dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+
+        channel_match = re.search(
+            r'(?m)^\s*channel\s*=\s*"(?P<channel>[0-9]+\.[0-9]+\.[0-9]+)"', toolchain
+        )
+        if channel_match is None:
+            self.fail("rust-toolchain.toml must pin an exact x.y.z channel")
+        channel = channel_match.group("channel")
+
+        builder_match = re.search(
+            r"(?m)^FROM\s+rust:(?P<tag>[^@\s]+)@(?P<digest>sha256:[0-9a-f]{64})\s+AS\s+builder",
+            dockerfile,
+        )
+        if builder_match is None:
+            self.fail(
+                "Dockerfile builder must be `FROM rust:<tag>@sha256:<digest> AS builder`"
+            )
+
+        tag = builder_match.group("tag")
+        self.assertTrue(
+            tag.startswith(f"{channel}-"),
+            f"Dockerfile builder tag {tag!r} must carry the full toolchain patch "
+            f"version {channel!r} (e.g. {channel}-slim); a floating minor tag "
+            f"builds releases with a different rustc than CI (#436)",
+        )
 
 
 if __name__ == "__main__":
