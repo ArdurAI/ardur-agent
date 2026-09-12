@@ -504,6 +504,67 @@ Provider support (Phase 1): **anthropic** (Messages API `tool_use`),
 `claude` CLI providers orchestrate their own tools internally, so the runtime
 loop does not drive tools through them.
 
+### Requiring human approval before a tool runs
+
+A tool call carrying an approval-gated capability does not execute. It proposes
+a **pending approval card** and the turn is refused until an operator decides
+it. Off by default:
+
+```bash
+ARDUR_APPROVAL_GATED_CAPABILITIES=cap.shell_exec,cap.fs_write
+```
+
+Entries are **capability labels**, not tool names, so a capability stays gated
+however many tools declare it. Leave the variable unset and the runtime is built
+with no approval store at all — the gate is absent, not present-and-permissive.
+A label containing whitespace can never match a capability, so it is rejected at
+startup rather than silently gating nothing.
+
+When a gated call is attempted the runtime:
+
+1. writes a pending card to `<ARDUR_DATA_DIR>/approvals/<id>.json`, recording the
+   tool, the capability, `sha256(arguments)`, and the session;
+2. mints an `approval.propose.created.v1` receipt into the chain;
+3. refuses the call.
+
+Decide it through the endpoints or the CLI, which share that same store:
+
+```bash
+curl -H "Authorization: Bearer $ADMIN_TOKEN" http://127.0.0.1:8080/approvals
+curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
+  http://127.0.0.1:8080/approvals/<id>/approve
+# or reject, optionally with {"reason": "..."}
+ardur approvals list
+```
+
+Retrying the **identical** call (same tool, same arguments, same session) reuses
+the pending card rather than proposing a second one, and proceeds once it is
+approved. The approval is then **spent**: the card is marked `consumed` and a
+further identical call proposes a fresh one. An approval authorises one
+invocation, not a standing permission. A rejected card refuses the retry with
+the operator's reason.
+
+Approval is an additional gate, not a replacement: the cap-token and Cedar checks
+still run first, so approving a card cannot grant a capability the token never
+carried.
+
+**Limitations, verified against the code — read before enabling:**
+
+- **HTTP with an explicit `session_id` only.** Card matching includes the
+  session id, and the channel adapters (Slack, Matrix, Discord, Telegram) and
+  the ACP route mint a fresh `SessionId` per inbound message. A retry there
+  never matches the approved card, so the loop cannot complete — every attempt
+  proposes another card. Send `session_id` explicitly on `POST /chat` and reuse
+  it for the retry.
+- **A gated call still costs provider tokens.** The gate is consulted after the
+  provider round that requested the tool, and the refused turn releases its
+  reservation at zero cost, so repeated gated attempts consume tokens without
+  decrementing `ARDUR_COST_BUDGET_CENTS`.
+- **The CLI reads `$HOME/.ardur`.** `ardur approvals` resolves its own state
+  directory and does not follow `ARDUR_DATA_DIR`. If the server runs with a
+  different data directory (the documented Docker setup uses `/var/lib/ardur`),
+  use the HTTP endpoints, which read the server's store directly.
+
 ## Platform integrations
 
 EPIC-PLATFORM adds dedicated platform crates for browser, terminal, and web

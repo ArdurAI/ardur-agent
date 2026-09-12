@@ -183,8 +183,27 @@ The platform tool crates are also implemented as explicit integration surfaces:
 - `GET /approvals`, `POST /approvals/{id}/approve`, and
   `POST /approvals/{id}/reject` are admin-bearer gated, persist to the same
   on-disk store as `ardur approvals`, and mint decision receipts. This is the
-  **decide-half** of ARD-463 / ARD-139. Nothing server-side currently *produces*
-  pending cards (the propose-half remains a follow-up).
+  **decide-half** of ARD-463 / ARD-139.
+- The **propose-half** is now reachable from a server boot (ARD-463). Setting
+  `ARDUR_APPROVAL_GATED_CAPABILITIES` to a CSV of capability labels attaches the
+  approval store to the runtime; a tool call carrying a listed capability then
+  does not execute — it proposes a pending card into that same store, mints
+  `approval.propose.created.v1`, and is refused until an operator decides it. A
+  retry of the identical call (matched on `sha256(arguments)`) reuses the
+  existing card rather than proposing a second one, and proceeds once approved.
+
+  Gating is by capability, not tool name, so a capability stays gated however
+  many tools declare it. The variable is **empty by default**, which builds the
+  runtime with no approval store at all — the gate is absent rather than present
+  and passing everything. A label containing whitespace can never match a
+  capability, so it is rejected at config load rather than silently gating
+  nothing. Covered by `crates/server/tests/approval_gate_boot.rs` (wiring) and
+  `crates/fused-runtime/tests/approval_gate.rs` (gate behaviour).
+
+  Known limitation: the gate is consulted on the tool-invocation path. Capability
+  labels must match what the tool registry declares (`cap.shell_exec`,
+  `cap.fs_write`, and so on); there is no wildcard form, and a label that matches
+  no registered capability gates nothing.
 
 ## Not Yet Turnkey
 
