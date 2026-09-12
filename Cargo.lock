@@ -468,6 +468,7 @@ dependencies = [
  "ardur-durability",
  "ardur-embeddings",
  "ardur-fused-runtime",
+ "ardur-integrations",
  "ardur-memory",
  "ardur-provider-runtime",
  "ardur-provider-selector",
@@ -804,6 +805,15 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "ardur-integrations"
+version = "0.0.1"
+dependencies = [
+ "ardur-tool-registry",
+ "thiserror 2.0.20",
+ "toml",
 ]
 
 [[package]]

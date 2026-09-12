@@ -205,6 +205,30 @@ The platform tool crates are also implemented as explicit integration surfaces:
   `cap.fs_write`, and so on); there is no wildcard form, and a label that matches
   no registered capability gates nothing.
 
+- **Integration configuration** (ARD-459) lands the declaration surface, not yet
+  the adapters. `[integrations.<name>]` blocks in `~/.ardur/config.toml` declare
+  an external tool as either a `command` (an executable driven through
+  argv-exec) or a `root` (a confining directory), validated strictly at load:
+  unknown keys, wrong types, and missing or ambiguous endpoints all fail the
+  parse rather than being normalised, because a silently-ignored key looks like
+  a setting that took effect. `ARDUR_INTEGRATIONS_<NAME>_ENABLED`, `_COMMAND`
+  and `_ROOT` adjust a declared integration but cannot introduce one, so the set
+  of possible integrations stays in reviewed configuration rather than in an
+  inherited environment variable.
+
+  Everything is off by default and off means absent: a disabled integration is
+  never passed to an adapter at all, so it cannot execute adapter code. An
+  enabled integration with no compiled-in adapter fails the boot rather than
+  running without a capability its configuration declares. `ardur doctor`
+  reports each integration's enabled state and whether its backing resource is
+  present — presence only, never values.
+
+  What is **not** here: the `beads`, `dolthub` and `obsidian` adapters that turn
+  a declared integration into callable tools. Until one exists, enabling an
+  integration fails the boot by design. Covered by 28 unit tests in
+  `crates/integrations` and `crates/cli/tests/cli_integrations_doctor.rs`, which
+  drives the real `ardur doctor` binary.
+
 ## Not Yet Turnkey
 
 Do not treat this repo as a public production deployment without additional

@@ -504,6 +504,103 @@ fn run_debug(args: DebugArgs) -> Result<(), CliError> {
     Ok(())
 }
 
+/// Append one check per declared integration to a doctor report.
+///
+/// Reports, for each integration: whether it is enabled, and whether its
+/// backing resource is present. It deliberately reports **presence only** —
+/// never the contents of a vault, a database, or a command's output — so that
+/// `ardur doctor` stays safe to paste into an issue.
+///
+/// A missing resource for an *enabled* integration is a warning; for a disabled
+/// one it is merely reported, since a declared-but-off block on a machine that
+/// lacks the tool is a legitimate configuration.
+fn push_integration_checks(root: &Path, checks: &mut Vec<serde_json::Value>, warnings: &mut usize) {
+    let config_path = root.join("config.toml");
+    let Ok(document) = std::fs::read_to_string(&config_path) else {
+        // No config file at all is already reported by check 4; a fresh boot
+        // simply has no integrations, which is the intended default posture.
+        return;
+    };
+
+    let set = match ardur_integrations::parse_integrations(&document) {
+        Ok(set) => set,
+        Err(e) => {
+            *warnings += 1;
+            checks.push(json!({
+                "name": "integrations",
+                "status": "warn",
+                "note": format!("integration configuration could not be parsed: {e}"),
+            }));
+            return;
+        }
+    };
+
+    if set.is_empty() {
+        checks.push(json!({
+            "name": "integrations",
+            "status": "ok",
+            "declared": 0,
+            "enabled": 0,
+            "note": "no integrations declared",
+        }));
+        return;
+    }
+
+    checks.push(json!({
+        "name": "integrations",
+        "status": "ok",
+        "declared": set.len(),
+        "enabled": set.active().count(),
+    }));
+
+    for integration in set.iter() {
+        let (present, detail) = match &integration.endpoint {
+            ardur_integrations::IntegrationEndpoint::Command { binary } => {
+                (resolve_binary(binary).is_some(), "command")
+            }
+            ardur_integrations::IntegrationEndpoint::Directory { root } => {
+                (root.is_dir(), "directory")
+            }
+        };
+
+        // Only an enabled integration whose resource is missing is a problem
+        // worth warning about: it will fail at first use.
+        let status = if present {
+            "ok"
+        } else if integration.enabled {
+            *warnings += 1;
+            "warn"
+        } else {
+            "skipped"
+        };
+
+        checks.push(json!({
+            "name": format!("integration:{}", integration.name),
+            "status": status,
+            "enabled": integration.enabled,
+            "kind": detail,
+            "present": present,
+            "endpoint": integration.endpoint.describe(),
+        }));
+    }
+}
+
+/// Whether a command is runnable: an explicit path that exists, or a bare name
+/// found on `PATH`.
+///
+/// Resolution happens here rather than in the integrations crate because a
+/// missing binary is a *host* fact, not a configuration error — the same
+/// configuration is valid on a machine where the tool is installed.
+fn resolve_binary(binary: &Path) -> Option<PathBuf> {
+    if binary.components().count() > 1 || binary.is_absolute() {
+        return binary.is_file().then(|| binary.to_path_buf());
+    }
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(binary))
+        .find(|candidate| candidate.is_file())
+}
+
 fn run_doctor(args: DoctorArgs) -> Result<(), CliError> {
     let root = state_root(args.state_dir)?;
     let mut checks = Vec::new();
@@ -592,6 +689,13 @@ fn run_doctor(args: DoctorArgs) -> Result<(), CliError> {
         "status": "skipped",
         "note": "live provider checks require explicit credentials and opt-in",
     }));
+
+    // 9. Integrations (ARD-459). Reports declared/enabled state and whether
+    //    each backing resource is reachable — presence only, never values.
+    //    A configured-but-missing resource is a warning rather than an error:
+    //    an operator may legitimately write configuration on a machine that
+    //    does not yet have the tool installed, and doctor's job is to say so.
+    push_integration_checks(&root, &mut checks, &mut warnings);
 
     let report = json!({
         "status": if hard_fail { "error" } else if warnings > 0 { "warn" } else { "ok" },
