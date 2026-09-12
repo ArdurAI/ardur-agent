@@ -62,6 +62,12 @@ use tokio::sync::Mutex as AsyncMutex;
 /// The receipt verb minted for a completed turn (`verb.object.state.vN`).
 pub(crate) const COMPLETION_VERB: &str = "llm.completion.minted.v1";
 
+/// The terminal verb recorded when a turn is abandoned after at least one
+/// tool-loop round already committed a receipt (#422). The receipt log is
+/// append-only, so earlier rounds cannot be un-minted; this marks the chain so
+/// an intermediate round is never the last word on a turn that never settled.
+pub(crate) const CANCELLED_VERB: &str = "llm.completion.cancelled.v1";
+
 /// The `filter_id` reported in [`RuntimeError::InjectionBlocked`] when stage 4.5
 /// blocks. The registry aggregates many filters into one combined verdict (and a
 /// [`CombinedScanResult`](ardur_injection_defense::CombinedScanResult) does not
@@ -1641,6 +1647,17 @@ impl FusedRuntime {
             .filter(|(_, receipt)| {
                 receipt.body.session_id == Some(session_id.0)
                     && !journaled.contains(&receipt.body.receipt_id)
+                    // A cancellation marker (#422) is intentionally
+                    // journal-less: it records that a turn ended WITHOUT
+                    // producing an assistant message, so there is no
+                    // AssistantMessage entry to vouch for it and never will be.
+                    // Without this exemption the default strategy would invent
+                    // a synthetic "crashed, model output lost" message for a
+                    // turn that was simply abandoned, and TruncateOrphans would
+                    // delete the marker and restore an intermediate round as
+                    // the chain tail — re-creating the very orphan the marker
+                    // exists to prevent.
+                    && receipt.body.verb.as_str() != CANCELLED_VERB
             })
             .map(|(i, _)| i)
             .collect();
@@ -1946,6 +1963,95 @@ impl FusedRuntime {
         Ok(reservation)
     }
 
+    /// Settle a turn abandoned mid tool-loop (#422).
+    ///
+    /// The receipt log is append-only, so a cancel arriving during iteration N
+    /// cannot un-mint the receipts iterations 1..N-1 already persisted. Two
+    /// things must still hold:
+    ///
+    /// 1. The turn must not be reported as succeeding. Returning an earlier
+    ///    round's receipt as the outcome would hand the caller a "result" that
+    ///    is really a mid-loop tool round — in practice an empty assistant
+    ///    message — and mark a turn complete that never produced an answer.
+    /// 2. The chain must not end on an intermediate round, which would imply a
+    ///    settled turn. When at least one round committed, a terminal
+    ///    `llm.completion.cancelled.v1` receipt is appended so the chain records
+    ///    that the turn ended without settling.
+    ///
+    /// A turn cancelled before anything committed appends nothing — that is
+    /// #359's contract and it is preserved exactly.
+    ///
+    /// The cancellation receipt is chained and signed like any other, so
+    /// `verify_persisted_chain` still passes. Minting it is best-effort: a
+    /// failure here is logged, never converted into a different error, because
+    /// the turn is already being abandoned.
+    async fn record_turn_cancellation(
+        &self,
+        session_id: SessionId,
+        claims: &VerifiedClaims,
+        committed_rounds: u32,
+    ) {
+        if committed_rounds == 0 {
+            return;
+        }
+        let verb = match VerbObject::new(CANCELLED_VERB) {
+            Ok(verb) => verb,
+            Err(e) => {
+                tracing::error!(error = %e, "invalid cancellation verb");
+                return;
+            }
+        };
+        let now_ms = self.clock.now_ms().get();
+
+        let _commit_guard = self.commit_lock.lock().await;
+        let parent_hash = *self.chain_tail.lock();
+        let body = ReceiptBody {
+            receipt_id: uuid::Uuid::new_v4(),
+            parent_hash,
+            verb,
+            issued_at: ardur_receipt::UnixTsMillis(now_ms),
+            subject: ardur_receipt::HolderId(claims.subject.0.clone()),
+            cap_token_id: ardur_receipt::TokenId(claims.token_id),
+            // The payload is the abandonment itself, not model output.
+            payload_digest: Sha256Digest::of(b"turn cancelled before settling"),
+            session_id: Some(session_id.0),
+            // ZERO, deliberately. This is a marker, not a billed event: the
+            // cost of every committed round is already carried by that round's
+            // own receipt. Chain aggregators sum `cost` across all receipts
+            // without inspecting the verb (`AppState::receipt_stats`,
+            // `ardur_admin_ui::costs::aggregate_receipts`), so restating the
+            // cumulative total here would double-count a cancelled turn — a
+            // single 5-cent round would report as 10 cents. The cost gate
+            // finalized each round exactly once and this record must not
+            // change that arithmetic.
+            cost: ardur_receipt::CostTuple {
+                tokens_in: 0,
+                tokens_out: 0,
+                cents: 0,
+                wall_ms: 0,
+                attention_score: 0,
+            },
+            tool_calls: Vec::new(),
+            provider: Some(self.provider.name()),
+        };
+        let signed = match ReceiptSigner::sign(body, &self.receipt_key) {
+            Ok(signed) => signed,
+            Err(e) => {
+                tracing::error!(error = %e, "cancellation receipt mint failed");
+                return;
+            }
+        };
+        if let Err(e) = self.persist_receipt(signed.jws_compact()) {
+            tracing::error!(error = %e, "cancellation receipt persist failed");
+            return;
+        }
+        *self.chain_tail.lock() = Some(Sha256Digest::of(signed.jws_compact().as_bytes()));
+        tracing::info!(
+            rounds = committed_rounds,
+            "turn cancelled mid tool-loop; terminal cancellation receipt recorded"
+        );
+    }
+
     async fn submit_inner(
         &self,
         req: SubmitRequest,
@@ -2023,7 +2129,10 @@ impl FusedRuntime {
         //          back in, or aborts with `ToolLoopExhausted`.
         let mut iteration: u32 = 0;
         let mut total_cost = RuntimeCostTuple::default();
-        let mut last_ok: Option<SubmitResult> = None;
+        // #422: how many tool-loop rounds have durably committed a receipt.
+        // A cancel after >= 1 round cannot un-mint those receipts, so the chain
+        // gets a terminal cancellation record instead.
+        let mut committed_rounds: u32 = 0;
 
         let (receipt, final_content) = loop {
             iteration += 1;
@@ -2105,7 +2214,9 @@ impl FusedRuntime {
             {
                 Ok(reservation) => reservation,
                 Err(RuntimeError::TurnCancelled) => {
-                    return last_ok.ok_or(RuntimeError::TurnCancelled);
+                    self.record_turn_cancellation(session_id, &claims, committed_rounds)
+                        .await;
+                    return Err(RuntimeError::TurnCancelled);
                 }
                 Err(err) => return Err(err),
             };
@@ -2138,7 +2249,9 @@ impl FusedRuntime {
                     {
                         Ok(reservation) => reservation,
                         Err(RuntimeError::TurnCancelled) => {
-                            return last_ok.ok_or(RuntimeError::TurnCancelled);
+                            self.record_turn_cancellation(session_id, &claims, committed_rounds)
+                                .await;
+                            return Err(RuntimeError::TurnCancelled);
                         }
                         Err(err) => return Err(err),
                     };
@@ -2273,7 +2386,9 @@ impl FusedRuntime {
             {
                 Ok(reservation) => reservation,
                 Err(RuntimeError::TurnCancelled) => {
-                    return last_ok.ok_or(RuntimeError::TurnCancelled);
+                    self.record_turn_cancellation(session_id, &claims, committed_rounds)
+                        .await;
+                    return Err(RuntimeError::TurnCancelled);
                 }
                 Err(err) => return Err(err),
             };
@@ -2296,7 +2411,9 @@ impl FusedRuntime {
                     let err = RuntimeError::TurnCancelled;
                     self.fire_error(session_id, LifecyclePhase::Provider, &err)
                         .await;
-                    return last_ok.ok_or(err);
+                    self.record_turn_cancellation(session_id, &claims, committed_rounds)
+                        .await;
+                    return Err(err);
                 }
                 let parent_hash = *self.chain_tail.lock();
                 let body = ReceiptBody {
@@ -2368,7 +2485,28 @@ impl FusedRuntime {
                         self.fire_error(session_id, LifecyclePhase::Receipt, &err)
                             .await;
                         if matches!(err, RuntimeError::TurnCancelled) {
-                            return last_ok.ok_or(err);
+                            // Release the commit guard BEFORE recording.
+                            // `record_turn_cancellation` takes `commit_lock`,
+                            // which is not reentrant, and this branch still
+                            // holds it — same reason the probe path above
+                            // drops the guard before returning.
+                            //
+                            // Unreachable today with `committed_rounds > 0`:
+                            // `begin_persist` only refuses from Cancelled,
+                            // `request_cancel` only wins against Live, and any
+                            // committed round has already moved the handshake
+                            // to Committed — where `record_turn_cancellation`
+                            // early-returns anyway. So this is a latent
+                            // hazard, not a live deadlock. Made structurally
+                            // safe rather than left to that coincidence: a
+                            // future state-machine change allowing a committed
+                            // turn to be cancelled would otherwise park the
+                            // single turn worker on a lock it already holds,
+                            // stalling every subsequent turn.
+                            drop(commit_guard);
+                            self.record_turn_cancellation(session_id, &claims, committed_rounds)
+                                .await;
+                            return Err(err);
                         }
                         return Err(err);
                     }
@@ -2470,11 +2608,7 @@ impl FusedRuntime {
             //     runs here.
 
             total_cost = total_cost.saturating_add(&combined_cost);
-            last_ok = Some(SubmitResult {
-                receipt_id: ReceiptId(receipt.receipt_id),
-                response: ChatMessage::assistant(response.content.clone()),
-                cost: total_cost,
-            });
+            committed_rounds += 1;
 
             // Termination: a response with no tool calls is the final answer; a
             // tool-wanting response at the iteration ceiling aborts; otherwise we

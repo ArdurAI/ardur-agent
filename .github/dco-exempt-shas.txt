@@ -12,3 +12,11 @@ d82725f
 # "fix(security): ARD-300 gates follow-up". Exempt so the dev -> main
 # promotion passes Check DCO sign-off.
 47910170e7633d8f9cfcb8d518bdfba3afba0927
+
+# Squash merge of PR #441 ("feat(tool-registry): add shell.exec, an argv-exec
+# confinement path"). Merged through the GitHub UI, whose squash body carries
+# no sign-off trailer, unlike the sibling merges in the same series which were
+# given one explicitly. The PR's own commits were signed off and its DCO check
+# passed; only the generated squash commit lacks the trailer. Exempt so the
+# dev -> main promotion passes Check DCO sign-off.
+43742ebe7a4aac20f9fe0d5cafaa0f0da0907f30

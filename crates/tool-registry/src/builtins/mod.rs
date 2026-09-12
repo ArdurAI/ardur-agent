@@ -4,6 +4,9 @@
 //!
 //! - [`ShellTool`] (`shell.run`) — run a shell command, optionally confined to
 //!   an allowlist. **Read its [module security warning](shell) before use.**
+//! - [`ShellExecTool`] (`shell.exec`) — the hardened sibling: execs argv
+//!   directly with no shell, so no metacharacter is ever interpreted. Prefer it
+//!   wherever shell composition is not actually required.
 //! - [`ReadFileTool`] (`file.read`), [`WriteFileTool`] (`file.write`),
 //!   [`ListDirTool`] (`file.list`) — root-confined filesystem access; see the
 //!   [`files`] module docs for the containment model.
@@ -30,7 +33,7 @@ mod shell;
 pub use files::{ListDirTool, ReadFileTool, WriteFileTool};
 pub use http::{HttpFetchTool, is_internal_ip};
 pub use media::{ImageAnalyzeTool, ImageGenerateTool, SttTool, TtsTool, VoiceNoteTool};
-pub use shell::ShellTool;
+pub use shell::{ShellExecTool, ShellTool};
 
 use std::path::PathBuf;
 
@@ -52,6 +55,14 @@ pub struct BuiltinOpts {
     /// patterns; `None` registers the **dev-only** unrestricted shell. Ignored
     /// unless `enable_shell` is `true`.
     pub shell_allowlist: Option<Vec<String>>,
+    /// Register [`ShellExecTool`] (`shell.exec`), the no-shell argv-exec tool.
+    /// Independent of `enable_shell`: a deployment can register the hardened
+    /// exec path without exposing `shell.run` at all.
+    pub enable_shell_exec: bool,
+    /// The `shell.exec` binary allowlist. `Some(binaries)` confines argv[0] to
+    /// exactly those names; `None` registers the **dev-only** unrestricted
+    /// variant. Ignored unless `enable_shell_exec` is `true`.
+    pub shell_exec_allowlist: Option<Vec<String>>,
     /// The root for the file tools (`file.read`, `file.write`, `file.list`).
     /// `Some(root)` registers all three confined to it; `None` installs no file
     /// tool.
@@ -125,6 +136,14 @@ impl ToolRegistry {
             let tool = match opts.shell_allowlist {
                 Some(allowlist) => ShellTool::with_allowlist(allowlist),
                 None => ShellTool::without_allowlist(),
+            };
+            self.register(Box::new(tool))?;
+        }
+
+        if opts.enable_shell_exec {
+            let tool = match opts.shell_exec_allowlist {
+                Some(allowlist) => ShellExecTool::with_allowlist(allowlist),
+                None => ShellExecTool::without_allowlist(),
             };
             self.register(Box::new(tool))?;
         }

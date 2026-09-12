@@ -32,11 +32,108 @@ jobs:
             exit 0
           fi
 
-          # Load exempt short-SHAs (drop comments and blank lines, take 1st field).
-          EXEMPT="$(grep -vE '^[[:space:]]*(#|$)' .github/dco-exempt-shas.txt | awk '{print $1}')"
-
           BASE="${{ github.event.pull_request.base.sha }}"
           HEAD="${{ github.event.pull_request.head.sha }}"
+
+          EXEMPT_FILE=".github/dco-exempt-shas.txt"
+
+          # Where the applied exempt list is read from.
+          #
+          # Normally: the BASE ref. Reading it from the checked-out head would
+          # let any PR append its own unsigned SHA and self-exempt (#435). The
+          # base copy is the one that already passed review, so an exemption
+          # only takes effect after it is merged.
+          #
+          # One documented exception: the dev -> main promotion. When an
+          # unsigned commit reaches `dev` directly (no PR, so this workflow
+          # never ran on it), it is exempted by a reviewed PR *on dev*. That
+          # entry is therefore live on dev but not yet on main, and a promotion
+          # reading only main's copy would evaluate the unsigned commit and
+          # block the very promotion that carries the exemption to main — a
+          # deadlock with no trusted way out.
+          #
+          # For that promotion only — same-repo PR, head branch exactly `dev`,
+          # base `main` — the list is read from dev, where it was already
+          # reviewed and merged. This does not reopen #435: an unsigned commit
+          # cannot reach dev *through a PR*, because that PR's own run reads
+          # base (dev), which does not yet contain the entry, and fails. Only a
+          # direct push to dev can create the situation, which needs elevated
+          # permission this check was never able to constrain anyway.
+          HEAD_REPO="${{ github.event.pull_request.head.repo.full_name }}"
+          HEAD_BRANCH="${{ github.event.pull_request.head.ref }}"
+          BASE_BRANCH="${{ github.base_ref }}"
+
+          if [ "${HEAD_REPO}" = "${{ github.repository }}" ] \
+             && [ "${HEAD_BRANCH}" = "dev" ] \
+             && [ "${BASE_BRANCH}" = "main" ]; then
+            EXEMPT_SOURCE="${HEAD}"
+            echo "NOTE: dev -> main promotion; reading ${EXEMPT_FILE} from dev (reviewed there)."
+          else
+            EXEMPT_SOURCE="${BASE}"
+          fi
+
+          # A missing file on the source ref means "no exemptions" (fail closed).
+          if git cat-file -e "${EXEMPT_SOURCE}:${EXEMPT_FILE}" 2>/dev/null; then
+            EXEMPT_RAW="$(git show "${EXEMPT_SOURCE}:${EXEMPT_FILE}")"
+          else
+            echo "NOTE: ${EXEMPT_FILE} does not exist on the exempt source ref; no commits are exempt."
+            EXEMPT_RAW=""
+          fi
+          EXEMPT="$(printf '%s\n' "${EXEMPT_RAW}" | grep -vE '^[[:space:]]*(#|$)' | awk '{print $1}')"
+
+          # Entries are prefix-matched below, so a short entry would exempt a
+          # wide range of commits. The shortest grandfathered entry is 7 chars;
+          # refuse anything shorter or not lowercase hex.
+          for e in ${EXEMPT}; do
+            if ! printf '%s' "${e}" | grep -qE '^[0-9a-f]{7,40}$'; then
+              echo "::error::Malformed entry in ${EXEMPT_FILE} on the base ref: '${e}'"
+              echo "Entries must be 7-40 lowercase hex characters."
+              exit 1
+            fi
+          done
+
+          # If this PR's own commits touch the exempt file, enforce the
+          # documented append-only property and require new entries to be full
+          # 40-char SHAs. Existing short entries are grandfathered by the prefix
+          # check. The comparison is against the MERGE BASE, not the base tip:
+          # a branch that simply has not rebased past a newly-merged exemption
+          # has not modified anything and must not be failed for it.
+          # This validates the diff only — the list actually applied above still
+          # comes from BASE, so a PR cannot exempt its own commits regardless.
+          MERGE_BASE="$(git merge-base "${BASE}" "${HEAD}" 2>/dev/null || echo "${BASE}")"
+
+          if git diff --name-only "${MERGE_BASE}" "${HEAD}" -- "${EXEMPT_FILE}" | grep -q .; then
+            echo "NOTE: ${EXEMPT_FILE} is modified by this PR; enforcing append-only."
+
+            if git cat-file -e "${MERGE_BASE}:${EXEMPT_FILE}" 2>/dev/null; then
+              MB_RAW="$(git show "${MERGE_BASE}:${EXEMPT_FILE}")"
+            else
+              MB_RAW=""
+            fi
+            HEAD_RAW="$(git show "${HEAD}:${EXEMPT_FILE}")"
+
+            # Every merge-base line must survive, in order, as a prefix of the
+            # head file. Rewriting or deleting a line is a policy change, not an
+            # append, and must not pass silently.
+            mb_lines="$(printf '%s\n' "${MB_RAW}" | wc -l | tr -d ' ')"
+            if [ "$(printf '%s\n' "${HEAD_RAW}" | head -n "${mb_lines}")" \
+                 != "$(printf '%s\n' "${MB_RAW}")" ]; then
+              echo "::error::${EXEMPT_FILE} is append-only: existing lines may not be modified or removed."
+              exit 1
+            fi
+
+            # New entries (present on head, absent on the merge base) must be
+            # full SHAs.
+            NEW_ENTRIES="$(printf '%s\n' "${HEAD_RAW}" | tail -n +"$((mb_lines + 1))" \
+                           | grep -vE '^[[:space:]]*(#|$)' | awk '{print $1}')"
+            for e in ${NEW_ENTRIES}; do
+              if ! printf '%s' "${e}" | grep -qE '^[0-9a-f]{40}$'; then
+                echo "::error::New entry '${e}' in ${EXEMPT_FILE} must be a full 40-character commit SHA."
+                exit 1
+              fi
+              echo "NEW EXEMPTION (takes effect once merged, not in this run): ${e}"
+            done
+          fi
 
           fail=0
           for sha in $(git rev-list "${BASE}..${HEAD}"); do
