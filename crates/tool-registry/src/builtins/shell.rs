@@ -222,6 +222,64 @@ impl Drop for ProcessGroupGuard {
     }
 }
 
+/// True when `tokens` is a recursive `chmod`/`chown` whose target resolves to
+/// the filesystem root or a top-level system directory.
+///
+/// Deliberately not a regex. A pattern can only catch the spellings its author
+/// happened to think of, and `/`, `"/"`, `'/'`, `//`, `\/` and `/etc/..` are
+/// all ordinary shell spellings of the same target. Each operand is instead
+/// unquoted and normalised, then judged by its resolved depth.
+fn targets_root_recursively(tokens: &[&str]) -> bool {
+    let Some(first) = tokens.first() else {
+        return false;
+    };
+    let binary = first.rsplit('/').next().unwrap_or(first);
+    if !matches!(binary, "chmod" | "chown") {
+        return false;
+    }
+    // The recursive flag, in any bundled form (`-R`, `-Rv`, `--recursive`).
+    let recursive = tokens[1..].iter().any(|t| {
+        *t == "--recursive" || (t.starts_with('-') && !t.starts_with("--") && t.contains('R'))
+    });
+    if !recursive {
+        return false;
+    }
+
+    tokens[1..].iter().any(|raw| {
+        // Strip shell quoting and escaping so `"/"`, `'/'` and `\/` all
+        // reduce to `/`.
+        let mut unquoted = String::with_capacity(raw.len());
+        let mut chars = raw.chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                '"' | '\'' => {}
+                '\\' => {
+                    if let Some(next) = chars.next() {
+                        unquoted.push(next);
+                    }
+                }
+                _ => unquoted.push(c),
+            }
+        }
+        if !unquoted.starts_with('/') {
+            return false;
+        }
+        // Resolve `.` and `..` lexically and collapse repeated separators, so
+        // `//`, `/etc/..` and `/./` all reduce to the root they denote.
+        let mut depth: usize = 0;
+        for segment in unquoted.split('/') {
+            match segment {
+                "" | "." => {}
+                ".." => depth = depth.saturating_sub(1),
+                _ => depth += 1,
+            }
+        }
+        // Depth 0 is `/` itself; depth 1 is a top-level directory such as
+        // `/etc`. Deeper paths like `/var/log/app` are ordinary targets.
+        depth <= 1
+    })
+}
+
 /// Best-effort patterns for known destructive shell commands. These are blocked
 /// even in `Allowlist::Any` mode as a defence-in-depth measure, but they are
 /// deliberately not described as a sandbox: shell syntax is too broad for a
@@ -243,26 +301,10 @@ static DESTRUCTIVE_PATTERNS: once_cell::sync::Lazy<Vec<Regex>> = once_cell::sync
         Regex::new(r"(?i)\|\s*(?:ba)?sh\b").expect("valid destructive pattern regex"),
         // Fork bomb
         Regex::new(r"(?i):\(\)\s*\{\s*:\|:&\s*\};:").expect("valid destructive pattern regex"),
-        // Recursive chmod/chown on root or a top-level system directory.
-        //
-        // Two failure modes have to be avoided at once. The original pattern
-        // ended in `/\b`, which requires a word character after the slash, so
-        // `chmod -R 777 /` — the single most dangerous target — never matched
-        // while `/etc` did. Replacing it with a bare `.*/` fixed that but
-        // denied any path containing a slash at all, including `./build` and
-        // `/tmp/work`, which is not what the rule is about.
-        //
-        // So the target is anchored: an absolute operand that is either `/`
-        // itself or a single top-level segment (`/etc`, `/usr`, `/etc/`).
-        // Deeper paths like `/var/log/app` and relative paths are left alone.
-        //
-        // Written without look-around: Rust's `regex` crate does not support
-        // it, so `-R` is required to appear before the operand (the natural
-        // ordering) rather than asserted by a lookahead.
-        Regex::new(r"(?i)\bchmod\b[^\n]*\s-[a-zA-Z]*R[a-zA-Z]*\b(?:\s+[^\s/][^\s]*)*\s+/(?:[^/\s]+/?)?(?:\s|$)")
-            .expect("valid destructive pattern regex"),
-        Regex::new(r"(?i)\bchown\b[^\n]*\s-[a-zA-Z]*R[a-zA-Z]*\b(?:\s+[^\s/][^\s]*)*\s+/(?:[^/\s]+/?)?(?:\s|$)")
-            .expect("valid destructive pattern regex"),
+        // Recursive chmod/chown on root is handled by `targets_root_recursively`
+        // below, not by a regex. A pattern can only match the spellings its
+        // author thought of, and `/`, `"/"`, `'/'`, `//`, `\/` and `/etc/..`
+        // are all ordinary shell spellings of the same target.
         // Disk wipe / filesystem creation. Permit whitespace around `=` because
         // shell users often add it while experimenting, even though some forms
         // are not accepted by `dd` itself.
@@ -753,6 +795,7 @@ impl Tool for ShellExecTool {
         if DESTRUCTIVE_PATTERNS
             .iter()
             .any(|re| re.is_match(&inspected))
+            || targets_root_recursively(&argv.iter().map(String::as_str).collect::<Vec<_>>())
         {
             return Err(ToolError::Denied {
                 reason: format!(
@@ -861,6 +904,7 @@ impl Tool for ShellTool {
         if DESTRUCTIVE_PATTERNS
             .iter()
             .any(|re| re.is_match(&args.command))
+            || targets_root_recursively(&args.command.split_whitespace().collect::<Vec<_>>())
         {
             return Err(ToolError::Denied {
                 reason: format!(
