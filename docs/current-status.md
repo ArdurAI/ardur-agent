@@ -114,6 +114,7 @@ Default `ardur-server` boot currently registers:
 The hardened built-in tools are implemented and tested in `ardur-tool-registry`:
 
 - `shell.run`
+- `shell.exec`
 - `file.read`
 - `file.write`
 - `file.list`
@@ -180,7 +181,12 @@ hardening and operator work.
   same fused-runtime cap-token/Cedar context as normal tool calls.
 - Hardened shell/file/http tools exist but stay off until an operator grant or
   server env opt-in (ARD-457).
-- `shell.run`'s allowlist is a prefix gate, not full argv confinement (`#420`).
+- `shell.run`'s allowlist is a prefix gate, not full argv confinement. The
+  hardened sibling `shell.exec` (`#420`) is implemented and tested — it execs
+  argv directly with no shell and matches `argv[0]` exactly — but is not yet
+  wired to a server config flag, so it is never registered at boot. Deployments
+  that construct a registry directly can opt in via
+  `BuiltinOpts::enable_shell_exec`.
 - Tool-loop intermediate receipts survive a later-round cancel (`#422`): a turn
   cancelled mid-loop can leave earlier-round tool receipts in the chain without
   a final settled receipt, so the chain can record cost for a turn the caller
@@ -197,8 +203,10 @@ hardening and operator work.
 Post-beta follow-ups (not part of the `v0.1.0-beta.1` gate):
 
 1. `#422`: tool-loop intermediate receipts survive a later-round cancel.
-2. `#420`: `shell.run` allowlist argv-exec hardening (prefix gate →
-   confinement).
+2. `#420` follow-through: wire `shell.exec` to a server config flag
+   (`ARDUR_ENABLE_SHELL_EXEC_TOOL` + binary allowlist) so operators can register
+   the hardened exec path, and migrate grant-driven registration to prefer it
+   over `shell.run`.
 3. ARD-463 propose-half: emit pending approval cards before irreversible tools,
    with `RequiresApproval` caveats.
 4. Auto-register local STT/TTS when `ARDUR_LOCAL_STT_COMMAND` /

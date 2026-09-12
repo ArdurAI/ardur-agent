@@ -535,6 +535,12 @@ impl Config {
             // Always `Some` when the shell is enabled, so the unrestricted shell
             // (`None`) is never constructed here.
             shell_allowlist: self.enable_shell_tool.then(|| self.shell_allowlist.clone()),
+            // `shell.exec` is not wired to a config flag yet; it stays
+            // unregistered on every boot. Registering it here would need its own
+            // enable + allowlist env pair, and the same never-`None` (never
+            // unrestricted) discipline used for `shell.run` above.
+            enable_shell_exec: false,
+            shell_exec_allowlist: None,
             file_root: self.file_tool_root.clone(),
             http: self.enable_http_tool.then(|| HttpFetchOpts {
                 enable: true,

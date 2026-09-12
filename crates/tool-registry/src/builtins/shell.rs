@@ -29,10 +29,13 @@
 //! Because `shell.run` deliberately runs the line through the system shell
 //! (composition — pipes, redirects, substitutions — is its purpose), the
 //! allowlist cannot be made a safe boundary without becoming a different tool.
-//! For an untrusted prompt, **do not** treat any `shell.run` configuration as a
-//! sandbox: gate it with the §11 cap-token + Cedar layers (which decide whether
-//! the capability may run at all), or use the sibling `terminal.exec` tool,
-//! which enforces a safe-charset allowlist and argv exec with no `/bin/sh -c`.
+//! That different tool is [`ShellExecTool`] (`shell.exec`), defined below: it
+//! execs argv directly with no shell, matches `argv[0]` exactly rather than by
+//! prefix, and is the right choice wherever shell composition is not actually
+//! required. For an untrusted prompt, **do not** treat any `shell.run`
+//! configuration as a sandbox: gate it with the §11 cap-token + Cedar layers
+//! (which decide whether the capability may run at all), prefer `shell.exec`,
+//! or use the sibling `terminal.exec` tool.
 
 use std::process::Stdio;
 use std::time::Duration;
@@ -230,6 +233,340 @@ impl ShellTool {
             // surface this tool touches.
             caps: vec![Capability::ShellExec, Capability::ProcessSpawn],
         }
+    }
+}
+
+/// Whether `c` is permitted inside a `shell.exec` command **string**.
+///
+/// An allowlist — alphanumerics, space/tab, and the punctuation that appears in
+/// flags, paths, and `key=value` pairs — rather than an operator denylist, so it
+/// fails closed against anything novel. Mirrors the `terminal.exec` charset
+/// (ARD-476): every shell operator, metacharacter, expansion, and quote is
+/// rejected, and newline/carriage-return are excluded because they are command
+/// separators.
+///
+/// This gate applies only to the `command` string form, whose split is naive
+/// whitespace tokenization and therefore cannot honour quoting. The explicit
+/// `argv` form does not need it: array elements are passed to `execvp` as
+/// literal arguments and are never parsed by a shell.
+fn is_safe_exec_char(c: char) -> bool {
+    c.is_ascii_alphanumeric()
+        || c == ' '
+        || c == '\t'
+        || matches!(c, '-' | '_' | '.' | '/' | ':' | ',' | '=' | '+' | '@' | '%')
+}
+
+/// The binary policy [`ShellExecTool`] gates `argv[0]` against.
+enum BinaryAllowlist {
+    /// Permit any binary. Dev-only.
+    Any,
+    /// Permit only these exact binary names.
+    Exact(Vec<String>),
+}
+
+impl BinaryAllowlist {
+    /// Whether `binary` is permitted.
+    ///
+    /// Unlike [`Allowlist::permits`], this is an **exact** match on the whole
+    /// argv[0], never a prefix: `git` permits `git` and nothing else, so no
+    /// `gitfoo` and no `git; …` (which cannot arise here anyway, since the
+    /// string is never handed to a shell).
+    fn permits(&self, binary: &str) -> bool {
+        match self {
+            BinaryAllowlist::Any => true,
+            BinaryAllowlist::Exact(allowed) => allowed
+                .iter()
+                .flat_map(|p| p.split('|'))
+                .map(str::trim)
+                .filter(|alt| !alt.is_empty())
+                .any(|alt| alt == binary),
+        }
+    }
+}
+
+/// Arguments to a `shell.exec` invocation.
+///
+/// Exactly one of `argv` or `command` must be supplied.
+#[derive(Deserialize)]
+struct ShellExecArgs {
+    /// Explicit argv. `argv[0]` is the binary; the rest are passed verbatim.
+    #[serde(default)]
+    argv: Option<Vec<String>>,
+    /// A safe-charset command string, split on whitespace into argv.
+    #[serde(default)]
+    command: Option<String>,
+    /// Wall-clock ceiling in seconds; the command is killed past it.
+    #[serde(default = "default_timeout_secs")]
+    timeout_secs: u64,
+    /// Working directory; falls back to the context's `cwd` when absent.
+    #[serde(default)]
+    cwd: Option<String>,
+}
+
+/// A tool that execs a command **directly** — no `bash -c`, no `cmd /C` — and
+/// returns `{ stdout, stderr, exit_code, timed_out }`.
+///
+/// # What this confines, and what it does not
+///
+/// `shell.exec` is the hardened sibling of [`ShellTool`]. It removes the shell
+/// interpretation layer entirely:
+///
+/// - The process is spawned with `Command::new(argv[0]).args(&argv[1..])`, so
+///   no metacharacter in any argument is ever interpreted. `;`, `|`, `` ` ``,
+///   `$(…)`, `&&`, redirects and globs arrive at the target binary as literal
+///   bytes.
+/// - `argv[0]` is matched **exactly** against the allowlist, not by prefix, so
+///   an allowlisted name cannot be extended (`gitfoo`) or chained (`git; id`).
+/// - The `command` string form is additionally restricted to a safe charset,
+///   because splitting a string on whitespace cannot honour quoting.
+///
+/// **It does not sandbox the allowlisted binary itself.** A binary that spawns
+/// a shell on your behalf remains a pivot regardless of how it is invoked:
+/// `sh`, `bash`, `env`, `xargs`, `find … -exec`, `git -c core.pager=…`,
+/// `ssh host …`, and any interpreter (`python -c`, `perl -e`) all execute
+/// caller-supplied code through their own argument handling. Allowlisting such
+/// a binary grants what that binary can do. Confining *which* binaries may run
+/// is the allowlist's job; confining what a permitted binary does is the
+/// cap-token + Cedar layers' job.
+///
+/// Prefer this tool over [`ShellTool`] wherever shell composition (pipes,
+/// redirects, substitutions) is not actually required.
+pub struct ShellExecTool {
+    schema: ToolSchema,
+    allowlist: BinaryAllowlist,
+    caps: Vec<Capability>,
+}
+
+impl ShellExecTool {
+    /// The id [`ShellExecTool`] registers under.
+    pub const ID: &'static str = "shell.exec";
+
+    /// A [`ShellExecTool`] confined to the exact binaries in `binaries`.
+    ///
+    /// Each entry is one or more `|`-separated binary names (e.g. `"git|cargo"`
+    /// or `"ls"`). `argv[0]` must equal one of them exactly. A command whose
+    /// binary matches nothing is refused with [`ToolError::Denied`].
+    #[must_use]
+    pub fn with_allowlist(binaries: Vec<String>) -> Self {
+        Self::build(BinaryAllowlist::Exact(binaries))
+    }
+
+    /// A [`ShellExecTool`] that permits **any** binary.
+    ///
+    /// # ⚠️ Dev use only
+    ///
+    /// Direct exec still means arbitrary code execution — it only removes shell
+    /// *interpretation*. Never register this on a server or any surface an
+    /// untrusted prompt can reach.
+    #[must_use]
+    pub fn without_allowlist() -> Self {
+        Self::build(BinaryAllowlist::Any)
+    }
+
+    fn build(allowlist: BinaryAllowlist) -> Self {
+        let schema = ToolSchema {
+            description: "Execute a command directly (no shell). Supply argv as an array, or a \
+                          simple command string without shell operators. Returns stdout, stderr, \
+                          exit code."
+                .to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "argv": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "minItems": 1,
+                        "description": "Explicit argv: argv[0] is the binary, the rest are passed \
+                                        verbatim. Preferred — arguments may contain any bytes, as \
+                                        they are never parsed by a shell."
+                    },
+                    "command": {
+                        "type": "string",
+                        "description": "Alternative to argv: a command string split on whitespace. \
+                                        Restricted to a safe charset (no shell operators, quotes, \
+                                        or expansions) because the split cannot honour quoting."
+                    },
+                    "timeout_secs": {
+                        "type": "integer",
+                        "description": "Wall-clock ceiling in seconds (default 30).",
+                        "minimum": 1
+                    },
+                    "cwd": {
+                        "type": "string",
+                        "description": "Working directory; defaults to the session cwd."
+                    }
+                }
+            }),
+            output_schema: json!({
+                "type": "object",
+                "properties": {
+                    "stdout": { "type": "string" },
+                    "stderr": { "type": "string" },
+                    "exit_code": { "type": "integer" },
+                    "timed_out": { "type": "boolean" }
+                },
+                "required": ["stdout", "stderr", "exit_code", "timed_out"]
+            }),
+            examples: vec![],
+        };
+        Self {
+            schema,
+            allowlist,
+            // Same capability pair as `shell.run`: the cap-token and Cedar
+            // layers see an identical surface, so hardening the exec path does
+            // not quietly widen what an existing grant authorizes.
+            caps: vec![Capability::ShellExec, Capability::ProcessSpawn],
+        }
+    }
+
+    /// Resolve the request into an argv vector, enforcing the input gates.
+    fn resolve_argv(args: &ShellExecArgs) -> Result<Vec<String>, ToolError> {
+        let argv = match (&args.argv, &args.command) {
+            (Some(_), Some(_)) => {
+                return Err(ToolError::InvalidArgs(
+                    "supply exactly one of `argv` or `command`, not both".to_string(),
+                ));
+            }
+            (None, None) => {
+                return Err(ToolError::InvalidArgs(
+                    "one of `argv` or `command` is required".to_string(),
+                ));
+            }
+            (Some(argv), None) => argv.clone(),
+            (None, Some(command)) => {
+                // The string form is split naively on whitespace, which cannot
+                // honour quoting — so anything a shell would treat as syntax is
+                // rejected outright rather than silently mis-split.
+                if let Some(bad) = command.chars().find(|c| !is_safe_exec_char(*c)) {
+                    return Err(ToolError::Denied {
+                        reason: format!(
+                            "command contains a disallowed character {bad:?}; `command` accepts \
+                             only simple commands without shell operators, quotes, or expansions \
+                             — pass `argv` to supply arguments containing these characters"
+                        ),
+                    });
+                }
+                command.split_whitespace().map(String::from).collect()
+            }
+        };
+
+        if argv.is_empty() {
+            return Err(ToolError::InvalidArgs(
+                "`argv` must not be empty".to_string(),
+            ));
+        }
+
+        let binary = &argv[0];
+        if binary.trim().is_empty() {
+            return Err(ToolError::InvalidArgs(
+                "`argv[0]` (the binary) must not be empty".to_string(),
+            ));
+        }
+        // argv[0] is the one element whose content selects what executes, so it
+        // is held to the safe charset even in the explicit-argv form.
+        if let Some(bad) = binary.chars().find(|c| !is_safe_exec_char(*c)) {
+            return Err(ToolError::Denied {
+                reason: format!(
+                    "binary `{binary}` contains a disallowed character {bad:?}; argv[0] must be a \
+                     plain binary name or path"
+                ),
+            });
+        }
+        if binary.chars().any(char::is_whitespace) {
+            return Err(ToolError::Denied {
+                reason: format!("binary `{binary}` must not contain whitespace"),
+            });
+        }
+
+        Ok(argv)
+    }
+}
+
+#[async_trait]
+impl Tool for ShellExecTool {
+    fn id(&self) -> ToolId {
+        ToolId::new(Self::ID)
+    }
+
+    fn schema(&self) -> &ToolSchema {
+        &self.schema
+    }
+
+    async fn invoke(
+        &self,
+        ctx: &ToolContext,
+        args: serde_json::Value,
+    ) -> Result<ToolOutput, ToolError> {
+        let args: ShellExecArgs =
+            serde_json::from_value(args).map_err(|e| ToolError::InvalidArgs(e.to_string()))?;
+
+        let argv = Self::resolve_argv(&args)?;
+        let binary = argv[0].clone();
+
+        if !self.allowlist.permits(&binary) {
+            return Err(ToolError::Denied {
+                reason: format!("binary is not on the shell.exec allowlist: `{binary}`"),
+            });
+        }
+
+        // Defence-in-depth, mirroring `shell.run`. Direct exec already prevents
+        // a metacharacter from *chaining* a second command, so this only has to
+        // catch a destructive invocation of the permitted binary itself.
+        let rendered = argv.join(" ");
+        if DESTRUCTIVE_PATTERNS.iter().any(|re| re.is_match(&rendered)) {
+            return Err(ToolError::Denied {
+                reason: format!(
+                    "command matches a destructive pattern and is blocked: `{rendered}`"
+                ),
+            });
+        }
+
+        let cwd = args.cwd.map_or_else(|| ctx.cwd.clone(), Into::into);
+
+        // No `bash -c` / `cmd /C`: argv is handed to the OS verbatim, so no
+        // metacharacter in any argument is ever interpreted.
+        let mut cmd = Command::new(&binary);
+        cmd.args(&argv[1..])
+            .current_dir(&cwd)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+
+        let child = cmd
+            .spawn()
+            .map_err(|e| ToolError::ExecutionFailed(format!("failed to spawn `{binary}`: {e}")))?;
+
+        let timeout = Duration::from_secs(args.timeout_secs);
+        let content = match tokio::time::timeout(timeout, child.wait_with_output()).await {
+            Ok(Ok(output)) => json!({
+                "stdout": String::from_utf8_lossy(&output.stdout),
+                "stderr": String::from_utf8_lossy(&output.stderr),
+                "exit_code": output.status.code().unwrap_or(-1),
+                "timed_out": false,
+            }),
+            Ok(Err(e)) => {
+                return Err(ToolError::ExecutionFailed(format!(
+                    "command i/o failed: {e}"
+                )));
+            }
+            Err(_elapsed) => json!({
+                "stdout": "",
+                "stderr": "",
+                "exit_code": -1,
+                "timed_out": true,
+            }),
+        };
+
+        Ok(ToolOutput {
+            content: content.clone(),
+            cost: CostTuple::default(),
+            receipt_data: content,
+        })
+    }
+
+    fn required_capabilities(&self) -> &[Capability] {
+        &self.caps
     }
 }
 

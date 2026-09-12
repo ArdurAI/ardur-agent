@@ -7,8 +7,8 @@ use std::path::PathBuf;
 
 use ardur_tool_registry::{
     BuiltinOpts, CapTokenRef, Capability, HttpFetchOpts, HttpFetchTool, InvocationId, ListDirTool,
-    ReadFileTool, SessionId, ShellTool, Tool, ToolContext, ToolError, ToolId, ToolRegistry,
-    WriteFileTool,
+    ReadFileTool, SessionId, ShellExecTool, ShellTool, Tool, ToolContext, ToolError, ToolId,
+    ToolRegistry, WriteFileTool,
 };
 use serde_json::json;
 use tempfile::TempDir;
@@ -290,6 +290,8 @@ async fn register_builtins_skips_disabled_tools() {
         .register_builtins(BuiltinOpts {
             enable_shell: false,
             shell_allowlist: None,
+            enable_shell_exec: false,
+            shell_exec_allowlist: None,
             file_root: Some(root.path().to_path_buf()),
             http: None,
             enable_media: false,
@@ -314,6 +316,8 @@ async fn register_builtins_skips_disabled_tools() {
         .register_builtins(BuiltinOpts {
             enable_shell: true,
             shell_allowlist: Some(vec!["echo".to_string()]),
+            enable_shell_exec: false,
+            shell_exec_allowlist: None,
             file_root: None,
             http: None,
             enable_media: false,
@@ -379,6 +383,8 @@ async fn register_builtins_empty_shell_allowlist_is_fail_closed() {
         .register_builtins(BuiltinOpts {
             enable_shell: true,
             shell_allowlist: Some(Vec::new()),
+            enable_shell_exec: false,
+            shell_exec_allowlist: None,
             ..BuiltinOpts::default()
         })
         .expect("register empty-allowlist shell");
@@ -406,6 +412,8 @@ async fn register_builtins_tools_declare_expected_capabilities() {
         .register_builtins(BuiltinOpts {
             enable_shell: true,
             shell_allowlist: Some(vec!["echo".to_string()]),
+            enable_shell_exec: false,
+            shell_exec_allowlist: None,
             file_root: Some(root.path().to_path_buf()),
             http: Some(HttpFetchOpts {
                 enable: true,
@@ -433,4 +441,245 @@ async fn register_builtins_tools_declare_expected_capabilities() {
     assert_eq!(caps_of(ReadFileTool::ID), vec!["cap.fs_read"]);
     assert_eq!(caps_of(WriteFileTool::ID), vec!["cap.fs_write"]);
     assert_eq!(caps_of(ListDirTool::ID), vec!["cap.fs_read"]);
+}
+
+// ── shell.exec (#420 argv-exec confinement) ──────────────────────────────────
+
+/// The exact bypass from #420: with `shell.run` an allowlisted prefix chains
+/// straight into arbitrary execution. `shell.exec` must refuse it.
+///
+/// This test asserts the *contrast*: it demonstrates the old behaviour is real
+/// (the prefix gate admits the chained line) and that the new tool denies it,
+/// so the guard cannot silently become vacuous if `permits()` is refactored.
+#[cfg(not(windows))]
+#[tokio::test]
+async fn shell_exec_refuses_the_prefix_gate_chaining_bypass() {
+    // Baseline: shell.run's prefix gate ADMITS `git ; id` (it starts with an
+    // allowlisted prefix) and the system shell then runs `id`.
+    let legacy = ShellTool::with_allowlist(vec!["git".to_string()]);
+    let out = legacy
+        .invoke(
+            &ctx(PathBuf::from(".")),
+            json!({ "command": "git --version ; id" }),
+        )
+        .await
+        .expect("shell.run admits the chained command (the #420 bug)");
+    assert!(
+        out.content["stdout"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("uid="),
+        "precondition: shell.run really does chain into `id`; got {:?}",
+        out.content["stdout"]
+    );
+
+    // shell.exec denies the same line: `;` is not in the safe charset.
+    let hardened = ShellExecTool::with_allowlist(vec!["git".to_string()]);
+    let err = hardened
+        .invoke(
+            &ctx(PathBuf::from(".")),
+            json!({ "command": "git --version ; id" }),
+        )
+        .await
+        .expect_err("shell.exec must deny a chained command string");
+    assert!(matches!(err, ToolError::Denied { .. }), "got {err:?}");
+}
+
+/// Metacharacters supplied through explicit argv are passed as literal bytes,
+/// never interpreted. This is the core argv-exec property.
+#[cfg(not(windows))]
+#[tokio::test]
+async fn shell_exec_passes_metacharacters_as_literal_arguments() {
+    let tool = ShellExecTool::with_allowlist(vec!["echo".to_string()]);
+    let out = tool
+        .invoke(
+            &ctx(PathBuf::from(".")),
+            json!({ "argv": ["echo", "; id", "$(id)", "`id`", "&& id", "| id"] }),
+        )
+        .await
+        .expect("argv elements are literal, so this is just an echo");
+
+    let stdout = out.content["stdout"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert_eq!(stdout, "; id $(id) `id` && id | id\n");
+    assert!(
+        !stdout.contains("uid="),
+        "no argument may ever be interpreted as a command: {stdout:?}"
+    );
+    assert_eq!(out.content["exit_code"], 0);
+}
+
+/// The binary allowlist is an exact match, not a prefix match — so an
+/// allowlisted name cannot be extended into a different binary.
+#[tokio::test]
+async fn shell_exec_allowlist_is_exact_not_prefix() {
+    let tool = ShellExecTool::with_allowlist(vec!["echo".to_string()]);
+
+    for argv0 in ["echofoo", "echo-x", "ec"] {
+        let err = tool
+            .invoke(&ctx(PathBuf::from(".")), json!({ "argv": [argv0, "hi"] }))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ToolError::Denied { .. }),
+            "{argv0} must not satisfy an `echo` allowlist, got {err:?}"
+        );
+    }
+}
+
+/// A path-qualified spelling of an allowlisted name is a different argv[0] and
+/// must not pass an exact-match allowlist.
+#[cfg(not(windows))]
+#[tokio::test]
+async fn shell_exec_allowlist_does_not_accept_path_qualified_aliases() {
+    let tool = ShellExecTool::with_allowlist(vec!["echo".to_string()]);
+    let err = tool
+        .invoke(
+            &ctx(PathBuf::from(".")),
+            json!({ "argv": ["/bin/echo", "hi"] }),
+        )
+        .await
+        .expect_err("/bin/echo is not the allowlisted token `echo`");
+    assert!(matches!(err, ToolError::Denied { .. }), "got {err:?}");
+}
+
+#[cfg(not(windows))]
+#[tokio::test]
+async fn shell_exec_runs_an_allowlisted_binary() {
+    let tool = ShellExecTool::with_allowlist(vec!["echo|ls".to_string()]);
+    let out = tool
+        .invoke(&ctx(PathBuf::from(".")), json!({ "argv": ["echo", "ok"] }))
+        .await
+        .expect("allowlisted binary runs");
+
+    assert_eq!(out.content["stdout"], "ok\n");
+    assert_eq!(out.content["exit_code"], 0);
+    assert_eq!(out.content["timed_out"], false);
+}
+
+/// The safe-charset gate on the string form rejects every shell operator,
+/// including the newline separator that a naive operator denylist misses.
+#[tokio::test]
+async fn shell_exec_command_string_rejects_shell_syntax() {
+    let tool = ShellExecTool::without_allowlist();
+
+    for bad in [
+        "echo a; id",
+        "echo a && id",
+        "echo a | id",
+        "echo $(id)",
+        "echo `id`",
+        "echo a > /tmp/x",
+        "echo a\nid",
+        "echo 'quoted'",
+        "echo \"quoted\"",
+        "echo a & id",
+        "echo *",
+        "echo ~/x",
+    ] {
+        let err = tool
+            .invoke(&ctx(PathBuf::from(".")), json!({ "command": bad }))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ToolError::Denied { .. }),
+            "command string {bad:?} must be denied, got {err:?}"
+        );
+    }
+}
+
+/// argv[0] selects what executes, so it is charset-checked even in the
+/// explicit-argv form (which otherwise permits arbitrary argument bytes).
+#[tokio::test]
+async fn shell_exec_rejects_unsafe_binary_names() {
+    let tool = ShellExecTool::without_allowlist();
+
+    for bad in ["ec;ho", "echo id", "ec|ho", "$(id)", "echo\nid"] {
+        let err = tool
+            .invoke(&ctx(PathBuf::from(".")), json!({ "argv": [bad] }))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ToolError::Denied { .. } | ToolError::InvalidArgs(_)),
+            "argv[0] {bad:?} must be refused, got {err:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn shell_exec_requires_exactly_one_input_form() {
+    let tool = ShellExecTool::without_allowlist();
+
+    let both = tool
+        .invoke(
+            &ctx(PathBuf::from(".")),
+            json!({ "argv": ["echo", "a"], "command": "echo a" }),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(both, ToolError::InvalidArgs(_)), "got {both:?}");
+
+    let neither = tool
+        .invoke(&ctx(PathBuf::from(".")), json!({}))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(neither, ToolError::InvalidArgs(_)),
+        "got {neither:?}"
+    );
+
+    let empty = tool
+        .invoke(&ctx(PathBuf::from(".")), json!({ "argv": [] }))
+        .await
+        .unwrap_err();
+    assert!(matches!(empty, ToolError::InvalidArgs(_)), "got {empty:?}");
+}
+
+/// The destructive-pattern denylist still applies to the hardened path.
+#[cfg(not(windows))]
+#[tokio::test]
+async fn shell_exec_still_blocks_destructive_patterns() {
+    let tool = ShellExecTool::without_allowlist();
+    let err = tool
+        .invoke(
+            &ctx(PathBuf::from(".")),
+            json!({ "argv": ["rm", "-rf", "/tmp/definitely-not-here"] }),
+        )
+        .await
+        .expect_err("destructive pattern is blocked even with argv exec");
+    assert!(matches!(err, ToolError::Denied { .. }), "got {err:?}");
+}
+
+/// `shell.exec` must declare exactly the same capabilities as `shell.run`, so
+/// hardening the exec path does not quietly widen what a grant authorizes.
+#[test]
+fn shell_exec_declares_the_same_capabilities_as_shell_run() {
+    let exec = ShellExecTool::without_allowlist();
+    let run = ShellTool::without_allowlist();
+
+    let mut exec_caps = exec.required_capabilities().to_vec();
+    let mut run_caps = run.required_capabilities().to_vec();
+    exec_caps.sort_by_key(|c| format!("{c:?}"));
+    run_caps.sort_by_key(|c| format!("{c:?}"));
+
+    assert_eq!(exec_caps, run_caps);
+    assert!(exec_caps.contains(&Capability::ShellExec));
+    assert!(exec_caps.contains(&Capability::ProcessSpawn));
+}
+
+#[tokio::test]
+async fn shell_exec_honours_timeout() {
+    let tool = ShellExecTool::with_allowlist(vec!["sleep".to_string()]);
+    let out = tool
+        .invoke(
+            &ctx(PathBuf::from(".")),
+            json!({ "argv": ["sleep", "5"], "timeout_secs": 1 }),
+        )
+        .await
+        .expect("timeout is reported, not an error");
+
+    assert_eq!(out.content["timed_out"], true);
+    assert_eq!(out.content["exit_code"], -1);
 }
