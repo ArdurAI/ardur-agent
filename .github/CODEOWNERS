@@ -1,3 +1,10 @@
 # Default owner for everything in this repo.
 # The project lead reviews all changes until the org grows.
 * @gnanirahulnutakki
+
+# Security-policy files that grant exceptions. Listed explicitly so they stay
+# owner-reviewed even if the default rule above is ever narrowed (#435):
+# an entry here waives the DCO sign-off requirement for a commit.
+/.github/dco-exempt-shas.txt @gnanirahulnutakki
+/.github/workflows/dco.yml @gnanirahulnutakki
+/.gitleaksignore @gnanirahulnutakki

@@ -172,6 +172,71 @@ class GitHubSecurityWorkflowTests(unittest.TestCase):
         self.assertIn("subject-name: ${{ steps.publish.outputs.image }}", jobs)
         self.assertIn("subject-digest: ${{ steps.publish.outputs.digest }}", jobs)
 
+    def test_dco_reads_exempt_list_from_the_base_ref(self):
+        """The exempt list must come from base, never the PR head.
+
+        Regression guard for #435: dco.yml read .github/dco-exempt-shas.txt
+        from the checked-out merge ref, so a PR could append its own unsigned
+        SHA and self-exempt. Reading it from the base ref means an exemption
+        only takes effect after it has been reviewed and merged.
+        """
+        dco = (WORKFLOWS / "dco.yml").read_text(encoding="utf-8")
+
+        # The applied list is read out of the base commit...
+        self.assertIn('EXEMPT_RAW="$(git show "${BASE}:${EXEMPT_FILE}")"', dco)
+        # ...and never straight off the working tree.
+        self.assertNotIn(
+            "grep -vE '^[[:space:]]*(#|$)' .github/dco-exempt-shas.txt",
+            dco,
+            "the exempt list must not be read from the checked-out head (#435)",
+        )
+        # A missing file on base must mean "no exemptions", not "skip the check".
+        self.assertIn('EXEMPT_RAW=""', dco)
+
+    def test_dco_enforces_append_only_and_full_shas_for_new_exemptions(self):
+        """New exemptions must be full SHAs and may not rewrite history."""
+        dco = (WORKFLOWS / "dco.yml").read_text(encoding="utf-8")
+
+        self.assertIn("append-only", dco)
+        self.assertRegex(
+            dco,
+            r"\^\[0-9a-f\]\{40\}\$",
+            "new exempt entries must be required to be full 40-char SHAs",
+        )
+        self.assertRegex(
+            dco,
+            r"\^\[0-9a-f\]\{7,40\}\$",
+            "applied exempt entries must be validated as lowercase hex",
+        )
+
+    def test_dco_exempt_file_entries_are_hex_shas(self):
+        """The committed exempt list itself must contain only hex SHAs."""
+        raw = (ROOT / ".github" / "dco-exempt-shas.txt").read_text(encoding="utf-8")
+
+        entries = [
+            line.split()[0]
+            for line in raw.splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+        self.assertTrue(entries, "exempt file should not be empty")
+        for entry in entries:
+            self.assertRegex(
+                entry,
+                r"^[0-9a-f]{7,40}$",
+                f"exempt entry {entry!r} must be 7-40 lowercase hex characters",
+            )
+
+    def test_codeowners_guards_the_exemption_policy_files(self):
+        """Files that waive security requirements stay owner-reviewed (#435)."""
+        codeowners = (ROOT / ".github" / "CODEOWNERS").read_text(encoding="utf-8")
+
+        for guarded in (
+            "/.github/dco-exempt-shas.txt",
+            "/.github/workflows/dco.yml",
+            "/.gitleaksignore",
+        ):
+            self.assertIn(guarded, codeowners, f"{guarded} must have an explicit owner")
+
     def test_rust_toolchain_is_exactly_pinned(self):
         toolchain = (ROOT / "rust-toolchain.toml").read_text(encoding="utf-8")
 
