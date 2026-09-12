@@ -182,6 +182,22 @@ pub struct Config {
     /// `file.list` built-in tools (`ARDUR_FILE_TOOL_ROOT`). `Some(root)`
     /// registers all three confined to it; `None` registers no file tool.
     pub file_tool_root: Option<PathBuf>,
+    /// **ARD-463.** Capability labels whose tool calls require an operator's
+    /// approval before they run (`ARDUR_APPROVAL_GATED_CAPABILITIES`, CSV).
+    ///
+    /// Empty (the default) leaves approval-gating **off**: the runtime is
+    /// built without an approval store, so `authorize_or_propose_approval` is
+    /// a no-op and no boot behaviour changes. When non-empty, a tool call
+    /// carrying any listed capability does not execute — it proposes a pending
+    /// card into the shared on-disk store the decide-half endpoints
+    /// (`GET /approvals`, `POST /approvals/{id}/approve|reject`) and the
+    /// `ardur approvals` CLI already read, mints
+    /// `approval.propose.created.v1`, and the call is refused until an
+    /// operator decides it.
+    ///
+    /// Gating is by **capability**, not tool name, so a capability stays gated
+    /// however many tools declare it.
+    pub approval_gated_capabilities: Vec<String>,
     /// How long a synchronous `POST /chat` (and ACP) turn may run before the
     /// HTTP surface stops waiting on it (`ARDUR_HTTP_TURN_TIMEOUT_SECS`, default
     /// `30`). When the wait elapses the client receives `504`; the worker
@@ -268,6 +284,10 @@ impl fmt::Debug for Config {
             .field("enable_http_tool", &self.enable_http_tool)
             .field("http_allowlist", &self.http_allowlist)
             .field("file_tool_root", &self.file_tool_root)
+            .field(
+                "approval_gated_capabilities",
+                &self.approval_gated_capabilities,
+            )
             .field("http_turn_timeout", &self.http_turn_timeout)
             .finish()
     }
@@ -429,6 +449,27 @@ impl Config {
         let http_allowlist = parse_csv(optional("ARDUR_HTTP_ALLOWLIST").as_deref());
         let file_tool_root = optional("ARDUR_FILE_TOOL_ROOT").map(PathBuf::from);
 
+        // ARD-463: approval-gating is opt-in and off by default. An empty list
+        // leaves the runtime without an approval store at all, so the gate is
+        // a no-op rather than a gate that silently passes everything.
+        //
+        // Entries are capability labels, not tool names. A tool name would let
+        // the same capability slip through under a differently-named tool, and
+        // the runtime matches on `Capability::as_str()`.
+        let approval_gated_capabilities =
+            parse_csv(optional("ARDUR_APPROVAL_GATED_CAPABILITIES").as_deref());
+        if approval_gated_capabilities
+            .iter()
+            .any(|label| label.contains(char::is_whitespace))
+        {
+            return Err(ConfigError::Invalid {
+                var: "ARDUR_APPROVAL_GATED_CAPABILITIES",
+                reason: "capability labels must not contain whitespace; a label that never \
+                         matches would gate nothing while appearing to be configured"
+                    .to_string(),
+            });
+        }
+
         // The synchronous-turn wait ceiling. A slow-but-legitimate turn (a long
         // tool loop, a slow provider) should be able to outlast the default 30s
         // without the operator having to fork the code — so it is a knob, not a
@@ -511,6 +552,7 @@ impl Config {
             enable_http_tool,
             http_allowlist,
             file_tool_root,
+            approval_gated_capabilities,
             http_turn_timeout,
         })
     }

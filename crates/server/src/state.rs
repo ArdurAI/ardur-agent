@@ -36,13 +36,14 @@
 //! session budget provisioning, which needs a request-time provisioning API on
 //! the runtime (or an injectable shared budget store).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use ardur_approvals::ApprovalStore;
 use ardur_cap_token::{
     BiscuitCapTokenIssuer, CapScope, CapTokenIssuer, HolderId as CapHolderId, KeyPair, PublicKey,
 };
@@ -557,6 +558,26 @@ impl AppState {
         // inert (an empty registry passes everything through).
         .with_default_injection_filters()
         .receipt_log(&receipt_log)
+        // ARD-463: the propose-half of the approval loop. Attaching the store
+        // is what arms the gate — with no store the runtime's
+        // `authorize_or_propose_approval` returns `Ok(())` immediately, so an
+        // unconfigured boot is behaviourally unchanged rather than running a
+        // gate that passes everything.
+        //
+        // Both are attached together or neither is. A store without gated
+        // capabilities would gate nothing; gated capabilities without a store
+        // would be silently ignored, which is the more dangerous half of that
+        // pair because the operator asked for a gate and would not get one.
+        .maybe_with_approvals((!config.approval_gated_capabilities.is_empty()).then(|| {
+            (
+                ApprovalStore::new(&approvals_dir),
+                config
+                    .approval_gated_capabilities
+                    .iter()
+                    .cloned()
+                    .collect::<HashSet<String>>(),
+            )
+        }))
         .build_reconciled()
         .await
         .map_err(|e| anyhow::anyhow!("building/reconciling fused runtime: {e}"))?;

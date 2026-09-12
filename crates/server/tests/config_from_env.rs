@@ -60,6 +60,7 @@ const TOUCHED: &[&str] = &[
     "ARDUR_ENABLE_HTTP_TOOL",
     "ARDUR_HTTP_ALLOWLIST",
     "ARDUR_FILE_TOOL_ROOT",
+    "ARDUR_APPROVAL_GATED_CAPABILITIES",
 ];
 
 fn set(key: &str, value: &str) {
@@ -587,5 +588,60 @@ fn from_env_cors_origins_parse_and_reject_wildcard() {
     assert!(
         err.to_string().contains("ARDUR_CORS_ORIGINS"),
         "error should name the cors var, got: {err}"
+    );
+}
+
+/// ARD-463: approval-gating is off unless asked for. An unset variable must
+/// leave the list empty, because an empty list is what makes the server build
+/// a runtime with no approval store — the gate is absent rather than present
+/// and passing everything.
+#[tokio::test]
+#[serial]
+async fn approval_gating_is_off_by_default() {
+    let _lock = env_lock();
+    let _env = CleanEnv::new().with_slack();
+    set("ANTHROPIC_API_KEY", "sk-ant-test");
+
+    let config = Config::from_env().expect("config loads without the variable");
+    assert!(
+        config.approval_gated_capabilities.is_empty(),
+        "a fresh boot must gate nothing; got {:?}",
+        config.approval_gated_capabilities
+    );
+}
+
+/// The configured labels survive the round trip in order, so an operator can
+/// verify what is gated by reading the config back.
+#[tokio::test]
+#[serial]
+async fn approval_gated_capabilities_parse_as_csv() {
+    let _lock = env_lock();
+    let _env = CleanEnv::new().with_slack();
+    set("ANTHROPIC_API_KEY", "sk-ant-test");
+    set("ARDUR_APPROVAL_GATED_CAPABILITIES", "shell.exec,file.write");
+
+    let config = Config::from_env().expect("config loads");
+    assert_eq!(
+        config.approval_gated_capabilities,
+        vec!["shell.exec".to_string(), "file.write".to_string()],
+    );
+}
+
+/// A label containing whitespace can never equal a `Capability::as_str()`, so
+/// it would gate nothing while looking configured. That silent no-gate is the
+/// dangerous failure for a security control, so it is rejected at load.
+#[tokio::test]
+#[serial]
+async fn a_capability_label_with_whitespace_is_rejected_at_load() {
+    let _lock = env_lock();
+    let _env = CleanEnv::new().with_slack();
+    set("ANTHROPIC_API_KEY", "sk-ant-test");
+    set("ARDUR_APPROVAL_GATED_CAPABILITIES", "shell exec");
+
+    let err = Config::from_env().expect_err("a label that cannot match must not load silently");
+    let rendered = err.to_string();
+    assert!(
+        rendered.contains("ARDUR_APPROVAL_GATED_CAPABILITIES"),
+        "the error must name the variable at fault; got: {rendered}"
     );
 }
