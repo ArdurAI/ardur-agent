@@ -927,8 +927,13 @@ impl AppState {
                 match tokio::time::timeout(self.http_turn_timeout(), &mut reply_rx).await {
                     Ok(Ok(Ok(outcome))) => Ok(outcome),
                     Ok(Ok(Err(RuntimeError::TurnCancelled))) if handshake.ever_committed() => {
-                        // last_ok should have turned this into Ok(outcome). If we
-                        // still see TurnCancelled after persist, do not 504.
+                        // A turn that persisted something still reports
+                        // TurnCancelled when it was abandoned mid tool-loop
+                        // (#422): the committed rounds are intermediate, not an
+                        // answer, so there is no outcome to hand back. The
+                        // runtime records a terminal cancellation receipt for
+                        // the chain; the caller gets no 200 for a turn that
+                        // never settled.
                         Err(ChatSubmitError::WorkerGone)
                     }
                     Ok(Ok(Err(e))) => Err(ChatSubmitError::Runtime(e)),
@@ -1365,10 +1370,21 @@ impl Processor {
             biased;
             result = &mut submit => result,
             () = reply.closed() => {
+                // #422: the drop-based path. Returning here drops `submit`,
+                // so the runtime's own in-loop cancellation recording never
+                // runs. If earlier tool-loop rounds already committed receipts,
+                // the chain would be left ending on an intermediate round —
+                // implying a turn that settled. Drive the future to its own
+                // cancellation exit instead: the probe already reports the
+                // caller gone, so the next checkpoint aborts, records the
+                // terminal marker, and returns TurnCancelled promptly. The
+                // reply channel is already closed, so nothing is sent to the
+                // client either way.
                 tracing::info!(
                     session_id = %session_id.0,
-                    "HTTP turn abandoned by caller before completion; cancelling turn (no receipt minted)"
+                    "HTTP turn abandoned by caller before completion; draining to record cancellation"
                 );
+                let _ = (&mut submit).await;
                 return;
             }
         };
