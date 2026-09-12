@@ -295,7 +295,7 @@ fn the_beads_adapter_is_wired_into_the_shipped_binary() {
 /// The contrast that keeps the previous test meaningful: wiring beads in must
 /// not make every integration look adapted.
 #[test]
-fn an_integration_without_an_adapter_is_still_reported_as_unadapted() {
+fn the_obsidian_adapter_is_also_wired_into_the_shipped_binary() {
     let home = tempfile::tempdir().expect("tempdir");
     let state = home.path().join(".ardur");
     std::fs::create_dir_all(&state).expect("state dir");
@@ -315,8 +315,42 @@ fn an_integration_without_an_adapter_is_still_reported_as_unadapted() {
     let entry = check(&report, "integration:obsidian").expect("check present");
 
     assert_eq!(
+        entry["adapter"], true,
+        "obsidian now has an adapter in this build: {entry}"
+    );
+    assert_eq!(
+        entry["status"], "ok",
+        "an enabled integration with an adapter and a present vault is healthy: {entry}"
+    );
+}
+
+/// An integration this build genuinely cannot serve is still reported as such.
+///
+/// Keeps the adapter assertions meaningful: registering beads and obsidian
+/// must not make every name look adapted.
+#[test]
+fn an_unknown_integration_is_reported_as_unadapted() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let state = home.path().join(".ardur");
+    std::fs::create_dir_all(&state).expect("state dir");
+    let dir = home.path().join("somewhere");
+    std::fs::create_dir_all(&dir).expect("dir");
+
+    std::fs::write(
+        state.join("config.toml"),
+        format!(
+            "[integrations.notreal]\nroot = \"{}\"\nenabled = true\n",
+            dir.display()
+        ),
+    )
+    .expect("config");
+
+    let report = doctor_report(home.path());
+    let entry = check(&report, "integration:notreal").expect("check present");
+
+    assert_eq!(
         entry["adapter"], false,
-        "obsidian has no adapter in this build: {entry}"
+        "no adapter exists for `notreal`: {entry}"
     );
     assert_eq!(
         entry["status"], "warn",

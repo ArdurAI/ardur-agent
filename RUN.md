@@ -671,9 +671,38 @@ mutations are receipted exactly like any other tool call today; the verb-level
 record is populated in advance of the runtime learning to fold it in, not as a
 distinction that already exists.
 
-The `dolthub` and `obsidian` adapters are tracked separately and are not yet in
-this build — enabling either fails the boot with `no adapter for it`, which is
-the intended fail-closed behaviour rather than a silent no-op.
+### Obsidian
+
+`[integrations.obsidian]` with a `root` endpoint yields three tools —
+`obsidian.read`, `obsidian.search`, `obsidian.write` — every one confined to
+the configured vault.
+
+```toml
+[integrations.obsidian]
+root = "/Users/me/vault"
+enabled = true
+```
+
+Paths are vault-relative. Path resolution is delegated to the same `file.*`
+machinery the built-in file tools use: the root is canonicalized, `..`
+components are rejected, and containment is re-checked *after* canonicalization,
+so a symlink inside the vault cannot point out of it. Reading `../secret.txt`,
+`notes/../../etc/passwd`, or an absolute path outside the root are all refused,
+and a refused write creates nothing.
+
+Reads require `cap.integration.obsidian.read` and `cap.fs_read`; writes also
+require `cap.integration.obsidian.write` and `cap.fs_write`. The filesystem
+capabilities are declared explicitly because this adapter invokes the file
+builtins directly — a caller holding no filesystem capability must not reach
+the filesystem through an integration.
+
+A write's structured record names the path and mode but **not** the note's
+contents, which can be arbitrarily large and arbitrarily sensitive.
+
+A configured vault that does not exist is **not** a boot failure: an operator
+may write configuration on a machine where the vault is not yet mounted, and
+`ardur doctor` reports it. The `dolthub` adapter is tracked separately and is
+not yet in this build — enabling it fails the boot with `no adapter for it`.
 
 ## Platform integrations
 
