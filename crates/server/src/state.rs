@@ -927,8 +927,13 @@ impl AppState {
                 match tokio::time::timeout(self.http_turn_timeout(), &mut reply_rx).await {
                     Ok(Ok(Ok(outcome))) => Ok(outcome),
                     Ok(Ok(Err(RuntimeError::TurnCancelled))) if handshake.ever_committed() => {
-                        // last_ok should have turned this into Ok(outcome). If we
-                        // still see TurnCancelled after persist, do not 504.
+                        // A turn that persisted something still reports
+                        // TurnCancelled when it was abandoned mid tool-loop
+                        // (#422): the committed rounds are intermediate, not an
+                        // answer, so there is no outcome to hand back. The
+                        // runtime records a terminal cancellation receipt for
+                        // the chain; the caller gets no 200 for a turn that
+                        // never settled.
                         Err(ChatSubmitError::WorkerGone)
                     }
                     Ok(Ok(Err(e))) => Err(ChatSubmitError::Runtime(e)),

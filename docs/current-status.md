@@ -187,10 +187,12 @@ hardening and operator work.
   wired to a server config flag, so it is never registered at boot. Deployments
   that construct a registry directly can opt in via
   `BuiltinOpts::enable_shell_exec`.
-- Tool-loop intermediate receipts survive a later-round cancel (`#422`): a turn
-  cancelled mid-loop can leave earlier-round tool receipts in the chain without
-  a final settled receipt, so the chain can record cost for a turn the caller
-  never saw finish.
+- Tool-loop intermediate receipts are settled on cancel (`#422`): the receipt
+  log is append-only, so a turn abandoned mid-loop cannot un-mint the rounds
+  that already committed. The runtime now appends a terminal
+  `llm.completion.cancelled.v1` receipt so the chain never ends on an
+  intermediate round, and an abandoned turn is never reported as a success
+  carrying an earlier round's receipt.
 - Local STT/TTS providers exist in `ardur-media-audio`, but the server currently
   auto-registers Whisper transcription only.
 - Approval *propose* (the agent creating a pending card before an irreversible
@@ -202,12 +204,11 @@ hardening and operator work.
 
 Post-beta follow-ups (not part of the `v0.1.0-beta.1` gate):
 
-1. `#422`: tool-loop intermediate receipts survive a later-round cancel.
-2. `#420` follow-through: wire `shell.exec` to a server config flag
+1. `#420` follow-through: wire `shell.exec` to a server config flag
    (`ARDUR_ENABLE_SHELL_EXEC_TOOL` + binary allowlist) so operators can register
    the hardened exec path, and migrate grant-driven registration to prefer it
    over `shell.run`.
-3. ARD-463 propose-half: emit pending approval cards before irreversible tools,
+2. ARD-463 propose-half: emit pending approval cards before irreversible tools,
    with `RequiresApproval` caveats.
-4. Auto-register local STT/TTS when `ARDUR_LOCAL_STT_COMMAND` /
+3. Auto-register local STT/TTS when `ARDUR_LOCAL_STT_COMMAND` /
    `ARDUR_LOCAL_TTS_COMMAND` are set.
