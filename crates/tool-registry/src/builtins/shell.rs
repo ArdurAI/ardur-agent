@@ -144,7 +144,7 @@ async fn run_capped(
     // dropped future — the timeout path — signals the whole tree rather than
     // just the immediate child, which `kill_on_drop` alone would leave behind.
     #[cfg(unix)]
-    let _group_guard = ProcessGroupGuard(child_pid);
+    let mut _group_guard = ProcessGroupGuard(child_pid);
 
     async fn drain<R: tokio::io::AsyncRead + Unpin>(
         pipe: &mut R,
@@ -169,6 +169,14 @@ async fn run_capped(
         drain(&mut stderr_pipe, max_output_bytes),
     )?;
     let status = child.wait().await?;
+    // The child exited on its own, so the guard's job is done. Disarm it:
+    // leaving it armed would SIGKILL the group on the success path too, and an
+    // allowlisted binary that intentionally forks a background descendant
+    // (which closed the captured pipes and let its parent exit cleanly) would
+    // be reported as succeeding and killed in the same breath. On timeout the
+    // future is dropped before reaching here, so the guard still fires there.
+    #[cfg(unix)]
+    _group_guard.disarm();
     let truncated = out.truncated || err.truncated;
     Ok((
         out.into_string_lossy(),
@@ -187,6 +195,16 @@ async fn run_capped(
 /// already reported `{ timed_out: true }`.
 #[cfg(unix)]
 struct ProcessGroupGuard(Option<u32>);
+
+#[cfg(unix)]
+impl ProcessGroupGuard {
+    /// Give up the right to signal the group. Called once the child has been
+    /// reaped normally, so the success path does not kill descendants the
+    /// command legitimately left running.
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
 
 #[cfg(unix)]
 impl Drop for ProcessGroupGuard {
@@ -225,9 +243,11 @@ static DESTRUCTIVE_PATTERNS: once_cell::sync::Lazy<Vec<Regex>> = once_cell::sync
         Regex::new(r"(?i)\|\s*(?:ba)?sh\b").expect("valid destructive pattern regex"),
         // Fork bomb
         Regex::new(r"(?i):\(\)\s*\{\s*:\|:&\s*\};:").expect("valid destructive pattern regex"),
-        // Recursive chmod/chown on root
-        Regex::new(r"(?i)\bchmod\s+.*-R\s+.*/\b").expect("valid destructive pattern regex"),
-        Regex::new(r"(?i)\bchown\s+.*-R\s+.*/\b").expect("valid destructive pattern regex"),
+        // Recursive chmod/chown on root. The path may be a bare `/`, so the
+        // pattern must not require a word character after the slash: `/\b`
+        // silently failed to match the single most dangerous target.
+        Regex::new(r"(?i)\bchmod\s+.*-R\s+.*/").expect("valid destructive pattern regex"),
+        Regex::new(r"(?i)\bchown\s+.*-R\s+.*/").expect("valid destructive pattern regex"),
         // Disk wipe / filesystem creation. Permit whitespace around `=` because
         // shell users often add it while experimenting, even though some forms
         // are not accepted by `dd` itself.
@@ -351,7 +371,7 @@ impl ShellTool {
                     "command": { "type": "string", "description": "The command line to run." },
                     "timeout_secs": {
                         "type": "integer",
-                        "description": "Wall-clock ceiling in seconds (default 30).",
+                        "description": "Wall-clock ceiling in seconds (default 25).",
                         "minimum": 1
                     },
                     "cwd": {
@@ -690,15 +710,28 @@ impl Tool for ShellExecTool {
         // asked to print the text "rm -rf /tmp/x" can only print it, yet a
         // flattened match would deny it.
         //
-        // Operands (non-flag arguments after argv[0]) are therefore excluded
+        // Operands (non-flag arguments after argv[0]) are normally excluded
         // from the matched string. Flags are kept because they carry the
         // destructive intent the patterns look for (`-rf`, `if=/dev/zero`).
+        //
+        // Exception: a few patterns are *about* the operand — the chmod/chown
+        // recursive-root rules require a path to match at all, so filtering
+        // operands would make `["chmod", "-R", "/"]` inspect as `chmod -R` and
+        // silently pass. For those binaries the operands are kept. This is
+        // safe for the `echo` false positive that motivated the filter,
+        // because `echo` is not one of them.
+        const OPERAND_SENSITIVE: &[&str] = &["chmod", "chown"];
+        let binary_name = std::path::Path::new(argv[0].as_str())
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(argv[0].as_str());
+        let keep_operands = OPERAND_SENSITIVE.contains(&binary_name);
         let inspected = std::iter::once(argv[0].as_str())
             .chain(
                 argv[1..]
                     .iter()
                     .map(String::as_str)
-                    .filter(|a| a.starts_with('-') || a.contains('=')),
+                    .filter(|a| keep_operands || a.starts_with('-') || a.contains('=')),
             )
             .collect::<Vec<_>>()
             .join(" ");
