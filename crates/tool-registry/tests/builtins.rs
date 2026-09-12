@@ -836,3 +836,76 @@ fn shell_exec_default_timeout_leaves_margin_under_the_runtime_deadline() {
         "the advertised default must match the implemented one: {described}"
     );
 }
+
+/// Review follow-up: a literal shell separator planted between the binary and
+/// its flags must not let a destructive invocation slip past. Filtering argv
+/// down to the binary plus option-looking arguments drops the `;` entirely, so
+/// `["rm", ";", "-rf", "x"]` is inspected as `rm -rf` and denied — whereas
+/// matching the flattened `rm ; -rf x` would stop scanning at the `;`.
+#[tokio::test]
+async fn shell_exec_denies_destructive_argv_with_planted_separators() {
+    let tool = ShellExecTool::without_allowlist();
+
+    for argv in [
+        vec!["rm", ";", "-rf", "/tmp/definitely-not-here"],
+        vec!["rm", "|", "-rf", "/tmp/definitely-not-here"],
+        vec!["rm", "&", "-fr", "/tmp/definitely-not-here"],
+        vec!["rm", "\n", "-rf", "/tmp/definitely-not-here"],
+    ] {
+        let err = tool
+            .invoke(&ctx(PathBuf::from(".")), json!({ "argv": argv }))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ToolError::Denied { .. }),
+            "{argv:?} must still be denied, got {err:?}"
+        );
+    }
+}
+
+/// Review follow-up: a timeout must reap the whole process tree, not just the
+/// direct child. An allowlisted interpreter that forks a background process and
+/// waits would otherwise leave that process running after the invocation
+/// already reported `{ timed_out: true }`.
+#[cfg(unix)]
+#[tokio::test]
+async fn shell_exec_timeout_kills_forked_descendants() {
+    let root = TempDir::new().expect("tempdir");
+    let marker = root.path().join("still-alive");
+    let script = root.path().join("forker.sh");
+
+    // Fork a child that writes a marker after the tool deadline has passed,
+    // then block. Killing only the direct shell would leave the sleeper alive
+    // and the marker would appear.
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\n(sleep 6; echo alive > {}) &\nsleep 30\n",
+            marker.display()
+        ),
+    )
+    .expect("write script");
+    std::fs::set_permissions(
+        &script,
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
+    )
+    .expect("chmod");
+
+    let tool = ShellExecTool::with_allowlist(vec![script.display().to_string()]);
+    let out = tool
+        .invoke(
+            &ctx(root.path().to_path_buf()),
+            json!({ "argv": [script.display().to_string()], "timeout_secs": 2 }),
+        )
+        .await
+        .expect("timeout is reported, not an error");
+    assert_eq!(out.content["timed_out"], true);
+
+    // Past the descendant's own write time: if the group was killed, nothing
+    // ever created the marker.
+    tokio::time::sleep(std::time::Duration::from_secs(7)).await;
+    assert!(
+        !marker.exists(),
+        "a forked descendant survived the timeout and kept running"
+    );
+}

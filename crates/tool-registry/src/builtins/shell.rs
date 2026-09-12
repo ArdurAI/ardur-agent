@@ -109,6 +109,23 @@ impl BoundedSink {
     }
 }
 
+/// A `PATH` for the child containing only absolute components.
+///
+/// An inherited `PATH` may carry an empty entry (`"a::b"`, or a leading/
+/// trailing `:`) or a relative one, both of which resolve against the child's
+/// working directory. Because `cwd` is caller-controlled, that would let a file
+/// in the working directory named exactly like an allowlisted token be selected
+/// by `Command::new("git")` — the textual allowlist would no longer decide which
+/// executable runs. Filtering to absolute entries closes that; a caller that
+/// needs a specific binary can pass an absolute path as `argv[0]`.
+fn sanitized_path() -> std::ffi::OsString {
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
+    let absolute: Vec<_> = std::env::split_paths(&inherited)
+        .filter(|p| p.is_absolute())
+        .collect();
+    std::env::join_paths(absolute).unwrap_or_default()
+}
+
 /// Spawn `cmd` and drain both pipes through bounded sinks, capping memory as
 /// bytes arrive rather than after the process exits.
 ///
@@ -118,8 +135,16 @@ async fn run_capped(
     max_output_bytes: usize,
 ) -> std::io::Result<(String, String, i32, bool)> {
     let mut child = cmd.spawn()?;
+    #[cfg(unix)]
+    let child_pid = child.id();
     let mut stdout_pipe = child.stdout.take().expect("stdout is piped by the caller");
     let mut stderr_pipe = child.stderr.take().expect("stderr is piped by the caller");
+
+    // On Unix the child leads its own process group (set by the caller), so a
+    // dropped future — the timeout path — signals the whole tree rather than
+    // just the immediate child, which `kill_on_drop` alone would leave behind.
+    #[cfg(unix)]
+    let _group_guard = ProcessGroupGuard(child_pid);
 
     async fn drain<R: tokio::io::AsyncRead + Unpin>(
         pipe: &mut R,
@@ -151,6 +176,32 @@ async fn run_capped(
         status.code().unwrap_or(-1),
         truncated,
     ))
+}
+
+/// Signals the child's whole process group with SIGKILL when dropped.
+///
+/// The timeout path drops the in-flight future, which drops this guard. The
+/// child leads its own group, so signalling `-pid` reaches descendants an
+/// allowlisted binary forked — `kill_on_drop` reaps only the direct child, and
+/// a forked background process would otherwise outlive the invocation that
+/// already reported `{ timed_out: true }`.
+#[cfg(unix)]
+struct ProcessGroupGuard(Option<u32>);
+
+#[cfg(unix)]
+impl Drop for ProcessGroupGuard {
+    fn drop(&mut self) {
+        if let Some(pid) = self.0 {
+            // Signalling the negated pid targets the process group led by
+            // `pid`. Errors are ignored: on the success path the group has
+            // normally already exited. rustix keeps this `unsafe`-free.
+            if let Ok(raw) = i32::try_from(pid) {
+                if let Some(p) = rustix::process::Pid::from_raw(raw) {
+                    let _ = rustix::process::kill_process_group(p, rustix::process::Signal::KILL);
+                }
+            }
+        }
+    }
 }
 
 /// Best-effort patterns for known destructive shell commands. These are blocked
@@ -429,9 +480,15 @@ struct ShellExecArgs {
 /// `sh`, `bash`, `env`, `xargs`, `find … -exec`, `git -c core.pager=…`,
 /// `ssh host …`, and any interpreter (`python -c`, `perl -e`) all execute
 /// caller-supplied code through their own argument handling. Allowlisting such
-/// a binary grants what that binary can do. Confining *which* binaries may run
-/// is the allowlist's job; confining what a permitted binary does is the
-/// cap-token + Cedar layers' job.
+/// a binary grants what that binary can do.
+///
+/// Nothing in this crate can narrow that. The cap-token and Cedar layers
+/// authorize *whether the tool may be invoked* — `authorize_tool_invocation`
+/// sees the tool name and claim-derived attributes, not argv and not the
+/// operations the spawned process goes on to perform — so they cannot confine
+/// a process once it is running. Confining **what a permitted binary does**
+/// requires an OS-level sandbox (container, seccomp, jail) or choosing a
+/// genuinely leaf binary that cannot execute anything else.
 ///
 /// Prefer this tool over [`ShellTool`] wherever shell composition (pipes,
 /// redirects, substitutions) is not actually required.
@@ -667,6 +724,21 @@ impl Tool for ShellExecTool {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+
+        // An inherited PATH containing an empty or relative component would let
+        // a caller-chosen `cwd` supply an executable named exactly like an
+        // allowlisted token, so the textual allowlist would not decide which
+        // binary actually runs. Override PATH with absolute entries only for
+        // the child; a caller wanting a specific binary can pass an absolute
+        // path as argv[0] instead.
+        cmd.env("PATH", sanitized_path());
+
+        // Put the child in its own process group so a timeout can signal the
+        // whole tree. `kill_on_drop` reaps only the immediate child, so an
+        // allowlisted process that forks could otherwise outlive the
+        // invocation that reported `{ timed_out: true }`.
+        #[cfg(unix)]
+        cmd.process_group(0);
 
         let timeout = Duration::from_secs(args.timeout_secs);
         // Bounded drain, not `wait_with_output()`: an allowlisted binary can
