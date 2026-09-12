@@ -643,11 +643,27 @@ file — an unterminated `api_key` string, say — would otherwise put that
 credential into a report advertised as safe to paste into an issue.
 
 **Current status:** this release lands the configuration surface, the adapter
-registry, and the doctor checks. The `beads`, `dolthub`, and `obsidian`
-adapters that turn a declared integration into callable tools are tracked
-separately and are not yet part of this build — enabling an integration today
-will therefore fail the boot with `no adapter for it`, which is the intended
-fail-closed behaviour rather than a silent no-op.
+registry, the doctor checks, and the **beads adapter**. `[integrations.beads]`
+with a `command` endpoint yields six tools — `beads.ready`, `beads.list`,
+`beads.show`, `beads.create`, `beads.update`, `beads.close`.
+
+Reads and writes carry **different capabilities**
+(`cap.integration.beads.read` and `cap.integration.beads.write`), so a grant
+that lets an agent consult the tracker does not also let it close issues. The
+three mutating verbs mint a receipt naming the verb and its arguments; reads
+mint nothing, since a receipt per `beads.list` would bury the writes that
+matter. Capabilities listed in the config block are *added* to the verb's own,
+never substituted for it.
+
+Every invocation goes through the same argv-exec confinement as `shell.exec`:
+no shell interpretation, `argv[0]` matched exactly against a single-entry
+allowlist, bounded output, and process-group teardown on timeout. Arguments are
+passed as separate argv entries, so an issue title containing `;` or `$(...)`
+is one operand rather than shell syntax.
+
+The `dolthub` and `obsidian` adapters are tracked separately and are not yet in
+this build — enabling either fails the boot with `no adapter for it`, which is
+the intended fail-closed behaviour rather than a silent no-op.
 
 ## Platform integrations
 

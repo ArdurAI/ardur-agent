@@ -223,11 +223,31 @@ The platform tool crates are also implemented as explicit integration surfaces:
   reports each integration's enabled state and whether its backing resource is
   present — presence only, never values.
 
-  What is **not** here: the `beads`, `dolthub` and `obsidian` adapters that turn
-  a declared integration into callable tools. Until one exists, enabling an
-  integration fails the boot by design. Covered by 28 unit tests in
-  `crates/integrations` and `crates/cli/tests/cli_integrations_doctor.rs`, which
-  drives the real `ardur doctor` binary.
+  What is **not** here: the `dolthub` and `obsidian` adapters. Until one
+  exists, enabling those integrations fails the boot by design. Covered by 30
+  unit tests in `crates/integrations` and
+  `crates/cli/tests/cli_integrations_doctor.rs`, which drives the real
+  `ardur doctor` binary.
+
+- **The beads adapter** (`crates/integration-beads`) turns a declared
+  `[integrations.beads]` block into six tools: `beads.ready`, `beads.list`,
+  `beads.show`, `beads.create`, `beads.update`, `beads.close`. Each verb is its
+  own tool, because a tool is the unit the runtime authorises, gates on cost,
+  and receipts — collapsing them behind a `verb` argument would make
+  `beads.close` indistinguishable from `beads.list` at authorisation time.
+
+  Reads require `cap.integration.beads.read`, writes
+  `cap.integration.beads.write`, so consulting the tracker and mutating it are
+  separately grantable. Operator-listed capabilities are added to the verb's
+  own, never substituted for it. The three mutating verbs mint a receipt naming
+  the verb and its arguments; reads mint none.
+
+  Invocation delegates to `ShellExecTool` with a single-entry allowlist rather
+  than spawning directly, so the #420 argv-exec confinement applies unchanged
+  and improves in one place. Covered by 14 tests, four of which drive a real
+  process: one proves a hostile issue title reaches the child as a single
+  unexpanded argument, one proves writes mint receipts, one proves reads do
+  not.
 
 ## Not Yet Turnkey
 

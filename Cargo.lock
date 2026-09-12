@@ -808,6 +808,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ardur-integration-beads"
+version = "0.0.1"
+dependencies = [
+ "ardur-integrations",
+ "ardur-tool-registry",
+ "async-trait",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "ardur-integrations"
 version = "0.0.1"
 dependencies = [
