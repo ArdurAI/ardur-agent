@@ -1283,7 +1283,26 @@ impl FusedRuntime {
             })?;
 
         match existing {
-            Some(card) if card.status == ApprovalStatus::Approved => Ok(()),
+            // The approval is spent by this call: consume the card so the next
+            // identical call proposes a fresh one. Without this, one approval
+            // is a standing permission to repeat the call without limit, which
+            // is a materially larger grant than the operator gave.
+            //
+            // Consumed before the tool runs, not after: a card consumed on
+            // success only would let a failed-then-retried call reuse the same
+            // grant, and a crash between invoke and consume would leave the
+            // approval spendable again. Erring toward re-asking the operator is
+            // the safe direction for a human-in-the-loop control.
+            Some(card) if card.status == ApprovalStatus::Approved => {
+                if let Some(id) = card.id.as_deref() {
+                    store.consume(id).map_err(|e| {
+                        RuntimeError::Internal(anyhow::anyhow!(
+                            "approval card {id} could not be consumed: {e}"
+                        ))
+                    })?;
+                }
+                Ok(())
+            }
             Some(card) if card.status == ApprovalStatus::Denied => {
                 Err(RuntimeError::ApprovalRejected {
                     approval_id: card.id.unwrap_or_default(),

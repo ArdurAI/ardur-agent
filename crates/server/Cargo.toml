@@ -47,6 +47,7 @@ ardur-provider-runtime = { workspace = true }
 # (anthropic | openrouter | openai-compat | ollama | codex | claude-cli) the
 # bin hands to AppState::boot.
 ardur-provider-selector = { workspace = true }
+ardur-approvals = { workspace = true }
 ardur-cap-token = { workspace = true }
 ardur-cedar-policy = { workspace = true }
 ardur-cost-gate = { workspace = true }
@@ -104,6 +105,7 @@ thiserror = { workspace = true }
 subtle = { workspace = true }
 
 [dev-dependencies]
+ardur-approvals = { workspace = true }
 # The integration tests drive the router in-process with `oneshot`, mock
 # `chat.postMessage` with wiremock, and recompute a genuine `v0=` Slack
 # signature so the signed-request path is exercised without a live workspace.

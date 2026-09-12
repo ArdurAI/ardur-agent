@@ -458,3 +458,111 @@ async fn propose_receipt_chains_with_turn_receipts() {
     assert_eq!(chain.last().unwrap().body.receipt_id, turn.receipt_id.0);
     verify_persisted_chain(&chain).expect("the chain verifies");
 }
+
+/// An approval authorises **one** invocation, not a standing permission.
+///
+/// Without consumption, `find_matching` keeps returning the same `Approved`
+/// card and every later identical call is waved through on a grant the operator
+/// already spent — for `shell.run` or `file.write` that is a materially larger
+/// authorisation than the one given.
+#[tokio::test]
+async fn an_approved_card_authorises_one_call_and_is_then_spent() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let store = ApprovalStore::new(root.path().join("approvals"));
+
+    let card = store
+        .propose(
+            "echo",
+            Capability::ShellExec.as_str(),
+            "digest-abc",
+            Some("session-1".to_string()),
+            "gated for test",
+            1_700_000_000,
+        )
+        .expect("propose");
+    let id = card.id.clone().expect("card id");
+    store
+        .decide(&id, Decision::Approve, 1_700_000_001)
+        .expect("approve");
+
+    // The authorised call finds it.
+    let found = store
+        .find_matching("echo", "digest-abc", Some("session-1"))
+        .expect("lookup")
+        .expect("an approved card matches before it is spent");
+    assert_eq!(found.status, ApprovalStatus::Approved);
+
+    // Spending it.
+    let consumed = store.consume(&id).expect("consume an approved card");
+    assert_eq!(consumed.status, ApprovalStatus::Consumed);
+
+    // The next identical call must NOT find it — it has to ask again.
+    assert!(
+        store
+            .find_matching("echo", "digest-abc", Some("session-1"))
+            .expect("lookup")
+            .is_none(),
+        "a spent approval must stop matching, or one approval becomes an \
+         unlimited standing permission to repeat the call"
+    );
+
+    // Consumption is idempotent, so a retry after a partial failure cannot error.
+    assert_eq!(
+        store.consume(&id).expect("idempotent").status,
+        ApprovalStatus::Consumed
+    );
+
+    // The record survives for audit: the receipt chain references this id.
+    assert_eq!(
+        store.read(&id).expect("still readable").status,
+        ApprovalStatus::Consumed
+    );
+}
+
+/// Consuming a card that was never approved would invent an authorisation.
+#[tokio::test]
+async fn a_pending_or_denied_card_cannot_be_consumed() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let store = ApprovalStore::new(root.path().join("approvals"));
+
+    let pending = store
+        .propose(
+            "echo",
+            Capability::ShellExec.as_str(),
+            "digest-pending",
+            None,
+            "gated",
+            1_700_000_000,
+        )
+        .expect("propose");
+    let pending_id = pending.id.clone().expect("id");
+    assert!(
+        store.consume(&pending_id).is_err(),
+        "consuming a pending card would authorise a call no operator approved"
+    );
+
+    let denied = store
+        .propose(
+            "echo",
+            Capability::ShellExec.as_str(),
+            "digest-denied",
+            None,
+            "gated",
+            1_700_000_000,
+        )
+        .expect("propose");
+    let denied_id = denied.id.clone().expect("id");
+    store
+        .decide(
+            &denied_id,
+            Decision::Reject {
+                reason: "no".to_string(),
+            },
+            1_700_000_001,
+        )
+        .expect("reject");
+    assert!(
+        store.consume(&denied_id).is_err(),
+        "consuming a denied card would reverse the operator's rejection"
+    );
+}

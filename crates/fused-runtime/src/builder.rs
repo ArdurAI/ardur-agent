@@ -438,6 +438,28 @@ impl FusedRuntimeBuilder {
         self
     }
 
+    /// **ARD-463.** Attach the store and its gated-capability set together, or
+    /// attach neither.
+    ///
+    /// The two halves are independently optional above, and either half alone
+    /// is a misconfiguration that fails *open*: a store with no gated
+    /// capabilities gates nothing, and gated capabilities with no store are
+    /// silently ignored. The second is the dangerous one — the operator asked
+    /// for a gate and would not get one, with nothing in the boot path saying
+    /// so. Callers wiring this from configuration should prefer this method so
+    /// the pairing cannot drift.
+    ///
+    /// `None` leaves approval-gating off, which is the default posture.
+    #[must_use]
+    pub fn maybe_with_approvals(self, approvals: Option<(ApprovalStore, HashSet<String>)>) -> Self {
+        match approvals {
+            Some((store, capabilities)) => self
+                .with_approvals(store)
+                .with_approval_gated_capabilities(capabilities),
+            None => self,
+        }
+    }
+
     /// Share an externally-held deny-list (so the caller can revoke through its
     /// own handle too). By default the runtime owns a fresh one, reachable via
     /// [`FusedRuntime::revoke_cap_token`].
