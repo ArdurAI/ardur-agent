@@ -243,11 +243,26 @@ static DESTRUCTIVE_PATTERNS: once_cell::sync::Lazy<Vec<Regex>> = once_cell::sync
         Regex::new(r"(?i)\|\s*(?:ba)?sh\b").expect("valid destructive pattern regex"),
         // Fork bomb
         Regex::new(r"(?i):\(\)\s*\{\s*:\|:&\s*\};:").expect("valid destructive pattern regex"),
-        // Recursive chmod/chown on root. The path may be a bare `/`, so the
-        // pattern must not require a word character after the slash: `/\b`
-        // silently failed to match the single most dangerous target.
-        Regex::new(r"(?i)\bchmod\s+.*-R\s+.*/").expect("valid destructive pattern regex"),
-        Regex::new(r"(?i)\bchown\s+.*-R\s+.*/").expect("valid destructive pattern regex"),
+        // Recursive chmod/chown on root or a top-level system directory.
+        //
+        // Two failure modes have to be avoided at once. The original pattern
+        // ended in `/\b`, which requires a word character after the slash, so
+        // `chmod -R 777 /` — the single most dangerous target — never matched
+        // while `/etc` did. Replacing it with a bare `.*/` fixed that but
+        // denied any path containing a slash at all, including `./build` and
+        // `/tmp/work`, which is not what the rule is about.
+        //
+        // So the target is anchored: an absolute operand that is either `/`
+        // itself or a single top-level segment (`/etc`, `/usr`, `/etc/`).
+        // Deeper paths like `/var/log/app` and relative paths are left alone.
+        //
+        // Written without look-around: Rust's `regex` crate does not support
+        // it, so `-R` is required to appear before the operand (the natural
+        // ordering) rather than asserted by a lookahead.
+        Regex::new(r"(?i)\bchmod\b[^\n]*\s-[a-zA-Z]*R[a-zA-Z]*\b(?:\s+[^\s/][^\s]*)*\s+/(?:[^/\s]+/?)?(?:\s|$)")
+            .expect("valid destructive pattern regex"),
+        Regex::new(r"(?i)\bchown\b[^\n]*\s-[a-zA-Z]*R[a-zA-Z]*\b(?:\s+[^\s/][^\s]*)*\s+/(?:[^/\s]+/?)?(?:\s|$)")
+            .expect("valid destructive pattern regex"),
         // Disk wipe / filesystem creation. Permit whitespace around `=` because
         // shell users often add it while experimenting, even though some forms
         // are not accepted by `dd` itself.

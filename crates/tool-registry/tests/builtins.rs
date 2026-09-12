@@ -988,3 +988,48 @@ async fn shell_run_blocks_recursive_chmod_on_bare_root() {
         .expect_err("recursive chmod on bare / must be denied");
     assert!(matches!(err, ToolError::Denied { .. }), "got {err:?}");
 }
+
+/// The recursive-chmod rule has to thread a needle, and has been wrong in both
+/// directions: the original `/\b` never matched a bare `/` (the worst target),
+/// and the first fix denied every path containing a slash at all. Pin both
+/// edges so neither regression can return silently.
+#[tokio::test]
+async fn recursive_chmod_denies_root_targets_without_denying_ordinary_paths() {
+    let tool = ShellTool::with_allowlist(vec!["chmod".to_string(), "chown".to_string()]);
+
+    // Root and top-level system directories: denied.
+    for cmd in [
+        "chmod -R 777 /",
+        "chmod -R 777 /etc",
+        "chmod -R 777 /etc/",
+        "chmod -R u+w /usr",
+        "chown -R root /",
+    ] {
+        let err = tool
+            .invoke(&ctx(PathBuf::from(".")), json!({ "command": cmd }))
+            .await;
+        assert!(
+            matches!(err, Err(ToolError::Denied { .. })),
+            "`{cmd}` targets root or a top-level system directory and must be \
+             denied; got {err:?}"
+        );
+    }
+
+    // Ordinary project and scratch paths: allowed. A denylist that blocks
+    // these is not expressing "recursive on root" any more.
+    for cmd in [
+        "chmod -R 755 ./build",
+        "chmod -R u+w /tmp/work",
+        "chmod -R 644 src/lib.rs",
+        "chmod -R 700 /var/log/app",
+    ] {
+        let out = tool
+            .invoke(&ctx(PathBuf::from(".")), json!({ "command": cmd }))
+            .await;
+        assert!(
+            !matches!(out, Err(ToolError::Denied { .. })),
+            "`{cmd}` is an ordinary recursive chmod on a non-root path and \
+             must not be denied by the root rule; got {out:?}"
+        );
+    }
+}
