@@ -636,7 +636,11 @@ fn push_integration_checks(root: &Path, checks: &mut Vec<serde_json::Value>, war
     // adapter fails the boot, so reporting it `ok` because its directory exists
     // would be actively misleading — doctor would be green about a
     // configuration that cannot start.
-    let registry = ardur_integrations::AdapterRegistry::new();
+    // The adapters this binary carries. Doctor must consult the *same* set the
+    // runtime would, or it reports health for a configuration that cannot boot.
+    let registry = ardur_integrations::AdapterRegistry::new().with(std::sync::Arc::new(
+        ardur_integration_beads::BeadsAdapter::new(),
+    ));
 
     for integration in set.iter() {
         let (present, detail) = match &integration.endpoint {

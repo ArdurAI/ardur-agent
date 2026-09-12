@@ -241,3 +241,85 @@ fn a_malformed_config_does_not_leak_secrets_into_the_doctor_report() {
         "the failure must still be reported, just without the excerpt; got: {stdout}"
     );
 }
+
+/// The beads adapter must be reachable from the shipped binary.
+///
+/// Adding a workspace dependency does not make an adapter available: the
+/// production doctor path built an empty `AdapterRegistry`, so a correctly
+/// configured beads integration was reported as having no adapter and would
+/// have failed the boot. This asserts the opposite through the real binary.
+#[test]
+fn the_beads_adapter_is_wired_into_the_shipped_binary() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let state = home.path().join(".ardur");
+    std::fs::create_dir_all(&state).expect("state dir");
+
+    // An executable stub, so "present" is true and the only thing under test
+    // is whether an adapter exists for the integration.
+    let bd = home.path().join("bd");
+    std::fs::write(&bd, "#!/bin/sh\nexit 0\n").expect("stub");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut p = std::fs::metadata(&bd).expect("metadata").permissions();
+        p.set_mode(0o755);
+        std::fs::set_permissions(&bd, p).expect("chmod");
+    }
+
+    std::fs::write(
+        state.join("config.toml"),
+        format!(
+            "[integrations.beads]\ncommand = \"{}\"\nenabled = true\n",
+            bd.display()
+        ),
+    )
+    .expect("config");
+
+    let report = doctor_report(home.path());
+    let entry = check(&report, "integration:beads").expect("per-integration check present");
+
+    assert_eq!(
+        entry["adapter"], true,
+        "the binary must carry a beads adapter, or an enabled beads integration \
+         cannot boot; got: {entry}"
+    );
+    assert_eq!(entry["present"], true, "the stub is executable");
+    assert_eq!(
+        entry["status"], "ok",
+        "with an adapter and a present binary, beads is healthy: {entry}"
+    );
+}
+
+/// An integration with no adapter is still reported as such.
+///
+/// The contrast that keeps the previous test meaningful: wiring beads in must
+/// not make every integration look adapted.
+#[test]
+fn an_integration_without_an_adapter_is_still_reported_as_unadapted() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let state = home.path().join(".ardur");
+    std::fs::create_dir_all(&state).expect("state dir");
+    let vault = home.path().join("vault");
+    std::fs::create_dir_all(&vault).expect("vault");
+
+    std::fs::write(
+        state.join("config.toml"),
+        format!(
+            "[integrations.obsidian]\nroot = \"{}\"\nenabled = true\n",
+            vault.display()
+        ),
+    )
+    .expect("config");
+
+    let report = doctor_report(home.path());
+    let entry = check(&report, "integration:obsidian").expect("check present");
+
+    assert_eq!(
+        entry["adapter"], false,
+        "obsidian has no adapter in this build: {entry}"
+    );
+    assert_eq!(
+        entry["status"], "warn",
+        "an enabled integration with no adapter must warn: {entry}"
+    );
+}
