@@ -1,0 +1,21 @@
+# gitleaks fingerprints intentionally ignored.
+#
+# These are SYNTHETIC TEST FIXTURES, not credentials: each is a fake token
+# literal that exists so a redaction test has an input to redact. Left
+# un-allowlisted they re-fire on every scan of main and train reviewers to
+# wave through gitleaks output (#437).
+#
+# Two fingerprint forms are listed per fixture because gitleaks derives them
+# differently by scan mode: `gitleaks git` uses <commit>:<file>:<rule>:<line>
+# and `gitleaks dir` uses <file>:<rule>:<line>. The pre-push gate scans a
+# commit range; a full-tree scan uses the other form.
+#
+# Anything NOT a proven synthetic fixture must be fixed, never listed here.
+
+# crates/cli/tests/session_lifecycle_commands.rs — synthetic fixture for session_export_redacts_markdown_and_jsonl — the literal exists so the export redaction test has something to redact
+3af5b3a81b8f5c4c918ff298f9f5c76d07d9b80a:crates/cli/tests/session_lifecycle_commands.rs:generic-api-key:294
+crates/cli/tests/session_lifecycle_commands.rs:generic-api-key:294
+
+# crates/session-journals/src/redact.rs — synthetic fixture for redacts_user_and_assistant_message_content — the literal exists so the redactor has something to redact
+485528f09227a009c41083adacee892105bffda9:crates/session-journals/src/redact.rs:generic-api-key:131
+crates/session-journals/src/redact.rs:generic-api-key:131
