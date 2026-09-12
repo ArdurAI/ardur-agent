@@ -21,7 +21,13 @@ reviewed code baseline and was re-verified against it.
     `llm.completion.cancelled.v1` marker and no success return for an
     abandoned turn (closes `#422`).
 - The previous baseline's PRs (`#418`, `#419`, `#421`, `#424`, `#423`,
-  `#425`) remain in `dev` unchanged.
+  `#425`) remain in `dev` unchanged. Also merged in the
+  `09b40df`..`6285be2` range, ahead of this bundle:
+  - `#439` — admin-ui session-id journal reads confined to the sessions root,
+    so an externally supplied session id cannot traverse outside it
+    (closes `#430`). Merged to `dev` as `334540d`; its own required checks were
+    green and it is included in the workflow evidence for the baseline commit
+    below.
 - No GitHub PRs were open at this review.
 - Required GitHub workflows were green before each merge, and the full
   dev-push check set (CodeQL, CodeQL/Rust, Trivy, build-healthcheck-scan,
@@ -192,23 +198,35 @@ hardening and operator work.
   server env opt-in (ARD-457).
 - `#420`'s hardened sibling `shell.exec` is implemented and tested — it execs
   argv directly with no shell, matches `argv[0]` exactly, bounds captured
-  output, gives the child an absolute-only `PATH`, and tears down the whole
-  process group on timeout — but is not yet wired to a server config flag, so
-  it is never registered at boot. `shell.run` remains a prefix gate, not full
-  argv confinement. Deployments that construct a registry directly can opt in
-  via `BuiltinOpts::enable_shell_exec`.
+  output, gives the child an absolute-only `PATH`, and (on **Unix**) tears down
+  the whole process group on timeout — but is not yet wired to a server config
+  flag, so it is never registered at boot. `shell.run` remains a prefix gate,
+  not full argv confinement. Deployments that construct a registry directly can
+  opt in via `BuiltinOpts::enable_shell_exec`.
+
+  Process-group teardown is Unix-only: the Windows path has `kill_on_drop`
+  alone, which reaps the immediate child but not descendants it spawned, so a
+  timed-out process can leave grandchildren running there. A Job Object
+  implementation is follow-up work.
 
   Neither tool sandboxes the binary it runs: allowlisting `sh`, `env`,
   `xargs`, `find -exec`, or any interpreter grants what that binary can do.
   Cap-token and Cedar authorize *whether* a tool may be invoked — they never
   see argv — so confining a running process needs an OS-level sandbox or a
   genuinely leaf binary.
-- Tool-loop intermediate receipts are settled on cancel (`#422`): the receipt
-  log is append-only, so a turn abandoned mid-loop cannot un-mint the rounds
-  that already committed. The runtime now appends a terminal
-  `llm.completion.cancelled.v1` receipt so the chain never ends on an
-  intermediate round, and an abandoned turn is never reported as a success
-  carrying an earlier round's receipt.
+- Tool-loop intermediate receipts are settled on cancel for **non-streaming**
+  submissions (`#422`): the receipt log is append-only, so a turn abandoned
+  mid-loop cannot un-mint the rounds that already committed. `submit_inner`
+  now appends a terminal `llm.completion.cancelled.v1` receipt so the chain
+  never ends on an intermediate round, and an abandoned turn is never reported
+  as a success carrying an earlier round's receipt.
+
+  **The streaming path does not yet have this.** `stream_inner` commits one
+  receipt per provider round but never records a cancellation marker, and
+  `handle_http_stream` drops the fused stream when forwarding fails. An SSE
+  client that disconnects after a tool-use round has persisted its receipt but
+  before the final round settles can therefore still leave the chain ending on
+  an intermediate receipt. Tracked as follow-up work below.
 - Local STT/TTS providers exist in `ardur-media-audio`, but the server currently
   auto-registers Whisper transcription only.
 - Approval *propose* (the agent creating a pending card before an irreversible
@@ -223,8 +241,12 @@ Post-beta follow-ups (not part of the `v0.1.0-beta.2` gate):
 1. `#420` follow-through: wire `shell.exec` to a server config flag
    (`ARDUR_ENABLE_SHELL_EXEC_TOOL` + binary allowlist) so operators can register
    the hardened exec path, and migrate grant-driven registration to prefer it
-   over `shell.run`.
-2. ARD-463 propose-half: emit pending approval cards before irreversible tools,
+   over `shell.run`. Windows process-tree teardown (a Job Object equivalent of
+   the Unix process-group kill) belongs with it.
+2. `#422` follow-through: give the streaming path the same cancellation
+   settlement as `submit_inner`, so an SSE client disconnecting mid tool-loop
+   cannot leave the chain ending on an intermediate receipt.
+3. ARD-463 propose-half: emit pending approval cards before irreversible tools,
    with `RequiresApproval` caveats.
-3. Auto-register local STT/TTS when `ARDUR_LOCAL_STT_COMMAND` /
+4. Auto-register local STT/TTS when `ARDUR_LOCAL_STT_COMMAND` /
    `ARDUR_LOCAL_TTS_COMMAND` are set.
