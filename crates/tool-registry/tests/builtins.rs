@@ -988,3 +988,66 @@ async fn shell_run_blocks_recursive_chmod_on_bare_root() {
         .expect_err("recursive chmod on bare / must be denied");
     assert!(matches!(err, ToolError::Denied { .. }), "got {err:?}");
 }
+
+/// The recursive-chmod rule has to thread a needle, and has been wrong in
+/// several directions: `/\b` never matched a bare `/` (the worst target), a
+/// bare `.*/` denied every path containing a slash, and an anchored lexical
+/// pattern missed ordinary shell spellings of root such as `"/"` and `/etc/..`.
+///
+/// The check is a normalising predicate rather than a regex, so this test
+/// exercises it **without spawning anything**: the allowed cases are real
+/// paths, and running `chmod -R` against `./build` or `/var/log/app` to prove
+/// they are permitted would mutate the machine running the suite.
+#[tokio::test]
+async fn recursive_chmod_denies_every_spelling_of_root_but_not_ordinary_paths() {
+    // Denied: root and top-level system directories, however they are spelled.
+    for cmd in [
+        "chmod -R 777 /",
+        "chmod -R 777 \"/\"",
+        "chmod -R 777 '/'",
+        "chmod -R 777 //",
+        "chmod -R 777 /etc/..",
+        "chmod -R 777 /etc",
+        "chmod -R 777 /etc/",
+        "chmod -Rv u+w /usr",
+        "chmod --recursive 777 /",
+        "chown -R root /",
+    ] {
+        let tool = ShellExecTool::with_allowlist(vec!["chmod".to_string(), "chown".to_string()]);
+        let argv: Vec<&str> = cmd.split_whitespace().collect();
+        let err = tool
+            .invoke(&ctx(PathBuf::from(".")), json!({ "argv": argv }))
+            .await;
+        assert!(
+            matches!(err, Err(ToolError::Denied { .. })),
+            "`{cmd}` resolves to root or a top-level system directory and must \
+             be denied; got {err:?}"
+        );
+    }
+
+    // Allowed: ordinary project and scratch paths. Asserted on the deny
+    // decision only — never executed, so the suite cannot chmod real files.
+    for cmd in [
+        "chmod -R 755 ./build",
+        "chmod -R u+w /tmp/work",
+        "chmod -R 644 src/lib.rs",
+        "chmod -R 700 /var/log/app",
+        "chmod 777 /",
+    ] {
+        let tool = ShellExecTool::with_allowlist(vec!["true".to_string()]);
+        let argv: Vec<&str> = cmd.split_whitespace().collect();
+        let err = tool
+            .invoke(&ctx(PathBuf::from(".")), json!({ "argv": argv }))
+            .await
+            .expect_err("not on this allowlist, so it cannot run");
+        match err {
+            ToolError::Denied { ref reason } => assert!(
+                !reason.contains("destructive"),
+                "`{cmd}` must be refused for the allowlist, not as destructive \
+                 — the root rule is about root, not about every path with a \
+                 slash in it. Got: {reason}"
+            ),
+            other => panic!("expected a denial for `{cmd}`, got {other:?}"),
+        }
+    }
+}
