@@ -669,6 +669,9 @@ fn shell_exec_declares_the_same_capabilities_as_shell_run() {
     assert!(exec_caps.contains(&Capability::ProcessSpawn));
 }
 
+/// `sleep` is a Unix binary; the Windows path spawns nothing and would return
+/// ExecutionFailed before reaching the timeout assertions.
+#[cfg(not(windows))]
 #[tokio::test]
 async fn shell_exec_honours_timeout() {
     let tool = ShellExecTool::with_allowlist(vec!["sleep".to_string()]);
@@ -682,4 +685,154 @@ async fn shell_exec_honours_timeout() {
 
     assert_eq!(out.content["timed_out"], true);
     assert_eq!(out.content["exit_code"], -1);
+}
+
+// ── shell.exec: PR #441 review findings ─────────────────────────────────────
+
+/// P2: the destructive-pattern denylist must inspect the binary and its flags,
+/// not a flattened argument string. An allowlisted `echo` asked to PRINT the
+/// text "rm -rf /tmp/x" can only print it — direct exec cannot turn an operand
+/// into a command — so denying it is a false positive.
+#[cfg(not(windows))]
+#[tokio::test]
+async fn shell_exec_does_not_mistake_literal_operands_for_commands() {
+    let tool = ShellExecTool::with_allowlist(vec!["echo".to_string()]);
+    let out = tool
+        .invoke(
+            &ctx(PathBuf::from(".")),
+            json!({ "argv": ["echo", "rm", "-rf", "/tmp/example"] }),
+        )
+        .await
+        .expect("echo printing destructive-looking text is not destructive");
+
+    assert_eq!(out.content["stdout"], "rm -rf /tmp/example\n");
+    assert_eq!(out.content["exit_code"], 0);
+}
+
+/// The same denylist must still fire when the destructive command really is
+/// the binary being executed.
+#[cfg(not(windows))]
+#[tokio::test]
+async fn shell_exec_still_blocks_a_destructive_binary_with_flags() {
+    let tool = ShellExecTool::without_allowlist();
+
+    for argv in [
+        vec!["rm", "-rf", "/tmp/definitely-not-here"],
+        vec!["rm", "-fr", "/tmp/definitely-not-here"],
+        vec!["mkfs", "/dev/null"],
+        vec!["shutdown", "-h", "now"],
+    ] {
+        let err = tool
+            .invoke(&ctx(PathBuf::from(".")), json!({ "argv": argv }))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ToolError::Denied { .. }),
+            "{argv:?} must be denied, got {err:?}"
+        );
+    }
+}
+
+/// P1: an allowlisted binary can emit unbounded output. Capture must be bounded
+/// as bytes arrive, not buffered whole and truncated afterwards, so a noisy
+/// command cannot exhaust memory before the deadline fires.
+#[cfg(not(windows))]
+#[tokio::test]
+async fn shell_exec_bounds_captured_output() {
+    // `yes` emits forever. With an unbounded read this never returns until the
+    // timeout, having buffered gigabytes; bounded, it caps and reports it.
+    let tool = ShellExecTool::with_allowlist(vec!["yes".to_string()]);
+    let out = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        tool.invoke(
+            &ctx(PathBuf::from(".")),
+            json!({ "argv": ["yes", "aaaaaaaaaaaaaaaa"], "timeout_secs": 10 }),
+        ),
+    )
+    .await
+    .expect("the bounded drain must not hang past the tool deadline");
+
+    match out {
+        Ok(output) => {
+            let stdout = output.content["stdout"].as_str().unwrap_or_default();
+            assert!(
+                stdout.len() <= 1024 * 1024,
+                "captured stdout must respect the ceiling, got {} bytes",
+                stdout.len()
+            );
+            // Either it was cut short, or the deadline stopped it first.
+            assert!(
+                output.content["truncated"] == true || output.content["timed_out"] == true,
+                "an endless producer must report truncation or timeout: {:?}",
+                output.content
+            );
+        }
+        Err(e) => panic!("bounded capture should not error: {e:?}"),
+    }
+}
+
+/// Normal-sized output is returned intact and not flagged as truncated.
+#[cfg(not(windows))]
+#[tokio::test]
+async fn shell_exec_does_not_flag_small_output_as_truncated() {
+    let tool = ShellExecTool::with_allowlist(vec!["echo".to_string()]);
+    let out = tool
+        .invoke(&ctx(PathBuf::from(".")), json!({ "argv": ["echo", "hi"] }))
+        .await
+        .expect("runs");
+
+    assert_eq!(out.content["stdout"], "hi\n");
+    assert_eq!(out.content["truncated"], false);
+    assert_eq!(out.content["timed_out"], false);
+}
+
+/// P2: the published schema must encode the exactly-one-input-form rule that
+/// `resolve_argv` enforces, so a schema-constrained client cannot generate a
+/// request that always fails at invocation.
+#[test]
+fn shell_exec_schema_encodes_the_exclusive_input_forms() {
+    let tool = ShellExecTool::without_allowlist();
+    let schema = tool.schema();
+
+    let one_of = schema.input_schema.get("oneOf").expect("schema has oneOf");
+    let branches = one_of.as_array().expect("oneOf is an array");
+    assert_eq!(branches.len(), 2, "one branch per input form");
+
+    // Each branch requires one form and forbids the other.
+    for (required, forbidden) in [("argv", "command"), ("command", "argv")] {
+        assert!(
+            branches.iter().any(|b| {
+                let req = b.get("required").and_then(|r| r.as_array());
+                let not_req = b
+                    .get("not")
+                    .and_then(|n| n.get("required"))
+                    .and_then(|r| r.as_array());
+                req.is_some_and(|r| r.iter().any(|v| v == required))
+                    && not_req.is_some_and(|r| r.iter().any(|v| v == forbidden))
+            }),
+            "no branch requires {required} while forbidding {forbidden}"
+        );
+    }
+
+    // The output contract advertises the truncation flag.
+    let out_required = schema.output_schema["required"]
+        .as_array()
+        .expect("output required list");
+    assert!(out_required.iter().any(|v| v == "truncated"));
+}
+
+/// P2: the inner default deadline must sit below the fused runtime's own
+/// per-tool deadline (30s), or the runtime cancels first and the caller never
+/// sees the advertised `{ timed_out: true }` result.
+#[test]
+fn shell_exec_default_timeout_leaves_margin_under_the_runtime_deadline() {
+    let tool = ShellExecTool::without_allowlist();
+    let described = tool.schema().input_schema["properties"]["timeout_secs"]["description"]
+        .as_str()
+        .expect("timeout description");
+
+    assert!(
+        described.contains("25"),
+        "the advertised default must match the implemented one: {described}"
+    );
 }

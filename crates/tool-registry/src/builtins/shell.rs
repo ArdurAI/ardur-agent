@@ -44,6 +44,7 @@ use async_trait::async_trait;
 use regex::Regex;
 use serde::Deserialize;
 use serde_json::json;
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
 use ardur_runtime::CostTuple;
@@ -54,7 +55,103 @@ use crate::tool::{Tool, ToolContext, ToolId, ToolOutput, ToolSchema};
 
 /// Default wall-clock ceiling for a command, in seconds, when the caller does
 /// not supply `timeout_secs`.
-const DEFAULT_TIMEOUT_SECS: u64 = 30;
+///
+/// Deliberately below the fused runtime's own default per-tool deadline (30s):
+/// the outer deadline starts before argument parsing and process spawn, so an
+/// equal inner default would normally lose the race and the caller would see a
+/// `ToolTimeout` error instead of the advertised `{ timed_out: true }` result.
+/// The margin lets this tool report its own timeout first.
+const DEFAULT_TIMEOUT_SECS: u64 = 25;
+
+/// Ceiling on captured stdout+stderr, in bytes, for a single invocation.
+///
+/// An allowlisted binary can still emit unbounded output (`yes`, a verbose
+/// build, `cat` on a huge file). Reading with `wait_with_output()` buffers the
+/// whole stream in memory, so a command can exhaust the host well before any
+/// wall-clock timeout fires. Output is drained through bounded sinks instead
+/// and flagged as truncated at this limit.
+const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
+
+/// Accumulates at most `cap` bytes, latching `truncated` once more arrives.
+struct BoundedSink {
+    buf: Vec<u8>,
+    cap: usize,
+    truncated: bool,
+}
+
+impl BoundedSink {
+    fn new(cap: usize) -> Self {
+        Self {
+            buf: Vec::new(),
+            cap,
+            truncated: false,
+        }
+    }
+
+    /// Append as much of `chunk` as still fits under `cap`; the remainder is
+    /// discarded and [`Self::truncated`] is latched.
+    fn push(&mut self, chunk: &[u8]) {
+        if self.buf.len() >= self.cap {
+            self.truncated = true;
+            return;
+        }
+        let remaining = self.cap - self.buf.len();
+        if chunk.len() <= remaining {
+            self.buf.extend_from_slice(chunk);
+        } else {
+            self.buf.extend_from_slice(&chunk[..remaining]);
+            self.truncated = true;
+        }
+    }
+
+    fn into_string_lossy(self) -> String {
+        String::from_utf8_lossy(&self.buf).into_owned()
+    }
+}
+
+/// Spawn `cmd` and drain both pipes through bounded sinks, capping memory as
+/// bytes arrive rather than after the process exits.
+///
+/// Returns `(stdout, stderr, exit_code, truncated)`.
+async fn run_capped(
+    mut cmd: Command,
+    max_output_bytes: usize,
+) -> std::io::Result<(String, String, i32, bool)> {
+    let mut child = cmd.spawn()?;
+    let mut stdout_pipe = child.stdout.take().expect("stdout is piped by the caller");
+    let mut stderr_pipe = child.stderr.take().expect("stderr is piped by the caller");
+
+    async fn drain<R: tokio::io::AsyncRead + Unpin>(
+        pipe: &mut R,
+        cap: usize,
+    ) -> std::io::Result<BoundedSink> {
+        let mut sink = BoundedSink::new(cap);
+        let mut chunk = [0u8; 8192];
+        loop {
+            let n = pipe.read(&mut chunk).await?;
+            if n == 0 {
+                break;
+            }
+            sink.push(&chunk[..n]);
+        }
+        Ok(sink)
+    }
+
+    // Drain concurrently: a child that fills one pipe while we block on the
+    // other would deadlock.
+    let (out, err) = tokio::try_join!(
+        drain(&mut stdout_pipe, max_output_bytes),
+        drain(&mut stderr_pipe, max_output_bytes),
+    )?;
+    let status = child.wait().await?;
+    let truncated = out.truncated || err.truncated;
+    Ok((
+        out.into_string_lossy(),
+        err.into_string_lossy(),
+        status.code().unwrap_or(-1),
+        truncated,
+    ))
+}
 
 /// Best-effort patterns for known destructive shell commands. These are blocked
 /// even in `Allowlist::Any` mode as a defence-in-depth measure, but they are
@@ -319,6 +416,13 @@ struct ShellExecArgs {
 ///   an allowlisted name cannot be extended (`gitfoo`) or chained (`git; id`).
 /// - The `command` string form is additionally restricted to a safe charset,
 ///   because splitting a string on whitespace cannot honour quoting.
+/// - Captured output is bounded as it arrives ([`MAX_OUTPUT_BYTES`]) and
+///   flagged with `truncated`, so an allowlisted binary that emits endlessly
+///   cannot exhaust memory before the deadline fires.
+/// - The destructive-pattern denylist is matched against the binary and its
+///   option flags, never a flattened argument string: direct exec cannot turn
+///   an operand into a command, so `echo "rm -rf /x"` is a print, not a
+///   deletion.
 ///
 /// **It does not sandbox the allowlisted binary itself.** A binary that spawns
 /// a shell on your behalf remains a pivot regardless of how it is invoked:
@@ -388,14 +492,21 @@ impl ShellExecTool {
                     },
                     "timeout_secs": {
                         "type": "integer",
-                        "description": "Wall-clock ceiling in seconds (default 30).",
+                        "description": "Wall-clock ceiling in seconds (default 25).",
                         "minimum": 1
                     },
                     "cwd": {
                         "type": "string",
                         "description": "Working directory; defaults to the session cwd."
                     }
-                }
+                },
+                // Exactly one input form. Encoded in the published contract so a
+                // schema-constrained client cannot emit a request that always
+                // fails at invocation.
+                "oneOf": [
+                    { "required": ["argv"], "not": { "required": ["command"] } },
+                    { "required": ["command"], "not": { "required": ["argv"] } }
+                ]
             }),
             output_schema: json!({
                 "type": "object",
@@ -403,9 +514,13 @@ impl ShellExecTool {
                     "stdout": { "type": "string" },
                     "stderr": { "type": "string" },
                     "exit_code": { "type": "integer" },
-                    "timed_out": { "type": "boolean" }
+                    "timed_out": { "type": "boolean" },
+                    "truncated": {
+                        "type": "boolean",
+                        "description": "Output exceeded the capture ceiling and was cut short."
+                    }
                 },
-                "required": ["stdout", "stderr", "exit_code", "timed_out"]
+                "required": ["stdout", "stderr", "exit_code", "timed_out", "truncated"]
             }),
             examples: vec![],
         };
@@ -509,14 +624,34 @@ impl Tool for ShellExecTool {
             });
         }
 
-        // Defence-in-depth, mirroring `shell.run`. Direct exec already prevents
-        // a metacharacter from *chaining* a second command, so this only has to
-        // catch a destructive invocation of the permitted binary itself.
-        let rendered = argv.join(" ");
-        if DESTRUCTIVE_PATTERNS.iter().any(|re| re.is_match(&rendered)) {
+        // Defence-in-depth, mirroring `shell.run` — but matched against the
+        // BINARY plus its option flags, never the flattened argument string.
+        // Direct exec already prevents a metacharacter from chaining a second
+        // command, so the only thing left to catch is a destructive invocation
+        // of the permitted binary itself. Flattening argv and re-parsing it
+        // would misread literal operands as commands: an allowlisted `echo`
+        // asked to print the text "rm -rf /tmp/x" can only print it, yet a
+        // flattened match would deny it.
+        //
+        // Operands (non-flag arguments after argv[0]) are therefore excluded
+        // from the matched string. Flags are kept because they carry the
+        // destructive intent the patterns look for (`-rf`, `if=/dev/zero`).
+        let inspected = std::iter::once(argv[0].as_str())
+            .chain(
+                argv[1..]
+                    .iter()
+                    .map(String::as_str)
+                    .filter(|a| a.starts_with('-') || a.contains('=')),
+            )
+            .collect::<Vec<_>>()
+            .join(" ");
+        if DESTRUCTIVE_PATTERNS
+            .iter()
+            .any(|re| re.is_match(&inspected))
+        {
             return Err(ToolError::Denied {
                 reason: format!(
-                    "command matches a destructive pattern and is blocked: `{rendered}`"
+                    "command matches a destructive pattern and is blocked: `{inspected}`"
                 ),
             });
         }
@@ -533,21 +668,20 @@ impl Tool for ShellExecTool {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
 
-        let child = cmd
-            .spawn()
-            .map_err(|e| ToolError::ExecutionFailed(format!("failed to spawn `{binary}`: {e}")))?;
-
         let timeout = Duration::from_secs(args.timeout_secs);
-        let content = match tokio::time::timeout(timeout, child.wait_with_output()).await {
-            Ok(Ok(output)) => json!({
-                "stdout": String::from_utf8_lossy(&output.stdout),
-                "stderr": String::from_utf8_lossy(&output.stderr),
-                "exit_code": output.status.code().unwrap_or(-1),
+        // Bounded drain, not `wait_with_output()`: an allowlisted binary can
+        // emit unbounded output and exhaust memory long before the deadline.
+        let content = match tokio::time::timeout(timeout, run_capped(cmd, MAX_OUTPUT_BYTES)).await {
+            Ok(Ok((stdout, stderr, exit_code, truncated))) => json!({
+                "stdout": stdout,
+                "stderr": stderr,
+                "exit_code": exit_code,
                 "timed_out": false,
+                "truncated": truncated,
             }),
             Ok(Err(e)) => {
                 return Err(ToolError::ExecutionFailed(format!(
-                    "command i/o failed: {e}"
+                    "failed to run `{binary}`: {e}"
                 )));
             }
             Err(_elapsed) => json!({
@@ -555,6 +689,7 @@ impl Tool for ShellExecTool {
                 "stderr": "",
                 "exit_code": -1,
                 "timed_out": true,
+                "truncated": false,
             }),
         };
 
