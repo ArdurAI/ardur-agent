@@ -909,3 +909,82 @@ async fn shell_exec_timeout_kills_forked_descendants() {
         "a forked descendant survived the timeout and kept running"
     );
 }
+
+/// `shell.run` and `shell.exec` share `DEFAULT_TIMEOUT_SECS`. A schema that
+/// advertises a different default than the code applies is a contract lie: a
+/// schema-driven caller budgets for the advertised ceiling and is cut off
+/// early. #420 lowered the shared constant to 25 and left shell.run's schema
+/// claiming 30.
+#[test]
+fn both_shell_tools_advertise_the_timeout_default_they_actually_apply() {
+    let run = ShellTool::with_allowlist(vec!["git".to_string()]);
+    let exec = ShellExecTool::with_allowlist(vec!["git".to_string()]);
+
+    for (name, schema) in [
+        (ShellTool::ID, run.schema()),
+        (ShellExecTool::ID, exec.schema()),
+    ] {
+        let described = schema.input_schema["properties"]["timeout_secs"]["description"]
+            .as_str()
+            .expect("timeout_secs documents its default")
+            .to_string();
+        assert!(
+            described.contains("25"),
+            "{name} advertises `{described}`, but both tools apply the same \
+             25-second default. A caller trusting the schema would be cut off \
+             five seconds early."
+        );
+    }
+}
+
+/// The destructive denylist filters operands out of the inspected string so
+/// `echo "rm -rf /"` is not denied for merely quoting text. But the
+/// chmod/chown rules match on the *path*, so filtering operands made them
+/// unmatchable: `["chmod", "-R", "/"]` inspected as `chmod -R` and passed.
+#[tokio::test]
+async fn shell_exec_still_blocks_recursive_chmod_on_root() {
+    let tool = ShellExecTool::with_allowlist(vec!["chmod".to_string(), "echo".to_string()]);
+
+    let denied = tool
+        .invoke(
+            &ctx(PathBuf::from(".")),
+            json!({ "argv": ["chmod", "-R", "777", "/"] }),
+        )
+        .await;
+    assert!(
+        matches!(denied, Err(ToolError::Denied { .. })),
+        "recursive chmod on / must stay blocked: here the operand IS the \
+         danger, so it cannot be filtered out of the inspected string. Got \
+         {denied:?}"
+    );
+
+    // The false positive the operand filter exists for must stay fixed.
+    let allowed = tool
+        .invoke(
+            &ctx(PathBuf::from(".")),
+            json!({ "argv": ["echo", "rm -rf /tmp/example"] }),
+        )
+        .await;
+    assert!(
+        allowed.is_ok(),
+        "echo printing destructive-looking text must still be allowed — it \
+         can only print it. Got {allowed:?}"
+    );
+}
+
+/// The same bare-root gap in `shell.run`'s denylist, which the operand filter
+/// merely hid on the exec side: `/\b` requires a word character after the
+/// slash, so `chmod -R 777 /` — the most dangerous form — never matched while
+/// `chmod -R 777 /etc` did.
+#[tokio::test]
+async fn shell_run_blocks_recursive_chmod_on_bare_root() {
+    let tool = ShellTool::with_allowlist(vec!["chmod".to_string()]);
+    let err = tool
+        .invoke(
+            &ctx(PathBuf::from(".")),
+            json!({ "command": "chmod -R 777 /" }),
+        )
+        .await
+        .expect_err("recursive chmod on bare / must be denied");
+    assert!(matches!(err, ToolError::Denied { .. }), "got {err:?}");
+}

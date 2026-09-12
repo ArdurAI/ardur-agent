@@ -356,3 +356,74 @@ async fn a_cancellation_marker_carries_zero_cost() {
         );
     }
 }
+
+/// Guards the lock discipline the #422 cancellation path depends on.
+///
+/// `commit_lock` is a non-reentrant `AsyncMutex`. `record_turn_cancellation`
+/// acquires it. Any call to it from inside the commit block — which holds
+/// `commit_guard` — therefore parks the turn worker on a lock it already
+/// holds, and because the runtime has a single worker that stalls every
+/// subsequent turn, not just the cancelled one.
+///
+/// This is asserted structurally rather than behaviourally on purpose. The
+/// dangerous branch is currently unreachable with `committed_rounds > 0`:
+/// `begin_persist` only refuses from Cancelled, `request_cancel` only wins
+/// against Live, and any committed round has already moved the handshake to
+/// Committed, where `record_turn_cancellation` early-returns. A runtime test
+/// would pass today whether or not the guard were released, and would go
+/// vacuous the moment that coincidence changed — which is precisely when the
+/// deadlock would appear. Pinning the source invariant fails loudly instead.
+#[test]
+fn recording_a_cancellation_never_happens_while_the_commit_guard_is_held() {
+    let src = include_str!("../src/runtime.rs");
+    let lines: Vec<&str> = src.lines().collect();
+
+    // Locate the commit block: `let (signed, receipt) = {` ... matching `};`
+    // at the same indentation.
+    let open = lines
+        .iter()
+        .position(|l| l.trim_start().starts_with("let (signed, receipt) = {"))
+        .expect("commit block should exist; if this function was renamed, re-point this guard");
+    let indent = lines[open].len() - lines[open].trim_start().len();
+    let closer = format!("{}}};", " ".repeat(indent));
+    let close = lines[open + 1..]
+        .iter()
+        .position(|l| *l == closer)
+        .map(|i| i + open + 1)
+        .expect("commit block should close");
+
+    // A `drop(commit_guard)` only releases the guard for the branch it sits in.
+    // An early-return path that drops before returning does NOT make a sibling
+    // branch safe, so track brace depth: a call is safe only when a drop at the
+    // SAME depth precedes it.
+    let mut depth: i32 = 0;
+    let mut dropped_at_depth: Vec<i32> = Vec::new();
+    let mut offenders = Vec::new();
+    for (idx, line) in lines[open..=close].iter().enumerate() {
+        let lineno = open + idx + 1;
+        let code = line.split("//").next().unwrap_or("");
+
+        if code.contains("drop(commit_guard)") {
+            dropped_at_depth.push(depth);
+        }
+        if code.contains("record_turn_cancellation") && !dropped_at_depth.contains(&depth) {
+            offenders.push(lineno);
+        }
+
+        let opens = code.matches('{').count() as i32;
+        let closes = code.matches('}').count() as i32;
+        depth += opens - closes;
+        // Leaving a branch invalidates drops recorded inside it.
+        if closes > opens {
+            dropped_at_depth.retain(|d| *d <= depth);
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "record_turn_cancellation is called at line(s) {offenders:?} while the \
+         commit guard is still held. That re-acquires the non-reentrant \
+         commit_lock and deadlocks the single turn worker, stalling every \
+         later turn. Release the guard first: `drop(commit_guard);`"
+    );
+}

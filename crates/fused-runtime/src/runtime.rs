@@ -2485,6 +2485,25 @@ impl FusedRuntime {
                         self.fire_error(session_id, LifecyclePhase::Receipt, &err)
                             .await;
                         if matches!(err, RuntimeError::TurnCancelled) {
+                            // Release the commit guard BEFORE recording.
+                            // `record_turn_cancellation` takes `commit_lock`,
+                            // which is not reentrant, and this branch still
+                            // holds it — same reason the probe path above
+                            // drops the guard before returning.
+                            //
+                            // Unreachable today with `committed_rounds > 0`:
+                            // `begin_persist` only refuses from Cancelled,
+                            // `request_cancel` only wins against Live, and any
+                            // committed round has already moved the handshake
+                            // to Committed — where `record_turn_cancellation`
+                            // early-returns anyway. So this is a latent
+                            // hazard, not a live deadlock. Made structurally
+                            // safe rather than left to that coincidence: a
+                            // future state-machine change allowing a committed
+                            // turn to be cancelled would otherwise park the
+                            // single turn worker on a lock it already holds,
+                            // stalling every subsequent turn.
+                            drop(commit_guard);
                             self.record_turn_cancellation(session_id, &claims, committed_rounds)
                                 .await;
                             return Err(err);
