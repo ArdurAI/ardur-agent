@@ -565,6 +565,90 @@ carried.
   different data directory (the documented Docker setup uses `/var/lib/ardur`),
   use the HTTP endpoints, which read the server's store directly.
 
+## Declaring an integration
+
+An *integration* is an external tool the runtime can be taught to drive — the
+`bd` CLI, a Dolt clone, an Obsidian vault. Integrations are declared in
+`~/.ardur/config.toml` and are **off by default**; a fresh install has none.
+
+```toml
+[integrations.obsidian]
+root = "/Users/me/vault"     # a directory that confines every read and write
+enabled = true
+
+[integrations.beads]
+command = "bd"               # an executable, driven through argv-exec
+capabilities = ["cap.integration.beads"]
+```
+
+Each integration declares exactly one endpoint: `command` for an executable, or
+`root` for a confining directory. The two are not interchangeable — they carry
+different confinement rules — so declaring both is a load error rather than a
+silent preference for one.
+
+Three properties are worth knowing before enabling anything:
+
+- **Declaring is not enabling.** A block without `enabled = true` is inert. A
+  disabled integration never reaches its adapter at all, so it cannot run
+  adapter code, spawn a process, or touch a path.
+- **Configuration is validated at load, strictly.** Unknown keys are refused
+  rather than ignored: a typo'd `enable = true` fails the parse instead of
+  leaving you convinced you switched something on.
+- **An enabled integration with no adapter in this build fails the boot.** The
+  configuration claims a capability the binary cannot provide, and starting
+  anyway would hide that.
+
+### Environment overrides
+
+`ARDUR_INTEGRATIONS_<NAME>_ENABLED`, `_COMMAND`, and `_ROOT` adjust a declared
+integration, so an image can ship the file and a deployment decide what is on:
+
+```bash
+export ARDUR_INTEGRATIONS_OBSIDIAN_ENABLED=false
+export ARDUR_INTEGRATIONS_BEADS_COMMAND=/opt/homebrew/bin/bd
+```
+
+An override **cannot introduce** an integration the file never declared, and
+cannot change an endpoint's kind. Environment variables are the part of a
+deployment most likely to be inherited or templated from a parent process;
+requiring a declaration keeps the set of *possible* integrations in a file
+someone reviews, and leaves the environment in charge only of the ones already
+there.
+
+### Checking your work
+
+`ardur doctor` reports every declared integration, whether it is enabled, and
+whether its backing resource is actually present:
+
+```json
+{ "name": "integration:obsidian", "status": "ok", "enabled": true,
+  "kind": "directory", "present": true, "adapter": true,
+  "endpoint": "directory: /Users/me/vault" }
+```
+
+Doctor reports the **effective** configuration — environment overrides are
+applied before it reports, so what you see is what the runtime would use. An
+enabled integration warns when its backing resource is missing, or when this
+build carries no adapter for it; either way it will fail at first use. The same
+integration disabled is reported but not warned about, so one config file can be
+shared across machines where the tool is not installed. For a `command`
+endpoint, "present" means a file that is actually executable — a file on `PATH`
+without an execute bit would otherwise look healthy and fail with
+`PermissionDenied`.
+
+Doctor reports presence only, never the contents of a vault or a database. When
+the configuration cannot be parsed it reports the error's *location* but
+withholds the source excerpt, because a malformed assignment elsewhere in the
+file — an unterminated `api_key` string, say — would otherwise put that
+credential into a report advertised as safe to paste into an issue.
+
+**Current status:** this release lands the configuration surface, the adapter
+registry, and the doctor checks. The `beads`, `dolthub`, and `obsidian`
+adapters that turn a declared integration into callable tools are tracked
+separately and are not yet part of this build — enabling an integration today
+will therefore fail the boot with `no adapter for it`, which is the intended
+fail-closed behaviour rather than a silent no-op.
+
 ## Platform integrations
 
 EPIC-PLATFORM adds dedicated platform crates for browser, terminal, and web

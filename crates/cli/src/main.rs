@@ -504,6 +504,242 @@ fn run_debug(args: DebugArgs) -> Result<(), CliError> {
     Ok(())
 }
 
+/// A parse error rendered without any fragment of the source document.
+///
+/// `toml`'s `Display` quotes the offending line to show where the problem is.
+/// That is helpful in a terminal and unacceptable in a report advertised as
+/// safe to paste into an issue: a malformed assignment anywhere in the file —
+/// including an unterminated `api_key` string — lands the credential in the
+/// message. Verified experimentally, not assumed: `toml` 1.1.2 does include the
+/// raw value for an unterminated string and for an unquoted bare value.
+///
+/// So only the structural part survives. `ardur-integrations`' own errors name
+/// keys and integration names but never values, and are safe in full; the
+/// underlying TOML error is reduced to its location line.
+fn redacted_parse_error(error: &ardur_integrations::ParseError) -> String {
+    match error {
+        ardur_integrations::ParseError::Toml { message } => {
+            // Keep only the leading "TOML parse error at line L, column C"
+            // locator, dropping the quoted source excerpt that follows it.
+            let locator = message
+                .lines()
+                .next()
+                .unwrap_or("TOML parse error")
+                .trim()
+                .to_string();
+            format!(
+                "integration configuration could not be parsed: {locator} \
+                 (source excerpt withheld — it can contain values from \
+                 elsewhere in the file)"
+            )
+        }
+        // Every other variant is this crate's own message: it names keys,
+        // integration names and expected types, never a configured value.
+        other => format!("integration configuration could not be parsed: {other}"),
+    }
+}
+
+/// Append one check per declared integration to a doctor report.
+///
+/// Reports, for each integration: whether it is enabled, and whether its
+/// backing resource is present. It deliberately reports **presence only** —
+/// never the contents of a vault, a database, or a command's output — so that
+/// `ardur doctor` stays safe to paste into an issue.
+///
+/// A missing resource for an *enabled* integration is a warning; for a disabled
+/// one it is merely reported, since a declared-but-off block on a machine that
+/// lacks the tool is a legitimate configuration.
+fn push_integration_checks(root: &Path, checks: &mut Vec<serde_json::Value>, warnings: &mut usize) {
+    let config_path = root.join("config.toml");
+    let document = match std::fs::read_to_string(&config_path) {
+        Ok(document) => document,
+        // A missing file is the default posture — check 4 already reports it,
+        // and a fresh boot simply has no integrations.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+        // Any other failure (permissions, a directory in its place) is a real
+        // condition doctor exists to surface: the file is there, check 4 called
+        // it `ok`, yet nothing can read it. Silently returning would hide the
+        // one case where integration configuration is present but inert.
+        Err(e) => {
+            *warnings += 1;
+            checks.push(json!({
+                "name": "integrations",
+                "status": "warn",
+                "note": format!(
+                    "integration configuration at {} could not be read: {} \
+                     (the file exists but is unreadable, so any integrations \
+                     it declares are inert)",
+                    config_path.display(),
+                    e.kind()
+                ),
+            }));
+            return;
+        }
+    };
+
+    let mut set = match ardur_integrations::parse_integrations(&document) {
+        Ok(set) => set,
+        Err(e) => {
+            *warnings += 1;
+            // The TOML parser quotes the offending source line, and a malformed
+            // assignment elsewhere in the file — an unterminated `api_key`
+            // string, say — puts that credential inside the parser's message.
+            // This report is advertised as safe to paste into an issue, so only
+            // the structural part of the error is emitted: the location, and
+            // the crate's own messages, which name keys but never values.
+            checks.push(json!({
+                "name": "integrations",
+                "status": "warn",
+                "note": redacted_parse_error(&e),
+            }));
+            return;
+        }
+    };
+
+    // Doctor must report the *effective* configuration, not just the file's
+    // view of it. A deployment that sets ARDUR_INTEGRATIONS_X_ENABLED=true and
+    // then sees doctor call X disabled would reasonably conclude the override
+    // does not work.
+    if let Err(e) = ardur_integrations::apply_env_overrides(&mut set, &env_integration_vars()) {
+        *warnings += 1;
+        checks.push(json!({
+            "name": "integrations",
+            "status": "warn",
+            // These errors name the variable and, for a bad boolean, its value.
+            // The value of an `ARDUR_INTEGRATIONS_*` variable is a flag or a
+            // path, never a credential.
+            "note": format!("integration environment override rejected: {e}"),
+        }));
+        return;
+    }
+
+    if set.is_empty() {
+        checks.push(json!({
+            "name": "integrations",
+            "status": "ok",
+            "declared": 0,
+            "enabled": 0,
+            "note": "no integrations declared",
+        }));
+        return;
+    }
+
+    checks.push(json!({
+        "name": "integrations",
+        "status": "ok",
+        "declared": set.len(),
+        "enabled": set.active().count(),
+    }));
+
+    // Which integrations this binary can actually serve. Empty in this
+    // release: the adapters are separate work. An enabled integration with no
+    // adapter fails the boot, so reporting it `ok` because its directory exists
+    // would be actively misleading — doctor would be green about a
+    // configuration that cannot start.
+    let registry = ardur_integrations::AdapterRegistry::new();
+
+    for integration in set.iter() {
+        let (present, detail) = match &integration.endpoint {
+            ardur_integrations::IntegrationEndpoint::Command { binary } => {
+                (resolve_binary(binary).is_some(), "command")
+            }
+            ardur_integrations::IntegrationEndpoint::Directory { root } => {
+                (root.is_dir(), "directory")
+            }
+        };
+        let has_adapter = registry.has(&integration.name);
+
+        let (status, note) = if !integration.enabled {
+            // Disabled: neither a missing resource nor a missing adapter can
+            // cause a failure, so one config file can be shared across machines
+            // and builds.
+            ("skipped", None)
+        } else if !has_adapter {
+            *warnings += 1;
+            (
+                "warn",
+                Some(
+                    "enabled, but this build has no adapter for it — the server \
+                     will refuse to boot rather than run without a capability \
+                     the configuration declares"
+                        .to_string(),
+                ),
+            )
+        } else if !present {
+            *warnings += 1;
+            (
+                "warn",
+                Some("enabled, but its backing resource is missing".to_string()),
+            )
+        } else {
+            ("ok", None)
+        };
+
+        let mut check = json!({
+            "name": format!("integration:{}", integration.name),
+            "status": status,
+            "enabled": integration.enabled,
+            "kind": detail,
+            "present": present,
+            "adapter": has_adapter,
+            "endpoint": integration.endpoint.describe(),
+        });
+        if let Some(note) = note {
+            check["note"] = json!(note);
+        }
+        checks.push(check);
+    }
+}
+
+/// Every `ARDUR_INTEGRATIONS_*` variable in the current process environment.
+///
+/// Collected into a map rather than read one at a time so the override pass has
+/// the same input shape its tests use.
+fn env_integration_vars() -> std::collections::BTreeMap<String, String> {
+    std::env::vars()
+        .filter(|(k, _)| k.starts_with("ARDUR_INTEGRATIONS_"))
+        .collect()
+}
+
+/// Whether a command is runnable: an explicit path that exists and is
+/// executable, or a bare name found on `PATH`.
+///
+/// Resolution happens here rather than in the integrations crate because a
+/// missing binary is a *host* fact, not a configuration error — the same
+/// configuration is valid on a machine where the tool is installed.
+fn resolve_binary(binary: &Path) -> Option<PathBuf> {
+    if binary.components().count() > 1 || binary.is_absolute() {
+        return is_executable_file(binary).then(|| binary.to_path_buf());
+    }
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(binary))
+        .find(|candidate| is_executable_file(candidate))
+}
+
+/// Whether `path` is a regular file the current host would actually execute.
+///
+/// A file on `PATH` can lack every execute bit; reporting it as present would
+/// make doctor green about a command that fails with `PermissionDenied` at
+/// first use. The permission check is Unix-only because Windows decides
+/// executability by extension rather than mode bits.
+fn is_executable_file(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path)
+            .map(|m| m.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
 fn run_doctor(args: DoctorArgs) -> Result<(), CliError> {
     let root = state_root(args.state_dir)?;
     let mut checks = Vec::new();
@@ -592,6 +828,13 @@ fn run_doctor(args: DoctorArgs) -> Result<(), CliError> {
         "status": "skipped",
         "note": "live provider checks require explicit credentials and opt-in",
     }));
+
+    // 9. Integrations (ARD-459). Reports declared/enabled state and whether
+    //    each backing resource is reachable — presence only, never values.
+    //    A configured-but-missing resource is a warning rather than an error:
+    //    an operator may legitimately write configuration on a machine that
+    //    does not yet have the tool installed, and doctor's job is to say so.
+    push_integration_checks(&root, &mut checks, &mut warnings);
 
     let report = json!({
         "status": if hard_fail { "error" } else if warnings > 0 { "warn" } else { "ok" },

@@ -97,17 +97,47 @@ impl Config {
     // and a richer schema (per-provider sections, model aliases, ceilings).
     fn from_toml_str(contents: &str) -> Result<Self, CliError> {
         let mut config = Self::default();
+        // Which `[table]` the reader is currently inside. Root-level keys (the
+        // flat Phase-1 subset) appear before any header; everything after one
+        // belongs to that table and is not a root key.
+        let mut section: Option<String> = None;
+
         for (lineno, raw) in contents.lines().enumerate() {
             let line = raw.split('#').next().unwrap_or("").trim();
             if line.is_empty() {
                 continue;
             }
+
+            // A table header. The flat reader does not understand tables, but it
+            // must not choke on them: `[integrations.<name>]` is a documented,
+            // supported section read by `ardur-integrations`, and rejecting it
+            // here would make the documented configuration break every other
+            // CLI command that loads config.
+            if let Some(header) = line.strip_prefix('[') {
+                let Some(name) = header.strip_suffix(']') else {
+                    return Err(CliError::Config(format!(
+                        "line {}: unterminated table header `{raw}`",
+                        lineno + 1
+                    )));
+                };
+                section = Some(name.trim().to_string());
+                continue;
+            }
+
             let Some((key, value)) = line.split_once('=') else {
                 return Err(CliError::Config(format!(
                     "line {}: expected `key = value`, got `{raw}`",
                     lineno + 1
                 )));
             };
+
+            // Keys inside a table are that table's business. Applying them at
+            // the root would let `[integrations.x] model = "..."` silently
+            // change the CLI's model.
+            if section.is_some() {
+                continue;
+            }
+
             let key = key.trim();
             let value = value.trim().trim_matches('"');
             match key {
