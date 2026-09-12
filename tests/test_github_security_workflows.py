@@ -182,16 +182,40 @@ class GitHubSecurityWorkflowTests(unittest.TestCase):
         """
         dco = (WORKFLOWS / "dco.yml").read_text(encoding="utf-8")
 
-        # The applied list is read out of the base commit...
-        self.assertIn('EXEMPT_RAW="$(git show "${BASE}:${EXEMPT_FILE}")"', dco)
+        # The applied list is read out of a resolved source ref...
+        self.assertIn('EXEMPT_RAW="$(git show "${EXEMPT_SOURCE}:${EXEMPT_FILE}")"', dco)
+        self.assertIn('EXEMPT_SOURCE="${BASE}"', dco)
         # ...and never straight off the working tree.
         self.assertNotIn(
             "grep -vE '^[[:space:]]*(#|$)' .github/dco-exempt-shas.txt",
             dco,
             "the exempt list must not be read from the checked-out head (#435)",
         )
-        # A missing file on base must mean "no exemptions", not "skip the check".
+        # A missing file on the source ref must mean "no exemptions", not
+        # "skip the check".
         self.assertIn('EXEMPT_RAW=""', dco)
+
+    def test_dco_promotion_carve_out_is_narrow(self):
+        """dev -> main may read dev's exempt list, but only that case.
+
+        A base-ref-only read deadlocks the documented recovery path: an
+        unsigned commit pushed straight to dev is exempted by a reviewed PR on
+        dev, so the entry is live on dev but not yet on main, and the
+        promotion that would carry it to main is the very thing blocked.
+        The carve-out must be constrained to a same-repo dev -> main PR so a
+        fork branch merely *named* dev cannot claim it.
+        """
+        dco = (WORKFLOWS / "dco.yml").read_text(encoding="utf-8")
+
+        self.assertIn('HEAD_BRANCH}" = "dev"', dco)
+        self.assertIn('BASE_BRANCH}" = "main"', dco)
+        self.assertIn(
+            'HEAD_REPO}" = "${{ github.repository }}"',
+            dco,
+            "the promotion carve-out must require a same-repo PR, so a fork "
+            "branch named dev cannot claim it",
+        )
+        self.assertIn('EXEMPT_SOURCE="${HEAD}"', dco)
 
     def test_dco_enforces_append_only_and_full_shas_for_new_exemptions(self):
         """New exemptions must be full SHAs and may not rewrite history."""

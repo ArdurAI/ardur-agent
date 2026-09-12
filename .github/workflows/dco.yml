@@ -37,15 +37,46 @@ jobs:
 
           EXEMPT_FILE=".github/dco-exempt-shas.txt"
 
-          # Read the exempt list from the BASE ref, never from the PR head.
-          # Reading it from the checked-out head would let any PR append its own
-          # unsigned SHA and self-exempt (#435). The base copy is the one that
-          # already passed review, so an exemption only takes effect after it is
-          # merged. A missing file on base means "no exemptions" (fail closed).
-          if git cat-file -e "${BASE}:${EXEMPT_FILE}" 2>/dev/null; then
-            EXEMPT_RAW="$(git show "${BASE}:${EXEMPT_FILE}")"
+          # Where the applied exempt list is read from.
+          #
+          # Normally: the BASE ref. Reading it from the checked-out head would
+          # let any PR append its own unsigned SHA and self-exempt (#435). The
+          # base copy is the one that already passed review, so an exemption
+          # only takes effect after it is merged.
+          #
+          # One documented exception: the dev -> main promotion. When an
+          # unsigned commit reaches `dev` directly (no PR, so this workflow
+          # never ran on it), it is exempted by a reviewed PR *on dev*. That
+          # entry is therefore live on dev but not yet on main, and a promotion
+          # reading only main's copy would evaluate the unsigned commit and
+          # block the very promotion that carries the exemption to main — a
+          # deadlock with no trusted way out.
+          #
+          # For that promotion only — same-repo PR, head branch exactly `dev`,
+          # base `main` — the list is read from dev, where it was already
+          # reviewed and merged. This does not reopen #435: an unsigned commit
+          # cannot reach dev *through a PR*, because that PR's own run reads
+          # base (dev), which does not yet contain the entry, and fails. Only a
+          # direct push to dev can create the situation, which needs elevated
+          # permission this check was never able to constrain anyway.
+          HEAD_REPO="${{ github.event.pull_request.head.repo.full_name }}"
+          HEAD_BRANCH="${{ github.event.pull_request.head.ref }}"
+          BASE_BRANCH="${{ github.base_ref }}"
+
+          if [ "${HEAD_REPO}" = "${{ github.repository }}" ] \
+             && [ "${HEAD_BRANCH}" = "dev" ] \
+             && [ "${BASE_BRANCH}" = "main" ]; then
+            EXEMPT_SOURCE="${HEAD}"
+            echo "NOTE: dev -> main promotion; reading ${EXEMPT_FILE} from dev (reviewed there)."
           else
-            echo "NOTE: ${EXEMPT_FILE} does not exist on the base ref; no commits are exempt."
+            EXEMPT_SOURCE="${BASE}"
+          fi
+
+          # A missing file on the source ref means "no exemptions" (fail closed).
+          if git cat-file -e "${EXEMPT_SOURCE}:${EXEMPT_FILE}" 2>/dev/null; then
+            EXEMPT_RAW="$(git show "${EXEMPT_SOURCE}:${EXEMPT_FILE}")"
+          else
+            echo "NOTE: ${EXEMPT_FILE} does not exist on the exempt source ref; no commits are exempt."
             EXEMPT_RAW=""
           fi
           EXEMPT="$(printf '%s\n' "${EXEMPT_RAW}" | grep -vE '^[[:space:]]*(#|$)' | awk '{print $1}')"
