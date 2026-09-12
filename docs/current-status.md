@@ -238,16 +238,26 @@ The platform tool crates are also implemented as explicit integration surfaces:
 
   Reads require `cap.integration.beads.read`, writes
   `cap.integration.beads.write`, so consulting the tracker and mutating it are
-  separately grantable. Operator-listed capabilities are added to the verb's
-  own, never substituted for it. The three mutating verbs mint a receipt naming
-  the verb and its arguments; reads mint none.
+  separately grantable. Every verb also declares `cap.shell_exec` and
+  `cap.process_spawn`: `invoke` runs `ShellExecTool` directly rather than
+  dispatching through the runtime, so that tool's own capability requirements
+  are never consulted, and declaring them here is what keeps a deployment's
+  process-spawn gate honest.
+
+  Mutating verbs attach structured detail (verb plus operands) to their output.
+  The runtime does **not** consume it yet — `ToolCallReceipt` is built from the
+  call name, an arguments digest, an output digest and the cost, appended
+  uniformly for every tool call, and nothing reads `ToolOutput::receipt_data`.
+  Beads mutations are therefore receipted like any other tool call today; the
+  verb-level record exists ahead of the runtime learning to fold it in.
 
   Invocation delegates to `ShellExecTool` with a single-entry allowlist rather
   than spawning directly, so the #420 argv-exec confinement applies unchanged
-  and improves in one place. Covered by 14 tests, four of which drive a real
-  process: one proves a hostile issue title reaches the child as a single
-  unexpanded argument, one proves writes mint receipts, one proves reads do
-  not.
+  and improves in one place. A command path containing whitespace is refused at
+  build, since the allowlist can never match one. Covered by 17 tests, four of
+  which drive a real process: one proves a hostile issue title reaches the
+  child as a single unexpanded argument, and one proves a non-string `status`
+  is refused rather than silently running an unfiltered list.
 
 ## Not Yet Turnkey
 

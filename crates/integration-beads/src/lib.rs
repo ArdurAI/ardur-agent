@@ -77,6 +77,26 @@ impl IntegrationAdapter for BeadsAdapter {
                 .to_string(),
         })?;
 
+        // `ShellExecTool::resolve_argv` refuses any whitespace in `argv[0]`, so
+        // a path containing a space builds six tools that are denied on every
+        // call. The configuration parser deliberately preserves surrounding
+        // whitespace (a filename may legitimately contain it), which makes this
+        // the right place to notice: fail at boot, where an operator is present
+        // to read the reason, rather than at first use with a denial that names
+        // the exec layer instead of the configuration.
+        if binary.chars().any(char::is_whitespace) {
+            return Err(AdapterError::Unusable {
+                name: integration.name.to_string(),
+                adapter: ADAPTER_NAME.to_string(),
+                reason: format!(
+                    "the command path `{binary}` contains whitespace, which the \
+                     argv-exec allowlist cannot match — every call would be \
+                     denied; move the executable somewhere without spaces or \
+                     symlink it"
+                ),
+            });
+        }
+
         Ok(BeadsVerb::ALL
             .iter()
             .map(|verb| {
@@ -147,6 +167,36 @@ mod tests {
                 .expect("disabled is fine")
                 .is_empty(),
             "a disabled integration must contribute no tools"
+        );
+    }
+}
+
+#[cfg(test)]
+mod whitespace_tests {
+    use super::*;
+    use ardur_integrations::{AdapterRegistry, parse_integrations};
+
+    /// A command path containing whitespace can never satisfy the argv
+    /// allowlist, so building tools for it produces six tools that are denied
+    /// on every call. Failing at boot puts the error where an operator can act
+    /// on it, and names the configuration rather than the exec layer.
+    #[test]
+    fn a_command_path_with_whitespace_is_refused_at_build() {
+        let set = parse_integrations(
+            "[integrations.beads]\ncommand = \"/opt/my tools/bd\"\nenabled = true\n",
+        )
+        .expect("the parser preserves the path verbatim");
+
+        let registry = AdapterRegistry::new().with(Arc::new(BeadsAdapter::new()));
+        let err = match registry.build_active(&set) {
+            Err(e) => e,
+            Ok(_) => panic!("a path the allowlist cannot match must be refused at build"),
+        };
+
+        let message = err.to_string();
+        assert!(
+            message.contains("whitespace"),
+            "the reason must name the actual problem: {message}"
         );
     }
 }

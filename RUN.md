@@ -649,17 +649,27 @@ with a `command` endpoint yields six tools — `beads.ready`, `beads.list`,
 
 Reads and writes carry **different capabilities**
 (`cap.integration.beads.read` and `cap.integration.beads.write`), so a grant
-that lets an agent consult the tracker does not also let it close issues. The
-three mutating verbs mint a receipt naming the verb and its arguments; reads
-mint nothing, since a receipt per `beads.list` would bury the writes that
-matter. Capabilities listed in the config block are *added* to the verb's own,
-never substituted for it.
+that lets an agent consult the tracker does not also let it close issues. Every
+verb additionally declares `cap.shell_exec` and `cap.process_spawn`, because it
+ultimately spawns `bd` — a deployment that gates process spawning must not find
+`beads.*` doing it underneath. Capabilities listed in the config block are
+*added* to the verb's own, never substituted for it.
 
 Every invocation goes through the same argv-exec confinement as `shell.exec`:
 no shell interpretation, `argv[0]` matched exactly against a single-entry
 allowlist, bounded output, and process-group teardown on timeout. Arguments are
 passed as separate argv entries, so an issue title containing `;` or `$(...)`
-is one operand rather than shell syntax.
+is one operand rather than shell syntax. A configured command path containing
+whitespace is refused at boot, since the allowlist could never match it and
+every call would otherwise fail with a confusing denial.
+
+**On receipts:** mutating verbs attach structured detail (the verb and its
+operands) to their output. The runtime does **not** yet consume it — it
+receipts every tool call uniformly from the call name, an arguments digest, an
+output digest, and the cost, and nothing reads the per-tool field. So beads
+mutations are receipted exactly like any other tool call today; the verb-level
+record is populated in advance of the runtime learning to fold it in, not as a
+distinction that already exists.
 
 The `dolthub` and `obsidian` adapters are tracked separately and are not yet in
 this build — enabling either fails the boot with `no adapter for it`, which is

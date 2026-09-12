@@ -130,7 +130,18 @@ impl BeadsTool {
     /// tightening access must not be able to accidentally widen it.
     #[must_use]
     pub fn new(verb: BeadsVerb, binary: String, extra_caps: Vec<String>) -> Self {
-        let mut caps = vec![verb.capability()];
+        // `invoke` runs `ShellExecTool` directly rather than dispatching through
+        // the runtime, so that tool's own `required_capabilities` are never
+        // consulted. Declaring them here is what keeps the nested execution
+        // honest: a deployment that gates `cap.process_spawn` must not find
+        // `beads.*` quietly spawning processes underneath it. Without these two
+        // labels the adapter would be a hole in exactly the control an operator
+        // reached for first.
+        let mut caps = vec![
+            verb.capability(),
+            Capability::ShellExec,
+            Capability::ProcessSpawn,
+        ];
         for label in extra_caps {
             // Labels arrive as `cap.foo` or `foo`; `Capability::Custom` renders
             // `cap.{name}`, so strip a leading `cap.` to avoid `cap.cap.foo`.
@@ -238,19 +249,41 @@ impl BeadsTool {
         match self.verb {
             BeadsVerb::Ready => {}
             BeadsVerb::List => {
-                if let Some(status) = args.get("status").and_then(Value::as_str) {
-                    // Constrained rather than passed through: an arbitrary
-                    // string here would become an operand `bd list` may read as
-                    // a flag.
-                    const ALLOWED: &[&str] = &["open", "closed", "in_progress"];
-                    if !ALLOWED.contains(&status) {
+                // A non-string `status` must not be treated as an omitted
+                // filter. The runtime hands provider-generated arguments to
+                // `invoke` without validating them against the published
+                // schema, so `{"status": {"$ne": null}}` would otherwise run an
+                // unrestricted `bd list` while the caller believes it is
+                // filtered — a silent widening, which is the direction that
+                // matters.
+                match args.get("status") {
+                    None | Some(Value::Null) => {}
+                    Some(Value::String(status)) => {
+                        // Constrained rather than passed through: an arbitrary
+                        // string here would become an operand `bd list` may
+                        // read as a flag.
+                        const ALLOWED: &[&str] = &["open", "closed", "in_progress"];
+                        if !ALLOWED.contains(&status.as_str()) {
+                            return Err(ToolError::InvalidArgs(format!(
+                                "`status` must be one of {}; got `{status}`",
+                                ALLOWED.join(", ")
+                            )));
+                        }
+                        argv.push("--status".to_string());
+                        argv.push(status.clone());
+                    }
+                    Some(other) => {
                         return Err(ToolError::InvalidArgs(format!(
-                            "`status` must be one of {}; got `{status}`",
-                            ALLOWED.join(", ")
+                            "`status` must be a string when present, got {}",
+                            match other {
+                                Value::Bool(_) => "a boolean",
+                                Value::Number(_) => "a number",
+                                Value::Array(_) => "an array",
+                                Value::Object(_) => "an object",
+                                _ => "an unsupported value",
+                            }
                         )));
                     }
-                    argv.push("--status".to_string());
-                    argv.push(status.to_string());
                 }
             }
             BeadsVerb::Show => argv.push(field("id")?),
@@ -290,9 +323,21 @@ impl Tool for BeadsTool {
         let exec = ShellExecTool::with_allowlist(vec![self.binary.clone()]);
         let mut output = exec.invoke(ctx, json!({ "argv": argv })).await?;
 
-        // Receipts are the audit trail, so a mutation records what it did.
-        // Reads deliberately mint nothing: a receipt per `bd list` would bury
-        // the writes that matter in noise.
+        // `receipt_data` is populated for mutations and left null for reads.
+        //
+        // Honest limitation: **the runtime does not currently consume this.**
+        // `FusedRuntime` builds its `ToolCallReceipt` from the call name, an
+        // arguments digest, an output digest and the cost, and appends one for
+        // every tool call regardless of what a tool puts here — nothing in
+        // `fused-runtime` or `runtime` reads `ToolOutput::receipt_data`.
+        //
+        // So this is not yet a read/write receipt *distinction* at the chain
+        // level: every beads call is receipted like any other tool call, and
+        // this field is a structured record the adapter offers for when the
+        // runtime learns to fold it in. It is populated now, rather than after
+        // that lands, so the verb-level detail exists the moment it can be
+        // used — but the claim in RUN.md is written to match what the runtime
+        // actually does today, not what this line looks like it does.
         output.receipt_data = match self.verb.mutability() {
             Mutability::Read => Value::Null,
             Mutability::Write => json!({
@@ -443,5 +488,73 @@ mod tests {
             .map(|v| v.subcommand())
             .collect();
         assert_eq!(writes, vec!["create", "update", "close"]);
+    }
+}
+
+#[cfg(test)]
+mod review_fix_tests {
+    use super::*;
+
+    /// `invoke` executes `ShellExecTool` directly, bypassing the dispatcher
+    /// that would otherwise enforce that tool's own capabilities. Declaring
+    /// them here is what stops `beads.*` being a hole in a deployment that
+    /// deliberately gates process spawning.
+    #[test]
+    fn every_verb_declares_the_capabilities_its_nested_execution_actually_uses() {
+        for verb in BeadsVerb::ALL {
+            let t = BeadsTool::new(*verb, "bd".to_string(), vec![]);
+            let labels: Vec<String> = t
+                .required_capabilities()
+                .iter()
+                .map(Capability::as_str)
+                .collect();
+
+            assert!(
+                labels.contains(&"cap.shell_exec".to_string()),
+                "{} spawns a process via ShellExecTool and must declare \
+                 cap.shell_exec: {labels:?}",
+                verb.tool_id()
+            );
+            assert!(
+                labels.contains(&"cap.process_spawn".to_string()),
+                "{} must declare cap.process_spawn, or a deployment gating it \
+                 is silently bypassed: {labels:?}",
+                verb.tool_id()
+            );
+        }
+    }
+
+    /// A non-string `status` must not read as an omitted filter.
+    ///
+    /// The runtime passes provider-generated arguments straight through, so
+    /// treating `{"status": {...}}` as absent would run an unrestricted
+    /// `bd list` while the caller believes the result is filtered.
+    #[test]
+    fn a_non_string_status_is_refused_rather_than_silently_unfiltered() {
+        let t = BeadsTool::new(BeadsVerb::List, "bd".to_string(), vec![]);
+
+        for bogus in [
+            json!({ "status": { "$ne": null } }),
+            json!({ "status": ["open"] }),
+            json!({ "status": 1 }),
+            json!({ "status": true }),
+        ] {
+            let result = t.argv(&bogus);
+            assert!(
+                result.is_err(),
+                "a non-string status must be refused, not treated as no filter; \
+                 got {result:?} for {bogus}"
+            );
+        }
+
+        // Absent and explicit-null remain legitimate "no filter".
+        assert_eq!(
+            t.argv(&json!({})).expect("absent is fine"),
+            vec!["bd".to_string(), "list".to_string()]
+        );
+        assert_eq!(
+            t.argv(&json!({ "status": null })).expect("null is fine"),
+            vec!["bd".to_string(), "list".to_string()]
+        );
     }
 }

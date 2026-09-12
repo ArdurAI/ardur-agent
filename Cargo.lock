@@ -468,6 +468,7 @@ dependencies = [
  "ardur-durability",
  "ardur-embeddings",
  "ardur-fused-runtime",
+ "ardur-integration-beads",
  "ardur-integrations",
  "ardur-memory",
  "ardur-provider-runtime",
