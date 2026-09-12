@@ -302,3 +302,57 @@ async fn an_uncancelled_multi_round_loop_settles_normally() {
         "a settled turn must not be recorded as cancelled"
     );
 }
+
+/// Review follow-up (P1): the cancellation marker must carry ZERO cost.
+///
+/// Chain aggregators (`AppState::receipt_stats`,
+/// `ardur_admin_ui::costs::aggregate_receipts`) sum `cost` across every receipt
+/// without inspecting the verb, so restating the cumulative total on a terminal
+/// marker would double-count a cancelled turn's spend.
+#[tokio::test]
+async fn a_cancellation_marker_carries_zero_cost() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let receipt_log = root.path().join("receipts.jsonl");
+    let session_id = ardur_runtime::SessionId::new();
+
+    let provider = Arc::new(ScriptedProvider::new(
+        vec![
+            tool_call("call_1", "echo", json!({ "msg": "one" })),
+            tool_call("call_2", "echo", json!({ "msg": "two" })),
+            stop("never reached"),
+        ],
+        stop("default"),
+    ));
+
+    let runtime = runtime_builder(provider.clone())
+        .with_tools(echo_registry().into())
+        .receipt_log(&receipt_log)
+        .build()
+        .expect("runtime builds");
+
+    let probe = probe_gone_after_rounds(provider.calls_handle(), 1);
+    let _ = runtime
+        .submit_with_cancellation(
+            request_for("cost check", &valid_token(), session_id),
+            Default::default(),
+            probe,
+            None,
+        )
+        .await;
+
+    let chain = load_persisted_chain(&receipt_log).expect("chain loads");
+    let markers: Vec<_> = chain
+        .iter()
+        .filter(|r| r.body.verb.as_str().contains("cancel"))
+        .collect();
+    assert!(!markers.is_empty(), "expected a cancellation marker");
+    for m in markers {
+        assert_eq!(m.body.cost.cents, 0, "marker must not restate billed cents");
+        assert_eq!(m.body.cost.tokens_in, 0);
+        assert_eq!(m.body.cost.tokens_out, 0);
+        assert!(
+            m.body.tool_calls.is_empty(),
+            "marker must not restate tool calls"
+        );
+    }
+}

@@ -1647,6 +1647,17 @@ impl FusedRuntime {
             .filter(|(_, receipt)| {
                 receipt.body.session_id == Some(session_id.0)
                     && !journaled.contains(&receipt.body.receipt_id)
+                    // A cancellation marker (#422) is intentionally
+                    // journal-less: it records that a turn ended WITHOUT
+                    // producing an assistant message, so there is no
+                    // AssistantMessage entry to vouch for it and never will be.
+                    // Without this exemption the default strategy would invent
+                    // a synthetic "crashed, model output lost" message for a
+                    // turn that was simply abandoned, and TruncateOrphans would
+                    // delete the marker and restore an intermediate round as
+                    // the chain tail — re-creating the very orphan the marker
+                    // exists to prevent.
+                    && receipt.body.verb.as_str() != CANCELLED_VERB
             })
             .map(|(i, _)| i)
             .collect();
@@ -1979,7 +1990,6 @@ impl FusedRuntime {
         session_id: SessionId,
         claims: &VerifiedClaims,
         committed_rounds: u32,
-        cost_so_far: RuntimeCostTuple,
     ) {
         if committed_rounds == 0 {
             return;
@@ -2005,9 +2015,22 @@ impl FusedRuntime {
             // The payload is the abandonment itself, not model output.
             payload_digest: Sha256Digest::of(b"turn cancelled before settling"),
             session_id: Some(session_id.0),
-            // The cost already finalized by the committed rounds, restated so
-            // the chain shows what the abandoned turn actually consumed.
-            cost: cost_so_far,
+            // ZERO, deliberately. This is a marker, not a billed event: the
+            // cost of every committed round is already carried by that round's
+            // own receipt. Chain aggregators sum `cost` across all receipts
+            // without inspecting the verb (`AppState::receipt_stats`,
+            // `ardur_admin_ui::costs::aggregate_receipts`), so restating the
+            // cumulative total here would double-count a cancelled turn — a
+            // single 5-cent round would report as 10 cents. The cost gate
+            // finalized each round exactly once and this record must not
+            // change that arithmetic.
+            cost: ardur_receipt::CostTuple {
+                tokens_in: 0,
+                tokens_out: 0,
+                cents: 0,
+                wall_ms: 0,
+                attention_score: 0,
+            },
             tool_calls: Vec::new(),
             provider: Some(self.provider.name()),
         };
@@ -2191,13 +2214,8 @@ impl FusedRuntime {
             {
                 Ok(reservation) => reservation,
                 Err(RuntimeError::TurnCancelled) => {
-                    self.record_turn_cancellation(
-                        session_id,
-                        &claims,
-                        committed_rounds,
-                        total_cost,
-                    )
-                    .await;
+                    self.record_turn_cancellation(session_id, &claims, committed_rounds)
+                        .await;
                     return Err(RuntimeError::TurnCancelled);
                 }
                 Err(err) => return Err(err),
@@ -2231,13 +2249,8 @@ impl FusedRuntime {
                     {
                         Ok(reservation) => reservation,
                         Err(RuntimeError::TurnCancelled) => {
-                            self.record_turn_cancellation(
-                                session_id,
-                                &claims,
-                                committed_rounds,
-                                total_cost,
-                            )
-                            .await;
+                            self.record_turn_cancellation(session_id, &claims, committed_rounds)
+                                .await;
                             return Err(RuntimeError::TurnCancelled);
                         }
                         Err(err) => return Err(err),
@@ -2373,13 +2386,8 @@ impl FusedRuntime {
             {
                 Ok(reservation) => reservation,
                 Err(RuntimeError::TurnCancelled) => {
-                    self.record_turn_cancellation(
-                        session_id,
-                        &claims,
-                        committed_rounds,
-                        total_cost,
-                    )
-                    .await;
+                    self.record_turn_cancellation(session_id, &claims, committed_rounds)
+                        .await;
                     return Err(RuntimeError::TurnCancelled);
                 }
                 Err(err) => return Err(err),
@@ -2403,13 +2411,8 @@ impl FusedRuntime {
                     let err = RuntimeError::TurnCancelled;
                     self.fire_error(session_id, LifecyclePhase::Provider, &err)
                         .await;
-                    self.record_turn_cancellation(
-                        session_id,
-                        &claims,
-                        committed_rounds,
-                        total_cost,
-                    )
-                    .await;
+                    self.record_turn_cancellation(session_id, &claims, committed_rounds)
+                        .await;
                     return Err(err);
                 }
                 let parent_hash = *self.chain_tail.lock();
@@ -2482,13 +2485,8 @@ impl FusedRuntime {
                         self.fire_error(session_id, LifecyclePhase::Receipt, &err)
                             .await;
                         if matches!(err, RuntimeError::TurnCancelled) {
-                            self.record_turn_cancellation(
-                                session_id,
-                                &claims,
-                                committed_rounds,
-                                total_cost,
-                            )
-                            .await;
+                            self.record_turn_cancellation(session_id, &claims, committed_rounds)
+                                .await;
                             return Err(err);
                         }
                         return Err(err);
