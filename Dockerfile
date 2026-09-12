@@ -1,13 +1,19 @@
 # Multi-stage build for ardur-server.
 #
-# Builder: rust:1.98-slim currently tracks Debian 13/trixie, matching the
+# Builder: rust:1.98.1-slim currently tracks Debian 13/trixie, matching the
 # distroless runtime base below. Both base images are pinned to manifest-list
 # digests so CI/release builds do not silently float to new base contents.
+# The builder tag carries the FULL patch version and must equal the
+# rust-toolchain.toml channel: a `1.98-slim`-style minor tag floats to whatever
+# patch release is current (it resolved to rustc 1.98.0 while the toolchain
+# pinned 1.98.1), so CI-validated artifacts and the released image were built by
+# different compilers. tests/test_github_security_workflows.py enforces the
+# match.
 # Runtime: distroless cc-debian13 nonroot. The healthcheck is a small Rust
 # binary, so the runtime image does not need curl/wget/shell packages.
 # ARD-303: Docker build is validated in CI with a /healthz smoke test.
 
-FROM rust:1.98-slim@sha256:17d1ba895198f9934c6314ec5346a0d5115372f3243390c3d731e242f35c2f27 AS builder
+FROM rust:1.98.1-slim@sha256:ce84a5edd80c5f91e05c5533b1e53eb1da54028f33734dc06aa6b49fa190462d AS builder
 
 # pkg-config + libssl-dev cover openssl-sys transitive dependencies. g++ provides
 # libstdc++ for native ML/search dependencies at the final link step.

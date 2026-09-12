@@ -178,6 +178,43 @@ class GitHubSecurityWorkflowTests(unittest.TestCase):
         self.assertIn('channel = "1.98.1"', toolchain)
         self.assertNotIn('channel = "stable"', toolchain)
 
+    def test_dockerfile_builder_matches_rust_toolchain_channel(self):
+        """The builder image must be the same rustc patch release as CI.
+
+        Regression guard for #436: the builder was pinned to a `1.98-slim`
+        minor tag, which floated to rustc 1.98.0 while rust-toolchain.toml
+        pinned 1.98.1 — CI-validated artifacts and the released image were
+        built by different compilers. Asserting on the *tag* (not a digest
+        lookup) keeps this test hermetic: no registry access, and a digest
+        bump that silently changes the patch version still fails here.
+        """
+        toolchain = (ROOT / "rust-toolchain.toml").read_text(encoding="utf-8")
+        dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+
+        channel_match = re.search(
+            r'(?m)^\s*channel\s*=\s*"(?P<channel>[0-9]+\.[0-9]+\.[0-9]+)"', toolchain
+        )
+        if channel_match is None:
+            self.fail("rust-toolchain.toml must pin an exact x.y.z channel")
+        channel = channel_match.group("channel")
+
+        builder_match = re.search(
+            r"(?m)^FROM\s+rust:(?P<tag>[^@\s]+)@(?P<digest>sha256:[0-9a-f]{64})\s+AS\s+builder",
+            dockerfile,
+        )
+        if builder_match is None:
+            self.fail(
+                "Dockerfile builder must be `FROM rust:<tag>@sha256:<digest> AS builder`"
+            )
+
+        tag = builder_match.group("tag")
+        self.assertTrue(
+            tag.startswith(f"{channel}-"),
+            f"Dockerfile builder tag {tag!r} must carry the full toolchain patch "
+            f"version {channel!r} (e.g. {channel}-slim); a floating minor tag "
+            f"builds releases with a different rustc than CI (#436)",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
