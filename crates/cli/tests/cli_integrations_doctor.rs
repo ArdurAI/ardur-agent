@@ -159,3 +159,85 @@ fn malformed_integration_configuration_is_reported_rather_than_ignored() {
         "the note must name the offending key so it can be fixed; got: {note}"
     );
 }
+
+/// The documented `[integrations.<name>]` config must not break the CLI.
+///
+/// `Config::load` routes through a hand-rolled flat-TOML reader. Before this
+/// was fixed, a table header had no `=` and so failed the parse: the exact
+/// configuration documented in RUN.md made every config-loading CLI command
+/// error out. Documenting a config that breaks the tool is worse than not
+/// supporting it.
+#[test]
+fn the_documented_integration_config_does_not_break_the_cli_config_loader() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let state = home.path().join(".ardur");
+    std::fs::create_dir_all(&state).expect("state dir");
+    std::fs::write(
+        state.join("config.toml"),
+        "model = \"a-model\"\n\
+         budget_cents = 250\n\
+         \n\
+         [integrations.obsidian]\n\
+         root = \"/tmp/vault\"\n\
+         enabled = true\n",
+    )
+    .expect("config");
+
+    let output = ardur(home.path())
+        .args(["config"])
+        .output()
+        .expect("config runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "`ardur config` must load a file containing the documented integrations \
+         section; stdout={stdout} stderr={stderr}"
+    );
+    // The root-level keys still apply...
+    assert!(
+        stdout.contains("a-model"),
+        "root-level keys must still be read; got: {stdout}"
+    );
+    // ...and the table's keys did NOT leak into the root namespace.
+    assert!(
+        !stdout.contains("/tmp/vault"),
+        "keys inside [integrations.*] must not be applied as root config; got: {stdout}"
+    );
+}
+
+/// Doctor's output is advertised as safe to paste into an issue.
+///
+/// `toml`'s error message quotes the offending source line. A malformed
+/// assignment on a credential line therefore puts the credential into the
+/// report unless it is redacted. Verified against `toml` 1.1.2, which does
+/// include the raw value for an unterminated string.
+#[test]
+fn a_malformed_config_does_not_leak_secrets_into_the_doctor_report() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let state = home.path().join(".ardur");
+    std::fs::create_dir_all(&state).expect("state dir");
+    // An unterminated string on the api_key line: the parse fails *there*, so
+    // the parser's excerpt is of the credential line.
+    std::fs::write(
+        state.join("config.toml"),
+        "api_key = \"sk-live-NOTAREALSECRET-abc123\n[integrations.beads]\ncommand = \"bd\"\n",
+    )
+    .expect("config");
+
+    let output = ardur(home.path())
+        .args(["doctor"])
+        .output()
+        .expect("doctor runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        !stdout.contains("NOTAREALSECRET"),
+        "the doctor report must not echo a credential from the config file; got: {stdout}"
+    );
+    assert!(
+        stdout.contains("could not be parsed"),
+        "the failure must still be reported, just without the excerpt; got: {stdout}"
+    );
+}

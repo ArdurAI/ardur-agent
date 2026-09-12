@@ -622,14 +622,25 @@ whether its backing resource is actually present:
 
 ```json
 { "name": "integration:obsidian", "status": "ok", "enabled": true,
-  "kind": "directory", "present": true, "endpoint": "directory: /Users/me/vault" }
+  "kind": "directory", "present": true, "adapter": true,
+  "endpoint": "directory: /Users/me/vault" }
 ```
 
-An enabled integration whose resource is missing is a warning — it will fail at
-first use. The same integration disabled is reported but not warned about, so
-one config file can be shared across machines where the tool is not installed.
-Doctor reports presence only, never the contents of a vault or a database, so
-its output stays safe to paste into an issue.
+Doctor reports the **effective** configuration — environment overrides are
+applied before it reports, so what you see is what the runtime would use. An
+enabled integration warns when its backing resource is missing, or when this
+build carries no adapter for it; either way it will fail at first use. The same
+integration disabled is reported but not warned about, so one config file can be
+shared across machines where the tool is not installed. For a `command`
+endpoint, "present" means a file that is actually executable — a file on `PATH`
+without an execute bit would otherwise look healthy and fail with
+`PermissionDenied`.
+
+Doctor reports presence only, never the contents of a vault or a database. When
+the configuration cannot be parsed it reports the error's *location* but
+withholds the source excerpt, because a malformed assignment elsewhere in the
+file — an unterminated `api_key` string, say — would otherwise put that
+credential into a report advertised as safe to paste into an issue.
 
 **Current status:** this release lands the configuration surface, the adapter
 registry, and the doctor checks. The `beads`, `dolthub`, and `obsidian`

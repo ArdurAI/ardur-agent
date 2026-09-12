@@ -62,6 +62,22 @@ pub enum EnvOverrideError {
         /// The integration it referred to.
         name: String,
     },
+    /// Two declared names collide in the environment-override namespace.
+    #[error(
+        "`{var}` is ambiguous: integrations `{first}` and `{second}` both map to \
+         `{PREFIX}{infix}_*`, so this variable cannot say which one it means; \
+         rename one of them"
+    )]
+    AmbiguousName {
+        /// The offending variable name.
+        var: String,
+        /// The env infix both names share.
+        infix: String,
+        /// One colliding declaration.
+        first: String,
+        /// The other colliding declaration.
+        second: String,
+    },
     /// `_ENABLED` held something other than a boolean.
     #[error("`{var}` must be `true` or `false` (case-insensitive), found `{value}`")]
     NotABoolean {
@@ -128,20 +144,22 @@ pub fn apply_env_overrides(
         // it from `my-tool`, so try the literal reading first and fall back to
         // the hyphenated one.
         let lowered = raw_name.to_ascii_lowercase();
-        let name =
-            resolve_declared_name(set, &lowered).ok_or_else(|| {
-                match IntegrationName::new(lowered.clone()) {
+        let name = match resolve_declared_name(set, &lowered, var)? {
+            Some(name) => name,
+            None => {
+                return Err(match IntegrationName::new(lowered.clone()) {
                     Ok(_) => EnvOverrideError::Undeclared {
                         var: var.clone(),
-                        name: lowered.clone(),
+                        name: lowered,
                     },
                     Err(source) => EnvOverrideError::Name {
                         var: var.clone(),
-                        name: lowered.clone(),
+                        name: lowered,
                         source,
                     },
-                }
-            })?;
+                });
+            }
+        };
 
         let trimmed = value.trim();
 
@@ -207,19 +225,34 @@ pub fn apply_env_overrides(
 ///
 /// `MY_TOOL` could mean `my_tool` or `my-tool`; only the declaration says
 /// which, so both readings are checked against what was actually declared.
-fn resolve_declared_name(set: &IntegrationSet, lowered: &str) -> Option<IntegrationName> {
-    if let Ok(direct) = IntegrationName::new(lowered)
-        && set.get(&direct).is_some()
-    {
-        return Some(direct);
+///
+/// If *both* are declared the variable is genuinely ambiguous. Silently
+/// preferring the underscore reading would make the hyphenated integration
+/// impossible to override while looking as though the override applied, so the
+/// collision is reported instead.
+fn resolve_declared_name(
+    set: &IntegrationSet,
+    lowered: &str,
+    var: &str,
+) -> Result<Option<IntegrationName>, EnvOverrideError> {
+    let direct = IntegrationName::new(lowered)
+        .ok()
+        .filter(|n| set.get(n).is_some());
+    let hyphenated = IntegrationName::new(lowered.replace('_', "-"))
+        .ok()
+        .filter(|n| set.get(n).is_some());
+
+    match (direct, hyphenated) {
+        (Some(a), Some(b)) if a != b => Err(EnvOverrideError::AmbiguousName {
+            var: var.to_string(),
+            infix: lowered.to_ascii_uppercase(),
+            first: a.to_string(),
+            second: b.to_string(),
+        }),
+        (Some(a), _) => Ok(Some(a)),
+        (None, Some(b)) => Ok(Some(b)),
+        (None, None) => Ok(None),
     }
-    let hyphenated = lowered.replace('_', "-");
-    if let Ok(alt) = IntegrationName::new(hyphenated)
-        && set.get(&alt).is_some()
-    {
-        return Some(alt);
-    }
-    None
 }
 
 #[cfg(test)]
@@ -395,5 +428,48 @@ mod tests {
                 binary: PathBuf::from("/a/bd")
             }
         );
+    }
+}
+
+#[cfg(test)]
+mod collision_tests {
+    use super::*;
+    use crate::parse_integrations;
+    use std::collections::BTreeMap;
+
+    /// Two declarations that share an env namespace make the variable
+    /// ambiguous. Silently preferring one would make the other impossible to
+    /// override while looking as though the override had applied.
+    #[test]
+    fn colliding_declarations_make_an_override_ambiguous_rather_than_silent() {
+        let mut set = parse_integrations(
+            "[integrations.my_tool]\ncommand = \"a\"\n\
+             [integrations.my-tool]\ncommand = \"b\"\n",
+        )
+        .expect("both names are individually legal");
+
+        let vars: BTreeMap<String, String> = [(
+            "ARDUR_INTEGRATIONS_MY_TOOL_ENABLED".to_string(),
+            "true".to_string(),
+        )]
+        .into_iter()
+        .collect();
+
+        let err = match apply_env_overrides(&mut set, &vars) {
+            Err(e) => e,
+            Ok(()) => panic!("a colliding override must be refused, not silently applied"),
+        };
+
+        match err {
+            EnvOverrideError::AmbiguousName { first, second, .. } => {
+                let mut names = [first, second];
+                names.sort();
+                assert_eq!(names, ["my-tool".to_string(), "my_tool".to_string()]);
+            }
+            other => panic!("expected AmbiguousName, got {other:?}"),
+        }
+
+        // Neither was touched: refusing must not half-apply.
+        assert_eq!(set.active().count(), 0);
     }
 }

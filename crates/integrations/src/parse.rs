@@ -270,7 +270,11 @@ fn string_field(
             name: name.to_string(),
             key,
         }),
-        Some(Value::String(s)) => Ok(Some(s.trim().to_string())),
+        // Deliberately NOT trimmed. A path is taken exactly as written, because
+        // a filename may legitimately begin or end with a space, and silently
+        // trimming would confine to — or execute — something other than what
+        // the operator quoted. Only the all-blank case is refused, above.
+        Some(Value::String(s)) => Ok(Some(s.clone())),
         Some(other) => Err(ParseError::WrongType {
             name: name.to_string(),
             key,
@@ -418,5 +422,42 @@ mod tests {
     fn invalid_toml_reports_a_toml_error_rather_than_panicking() {
         let err = parse_integrations("[integrations.beads\ncommand =").expect_err("malformed");
         assert!(matches!(err, ParseError::Toml { .. }));
+    }
+}
+
+#[cfg(test)]
+mod path_fidelity_tests {
+    use super::*;
+
+    /// A path is taken exactly as written.
+    ///
+    /// A filename may legitimately begin or end with a space. Trimming would
+    /// confine to, or execute, something other than what the operator quoted —
+    /// in the directory case potentially a sibling tree.
+    #[test]
+    fn endpoint_paths_keep_their_leading_and_trailing_spaces() {
+        let set = parse_integrations(
+            "[integrations.obsidian]\nroot = \" /vault \"\n\
+             [integrations.beads]\ncommand = \" bd \"\n",
+        )
+        .expect("padded paths are valid");
+
+        assert_eq!(
+            set.get(&IntegrationName::new("obsidian").unwrap())
+                .unwrap()
+                .endpoint,
+            IntegrationEndpoint::Directory {
+                root: PathBuf::from(" /vault ")
+            },
+            "a root must be confined exactly as written, not silently retargeted"
+        );
+        assert_eq!(
+            set.get(&IntegrationName::new("beads").unwrap())
+                .unwrap()
+                .endpoint,
+            IntegrationEndpoint::Command {
+                binary: PathBuf::from(" bd ")
+            }
+        );
     }
 }
