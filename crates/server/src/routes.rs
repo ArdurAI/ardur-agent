@@ -803,6 +803,20 @@ async fn chat_inner(state: Arc<AppState>, headers: HeaderMap, body: Bytes) -> Re
             .into_response(),
         // The runtime rejected or failed the turn — a bad-gateway from the HTTP
         // surface's point of view (the upstream pipeline refused or errored).
+        //
+        // ARD-463: an approval refusal is a resumable state, not a dead end —
+        // the caller is expected to retry the same call once an operator
+        // decides the card. Card matching includes the session id, and a
+        // request that omitted `session_id` had one minted for it here, so the
+        // error must carry it back or the caller cannot construct the retry
+        // and every attempt proposes another card.
+        Err(ChatSubmitError::Runtime(
+            e @ (RuntimeError::ApprovalRequired { .. } | RuntimeError::ApprovalRejected { .. }),
+        )) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": e.to_string(), "session_id": session_id })),
+        )
+            .into_response(),
         Err(ChatSubmitError::Runtime(e)) => (
             StatusCode::BAD_GATEWAY,
             Json(json!({ "error": e.to_string() })),

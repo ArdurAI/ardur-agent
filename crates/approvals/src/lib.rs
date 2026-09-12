@@ -62,6 +62,18 @@ pub enum ApprovalStatus {
     /// An operator rejected it (the wire/CLI verb is `reject`/`deny`; the
     /// stored status, matching PR #279's own reconciliation, is `denied`).
     Denied,
+    /// An operator approved it **and the authorized call has since run**.
+    ///
+    /// Approval authorises one invocation, not a standing permission. Without
+    /// this state `find_matching` keeps returning the same `Approved` card, so
+    /// a single approval would let an identical call repeat without limit —
+    /// for `shell.run` or `file.write` that is a materially different grant
+    /// from the one the operator actually gave.
+    ///
+    /// A consumed card no longer matches, so the next identical call proposes
+    /// a fresh one. The record is kept rather than deleted so the receipt
+    /// chain's `approval_id` stays resolvable for audit.
+    Consumed,
 }
 
 impl ApprovalStatus {
@@ -223,6 +235,11 @@ impl ApprovalStore {
     /// pending returns the *same* card rather than minting a duplicate, and
     /// a call after approval finds the approved card rather than proposing
     /// again.
+    ///
+    /// [`Consumed`](ApprovalStatus::Consumed) cards are skipped. An approval
+    /// authorises one invocation, so once the authorized call has run its card
+    /// must stop matching — otherwise the next identical call would be waved
+    /// through on a grant the operator already spent.
     pub fn find_matching(
         &self,
         tool: &str,
@@ -234,7 +251,27 @@ impl ApprovalStore {
             c.tool == tool
                 && c.arguments_digest == arguments_digest
                 && c.session_id.as_deref() == session_id
+                && c.status != ApprovalStatus::Consumed
         }))
+    }
+
+    /// Mark an `Approved` card as [`Consumed`](ApprovalStatus::Consumed) once
+    /// the call it authorised has actually run.
+    ///
+    /// Idempotent for an already-consumed card, so a retry after a partial
+    /// failure cannot error. A card that is not `Approved` is left untouched
+    /// and reported as [`ApprovalStoreError::AlreadyDecided`] — consuming a
+    /// pending or denied card would silently invent an authorisation.
+    pub fn consume(&self, id: &str) -> Result<ApprovalCard, ApprovalStoreError> {
+        let mut card = self.read(id)?;
+        match card.status {
+            ApprovalStatus::Consumed => return Ok(card),
+            ApprovalStatus::Approved => {}
+            _ => return Err(ApprovalStoreError::AlreadyDecided),
+        }
+        card.status = ApprovalStatus::Consumed;
+        self.write_atomically(id, &card)?;
+        Ok(card)
     }
 
     /// Create a new `Pending` card with a fresh id and write it atomically.
