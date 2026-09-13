@@ -192,8 +192,12 @@ mod exec_path_tests {
     use ardur_integrations::{AdapterRegistry, parse_integrations};
 
     fn build_result(command: &str) -> Result<Vec<Arc<dyn Tool>>, String> {
+        // A TOML *literal* string (single quotes): no escape processing, so a
+        // Windows path's backslashes reach the adapter instead of failing the
+        // parse. With a basic string, `C:\dolt\dolt.exe` is an invalid escape
+        // and the fixture blows up before the code under test runs.
         let set = parse_integrations(&format!(
-            "[integrations.dolthub]\ncommand = \"{command}\"\nenabled = true\n"
+            "[integrations.dolthub]\ncommand = '{command}'\nenabled = true\n"
         ))
         .expect("fixture parses");
         AdapterRegistry::new()
