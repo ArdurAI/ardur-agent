@@ -323,6 +323,15 @@ The platform tool crates are also implemented as explicit integration surfaces:
   With this adapter, ARD-459's config surface, registry, doctor checks and all
   three reference adapters are complete.
 
+- **Tool advertisement is cap-token scoped** (gh#415). The list of tools sent
+  to the provider is filtered through the same predicate the invocation path
+  uses, so a turn is told about exactly the tools its cap-token permits. Tool
+  names are not neutral — `dolthub.execute` or a customer-named connector
+  discloses what a deployment is wired to — so a withheld capability is not
+  discoverable by reading the tool list. Enforcement is unchanged: a call to an
+  unadvertised tool is still denied at invocation, pinned by a test asserting
+  the tool body never runs.
+
 ## Not Yet Turnkey
 
 Do not treat this repo as a public production deployment without additional
