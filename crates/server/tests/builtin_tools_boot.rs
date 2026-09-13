@@ -94,6 +94,7 @@ async fn shell_and_http_opt_in_registers_and_cap_aligns() {
         shell_exec_allowlist: None,
         file_root: None,
         snapshot_store: None,
+        diagnostics: None,
         http: Some(HttpFetchOpts {
             enable: true,
             allowlist: vec!["example.com".to_string()],
@@ -142,6 +143,7 @@ async fn file_tool_root_opt_in_registers_file_tools_and_grants_fs_caps() {
     let opts = BuiltinOpts {
         file_root: Some(file_root.path().to_path_buf()),
         snapshot_store: None,
+        diagnostics: None,
         ..BuiltinOpts::default()
     };
     let tools = assemble(opts).await;

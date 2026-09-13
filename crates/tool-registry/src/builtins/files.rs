@@ -324,11 +324,26 @@ pub struct WriteFileTool {
     /// keeps the pre-existing behaviour, so a deployment that has not opted in
     /// writes exactly as before.
     snapshots: Option<crate::snapshot::SnapshotStore>,
+    /// gh#414: checkers run over the content after a write. Advisory — the
+    /// bytes are already on disk, so problems are reported, never raised as a
+    /// failed call.
+    diagnostics: Option<crate::diagnostics::SyntaxCheckers>,
 }
 
 impl WriteFileTool {
     /// The id [`WriteFileTool`] registers under.
     pub const ID: &'static str = "file.write";
+
+    /// Run `checkers` over the content after each write (gh#414).
+    ///
+    /// Advisory by construction: a checker runs after the bytes are on disk,
+    /// so returning an error would report a failed write that succeeded — and
+    /// a model retrying on that error would write the content twice.
+    #[must_use]
+    pub fn with_diagnostics(mut self, checkers: crate::diagnostics::SyntaxCheckers) -> Self {
+        self.diagnostics = Some(checkers);
+        self
+    }
 
     /// Capture prior file content into `store` before each write (gh#413).
     ///
@@ -376,6 +391,7 @@ impl WriteFileTool {
             root,
             caps: vec![Capability::FsWrite],
             snapshots: None,
+            diagnostics: None,
         }
     }
 }
@@ -495,6 +511,47 @@ impl Tool for WriteFileTool {
                 out.receipt_data = snapshot_json;
             }
         }
+        // gh#414: check what was just written. The bytes are already on disk,
+        // so this NEVER fails the call — problems ride along in the output.
+        if let Some(checkers) = &self.diagnostics {
+            // Check what is ON DISK, not what was passed in. For an overwrite
+            // those are the same string, but for an append `args.content` is
+            // only the added chunk — checking that in isolation reports
+            // syntax errors for perfectly good appends (a fragment rarely
+            // parses alone) and misses breakage the append actually caused.
+            let to_check = if append {
+                match tokio::fs::metadata(&path).await {
+                    Ok(m) if m.len() <= crate::diagnostics::MAX_CHECK_BYTES => {
+                        tokio::fs::read_to_string(&path).await.ok()
+                    }
+                    // Too large, or unstattable: skip rather than buffer it.
+                    _ => None,
+                }
+            } else {
+                Some(args.content.clone())
+            };
+
+            let report = to_check
+                .as_deref()
+                .map(|c| checkers.run(&path, c))
+                .unwrap_or_else(crate::diagnostics::DiagnosticReport::not_checked);
+            if let Some(obj) = out.content.as_object_mut() {
+                // `checked` distinguishes "nothing understood this file" from
+                // "checked and clean". Collapsing them would let an unchecked
+                // file read as validated.
+                obj.insert("checked".to_string(), json!(report.was_checked()));
+                if !report.is_empty() {
+                    obj.insert("diagnostics".to_string(), report.to_json());
+                    if report.truncated() > 0 {
+                        obj.insert(
+                            "diagnostics_truncated".to_string(),
+                            json!(report.truncated()),
+                        );
+                    }
+                }
+            }
+        }
+
         Ok(out)
     }
 

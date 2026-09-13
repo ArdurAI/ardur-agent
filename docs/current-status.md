@@ -341,6 +341,37 @@ The platform tool crates are also implemented as explicit integration surfaces:
   undoing a creation removes the file. A blob whose bytes no longer match its
   digest is refused rather than restored.
 
+- **Post-write diagnostics (gh#414).** `file.write` can run syntax checkers
+  over the content it just wrote, enabled through `BuiltinOpts::diagnostics`.
+  Problems are attached to the tool output as `diagnostics`; the write itself
+  still succeeds.
+
+  Advisory by construction: a checker runs after the bytes are on disk, so
+  failing the call would report a failed write that actually succeeded, and a
+  model retrying on that error would write the same content twice.
+
+  An append is checked against the resulting file on disk, not the appended
+  fragment — a fragment rarely parses alone, so checking it in isolation would
+  report spurious errors and miss real breakage. Files over 8 MiB are not read
+  back for this, and report `checked: false`.
+
+  The output distinguishes `checked: false` (nothing understood this file, or
+  every applicable checker failed) from a clean check, because an unchecked
+  file must not read as validated. The list is capped at 50 with
+  `diagnostics_truncated` reporting the drop.
+
+  Diagnostic messages carry the parser's message only, never its rendered
+  source excerpt: `toml::de::Error`'s `Display` echoes the offending line, so a
+  syntax error on a line holding a credential would copy that credential into
+  the model's context and the receipt.
+
+  Limitation, stated rather than implied: gh#414 asks for real language servers
+  (pyright, gopls, rust-analyzer). What ships here is the extension point plus
+  dependency-free JSON and TOML syntax checkers. Real language servers need an
+  LSP/JSON-RPC client (absent from this workspace), host binaries, and process
+  spawning that must go through the gh#420 argv-exec confinement — none of
+  which is built.
+
   Enable it through `BuiltinOpts::snapshot_store`. Blobs are written
   owner-only (0600) under a 0700 store, verified against their digest before
   reuse and before restore, and written atomically so an interrupted capture

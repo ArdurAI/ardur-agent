@@ -52,6 +52,7 @@
 
 mod builtins;
 mod capability;
+pub mod diagnostics;
 mod echo;
 mod error;
 mod health;
