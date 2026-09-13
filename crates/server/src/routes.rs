@@ -315,7 +315,11 @@ async fn openapi_json(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
     if let Err(response) = authorize_admin(&state, &headers) {
         return *response;
     }
-    Json(openapi_spec(state.slack().is_some())).into_response()
+    Json(openapi_spec(
+        state.slack().is_some(),
+        state.admin_cap_token_gate(),
+    ))
+    .into_response()
 }
 
 /// `GET /openapi/clients/rust` — return generated Rust client source.
@@ -497,7 +501,13 @@ async fn approvals_approve(
         if let Err(response) = authorize_admin_mutation(&state, &headers, APPROVAL_DECIDE_VERB) {
             return *response;
         }
-        apply_approval_decision(&state, &id, ApprovalDecision::Approve).await
+        apply_approval_decision(
+            &state,
+            &id,
+            ApprovalDecision::Approve,
+            presented_cap_token(&headers),
+        )
+        .await
     }
     .await;
     with_cors(&state, &headers, response)
@@ -520,7 +530,13 @@ async fn approvals_reject(
             return *response;
         }
         let reason = parse_reject_reason(&body);
-        apply_approval_decision(&state, &id, ApprovalDecision::Reject { reason }).await
+        apply_approval_decision(
+            &state,
+            &id,
+            ApprovalDecision::Reject { reason },
+            presented_cap_token(&headers),
+        )
+        .await
     }
     .await;
     with_cors(&state, &headers, response)
@@ -553,6 +569,7 @@ async fn apply_approval_decision(
     state: &Arc<AppState>,
     id: &str,
     decision: ApprovalDecision,
+    presented_cap_token: Option<String>,
 ) -> Response {
     if !valid_approval_id(id) {
         return bad_request("malformed approval id".to_string());
@@ -631,7 +648,11 @@ async fn apply_approval_decision(
     // worker being unavailable, say) is logged but does not fail the request;
     // the store, not the receipt, is this endpoint's source of truth.
     match state
-        .mint_approval_receipt(id.to_string(), receipt_verb.to_string())
+        .mint_approval_receipt(
+            id.to_string(),
+            receipt_verb.to_string(),
+            presented_cap_token,
+        )
         .await
     {
         Ok(receipt_id) => {
@@ -1140,7 +1161,10 @@ fn with_cors(state: &AppState, headers: &HeaderMap, mut response: Response) -> R
     headers_mut.insert(header::VARY, HeaderValue::from_static("Origin"));
     headers_mut.insert(
         header::ACCESS_CONTROL_ALLOW_HEADERS,
-        HeaderValue::from_static("Authorization, Content-Type, Accept"),
+        // `X-Ardur-Cap-Token` (gh#417) is non-safelisted, so a cross-origin client
+        // triggers a preflight; omitting it here would make the gate unusable
+        // from the PWA even with a valid token.
+        HeaderValue::from_static("Authorization, Content-Type, Accept, X-Ardur-Cap-Token"),
     );
     headers_mut.insert(
         header::ACCESS_CONTROL_ALLOW_METHODS,
@@ -1204,7 +1228,13 @@ fn authorize_admin(state: &AppState, headers: &HeaderMap) -> Result<(), Box<Resp
 /// merely told otherwise.
 /// The cap-token verb required to decide an approval. Approve and reject are
 /// one authority: an operator who may accept a card may also refuse it.
-const APPROVAL_DECIDE_VERB: &str = "admin.approvals.decide";
+///
+/// This is deliberately the SAME string the receipt path verifies against
+/// (`APPROVAL_DECIDE_TOOL` in state.rs). Two names for one authority would let
+/// a token pass this gate and then be refused by receipt minting — the
+/// decision would persist while its receipt silently did not, which is the
+/// audit gap this slice exists to close.
+const APPROVAL_DECIDE_VERB: &str = "approval.decide";
 
 fn authorize_admin_mutation(
     state: &AppState,
@@ -1243,6 +1273,16 @@ fn authorize_admin_mutation(
         Ok(_) => Ok(()),
         Err(_) => Err(Box::new(cap_token_denied(verb))),
     }
+}
+
+/// The cap-token the caller presented, if any.
+///
+/// Returned for receipt binding only — it has already been verified by
+/// [`authorize_admin_mutation`] before any mutation runs, so this never
+/// decides authorization.
+fn presented_cap_token(headers: &HeaderMap) -> Option<String> {
+    let raw = header_str(headers, "X-Ardur-Cap-Token");
+    (!raw.is_empty()).then(|| raw.to_string())
 }
 
 /// 403 for a mutation the presented cap-token does not authorize.

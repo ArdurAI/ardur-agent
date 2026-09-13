@@ -40,7 +40,9 @@ const AUDIENCE: &str = "ardur";
 const HOLDER: &str = "admin-operator";
 
 /// The verb a cap-token must name to decide an approval.
-const APPROVAL_DECIDE_VERB: &str = "admin.approvals.decide";
+// Matches both the route gate AND `APPROVAL_DECIDE_TOOL` in state.rs, so a
+// token that passes the gate can also mint the decision receipt.
+const APPROVAL_DECIDE_VERB: &str = "approval.decide";
 
 /// Well past any plausible test clock, so expiry is never the reason a token
 /// is rejected except in the test that asks for it.
@@ -322,4 +324,183 @@ async fn without_the_gate_configured_bearer_still_works() {
         "the gate is opt-in; un-opted deployments are unaffected"
     );
     assert_eq!(status_on_disk(&card_path), "approved");
+}
+
+/// The decision receipt records the capability that actually authorized it.
+///
+/// Review P1, and it was a real hole: the receipt worker minted a FRESH
+/// gateway-subject token, so every gated decision was attributed to
+/// `ardur:slack-gateway` regardless of which delegated token the operator
+/// presented. An audit chain that cannot say which capability performed an
+/// action is not doing the job the chain exists for.
+#[tokio::test]
+async fn the_receipt_binds_to_the_presented_capability() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let id = "card-receipt-binding";
+    seed_pending(dir.path(), id);
+
+    let mut config = support::test_config_with_admin(&dir, None, vec![ADMIN_TOKEN.to_string()]);
+    config.admin_cap_token_gate = true;
+    let router = support::boot_router(&config).await;
+    let keypair = server_issuer_keypair(&config.data_dir);
+
+    let request = Request::builder()
+        .method("POST")
+        .uri(format!("/approvals/{id}/approve"))
+        .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+        .header(
+            "X-Ardur-Cap-Token",
+            mint(keypair, &[APPROVAL_DECIDE_VERB], far_future()),
+        )
+        .body(Body::empty())
+        .expect("request builds");
+    let (status, _) = support::oneshot(router, request).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let chain =
+        ardur_fused_runtime::load_persisted_chain(dir.path().join("receipts").join("chain.jsonl"))
+            .expect("chain loads");
+    assert_eq!(chain.len(), 1, "exactly one receipt for this decision");
+    assert_eq!(
+        chain[0].body.subject.0, HOLDER,
+        "the receipt must name the operator who presented the token, not the \
+         gateway that happened to mint one"
+    );
+    ardur_fused_runtime::verify_persisted_chain(&chain).expect("the chain verifies");
+}
+
+/// Without the gate, the receipt still mints under the gateway subject.
+///
+/// The contrast case: un-gated deployments are unchanged, so the binding above
+/// is demonstrably caused by the presented token rather than by anything else
+/// in the decision path.
+#[tokio::test]
+async fn without_the_gate_the_receipt_keeps_the_gateway_subject() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let id = "card-receipt-ungated";
+    seed_pending(dir.path(), id);
+
+    let config = support::test_config_with_admin(&dir, None, vec![ADMIN_TOKEN.to_string()]);
+    let router = support::boot_router(&config).await;
+
+    let request = Request::builder()
+        .method("POST")
+        .uri(format!("/approvals/{id}/approve"))
+        .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+        .body(Body::empty())
+        .expect("request builds");
+    let (status, _) = support::oneshot(router, request).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let chain =
+        ardur_fused_runtime::load_persisted_chain(dir.path().join("receipts").join("chain.jsonl"))
+            .expect("chain loads");
+    assert_ne!(
+        chain[0].body.subject.0, HOLDER,
+        "an un-gated decision has no presented token to bind to"
+    );
+}
+
+/// The CORS preflight advertises the cap-token header.
+///
+/// Review P2: the header is non-safelisted, so a cross-origin client preflights
+/// before sending it. Omitting it from `Access-Control-Allow-Headers` would
+/// make the gate unusable from the PWA even with a perfectly valid token —
+/// the browser blocks the request before the handler ever runs.
+#[tokio::test]
+async fn the_preflight_allows_the_cap_token_header() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut config = support::test_config_with_admin(&dir, None, vec![ADMIN_TOKEN.to_string()]);
+    // An empty allowlist reflects no Origin at all, so the preflight would
+    // carry no CORS headers and the assertion below would be vacuous.
+    config.cors_origins = vec!["http://localhost:5173".to_string()];
+    let router = support::boot_router(&config).await;
+
+    let request = Request::builder()
+        .method("OPTIONS")
+        .uri("/approvals/card-any/approve")
+        .header("Origin", "http://localhost:5173")
+        .body(Body::empty())
+        .expect("request builds");
+    let response = tower::ServiceExt::oneshot(router, request)
+        .await
+        .expect("the router responds");
+
+    let allowed = response
+        .headers()
+        .get("Access-Control-Allow-Headers")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        allowed.contains("X-Ardur-Cap-Token"),
+        "the preflight must advertise the cap-token header, got `{allowed}`"
+    );
+}
+
+/// The OpenAPI spec documents the cap-token requirement when the gate is on.
+///
+/// Review P2: a client generated from a spec that describes these operations
+/// as bearer-only would never send the credential, and would fail against
+/// every gated deployment with no indication why.
+#[tokio::test]
+async fn the_openapi_spec_documents_the_gate_when_enabled() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut config = support::test_config_with_admin(&dir, None, vec![ADMIN_TOKEN.to_string()]);
+    config.admin_cap_token_gate = true;
+    let router = support::boot_router(&config).await;
+
+    let request = Request::builder()
+        .uri("/openapi.json")
+        .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+        .body(Body::empty())
+        .expect("request builds");
+    let (status, body) = support::oneshot(router, request).await;
+    assert_eq!(status, StatusCode::OK);
+    let spec: serde_json::Value = serde_json::from_slice(&body).expect("spec is JSON");
+
+    for op in ["/approvals/{id}/approve", "/approvals/{id}/reject"] {
+        let post = &spec["paths"][op]["post"];
+        let params = post["parameters"].as_array().expect("parameters");
+        assert!(
+            params
+                .iter()
+                .any(|p| p["name"] == "X-Ardur-Cap-Token" && p["in"] == "header"),
+            "{op} must declare the cap-token header: {post}"
+        );
+        assert!(
+            post["responses"]["403"].is_object(),
+            "{op} must document the forbidden response"
+        );
+    }
+}
+
+/// Without the gate, the spec is unchanged.
+///
+/// The contrast case: a client generated against an un-gated deployment must
+/// not be told to send a credential that deployment ignores.
+#[tokio::test]
+async fn the_openapi_spec_is_unchanged_without_the_gate() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config = support::test_config_with_admin(&dir, None, vec![ADMIN_TOKEN.to_string()]);
+    let router = support::boot_router(&config).await;
+
+    let request = Request::builder()
+        .uri("/openapi.json")
+        .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+        .body(Body::empty())
+        .expect("request builds");
+    let (_, body) = support::oneshot(router, request).await;
+    let spec: serde_json::Value = serde_json::from_slice(&body).expect("spec is JSON");
+
+    let post = &spec["paths"]["/approvals/{id}/approve"]["post"];
+    assert!(
+        !post["parameters"]
+            .as_array()
+            .expect("parameters")
+            .iter()
+            .any(|p| p["name"] == "X-Ardur-Cap-Token"),
+        "an un-gated deployment must not advertise the header"
+    );
+    assert!(post["responses"]["403"].is_null());
 }

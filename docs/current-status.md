@@ -344,7 +344,7 @@ The platform tool crates are also implemented as explicit integration surfaces:
 - **Cap-token gated admin mutations (gh#417, first slice).** With
   `ARDUR_ADMIN_CAP_TOKEN_GATE=1`, an admin *mutation* additionally requires an
   `X-Ardur-Cap-Token` header carrying a token that names that mutation's verb
-  (`admin.approvals.decide` for the approvals decide endpoints).
+  (`approval.decide` for the approvals decide endpoints).
 
   The gate is **additive**: the admin bearer check still answers "who are you"
   with 401, and the cap-token answers "may you do this" with 403. Accepting a
@@ -358,6 +358,16 @@ The platform tool crates are also implemented as explicit integration surfaces:
   admin route at once. A cap-token carries those constraints, so authority to
   decide an approval can be delegated without also delegating authority to
   rewrite configuration.
+
+  The decision receipt binds to the **presented** token, so the audit chain
+  records which delegated capability performed the mutation rather than the
+  gateway that happened to mint one. The gate's verb is the same string the
+  receipt path verifies (`approval.decide`) — two names for one authority would
+  let a token pass the gate and then be refused by receipt minting, leaving the
+  decision persisted with no receipt.
+
+  `X-Ardur-Cap-Token` is advertised in the CORS preflight; it is non-safelisted,
+  so a cross-origin client would otherwise be blocked before the handler runs.
 
   Tokens are verified against the same issuer key turns use
   (`<data_dir>/keys/issuer.key`), so operators mint admin authority with

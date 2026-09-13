@@ -144,6 +144,11 @@ enum WorkItem {
 struct ApprovalReceiptRequest {
     approval_id: String,
     verb: String,
+    /// The cap-token the operator actually presented, when the gh#417 gate is
+    /// on. The receipt must record THAT capability: minting a fresh gateway
+    /// token here would attribute every gated decision to the gateway, and the
+    /// audit chain could not say which delegated authority performed it.
+    presented_cap_token: Option<String>,
     reply: oneshot::Sender<Result<ReceiptId, RuntimeError>>,
 }
 
@@ -1014,11 +1019,13 @@ impl AppState {
         &self,
         approval_id: String,
         verb: String,
+        presented_cap_token: Option<String>,
     ) -> Result<ReceiptId, ChatSubmitError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         let item = WorkItem::ApprovalReceipt(ApprovalReceiptRequest {
             approval_id,
             verb,
+            presented_cap_token,
             reply: reply_tx,
         });
         let Some(work_tx) = self.work_sender() else {
@@ -1719,17 +1726,27 @@ impl Processor {
         let ApprovalReceiptRequest {
             approval_id,
             verb,
+            presented_cap_token,
             reply,
         } = request;
         let result = async {
+            // Prefer the token the operator actually presented (gh#417). A
+            // freshly-minted gateway token would make every gated decision
+            // receipt read as if the gateway performed it, so the chain could
+            // not answer which delegated capability did. Falling back to the
+            // gateway token keeps un-gated deployments behaving exactly as
+            // before.
             let now_unix = now_unix();
-            let token = self
-                .mint_scoped_token(now_unix, APPROVAL_DECIDE_TOOL)
-                .map_err(|e| {
-                    RuntimeError::Internal(anyhow::anyhow!(
-                        "minting approval decision cap-token: {e}"
-                    ))
-                })?;
+            let token = match presented_cap_token {
+                Some(token) => token,
+                None => self
+                    .mint_scoped_token(now_unix, APPROVAL_DECIDE_TOOL)
+                    .map_err(|e| {
+                        RuntimeError::Internal(anyhow::anyhow!(
+                            "minting approval decision cap-token: {e}"
+                        ))
+                    })?,
+            };
             self.runtime
                 .mint_approval_decision_receipt(
                     SessionId::new(),
