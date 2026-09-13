@@ -293,6 +293,7 @@ async fn register_builtins_skips_disabled_tools() {
             enable_shell_exec: false,
             shell_exec_allowlist: None,
             file_root: Some(root.path().to_path_buf()),
+            snapshot_store: None,
             http: None,
             enable_media: false,
         })
@@ -319,6 +320,7 @@ async fn register_builtins_skips_disabled_tools() {
             enable_shell_exec: false,
             shell_exec_allowlist: None,
             file_root: None,
+            snapshot_store: None,
             http: None,
             enable_media: false,
         })
@@ -415,6 +417,7 @@ async fn register_builtins_tools_declare_expected_capabilities() {
             enable_shell_exec: false,
             shell_exec_allowlist: None,
             file_root: Some(root.path().to_path_buf()),
+            snapshot_store: None,
             http: Some(HttpFetchOpts {
                 enable: true,
                 ..HttpFetchOpts::default()

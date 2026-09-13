@@ -332,6 +332,37 @@ The platform tool crates are also implemented as explicit integration surfaces:
   unadvertised tool is still denied at invocation, pinned by a test asserting
   the tool body never runs.
 
+- **Destructive file writes can capture what they overwrite** (gh#413).
+  `SnapshotStore` puts the prior bytes in a content-addressed store before
+  `file.write` lands, so a mistaken write is recoverable and an audit can say
+  what a file changed *from*, not just that it changed. Opt-in per deployment
+  via `WriteFileTool::with_snapshots`; without it the tool behaves exactly as
+  before. An absent file is recorded as absent rather than as empty content, so
+  undoing a creation removes the file. A blob whose bytes no longer match its
+  digest is refused rather than restored.
+
+  Enable it through `BuiltinOpts::snapshot_store`. Blobs are written
+  owner-only (0600) under a 0700 store, verified against their digest before
+  reuse and before restore, and written atomically so an interrupted capture
+  cannot leave a blob a later capture would accept. A file over the configured
+  ceiling (64 MiB by default) refuses the write rather than being read into
+  memory. Symlinked paths are refused: writing through a link changes its
+  target, so an undo cannot be expressed as restoring that entry.
+
+  Limitations, stated rather than implied:
+
+  - The snapshot id is written to `ToolOutput::receipt_data`, but the runtime
+    builds its `ToolCallReceipt` unconditionally and never reads that field —
+    so snapshots are **not** yet linked into the receipt chain.
+  - Under concurrent writers to the same path, two captures can both record the
+    original content before either write lands, so the second snapshot cannot
+    restore the state immediately before it. The store stays consistent; the
+    undo *history* is not linearisable. Serialising capture and write behind a
+    per-path lock would fix it — tracked as gh#460 with the design questions
+    it raises (lock-map eviction, canonical-path keying, block-vs-fail-fast).
+  - Shadow-git proper (history semantics) is not built; it needs a git
+    dependency this workspace does not have.
+
 ## Not Yet Turnkey
 
 Do not treat this repo as a public production deployment without additional

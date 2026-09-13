@@ -584,6 +584,7 @@ impl Config {
             enable_shell_exec: false,
             shell_exec_allowlist: None,
             file_root: self.file_tool_root.clone(),
+            snapshot_store: None,
             http: self.enable_http_tool.then(|| HttpFetchOpts {
                 enable: true,
                 allowlist: self.http_allowlist.clone(),

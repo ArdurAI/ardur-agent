@@ -320,11 +320,26 @@ pub struct WriteFileTool {
     schema: ToolSchema,
     root: PathBuf,
     caps: Vec<Capability>,
+    /// gh#413: where prior content goes before a write destroys it. `None`
+    /// keeps the pre-existing behaviour, so a deployment that has not opted in
+    /// writes exactly as before.
+    snapshots: Option<crate::snapshot::SnapshotStore>,
 }
 
 impl WriteFileTool {
     /// The id [`WriteFileTool`] registers under.
     pub const ID: &'static str = "file.write";
+
+    /// Capture prior file content into `store` before each write (gh#413).
+    ///
+    /// Opt-in: without it the tool behaves exactly as before, so enabling
+    /// snapshots is a deployment decision rather than a silent change in what
+    /// the agent writes to disk.
+    #[must_use]
+    pub fn with_snapshots(mut self, store: crate::snapshot::SnapshotStore) -> Self {
+        self.snapshots = Some(store);
+        self
+    }
 
     /// A [`WriteFileTool`] confined to `root`.
     #[must_use]
@@ -360,6 +375,7 @@ impl WriteFileTool {
             schema,
             root,
             caps: vec![Capability::FsWrite],
+            snapshots: None,
         }
     }
 }
@@ -401,6 +417,25 @@ impl Tool for WriteFileTool {
             })?;
         }
 
+        // gh#413: capture what is about to be lost, BEFORE the write. Taking
+        // it afterwards would capture the new content, which is exactly the
+        // thing that is not worth keeping.
+        //
+        // A capture failure fails the write. The alternative — proceed and
+        // return a warning — destroys unrecoverable content in the one case
+        // the snapshot exists to protect, and the caller asked for snapshots
+        // by opting in.
+        let snapshot = match &self.snapshots {
+            Some(store) => Some(store.capture(&path).await.map_err(|e| {
+                ToolError::ExecutionFailed(format!(
+                    "could not snapshot the prior content of `{}`, so the write \
+                     was not attempted: {e}",
+                    args.path
+                ))
+            })?),
+            None => None,
+        };
+
         if append {
             let mut file = tokio::fs::OpenOptions::new()
                 .create(true)
@@ -423,10 +458,44 @@ impl Tool for WriteFileTool {
                 .map_err(|e| ToolError::ExecutionFailed(format!("write `{}`: {e}", args.path)))?;
         }
 
-        Ok(output(json!({
+        let mut out = output(json!({
             "bytes_written": bytes.len(),
             "path_written": path.display().to_string(),
-        })))
+        }));
+
+        // The snapshot id rides in `receipt_data`. NOTE: the runtime currently
+        // builds its `ToolCallReceipt` unconditionally and never reads this
+        // field, so the snapshot is recorded here but is NOT yet linked into
+        // the receipt chain. Populating it now means the link becomes real the
+        // moment the runtime consumes it; claiming the link exists today would
+        // be false.
+        if let Some(snapshot) = &snapshot {
+            // MERGE, do not replace: `output` already put bytes_written and
+            // path_written here, and a consumer that gets only a content hash
+            // cannot say which file the snapshot belongs to — which is the
+            // audit question.
+            let snapshot_json = json!({
+                "snapshot": match snapshot {
+                    crate::snapshot::Snapshot::Captured(id) => json!({
+                        "prior_content": id.as_str(),
+                    }),
+                    crate::snapshot::Snapshot::NothingToCapture => json!({
+                        "prior_content": serde_json::Value::Null,
+                        "note": "the file did not exist; undoing this write means removing it",
+                    }),
+                },
+            });
+            if let (Some(base), Some(extra)) =
+                (out.receipt_data.as_object_mut(), snapshot_json.as_object())
+            {
+                for (k, v) in extra {
+                    base.insert(k.clone(), v.clone());
+                }
+            } else {
+                out.receipt_data = snapshot_json;
+            }
+        }
+        Ok(out)
     }
 
     fn required_capabilities(&self) -> &[Capability] {
