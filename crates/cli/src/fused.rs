@@ -1113,6 +1113,7 @@ pub fn integration_registry() -> ardur_integrations::AdapterRegistry {
     ardur_integrations::AdapterRegistry::new()
         .with(Arc::new(ardur_integration_beads::BeadsAdapter::new()))
         .with(Arc::new(ardur_integration_obsidian::ObsidianAdapter::new()))
+        .with(Arc::new(ardur_integration_dolthub::DolthubAdapter::new()))
 }
 
 /// Adapts an `Arc<dyn Tool>` into the `Box<dyn Tool>` the registry stores.

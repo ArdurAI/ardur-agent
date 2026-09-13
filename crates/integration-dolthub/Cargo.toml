@@ -1,0 +1,18 @@
+[package]
+name = "ardur-integration-dolthub"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ardur-integrations = { workspace = true }
+ardur-tool-registry = { workspace = true }
+async-trait = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+tempfile = { workspace = true }

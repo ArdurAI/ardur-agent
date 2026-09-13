@@ -469,6 +469,7 @@ dependencies = [
  "ardur-embeddings",
  "ardur-fused-runtime",
  "ardur-integration-beads",
+ "ardur-integration-dolthub",
  "ardur-integration-obsidian",
  "ardur-integrations",
  "ardur-memory",
@@ -818,6 +819,19 @@ dependencies = [
  "async-trait",
  "serde_json",
  "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "ardur-integration-dolthub"
+version = "0.0.1"
+dependencies = [
+ "ardur-integrations",
+ "ardur-tool-registry",
+ "async-trait",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
  "tokio",
 ]
 

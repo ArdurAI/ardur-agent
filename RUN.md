@@ -701,8 +701,40 @@ contents, which can be arbitrarily large and arbitrarily sensitive.
 
 A configured vault that does not exist is **not** a boot failure: an operator
 may write configuration on a machine where the vault is not yet mounted, and
-`ardur doctor` reports it. The `dolthub` adapter is tracked separately and is
-not yet in this build — enabling it fails the boot with `no adapter for it`.
+`ardur doctor` reports it.
+
+### DoltHub
+
+`[integrations.dolthub]` with a `command` endpoint pointing at the `dolt` binary
+yields `dolthub.query`, a read tool. A write tool, `dolthub.execute`, appears
+**only** when the operator declares writable tables:
+
+```toml
+[integrations.dolthub]
+command = "dolt"
+enabled = true
+capabilities = ["table:knowledge"]   # without this there is NO write tool
+```
+
+Queries run against the Dolt clone in the process's working directory. Both
+verbs accept **exactly one SQL statement**, and this is the adapter's central
+constraint rather than a stylistic one: `dolt sql -q` executes *every*
+statement in its argument. `select 1; insert into t values (99)` returns the
+select's rows and performs the insert — verified experimentally, and pinned by a
+test that runs it against a real database. A read-only guard that checks only
+the leading keyword would therefore admit `select 1; delete from notes`, so
+multi-statement input is refused outright instead.
+
+The write tool additionally checks the target table against the declared
+allowlist, and refuses DDL entirely: an allowlist of tables cannot meaningfully
+constrain a statement that drops one, so schema changes stay an operator
+action.
+
+Reads require `cap.integration.dolthub.read`, writes
+`cap.integration.dolthub.write`, and both declare `cap.shell_exec` and
+`cap.process_spawn` because they spawn `dolt`. The SQL text is passed as a
+single argv entry, so a query containing shell metacharacters is a string to
+Dolt rather than syntax to a shell.
 
 ## Platform integrations
 

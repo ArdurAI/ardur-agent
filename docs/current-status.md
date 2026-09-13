@@ -282,6 +282,32 @@ The platform tool crates are also implemented as explicit integration surfaces:
   absolute path, and a traversal to `/etc/passwd`) are all refused, and a
   refused write is proven to create nothing.
 
+- **The dolthub adapter** (`crates/integration-dolthub`) turns a declared
+  `[integrations.dolthub]` block into `dolthub.query`, and `dolthub.execute`
+  only when the operator declares writable tables via `table:` entries — an
+  integration with no declared table gets no write tool at all, rather than an
+  unconstrained one.
+
+  The admission gate is built around a verified fact: `dolt sql -q` executes
+  **every** statement in its argument, so `select 1; insert into t values (99)`
+  returns the select's rows and performs the insert. A read guard that inspects
+  only the leading keyword is therefore a write hole, and multi-statement input
+  is refused outright rather than classified statement by statement. Comments
+  are stripped and quoting tracked first, so a `;` inside a literal is data and
+  a `;` after a comment still counts.
+
+  Writes additionally check the target table against the allowlist and refuse
+  DDL: a table allowlist cannot constrain a statement that drops a table. Both
+  verbs re-declare `cap.shell_exec` and `cap.process_spawn`, and SQL is passed
+  as one argv entry.
+
+  Covered by 22 unit tests and 5 against a **real Dolt database**, one of which
+  demonstrates the stacked-statement execution the gate exists to stop, and one
+  proving a refused write leaves the row count unchanged.
+
+  With this adapter, ARD-459's config surface, registry, doctor checks and all
+  three reference adapters are complete.
+
 ## Not Yet Turnkey
 
 Do not treat this repo as a public production deployment without additional
