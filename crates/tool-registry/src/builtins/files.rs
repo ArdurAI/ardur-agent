@@ -470,7 +470,11 @@ impl Tool for WriteFileTool {
         // moment the runtime consumes it; claiming the link exists today would
         // be false.
         if let Some(snapshot) = &snapshot {
-            out.receipt_data = json!({
+            // MERGE, do not replace: `output` already put bytes_written and
+            // path_written here, and a consumer that gets only a content hash
+            // cannot say which file the snapshot belongs to — which is the
+            // audit question.
+            let snapshot_json = json!({
                 "snapshot": match snapshot {
                     crate::snapshot::Snapshot::Captured(id) => json!({
                         "prior_content": id.as_str(),
@@ -481,6 +485,15 @@ impl Tool for WriteFileTool {
                     }),
                 },
             });
+            if let (Some(base), Some(extra)) =
+                (out.receipt_data.as_object_mut(), snapshot_json.as_object())
+            {
+                for (k, v) in extra {
+                    base.insert(k.clone(), v.clone());
+                }
+            } else {
+                out.receipt_data = snapshot_json;
+            }
         }
         Ok(out)
     }

@@ -341,11 +341,26 @@ The platform tool crates are also implemented as explicit integration surfaces:
   undoing a creation removes the file. A blob whose bytes no longer match its
   digest is refused rather than restored.
 
-  Limitation, stated rather than implied: the snapshot id is written to
-  `ToolOutput::receipt_data`, but the runtime builds its `ToolCallReceipt`
-  unconditionally and never reads that field — so snapshots are **not** yet
-  linked into the receipt chain. Shadow-git proper (history semantics) is also
-  not built; it needs a git dependency this workspace does not have.
+  Enable it through `BuiltinOpts::snapshot_store`. Blobs are written
+  owner-only (0600) under a 0700 store, verified against their digest before
+  reuse and before restore, and written atomically so an interrupted capture
+  cannot leave a blob a later capture would accept. A file over the configured
+  ceiling (64 MiB by default) refuses the write rather than being read into
+  memory. Symlinked paths are refused: writing through a link changes its
+  target, so an undo cannot be expressed as restoring that entry.
+
+  Limitations, stated rather than implied:
+
+  - The snapshot id is written to `ToolOutput::receipt_data`, but the runtime
+    builds its `ToolCallReceipt` unconditionally and never reads that field —
+    so snapshots are **not** yet linked into the receipt chain.
+  - Under concurrent writers to the same path, two captures can both record the
+    original content before either write lands, so the second snapshot cannot
+    restore the state immediately before it. The store stays consistent; the
+    undo *history* is not linearisable. Serialising capture and write behind a
+    per-path lock would fix it.
+  - Shadow-git proper (history semantics) is not built; it needs a git
+    dependency this workspace does not have.
 
 ## Not Yet Turnkey
 

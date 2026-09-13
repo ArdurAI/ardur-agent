@@ -36,7 +36,7 @@ use ardur_core_types::Sha256Digest;
 /// The id is the SHA-256 of the bytes, so identical prior content captured
 /// twice occupies one blob and the id is reproducible from the content alone.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct SnapshotId(pub String);
+pub struct SnapshotId(String);
 
 impl SnapshotId {
     /// The id for `bytes`.
@@ -49,6 +49,30 @@ impl SnapshotId {
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// Parse an id supplied by a caller.
+    ///
+    /// The field is private and this is the only way in, because the id is
+    /// used to build a filesystem path. An empty or short value would panic
+    /// the two-character shard split, and one containing path components
+    /// would escape the store root — leaking the digest of an arbitrary
+    /// readable file through the [`SnapshotError::Corrupt`] report.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SnapshotError::MalformedId`] unless `id` is exactly 64
+    /// lowercase hex characters.
+    pub fn parse(id: &str) -> Result<Self, SnapshotError> {
+        let ok = id.len() == 64
+            && id
+                .chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c));
+        if ok {
+            Ok(Self(id.to_string()))
+        } else {
+            Err(SnapshotError::MalformedId { id: id.to_string() })
+        }
     }
 }
 
@@ -85,6 +109,48 @@ pub enum SnapshotError {
         /// The underlying IO error.
         source: std::io::Error,
     },
+    /// A caller-supplied id is not a well-formed digest.
+    #[error(
+        "`{id}` is not a snapshot id: expected 64 lowercase hex characters. \
+         Ids are digests, and anything else would be used to build a path \
+         inside the store"
+    )]
+    MalformedId {
+        /// The rejected value.
+        id: String,
+    },
+    /// The file is larger than the configured capture ceiling.
+    #[error(
+        "`{path}` is {size} bytes, over the {limit}-byte snapshot ceiling — \
+         capturing it would read the whole file into memory, so the write was \
+         refused rather than risking exhaustion"
+    )]
+    TooLarge {
+        /// The file that was too big.
+        path: String,
+        /// Its size.
+        size: u64,
+        /// The configured ceiling.
+        limit: u64,
+    },
+    /// The file on disk is not the one this snapshot was taken against.
+    #[error(
+        "refusing to restore: `{path}` is not the file this snapshot was taken \
+         against (it has been changed since), so undoing would discard newer \
+         work"
+    )]
+    Stale {
+        /// The path that changed underneath.
+        path: String,
+    },
+    /// The path cannot be snapshotted meaningfully.
+    #[error("cannot snapshot `{path}`: {reason}")]
+    Unsupported {
+        /// The path.
+        path: String,
+        /// Why.
+        reason: String,
+    },
     /// The requested snapshot is not in the store.
     #[error("snapshot `{id}` is not in the store")]
     Missing {
@@ -106,22 +172,57 @@ pub enum SnapshotError {
 }
 
 /// A content-addressed store of pre-write file content.
+/// Default ceiling on a file this store will capture.
+///
+/// Capturing reads the whole file into memory, so an unbounded ceiling lets a
+/// write of a few bytes to a multi-gigabyte artifact exhaust the process. 64
+/// MiB keeps ordinary source and config files well inside the limit.
+pub const DEFAULT_MAX_CAPTURE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// A content-addressed store of pre-write file content.
 #[derive(Debug, Clone)]
 pub struct SnapshotStore {
     root: PathBuf,
+    max_capture_bytes: u64,
 }
 
 impl SnapshotStore {
     /// A store rooted at `root`. The directory is created on first write.
     #[must_use]
     pub fn new(root: PathBuf) -> Self {
-        Self { root }
+        Self {
+            root,
+            max_capture_bytes: DEFAULT_MAX_CAPTURE_BYTES,
+        }
+    }
+
+    /// Set the largest file this store will capture.
+    #[must_use]
+    pub fn with_max_capture_bytes(mut self, limit: u64) -> Self {
+        self.max_capture_bytes = limit;
+        self
     }
 
     /// Where the store keeps its blobs.
     #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Create `dir` (and parents) owner-only.
+    ///
+    /// A snapshot holds the prior contents of a file that may have been mode
+    /// 0600. Creating blobs under the ambient umask (commonly 0644) would
+    /// publish those contents to every local account that can traverse the
+    /// store.
+    async fn create_dir_private(dir: &Path) -> std::io::Result<()> {
+        tokio::fs::create_dir_all(dir).await?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            tokio::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).await?;
+        }
+        Ok(())
     }
 
     fn blob_path(&self, id: &SnapshotId) -> PathBuf {
@@ -193,6 +294,17 @@ impl SnapshotStore {
         Ok(removed)
     }
 
+    /// Write `bytes` to `path` owner-only.
+    async fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+        tokio::fs::write(path, bytes).await?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).await?;
+        }
+        Ok(())
+    }
+
     /// Capture the current content of `path`, if it has any.
     ///
     /// # Errors
@@ -201,6 +313,33 @@ impl SnapshotStore {
     /// store cannot be written. A missing file is [`Snapshot::NothingToCapture`],
     /// not an error.
     pub async fn capture(&self, path: &Path) -> Result<Snapshot, SnapshotError> {
+        // Refuse before allocating: a small write to a huge file must not be
+        // able to exhaust the process (review P1 on capture memory). Use
+        // symlink_metadata so a dangling link is classified below rather than
+        // reported as a missing file.
+        match tokio::fs::symlink_metadata(path).await {
+            Ok(meta) if meta.is_file() && meta.len() > self.max_capture_bytes => {
+                return Err(SnapshotError::TooLarge {
+                    path: path.display().to_string(),
+                    size: meta.len(),
+                    limit: self.max_capture_bytes,
+                });
+            }
+            Ok(meta) if meta.file_type().is_symlink() => {
+                // A symlink is a directory entry in its own right. Writing
+                // through it creates or edits the TARGET, so capturing the
+                // link as "absent" and later deleting it would remove a
+                // pre-existing entry while leaving the written target behind.
+                return Err(SnapshotError::Unsupported {
+                    path: path.display().to_string(),
+                    reason: "the path is a symlink; writing through it changes the target, \
+                             so an undo cannot be expressed as restoring this entry"
+                        .to_string(),
+                });
+            }
+            _ => {}
+        }
+
         let bytes = match tokio::fs::read(path).await {
             Ok(bytes) => bytes,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -220,21 +359,37 @@ impl SnapshotStore {
         let id = SnapshotId::of(&bytes);
         let blob = self.blob_path(&id);
 
-        // Content-addressed: if the blob is already there its bytes are the
-        // same bytes, so rewriting it is pure cost.
-        if tokio::fs::metadata(&blob).await.is_ok() {
-            return Ok(Snapshot::Captured(id));
+        // An existing blob is only reusable if its bytes still hash to the id.
+        // A truncated or tampered blob would otherwise be accepted here, the
+        // source file destroyed by the write, and the corruption discovered
+        // only at restore — exactly when the original is unrecoverable.
+        if let Ok(existing) = tokio::fs::read(&blob).await {
+            if SnapshotId::of(&existing) == id {
+                return Ok(Snapshot::Captured(id));
+            }
+            // Fall through and rewrite it from the bytes we just read.
         }
 
         if let Some(parent) = blob.parent() {
-            tokio::fs::create_dir_all(parent)
+            Self::create_dir_private(parent)
                 .await
                 .map_err(|source| SnapshotError::Write {
                     id: id.0.clone(),
                     source,
                 })?;
         }
-        tokio::fs::write(&blob, &bytes)
+
+        // Write to a temporary name and rename into place, so a cancelled or
+        // crashed capture never leaves a half-written blob that a later
+        // capture would accept.
+        let tmp = blob.with_extension(format!("tmp-{}", uuid::Uuid::new_v4()));
+        Self::write_private(&tmp, &bytes)
+            .await
+            .map_err(|source| SnapshotError::Write {
+                id: id.0.clone(),
+                source,
+            })?;
+        tokio::fs::rename(&tmp, &blob)
             .await
             .map_err(|source| SnapshotError::Write {
                 id: id.0.clone(),
@@ -307,6 +462,12 @@ impl SnapshotStore {
             }
             // The file did not exist before the write, so undoing the write
             // means removing it — not leaving an empty file behind.
+            //
+            // But only if it is still the file the write created. An undo that
+            // arrives after someone else has edited or replaced the path would
+            // otherwise silently delete newer work. `restore_expecting` is the
+            // checked form; this unconditional branch is reachable only when a
+            // caller explicitly opts out of the check.
             Snapshot::NothingToCapture => match tokio::fs::remove_file(path).await {
                 Ok(()) => Ok(()),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -316,6 +477,52 @@ impl SnapshotStore {
                 }),
             },
         }
+    }
+}
+
+impl SnapshotStore {
+    /// Restore `snapshot` over `path`, but only if the file there is still the
+    /// one the write produced.
+    ///
+    /// `written` is the digest of the content the write left behind. If the
+    /// file no longer matches it, someone has changed the path since and the
+    /// restore is refused with [`SnapshotError::Stale`] rather than discarding
+    /// their work. A file that has since been deleted is treated as already
+    /// undone.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SnapshotError`] if the snapshot is missing or corrupt, the
+    /// current file does not match `written`, or the write fails.
+    pub async fn restore_expecting(
+        &self,
+        snapshot: &Snapshot,
+        path: &Path,
+        written: &SnapshotId,
+    ) -> Result<(), SnapshotError> {
+        match tokio::fs::read(path).await {
+            Ok(current) => {
+                if SnapshotId::of(&current) != *written {
+                    return Err(SnapshotError::Stale {
+                        path: path.display().to_string(),
+                    });
+                }
+            }
+            // Already gone: nothing of the write survives to undo.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return match snapshot {
+                    Snapshot::NothingToCapture => Ok(()),
+                    Snapshot::Captured(_) => self.restore(snapshot, path).await,
+                };
+            }
+            Err(source) => {
+                return Err(SnapshotError::Read {
+                    path: path.display().to_string(),
+                    source,
+                });
+            }
+        }
+        self.restore(snapshot, path).await
     }
 }
 
