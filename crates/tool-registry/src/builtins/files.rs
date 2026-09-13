@@ -184,6 +184,25 @@ fn contained_path(root: &Path, rel: &str) -> Result<PathBuf, ToolError> {
 
 /// Build the standard `{ content, cost, receipt_data }` output where the receipt
 /// mirrors the content.
+/// Read at most `limit` bytes of `path` as UTF-8, or `None`.
+///
+/// `None` means "not checked": the file is over the limit, is not valid UTF-8,
+/// or could not be read. Never "clean".
+async fn read_bounded(path: &std::path::Path, limit: u64) -> Option<String> {
+    use tokio::io::AsyncReadExt;
+
+    let file = tokio::fs::File::open(path).await.ok()?;
+    // Read one byte past the ceiling: if it arrives, the file is over the
+    // limit and is skipped rather than partially checked — a truncated file
+    // reports syntax errors that are artefacts of the truncation.
+    let mut buf = Vec::new();
+    file.take(limit + 1).read_to_end(&mut buf).await.ok()?;
+    if buf.len() as u64 > limit {
+        return None;
+    }
+    String::from_utf8(buf).ok()
+}
+
 fn output(content: serde_json::Value) -> ToolOutput {
     ToolOutput {
         content: content.clone(),
@@ -315,7 +334,8 @@ fn default_mode() -> String {
 }
 
 /// Writes a file inside the tool root, creating parent directories as needed.
-/// Returns `{ bytes_written, path_written }`.
+/// Returns `{ bytes_written, path_written }`, plus `checked`, `diagnostics`
+/// and `diagnostics_truncated` when post-write diagnostics are enabled.
 pub struct WriteFileTool {
     schema: ToolSchema,
     root: PathBuf,
@@ -324,11 +344,26 @@ pub struct WriteFileTool {
     /// keeps the pre-existing behaviour, so a deployment that has not opted in
     /// writes exactly as before.
     snapshots: Option<crate::snapshot::SnapshotStore>,
+    /// gh#414: checkers run over the content after a write. Advisory — the
+    /// bytes are already on disk, so problems are reported, never raised as a
+    /// failed call.
+    diagnostics: Option<crate::diagnostics::SyntaxCheckers>,
 }
 
 impl WriteFileTool {
     /// The id [`WriteFileTool`] registers under.
     pub const ID: &'static str = "file.write";
+
+    /// Run `checkers` over the content after each write (gh#414).
+    ///
+    /// Advisory by construction: a checker runs after the bytes are on disk,
+    /// so returning an error would report a failed write that succeeded — and
+    /// a model retrying on that error would write the content twice.
+    #[must_use]
+    pub fn with_diagnostics(mut self, checkers: crate::diagnostics::SyntaxCheckers) -> Self {
+        self.diagnostics = Some(checkers);
+        self
+    }
 
     /// Capture prior file content into `store` before each write (gh#413).
     ///
@@ -365,6 +400,35 @@ impl WriteFileTool {
                 "type": "object",
                 "properties": {
                     "bytes_written": { "type": "integer" },
+                    // gh#414. Present only when diagnostics are enabled, so a
+                    // schema-driven client can generate types for them and a
+                    // strict consumer does not reject the response.
+                    "checked": {
+                        "type": "boolean",
+                        "description": "Whether any checker ran. False means the file type was \
+                                        unrecognised or every applicable checker failed — NOT \
+                                        that the file is clean."
+                    },
+                    "diagnostics": {
+                        "type": "array",
+                        "description": "Problems found in what was written. Advisory: the write \
+                                        succeeded regardless.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "source": { "type": "string" },
+                                "severity": { "type": "string", "enum": ["error", "warning"] },
+                                "line": { "type": ["integer", "null"] },
+                                "column": { "type": ["integer", "null"] },
+                                "message": { "type": "string" }
+                            },
+                            "required": ["source", "severity", "message"]
+                        }
+                    },
+                    "diagnostics_truncated": {
+                        "type": "integer",
+                        "description": "How many diagnostics were dropped by the cap."
+                    },
                     "path_written": { "type": "string" }
                 },
                 "required": ["bytes_written", "path_written"]
@@ -376,6 +440,7 @@ impl WriteFileTool {
             root,
             caps: vec![Capability::FsWrite],
             snapshots: None,
+            diagnostics: None,
         }
     }
 }
@@ -495,6 +560,55 @@ impl Tool for WriteFileTool {
                 out.receipt_data = snapshot_json;
             }
         }
+        // gh#414: check what was just written. The bytes are already on disk,
+        // so this NEVER fails the call — problems ride along in the output.
+        if let Some(checkers) = &self.diagnostics {
+            // Check what is ON DISK, not what was passed in. For an overwrite
+            // those are the same string, but for an append `args.content` is
+            // only the added chunk — checking that in isolation reports
+            // syntax errors for perfectly good appends (a fragment rarely
+            // parses alone) and misses breakage the append actually caused.
+            let to_check = if append {
+                // Bound the READ itself. A metadata pre-check is racy: another
+                // writer can grow the file between the stat and the read, so
+                // the ceiling would be enforced against a stale size while the
+                // read allocates whatever is actually there now.
+                read_bounded(&path, crate::diagnostics::MAX_CHECK_BYTES).await
+            } else {
+                Some(args.content.clone())
+            };
+
+            let report = to_check
+                .as_deref()
+                .map(|c| checkers.run(&path, c))
+                .unwrap_or_else(crate::diagnostics::DiagnosticReport::not_checked);
+            // Build once, then apply to BOTH payloads. `output()` mirrors
+            // content into receipt_data, and inserting into only one leaves
+            // the receipt auditing a different result than the model saw.
+            let mut additions = vec![
+                // `checked` distinguishes "nothing understood this file" from
+                // "checked and clean". Collapsing them would let an unchecked
+                // file read as validated.
+                ("checked".to_string(), json!(report.was_checked())),
+            ];
+            if !report.is_empty() {
+                additions.push(("diagnostics".to_string(), report.to_json()));
+                if report.truncated() > 0 {
+                    additions.push((
+                        "diagnostics_truncated".to_string(),
+                        json!(report.truncated()),
+                    ));
+                }
+            }
+            for target in [&mut out.content, &mut out.receipt_data] {
+                if let Some(obj) = target.as_object_mut() {
+                    for (k, v) in &additions {
+                        obj.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+        }
+
         Ok(out)
     }
 

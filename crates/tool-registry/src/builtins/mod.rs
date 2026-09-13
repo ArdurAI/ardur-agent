@@ -63,6 +63,12 @@ pub struct BuiltinOpts {
     /// exactly those names; `None` registers the **dev-only** unrestricted
     /// variant. Ignored unless `enable_shell_exec` is `true`.
     pub shell_exec_allowlist: Option<Vec<String>>,
+    /// Checkers run over content after `file.write` (gh#414). `None` disables
+    /// post-write diagnostics.
+    ///
+    /// Present for the same reason as `snapshot_store`: an opt-in builder with
+    /// no registration path calling it is unreachable in every shipped binary.
+    pub diagnostics: Option<crate::diagnostics::SyntaxCheckers>,
     /// Where `file.write` puts the prior content of a file before overwriting
     /// it (gh#413). `None` keeps the pre-snapshot behaviour.
     ///
@@ -160,6 +166,9 @@ impl ToolRegistry {
             let mut write_tool = WriteFileTool::with_root(root.clone());
             if let Some(store) = &opts.snapshot_store {
                 write_tool = write_tool.with_snapshots(store.clone());
+            }
+            if let Some(checkers) = &opts.diagnostics {
+                write_tool = write_tool.with_diagnostics(checkers.clone());
             }
             self.register(Box::new(write_tool))?;
             self.register(Box::new(ListDirTool::with_root(root)))?;

@@ -294,6 +294,7 @@ async fn register_builtins_wires_the_store_into_file_write() {
         .register_builtins(BuiltinOpts {
             file_root: Some(root.clone()),
             snapshot_store: Some(store.clone()),
+            diagnostics: None,
             ..Default::default()
         })
         .expect("builtins register");

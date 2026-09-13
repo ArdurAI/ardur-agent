@@ -94,6 +94,7 @@ async fn shell_and_http_opt_in_registers_and_cap_aligns() {
         shell_exec_allowlist: None,
         file_root: None,
         snapshot_store: None,
+        diagnostics: None,
         http: Some(HttpFetchOpts {
             enable: true,
             allowlist: vec!["example.com".to_string()],
@@ -142,6 +143,7 @@ async fn file_tool_root_opt_in_registers_file_tools_and_grants_fs_caps() {
     let opts = BuiltinOpts {
         file_root: Some(file_root.path().to_path_buf()),
         snapshot_store: None,
+        diagnostics: None,
         ..BuiltinOpts::default()
     };
     let tools = assemble(opts).await;
@@ -161,5 +163,31 @@ async fn file_tool_root_opt_in_registers_file_tools_and_grants_fs_caps() {
     assert!(
         !allow.contains(&"cap.shell_exec".to_string()),
         "shell capability must not leak in from the file-tool grant"
+    );
+}
+
+/// The server can actually turn post-write diagnostics on (gh#414).
+///
+/// Review P1: `Config::builtin_tool_opts` hard-coded `diagnostics: None`, so
+/// every shipped server built `file.write` without them and only tests or
+/// external embedders could reach the feature. Same reachability defect as
+/// gh#413/#455/#453 — this pins the config path, not just the builder.
+#[test]
+fn file_write_diagnostics_flag_reaches_the_builtin_opts() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut cfg = support::test_config(&dir, None);
+    cfg.file_tool_root = Some(std::path::PathBuf::from("/tmp"));
+
+    cfg.file_write_diagnostics = false;
+    assert!(
+        cfg.builtin_tool_opts().diagnostics.is_none(),
+        "off by default"
+    );
+
+    cfg.file_write_diagnostics = true;
+    assert!(
+        cfg.builtin_tool_opts().diagnostics.is_some(),
+        "the operator flag must reach the registry, or the feature is \
+         unreachable in every shipped server"
     );
 }

@@ -182,6 +182,12 @@ pub struct Config {
     /// `file.list` built-in tools (`ARDUR_FILE_TOOL_ROOT`). `Some(root)`
     /// registers all three confined to it; `None` registers no file tool.
     pub file_tool_root: Option<PathBuf>,
+    /// **gh#414.** Run post-write syntax checkers over what `file.write`
+    /// writes (`ARDUR_FILE_WRITE_DIAGNOSTICS`, default off). Advisory: a
+    /// problem is reported in the tool output and never fails the write.
+    /// Ignored unless [`file_tool_root`](Self::file_tool_root) is set, since
+    /// without it no file tool is registered at all.
+    pub file_write_diagnostics: bool,
     /// **ARD-463.** Capability labels whose tool calls require an operator's
     /// approval before they run (`ARDUR_APPROVAL_GATED_CAPABILITIES`, CSV).
     ///
@@ -284,6 +290,7 @@ impl fmt::Debug for Config {
             .field("enable_http_tool", &self.enable_http_tool)
             .field("http_allowlist", &self.http_allowlist)
             .field("file_tool_root", &self.file_tool_root)
+            .field("file_write_diagnostics", &self.file_write_diagnostics)
             .field(
                 "approval_gated_capabilities",
                 &self.approval_gated_capabilities,
@@ -448,6 +455,9 @@ impl Config {
             .is_some_and(is_truthy);
         let http_allowlist = parse_csv(optional("ARDUR_HTTP_ALLOWLIST").as_deref());
         let file_tool_root = optional("ARDUR_FILE_TOOL_ROOT").map(PathBuf::from);
+        let file_write_diagnostics = optional("ARDUR_FILE_WRITE_DIAGNOSTICS")
+            .as_deref()
+            .is_some_and(is_truthy);
 
         // ARD-463: approval-gating is opt-in and off by default. An empty list
         // leaves the runtime without an approval store at all, so the gate is
@@ -552,6 +562,7 @@ impl Config {
             enable_http_tool,
             http_allowlist,
             file_tool_root,
+            file_write_diagnostics,
             approval_gated_capabilities,
             http_turn_timeout,
         })
@@ -585,6 +596,12 @@ impl Config {
             shell_exec_allowlist: None,
             file_root: self.file_tool_root.clone(),
             snapshot_store: None,
+            // gh#414: without this the feature is unreachable in every shipped
+            // server — the only callers able to enable it would be tests and
+            // external embedders, however the operator configures things.
+            diagnostics: self
+                .file_write_diagnostics
+                .then(ardur_tool_registry::diagnostics::SyntaxCheckers::builtin),
             http: self.enable_http_tool.then(|| HttpFetchOpts {
                 enable: true,
                 allowlist: self.http_allowlist.clone(),
