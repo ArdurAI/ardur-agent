@@ -85,6 +85,19 @@ pub struct Config {
     /// (`ARDUR_ADMIN_BEARER_TOKENS`, comma-separated). When empty, admin routes
     /// deny every request with `401` (fail-closed).
     pub admin_bearer_tokens: Vec<String>,
+    /// **gh#417.** Require a verb-scoped cap-token on admin *mutations*
+    /// (`ARDUR_ADMIN_CAP_TOKEN_GATE`, default off).
+    ///
+    /// A bearer token is one shared secret with no audience, no expiry, no
+    /// per-verb allowlist and no revocation: presenting it grants every admin
+    /// route at once. With this on, a mutation additionally requires a
+    /// cap-token naming that mutation's verb, so authority to decide an
+    /// approval can be delegated without also delegating authority to rewrite
+    /// configuration.
+    ///
+    /// Off by default: a control that breaks every existing operator on
+    /// upgrade gets switched off rather than adopted.
+    pub admin_cap_token_gate: bool,
     /// Exact browser origins allowed to call `/chat` and `/approvals*` from a
     /// separately-hosted PWA (`ARDUR_CORS_ORIGINS`, comma-separated
     /// `http(s)://host[:port]` values). Empty (the default) emits no CORS
@@ -260,6 +273,7 @@ impl fmt::Debug for Config {
                 "chat_bearer_tokens",
                 &redacted_count(self.chat_bearer_tokens.len()),
             )
+            .field("admin_cap_token_gate", &self.admin_cap_token_gate)
             .field(
                 "admin_bearer_tokens",
                 &redacted_count(self.admin_bearer_tokens.len()),
@@ -514,6 +528,9 @@ impl Config {
             bind_addr: optional("ARDUR_BIND_ADDR").unwrap_or_else(|| "127.0.0.1:3000".to_string()),
             chat_bearer_tokens: parse_csv(optional("ARDUR_CHAT_BEARER_TOKENS").as_deref()),
             admin_bearer_tokens: parse_csv(optional("ARDUR_ADMIN_BEARER_TOKENS").as_deref()),
+            admin_cap_token_gate: optional("ARDUR_ADMIN_CAP_TOKEN_GATE")
+                .as_deref()
+                .is_some_and(is_truthy),
             cors_origins: parse_cors_origins(optional("ARDUR_CORS_ORIGINS").as_deref())?,
             dev_permissive_policy: optional("ARDUR_DEV_PERMISSIVE_POLICY")
                 .as_deref()

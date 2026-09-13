@@ -17,6 +17,9 @@ use std::convert::Infallible;
 use std::fmt::Write as _;
 use std::sync::Arc;
 
+use ardur_cap_token::{
+    BiscuitCapTokenVerifier, CapToken, CapTokenVerifier, HashSetDenyList, RequiredCaveats,
+};
 use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::extract::{DefaultBodyLimit, Path, Request, State};
@@ -312,7 +315,11 @@ async fn openapi_json(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
     if let Err(response) = authorize_admin(&state, &headers) {
         return *response;
     }
-    Json(openapi_spec(state.slack().is_some())).into_response()
+    Json(openapi_spec(
+        state.slack().is_some(),
+        state.admin_cap_token_gate(),
+    ))
+    .into_response()
 }
 
 /// `GET /openapi/clients/rust` — return generated Rust client source.
@@ -491,10 +498,16 @@ async fn approvals_approve(
     headers: HeaderMap,
 ) -> Response {
     let response = async {
-        if let Err(response) = authorize_admin(&state, &headers) {
+        if let Err(response) = authorize_admin_mutation(&state, &headers, APPROVAL_DECIDE_VERB) {
             return *response;
         }
-        apply_approval_decision(&state, &id, ApprovalDecision::Approve).await
+        apply_approval_decision(
+            &state,
+            &id,
+            ApprovalDecision::Approve,
+            presented_cap_token(&headers),
+        )
+        .await
     }
     .await;
     with_cors(&state, &headers, response)
@@ -513,11 +526,17 @@ async fn approvals_reject(
     body: Bytes,
 ) -> Response {
     let response = async {
-        if let Err(response) = authorize_admin(&state, &headers) {
+        if let Err(response) = authorize_admin_mutation(&state, &headers, APPROVAL_DECIDE_VERB) {
             return *response;
         }
         let reason = parse_reject_reason(&body);
-        apply_approval_decision(&state, &id, ApprovalDecision::Reject { reason }).await
+        apply_approval_decision(
+            &state,
+            &id,
+            ApprovalDecision::Reject { reason },
+            presented_cap_token(&headers),
+        )
+        .await
     }
     .await;
     with_cors(&state, &headers, response)
@@ -550,6 +569,7 @@ async fn apply_approval_decision(
     state: &Arc<AppState>,
     id: &str,
     decision: ApprovalDecision,
+    presented_cap_token: Option<String>,
 ) -> Response {
     if !valid_approval_id(id) {
         return bad_request("malformed approval id".to_string());
@@ -628,7 +648,11 @@ async fn apply_approval_decision(
     // worker being unavailable, say) is logged but does not fail the request;
     // the store, not the receipt, is this endpoint's source of truth.
     match state
-        .mint_approval_receipt(id.to_string(), receipt_verb.to_string())
+        .mint_approval_receipt(
+            id.to_string(),
+            receipt_verb.to_string(),
+            presented_cap_token,
+        )
         .await
     {
         Ok(receipt_id) => {
@@ -1137,7 +1161,10 @@ fn with_cors(state: &AppState, headers: &HeaderMap, mut response: Response) -> R
     headers_mut.insert(header::VARY, HeaderValue::from_static("Origin"));
     headers_mut.insert(
         header::ACCESS_CONTROL_ALLOW_HEADERS,
-        HeaderValue::from_static("Authorization, Content-Type, Accept"),
+        // `X-Ardur-Cap-Token` (gh#417) is non-safelisted, so a cross-origin client
+        // triggers a preflight; omitting it here would make the gate unusable
+        // from the PWA even with a valid token.
+        HeaderValue::from_static("Authorization, Content-Type, Accept, X-Ardur-Cap-Token"),
     );
     headers_mut.insert(
         header::ACCESS_CONTROL_ALLOW_METHODS,
@@ -1184,6 +1211,95 @@ async fn cors_preflight(State(state): State<Arc<AppState>>, headers: HeaderMap) 
 /// Verify the admin bearer token. Empty admin token config fails closed.
 fn authorize_admin(state: &AppState, headers: &HeaderMap) -> Result<(), Box<Response>> {
     authorize_bearer(state.admin_bearer_tokens(), headers).map_err(|()| Box::new(unauthorized()))
+}
+
+/// Authorize an admin **mutation** (gh#417).
+///
+/// Bearer first (unchanged, so an unauthenticated caller still gets 401), then
+/// — when `ARDUR_ADMIN_CAP_TOKEN_GATE` is on — a cap-token that names `verb`.
+///
+/// Why both rather than either: the bearer check keeps "who are you" answering
+/// 401, while the cap-token answers "may you do THIS", which a shared secret
+/// cannot express. Accepting a valid cap-token *instead of* the bearer would
+/// let the gate widen access rather than narrow it.
+///
+/// Called BEFORE any mutation is performed. Gating that rejects the response
+/// after writing would be theatre: the record would be changed and the caller
+/// merely told otherwise.
+/// The cap-token verb required to decide an approval. Approve and reject are
+/// one authority: an operator who may accept a card may also refuse it.
+///
+/// This is deliberately the SAME string the receipt path verifies against
+/// (`APPROVAL_DECIDE_TOOL` in state.rs). Two names for one authority would let
+/// a token pass this gate and then be refused by receipt minting — the
+/// decision would persist while its receipt silently did not, which is the
+/// audit gap this slice exists to close.
+const APPROVAL_DECIDE_VERB: &str = "approval.decide";
+
+fn authorize_admin_mutation(
+    state: &AppState,
+    headers: &HeaderMap,
+    verb: &str,
+) -> Result<(), Box<Response>> {
+    authorize_admin(state, headers)?;
+    if !state.admin_cap_token_gate() {
+        return Ok(());
+    }
+
+    let presented = header_str(headers, "X-Ardur-Cap-Token");
+    if presented.is_empty() {
+        return Err(Box::new(cap_token_denied(verb)));
+    }
+    // `from_base64` verifies the block signatures against the root key, so a
+    // token signed by anyone else fails HERE, before any caveat is read.
+    let Ok(token) = CapToken::from_base64(presented, state.cap_issuer_public_key()) else {
+        return Err(Box::new(cap_token_denied(verb)));
+    };
+
+    // An EMPTY deny list. The server holds no revocation store today, so a
+    // minted admin token is valid until it expires — revocation is the reason
+    // to keep admin token lifetimes short. Documented as a limitation rather
+    // than implied away; wiring the runtime's deny list here is follow-up work.
+    let verifier = BiscuitCapTokenVerifier::new(HashSetDenyList::new());
+    let required = RequiredCaveats {
+        now_unix: now_unix_secs(),
+        audience: crate::state::AUDIENCE.to_string(),
+        tool: verb.to_string(),
+        // Admin mutations are not metered against the turn budget; a zero cost
+        // means a budget caveat can never be the reason one is refused.
+        cost: 0,
+    };
+    match verifier.verify(&token, state.cap_issuer_public_key(), &required) {
+        Ok(_) => Ok(()),
+        Err(_) => Err(Box::new(cap_token_denied(verb))),
+    }
+}
+
+/// The cap-token the caller presented, if any.
+///
+/// Returned for receipt binding only — it has already been verified by
+/// [`authorize_admin_mutation`] before any mutation runs, so this never
+/// decides authorization.
+fn presented_cap_token(headers: &HeaderMap) -> Option<String> {
+    let raw = header_str(headers, "X-Ardur-Cap-Token");
+    (!raw.is_empty()).then(|| raw.to_string())
+}
+
+/// 403 for a mutation the presented cap-token does not authorize.
+///
+/// Deliberately 403 and not 401: the caller authenticated (the bearer check
+/// passed), they simply lack authority for this verb. The body names the verb
+/// required so an operator can mint the right token, and reveals nothing about
+/// the token presented.
+fn cap_token_denied(verb: &str) -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(json!({
+            "error": "cap_token_required",
+            "required_verb": verb,
+        })),
+    )
+        .into_response()
 }
 
 fn authorize_bearer(allowed_tokens: &[String], headers: &HeaderMap) -> Result<(), ()> {

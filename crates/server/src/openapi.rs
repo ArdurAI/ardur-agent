@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 /// advertised only when the Slack channel is enabled, so the document matches the
 /// routes actually mounted (an HTTP-only boot omits it).
 #[must_use]
-pub fn openapi_spec(slack_enabled: bool) -> Value {
+pub fn openapi_spec(slack_enabled: bool, admin_cap_token_gate: bool) -> Value {
     let mut spec = json!({
         "openapi": "3.0.3",
         "info": {
@@ -216,6 +216,32 @@ pub fn openapi_spec(slack_enabled: bool) -> Value {
 
     // Advertise `/slack/events` only when Slack is enabled, matching the routes
     // `build_router` actually mounts.
+    // gh#417: when the gate is on these operations require an extra header and
+    // can answer 403. A client generated from a spec that omits them would
+    // never send the credential and would fail against every gated deployment.
+    if admin_cap_token_gate {
+        for op in ["/approvals/{id}/approve", "/approvals/{id}/reject"] {
+            let Some(post) = spec["paths"][op]["post"].as_object_mut() else {
+                continue;
+            };
+            if let Some(params) = post["parameters"].as_array_mut() {
+                params.push(json!({
+                    "name": "X-Ardur-Cap-Token",
+                    "in": "header",
+                    "required": true,
+                    "description": "Base64 cap-token naming the `approval.decide` verb. Required because ARDUR_ADMIN_CAP_TOKEN_GATE is enabled on this deployment.",
+                    "schema": {"type": "string"}
+                }));
+            }
+            if let Some(responses) = post["responses"].as_object_mut() {
+                responses.insert(
+                    "403".to_string(),
+                    json!({"description": "Cap-token missing, malformed, expired, or not naming `approval.decide`"}),
+                );
+            }
+        }
+    }
+
     if slack_enabled {
         if let Some(paths) = spec["paths"].as_object_mut() {
             paths.insert(
