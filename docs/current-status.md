@@ -358,7 +358,8 @@ The platform tool crates are also implemented as explicit integration surfaces:
     original content before either write lands, so the second snapshot cannot
     restore the state immediately before it. The store stays consistent; the
     undo *history* is not linearisable. Serialising capture and write behind a
-    per-path lock would fix it.
+    per-path lock would fix it — tracked as gh#460 with the design questions
+    it raises (lock-map eviction, canonical-path keying, block-vs-fail-fast).
   - Shadow-git proper (history semantics) is not built; it needs a git
     dependency this workspace does not have.
 
