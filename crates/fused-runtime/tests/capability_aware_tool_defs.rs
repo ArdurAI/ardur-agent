@@ -405,3 +405,60 @@ async fn a_tool_cedar_denies_is_not_advertised() {
         "Cedar denies every tool invoke, so none may be advertised: {offered:?}"
     );
 }
+
+/// A capability-FREE tool whose name the token omits is not advertised.
+///
+/// The precise case review named, and the one my capability-gated tests did not
+/// reach: `authorize_tool_capabilities` returns `Ok(())` immediately for a tool
+/// declaring no capabilities, so a filter built only on that check advertises
+/// the tool even when the token's allowlist omits its ID. The name-scoped check
+/// inside `authorize_tool_invocation` is what catches it.
+#[tokio::test]
+async fn a_capability_free_tool_the_token_omits_is_not_advertised() {
+    let provider = Arc::new(RecordingProvider::new());
+    let runtime = runtime_builder(provider.clone())
+        .with_tools(two_tool_registry(Arc::new(AtomicUsize::new(0))))
+        .build()
+        .expect("runtime builds");
+
+    // `echo` declares NO capabilities and is deliberately absent from the
+    // allowlist; `dolthub.execute` is absent too.
+    let token = mint_token_as(HOLDER, AUDIENCE, &[TOOL]);
+    runtime
+        .submit(user_request("hi", &token))
+        .await
+        .expect("the turn completes");
+
+    let offered = provider.last_offered().await;
+    assert!(
+        !offered.contains(&"echo".to_string()),
+        "a capability-free tool the token does not name must not be advertised: \
+         {offered:?}"
+    );
+}
+
+/// The token-name check admits a capability-free tool it DOES name.
+///
+/// The restrictive direction for the test above: a filter that dropped every
+/// capability-free tool would satisfy it while hiding legitimately callable
+/// tools.
+#[tokio::test]
+async fn a_capability_free_tool_the_token_names_is_still_advertised() {
+    let provider = Arc::new(RecordingProvider::new());
+    let runtime = runtime_builder(provider.clone())
+        .with_tools(two_tool_registry(Arc::new(AtomicUsize::new(0))))
+        .build()
+        .expect("runtime builds");
+
+    let token = mint_token_as(HOLDER, AUDIENCE, &[TOOL, "echo"]);
+    runtime
+        .submit(user_request("hi", &token))
+        .await
+        .expect("the turn completes");
+
+    let offered = provider.last_offered().await;
+    assert!(
+        offered.contains(&"echo".to_string()),
+        "a capability-free tool the token names must still be offered: {offered:?}"
+    );
+}
