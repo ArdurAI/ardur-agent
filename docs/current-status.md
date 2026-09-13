@@ -332,6 +332,21 @@ The platform tool crates are also implemented as explicit integration surfaces:
   unadvertised tool is still denied at invocation, pinned by a test asserting
   the tool body never runs.
 
+- **Destructive file writes can capture what they overwrite** (gh#413).
+  `SnapshotStore` puts the prior bytes in a content-addressed store before
+  `file.write` lands, so a mistaken write is recoverable and an audit can say
+  what a file changed *from*, not just that it changed. Opt-in per deployment
+  via `WriteFileTool::with_snapshots`; without it the tool behaves exactly as
+  before. An absent file is recorded as absent rather than as empty content, so
+  undoing a creation removes the file. A blob whose bytes no longer match its
+  digest is refused rather than restored.
+
+  Limitation, stated rather than implied: the snapshot id is written to
+  `ToolOutput::receipt_data`, but the runtime builds its `ToolCallReceipt`
+  unconditionally and never reads that field — so snapshots are **not** yet
+  linked into the receipt chain. Shadow-git proper (history semantics) is also
+  not built; it needs a git dependency this workspace does not have.
+
 ## Not Yet Turnkey
 
 Do not treat this repo as a public production deployment without additional

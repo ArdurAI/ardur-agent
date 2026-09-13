@@ -31,6 +31,7 @@ serde_yaml = { workspace = true }
 # §8.X — the skill loader warns (not fails) on a malformed SKILL.md so one bad
 # skill never blocks the rest.
 tracing = { workspace = true }
+ardur-core-types = { workspace = true }
 thiserror = { workspace = true }
 # `ToolError::Internal` carries an opaque execution failure verbatim.
 anyhow = { workspace = true }

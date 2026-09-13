@@ -1329,6 +1329,7 @@ name = "ardur-tool-registry"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "ardur-core-types",
  "ardur-resilience",
  "ardur-runtime",
  "async-trait",

@@ -58,6 +58,7 @@ mod health;
 mod mcp;
 mod registry;
 mod skills;
+pub mod snapshot;
 mod tool;
 
 pub use builtins::{
