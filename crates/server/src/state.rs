@@ -370,6 +370,10 @@ pub struct AppState {
     data_dir: PathBuf,
     chat_bearer_tokens: Vec<String>,
     admin_bearer_tokens: Vec<String>,
+    /// gh#417: require a verb-scoped cap-token on admin mutations.
+    admin_cap_token_gate: bool,
+    /// The root key those cap-tokens are verified against.
+    cap_issuer_public_key: PublicKey,
     cors_origins: Vec<String>,
     tool_allowlist: Vec<String>,
     cost_budget_cents: u64,
@@ -680,6 +684,8 @@ impl AppState {
             data_dir,
             chat_bearer_tokens: config.chat_bearer_tokens.clone(),
             admin_bearer_tokens: config.admin_bearer_tokens.clone(),
+            admin_cap_token_gate: config.admin_cap_token_gate,
+            cap_issuer_public_key: issuer_public_key(&config.data_dir)?,
             cors_origins: config.cors_origins.clone(),
             tool_allowlist,
             cost_budget_cents: config.cost_budget_cents,
@@ -704,6 +710,21 @@ impl AppState {
     #[must_use]
     pub fn admin_bearer_tokens(&self) -> &[String] {
         &self.admin_bearer_tokens
+    }
+
+    /// Whether admin *mutations* additionally require a verb-scoped cap-token
+    /// (gh#417). Off by default.
+    #[must_use]
+    pub fn admin_cap_token_gate(&self) -> bool {
+        self.admin_cap_token_gate
+    }
+
+    /// The root key admin cap-tokens are verified against — the same issuer
+    /// key turns use, so an operator mints admin authority with the existing
+    /// tooling rather than a second key hierarchy.
+    #[must_use]
+    pub fn cap_issuer_public_key(&self) -> &PublicKey {
+        &self.cap_issuer_public_key
     }
 
     /// Exact browser origins allowed to call `/chat` and `/approvals*` (empty =
@@ -2143,6 +2164,8 @@ mod tests {
             data_dir: tempdir.path().to_path_buf(),
             chat_bearer_tokens: Vec::new(),
             admin_bearer_tokens: Vec::new(),
+            admin_cap_token_gate: false,
+            cap_issuer_public_key: KeyPair::new().public(),
             cors_origins: Vec::new(),
             tool_allowlist: Vec::new(),
             cost_budget_cents: 0,
@@ -2230,6 +2253,8 @@ mod tests {
             data_dir: tempdir.path().to_path_buf(),
             chat_bearer_tokens: Vec::new(),
             admin_bearer_tokens: Vec::new(),
+            admin_cap_token_gate: false,
+            cap_issuer_public_key: KeyPair::new().public(),
             cors_origins: Vec::new(),
             tool_allowlist: Vec::new(),
             cost_budget_cents: 0,

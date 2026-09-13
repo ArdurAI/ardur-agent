@@ -101,6 +101,7 @@ async fn server_routes_signed_slack_message_through_runtime_to_chat_post_message
         bind_addr: "127.0.0.1:0".to_string(),
         chat_bearer_tokens: vec!["e2e-chat-token".to_string()],
         admin_bearer_tokens: Vec::new(),
+        admin_cap_token_gate: false,
         cors_origins: Vec::new(),
         dev_permissive_policy: true,
         model: "claude-opus-4-8".to_string(),

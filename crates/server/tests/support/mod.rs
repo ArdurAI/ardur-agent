@@ -69,6 +69,7 @@ pub fn test_config(data_dir: &TempDir, slack_base: Option<String>) -> Config {
         bind_addr: "127.0.0.1:0".to_string(),
         chat_bearer_tokens: vec![CHAT_TOKEN.to_string()],
         admin_bearer_tokens: Vec::new(),
+        admin_cap_token_gate: false,
         cors_origins: Vec::new(),
         dev_permissive_policy: true,
         model: "claude-opus-4-8".to_string(),

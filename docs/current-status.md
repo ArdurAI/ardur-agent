@@ -341,6 +341,37 @@ The platform tool crates are also implemented as explicit integration surfaces:
   undoing a creation removes the file. A blob whose bytes no longer match its
   digest is refused rather than restored.
 
+- **Cap-token gated admin mutations (gh#417, first slice).** With
+  `ARDUR_ADMIN_CAP_TOKEN_GATE=1`, an admin *mutation* additionally requires an
+  `X-Ardur-Cap-Token` header carrying a token that names that mutation's verb
+  (`admin.approvals.decide` for the approvals decide endpoints).
+
+  The gate is **additive**: the admin bearer check still answers "who are you"
+  with 401, and the cap-token answers "may you do this" with 403. Accepting a
+  cap-token *instead of* the bearer would let the gate widen access rather than
+  narrow it. It runs before any mutation, because gating that rejects the
+  response after writing would leave the record changed and the caller merely
+  told otherwise.
+
+  Why it matters: a bearer token is one shared secret with no audience, no
+  expiry, no per-verb allowlist and no revocation — presenting it grants every
+  admin route at once. A cap-token carries those constraints, so authority to
+  decide an approval can be delegated without also delegating authority to
+  rewrite configuration.
+
+  Tokens are verified against the same issuer key turns use
+  (`<data_dir>/keys/issuer.key`), so operators mint admin authority with
+  existing tooling rather than a second key hierarchy.
+
+  Limitations, stated rather than implied:
+
+  - **No revocation.** The verifier runs against an empty deny list because the
+    server holds no revocation store, so a minted admin token is valid until it
+    expires. Keep admin token lifetimes short.
+  - Only the approvals decide endpoints are gated so far. The remaining
+    surfaces gh#417 names (config, keys, MCP servers, webhooks, cron, skills)
+    do not exist as write endpoints yet, and the dashboard half is unbuilt.
+
 - **Post-write diagnostics (gh#414).** `file.write` can run syntax checkers
   over the content it just wrote, enabled through `BuiltinOpts::diagnostics`.
   Problems are attached to the tool output as `diagnostics`; the write itself
