@@ -174,6 +174,14 @@ fn map_cap_error(err: CapTokenError) -> RuntimeError {
         CapTokenError::Malformed(_) | CapTokenError::SignatureInvalid => {
             RuntimeError::CapTokenMissing
         }
+        // A revoked token is a capability denial, not an internal fault
+        // (gh#361). Folding it into `Internal` would make the kill switch
+        // indistinguishable from a bug in logs, metrics and callers that match
+        // on the variant — the one rejection an operator most needs to see
+        // classified correctly.
+        denied @ CapTokenError::Revoked => RuntimeError::CapDenied {
+            reason: denied.to_string(),
+        },
         denied => RuntimeError::Internal(anyhow::anyhow!("cap-token denied at submit: {denied}")),
     }
 }

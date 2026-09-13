@@ -15,7 +15,7 @@
 
 mod common;
 
-use ardur_multi_agent::{AttenuationRule, MultiAgentRuntime};
+use ardur_multi_agent::{AttenuationRule, MultiAgentError, MultiAgentRuntime, RuntimeError};
 use common::{ask, spec, verifying_runtime_with_deny};
 
 /// Revoking the parent token denies a sub-agent spawned from it.
@@ -44,11 +44,17 @@ async fn a_revoked_parent_token_denies_its_sub_agent() {
         .await
         .expect_err("a revoked delegation must not keep executing");
 
-    let msg = format!("{err:?}");
-    assert!(
-        msg.contains("revoked") || msg.contains("Revoked"),
-        "expected a revocation denial, got: {msg}"
-    );
+    // Assert the VARIANT, not the debug text: a substring match passes for
+    // `Internal` too, which is exactly the misclassification under review.
+    match err {
+        MultiAgentError::Runtime(RuntimeError::CapDenied { reason }) => {
+            assert!(
+                reason.to_lowercase().contains("revoked"),
+                "expected a revocation reason, got: {reason}"
+            );
+        }
+        other => panic!("expected RuntimeError::CapDenied, got {other:?}"),
+    }
 }
 
 /// An attenuated child token is denied when the parent it derives from is
@@ -86,11 +92,17 @@ async fn revoking_a_parent_kills_delegations_already_minted_from_it() {
         .await
         .expect_err("revoking the parent must kill delegations minted from it");
 
-    let msg = format!("{err:?}");
-    assert!(
-        msg.contains("revoked") || msg.contains("Revoked"),
-        "expected a revocation denial, got: {msg}"
-    );
+    // Assert the VARIANT, not the debug text: a substring match passes for
+    // `Internal` too, which is exactly the misclassification under review.
+    match err {
+        MultiAgentError::Runtime(RuntimeError::CapDenied { reason }) => {
+            assert!(
+                reason.to_lowercase().contains("revoked"),
+                "expected a revocation reason, got: {reason}"
+            );
+        }
+        other => panic!("expected RuntimeError::CapDenied, got {other:?}"),
+    }
 }
 
 /// Revocation does not leak across unrelated runtimes.
