@@ -40,8 +40,8 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ardur_cap_token::{
-    BiscuitCapTokenVerifier, CapToken, CapTokenError, CapTokenVerifier, HashSetDenyList, PublicKey,
-    RequiredCaveats,
+    BiscuitCapTokenVerifier, CapToken, CapTokenError, CapTokenVerifier, DenyList, HashSetDenyList,
+    PublicKey, RequiredCaveats,
 };
 use ardur_runtime::{ChatRuntime, RuntimeError, SubmitRequest, SubmitResult};
 
@@ -59,7 +59,7 @@ pub const CHAT_SUBMIT_TOOL: &str = "chat.submit";
 /// time. A turn whose sub-agent token was attenuated to drop `chat.submit`,
 /// restrict the audience, or bring the expiry into the past is rejected before
 /// the inner runtime ever sees it.
-pub struct CapVerifyingRuntime<R: ChatRuntime> {
+pub struct CapVerifyingRuntime<R: ChatRuntime, D: DenyList + Send + Sync = HashSetDenyList> {
     /// The runtime that actually produces the response once authority is proven.
     inner: R,
     /// The issuer root the presented token's block signatures must verify
@@ -69,15 +69,18 @@ pub struct CapVerifyingRuntime<R: ChatRuntime> {
     /// audience the parent token — and so every narrowing of it — was issued
     /// for).
     audience: String,
-    /// A stateless verifier over an empty deny list. Revocation-by-deny-list is
-    /// a §11.14 verifier concern; Phase 1 carries no revocations here.
-    // TODO §5.0 Phase 2: thread a shared, mutable deny list so a parent can
-    // revoke a live sub-agent's authority mid-flight (pairs with the §11.17
-    // lifecycle-hook `on_revoke` surface once it lands).
-    verifier: BiscuitCapTokenVerifier<HashSetDenyList>,
+    /// The verifier, over whatever deny list the caller supplied (gh#361).
+    ///
+    /// `new` keeps the historical empty list so existing callers are
+    /// unchanged; `with_deny_list` takes a shared one, which is what makes a
+    /// parent's revocation visible to a live sub-agent. Revocation is the only
+    /// kill switch for a delegated capability — expiry is a timer and
+    /// attenuation is fixed at spawn, so neither can stop a sub-agent that is
+    /// misbehaving right now.
+    verifier: BiscuitCapTokenVerifier<D>,
 }
 
-impl<R: ChatRuntime> CapVerifyingRuntime<R> {
+impl<R: ChatRuntime> CapVerifyingRuntime<R, HashSetDenyList> {
     /// Wrap `inner` with cap-token enforcement against issuer `root` for
     /// `audience`.
     pub fn new(inner: R, root: PublicKey, audience: impl Into<String>) -> Self {
@@ -88,6 +91,24 @@ impl<R: ChatRuntime> CapVerifyingRuntime<R> {
             verifier: BiscuitCapTokenVerifier::new(HashSetDenyList::new()),
         }
     }
+}
+
+impl<R: ChatRuntime, D: DenyList + Send + Sync> CapVerifyingRuntime<R, D> {
+    /// Wrap `inner` with cap-token enforcement, consulting `deny` on every
+    /// verification (gh#361).
+    ///
+    /// Pass a deny list the revoker also holds — `SharedDenyList` clones share
+    /// one set — so a parent revoking a misbehaving sub-agent's authority
+    /// takes effect on the child's very next turn rather than whenever its
+    /// token happens to expire.
+    pub fn with_deny_list(inner: R, root: PublicKey, audience: impl Into<String>, deny: D) -> Self {
+        Self {
+            inner,
+            root,
+            audience: audience.into(),
+            verifier: BiscuitCapTokenVerifier::new(deny),
+        }
+    }
 
     /// The issuer root this runtime authorizes presented tokens against.
     pub fn root_public_key(&self) -> &PublicKey {
@@ -96,7 +117,7 @@ impl<R: ChatRuntime> CapVerifyingRuntime<R> {
 }
 
 #[async_trait::async_trait]
-impl<R: ChatRuntime> ChatRuntime for CapVerifyingRuntime<R> {
+impl<R: ChatRuntime, D: DenyList + Send + Sync> ChatRuntime for CapVerifyingRuntime<R, D> {
     async fn submit(&self, req: SubmitRequest) -> Result<SubmitResult, RuntimeError> {
         // An empty token string is "missing", not "denied" — match the echo
         // runtime's framing so the two surfaces agree on that boundary case.
@@ -153,6 +174,14 @@ fn map_cap_error(err: CapTokenError) -> RuntimeError {
         CapTokenError::Malformed(_) | CapTokenError::SignatureInvalid => {
             RuntimeError::CapTokenMissing
         }
+        // A revoked token is a capability denial, not an internal fault
+        // (gh#361). Folding it into `Internal` would make the kill switch
+        // indistinguishable from a bug in logs, metrics and callers that match
+        // on the variant — the one rejection an operator most needs to see
+        // classified correctly.
+        denied @ CapTokenError::Revoked => RuntimeError::CapDenied {
+            reason: denied.to_string(),
+        },
         denied => RuntimeError::Internal(anyhow::anyhow!("cap-token denied at submit: {denied}")),
     }
 }
