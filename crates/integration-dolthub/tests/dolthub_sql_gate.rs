@@ -6,10 +6,12 @@
 //! real repository, confirm experimentally that Dolt executes every statement
 //! in a `-q` argument, and then confirm the tool refuses exactly that input.
 //!
-//! Skipped when `dolt` is absent, because a missing toolchain is not a test
-//! failure — but a skip is loud and distinguishes "not installed" from "setup
-//! broke", so a suite that silently never runs is visible rather than passing
-//! vacuously.
+//! Every test here is `#[ignore]`d, following the same convention as the
+//! Qdrant integration suite (#358): an early `return` on a missing binary is
+//! reported by the harness as `ok`, and the `eprintln!` explaining why is
+//! hidden for passing tests — so the whole file can silently never run while
+//! the summary reads green. `#[ignore]` makes non-execution visible in the
+//! count, and CI runs them with `--ignored` where `dolt` is installed.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -72,10 +74,13 @@ fn dolt_repo(dolt: &Path) -> Option<(tempfile::TempDir, PathBuf, PathBuf)> {
 /// Set up, or explain why the test cannot run.
 macro_rules! dolt_fixture {
     () => {{
-        let Some(dolt) = dolt_binary() else {
-            eprintln!("SKIPPED: `dolt` is not installed");
-            return;
-        };
+        // These tests are `#[ignore]`d, so reaching this point means someone
+        // asked for them explicitly. A missing binary is then a real failure,
+        // not something to skip past.
+        let dolt = dolt_binary().expect(
+            "`dolt` is not installed, but these tests were run with --ignored; \
+             install dolt or drop the --ignored flag",
+        );
         match dolt_repo(&dolt) {
             Some((guard, repo, home)) => (dolt, guard, repo, home),
             None => panic!(
@@ -118,6 +123,7 @@ fn row_count(dolt: &Path, repo: &Path, home: &Path) -> usize {
 }
 
 #[tokio::test]
+#[ignore = "needs the `dolt` binary; run with --ignored"]
 async fn dolt_really_executes_stacked_statements() {
     // The premise of the whole admission gate, established rather than assumed.
     // If this ever stops being true the gate is stricter than it needs to be —
@@ -151,6 +157,7 @@ async fn dolt_really_executes_stacked_statements() {
 }
 
 #[tokio::test]
+#[ignore = "needs the `dolt` binary; run with --ignored"]
 async fn the_read_tool_refuses_the_stacked_write_that_dolt_would_execute() {
     let (dolt, _guard, repo, home) = dolt_fixture!();
     let before = row_count(&dolt, &repo, &home);
@@ -172,6 +179,7 @@ async fn the_read_tool_refuses_the_stacked_write_that_dolt_would_execute() {
 }
 
 #[tokio::test]
+#[ignore = "needs the `dolt` binary; run with --ignored"]
 async fn a_plain_select_returns_rows() {
     let (dolt, _guard, repo, home) = dolt_fixture!();
 
@@ -189,6 +197,7 @@ async fn a_plain_select_returns_rows() {
 }
 
 #[tokio::test]
+#[ignore = "needs the `dolt` binary; run with --ignored"]
 async fn a_write_to_an_unlisted_table_never_reaches_dolt() {
     let (dolt, _guard, repo, home) = dolt_fixture!();
     let before = row_count(&dolt, &repo, &home);
@@ -216,6 +225,7 @@ async fn a_write_to_an_unlisted_table_never_reaches_dolt() {
 }
 
 #[tokio::test]
+#[ignore = "needs the `dolt` binary; run with --ignored"]
 async fn a_write_to_an_allowlisted_table_lands() {
     let (dolt, _guard, repo, home) = dolt_fixture!();
     let before = row_count(&dolt, &repo, &home);
@@ -253,6 +263,7 @@ async fn a_write_to_an_allowlisted_table_lands() {
 /// caught it: it asserts both that dolt performs the write and that the tool
 /// refuses the input.
 #[tokio::test]
+#[ignore = "needs the `dolt` binary; run with --ignored"]
 async fn a_backslash_escaped_quote_cannot_smuggle_a_write_past_the_read_tool() {
     let (dolt, _guard, repo, home) = dolt_fixture!();
 

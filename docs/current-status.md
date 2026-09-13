@@ -307,7 +307,16 @@ The platform tool crates are also implemented as explicit integration surfaces:
   separator) and CTE preambles (`with c as (select 1) insert ...` leads with a
   read keyword and writes).
 
-  Covered by 29 unit tests and 6 against a **real Dolt database**, one of which
+  Review found a third bypass and a fourth surfaced while checking it: a
+  multi-table `DELETE` names its target before `FROM`, and a multi-table
+  `UPDATE` assigns through a join, so both reach a table the allowlist never
+  sees. Multi-table write forms are now refused outright.
+
+  The real-database tests are `#[ignore]`d and run by a dedicated CI job, for
+  the reason #358 established: an early return on a missing binary is counted
+  as a pass, so the whole suite could report green without executing.
+
+  Covered by 37 unit tests and 6 against a **real Dolt database**, one of which
   demonstrates the stacked-statement execution the gate exists to stop, and one
   proving a refused write leaves the row count unchanged.
 

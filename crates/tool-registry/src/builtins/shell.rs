@@ -474,7 +474,12 @@ impl ShellTool {
 /// whitespace tokenization and therefore cannot honour quoting. The explicit
 /// `argv` form does not need it: array elements are passed to `execvp` as
 /// literal arguments and are never parsed by a shell.
-fn is_safe_exec_char(c: char) -> bool {
+/// Whether `c` may appear in an argv-exec path or command.
+///
+/// Exported so callers that build a tool around [`ShellExecTool`] can reject an
+/// unusable binary at construction time instead of registering a tool that is
+/// denied on every invocation.
+pub fn is_safe_exec_char(c: char) -> bool {
     c.is_ascii_alphanumeric()
         || c == ' '
         || c == '\t'

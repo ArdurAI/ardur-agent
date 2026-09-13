@@ -39,6 +39,16 @@ pub enum SqlError {
         /// The tables that are permitted.
         allowed: String,
     },
+    /// A write names more than one table.
+    #[error(
+        "multi-table writes are not permitted: `{0}` forms can modify a table \
+         that the FROM clause never names (`delete secrets from notes join \
+         secrets ...` empties `secrets`), so this adapter refuses them rather \
+         than resolving joins — rewrite it as a single-table statement",
+        "JOIN/multi-target"
+    )]
+    MultiTableWrite,
+
     /// A write's target table could not be identified.
     #[error(
         "cannot determine which table `{verb}` writes to, so it cannot be \
@@ -293,11 +303,35 @@ pub fn table_written_by(sql: &str, allowed: &[String]) -> Result<String, SqlErro
     }
 
     let statement = &statements[0];
-    let tokens: Vec<String> = statement
+    // Keyword scanning must not fire on table names inside string literals.
+    let scrubbed = blank_string_literals(statement);
+    let tokens: Vec<String> = scrubbed
         .split_whitespace()
         .map(|t| t.to_ascii_lowercase())
         .collect();
     let verb = tokens.first().cloned().unwrap_or_default();
+
+    // Multi-table write forms are refused outright.
+    //
+    // Both of these change a table the naive single-target lookup never sees,
+    // verified against a real database:
+    //
+    //   delete secrets from notes join secrets on 1=1   -> empties `secrets`
+    //   update notes join secrets on 1=1 set secrets.id='X' -> rewrites `secrets`
+    //
+    // Resolving every modified table in these shapes means implementing join
+    // resolution and alias tracking. Refusing them is the conservative answer:
+    // a multi-table write is not something this adapter needs to offer, and the
+    // failure mode of getting it wrong is writing to an unlisted table.
+    let has_join = tokens.iter().any(|t| {
+        matches!(
+            t.as_str(),
+            "join" | "inner" | "left" | "right" | "cross" | "straight_join" | "natural"
+        )
+    });
+    if has_join {
+        return Err(SqlError::MultiTableWrite);
+    }
 
     // Only these three shapes are admitted. DDL (`drop`, `alter`, `truncate`)
     // is deliberately absent: an allowlist of tables cannot meaningfully
@@ -308,11 +342,36 @@ pub fn table_written_by(sql: &str, allowed: &[String]) -> Result<String, SqlErro
             .iter()
             .position(|t| t == "into")
             .and_then(|i| tokens.get(i + 1)),
-        "update" => tokens.get(1),
-        "delete" => tokens
-            .iter()
-            .position(|t| t == "from")
-            .and_then(|i| tokens.get(i + 1)),
+        "update" => {
+            // `update a, b set ...` is a multi-table update written with a
+            // comma instead of a JOIN.
+            let set_at = tokens.iter().position(|t| t == "set");
+            let target = tokens.get(1);
+            // `update a, b set ...` — a comma is the other multi-table spelling.
+            if target.is_some_and(|t| t.contains(',')) {
+                return Err(SqlError::MultiTableWrite);
+            }
+            match (set_at, target) {
+                // Exactly one token may sit between `update` and `set`.
+                (Some(2), Some(_)) => target,
+                (Some(_), _) => return Err(SqlError::MultiTableWrite),
+                (None, _) => return Err(SqlError::UnknownTarget { verb }),
+            }
+        }
+        "delete" => {
+            // `delete t1 from ...` names its targets BEFORE `from`. Only the
+            // plain `delete from <table>` shape is admitted.
+            match tokens.get(1).map(String::as_str) {
+                Some("from") => {
+                    if tokens.get(2).is_some_and(|t| t.contains(',')) {
+                        return Err(SqlError::MultiTableWrite);
+                    }
+                    tokens.get(2)
+                }
+                Some(_) => return Err(SqlError::MultiTableWrite),
+                None => return Err(SqlError::UnknownTarget { verb }),
+            }
+        }
         _ => {
             return Err(SqlError::NotAReadStatement { verb });
         }
@@ -632,6 +691,87 @@ mod cte_tests {
         assert!(
             ensure_single_read_statement("with c as (select 'delete') select * from c").is_ok(),
             "the word `delete` here is a string value, not a verb"
+        );
+    }
+}
+
+#[cfg(test)]
+mod multi_table_tests {
+    use super::*;
+
+    /// A multi-table DELETE names its target BEFORE `from`.
+    ///
+    /// Verified against a real database: with only `notes` allowlisted,
+    /// `delete secrets from notes join secrets on 1=1` emptied `secrets`
+    /// (row count 1 -> 0). Looking for the table after `from` finds `notes`,
+    /// which is allowed — so the naive lookup admits a write to an unlisted
+    /// table.
+    #[test]
+    fn a_multi_table_delete_cannot_reach_an_unlisted_table() {
+        let allowed = vec!["notes".to_string()];
+        for attack in [
+            "delete secrets from notes join secrets on 1=1",
+            "DELETE secrets FROM notes INNER JOIN secrets ON 1=1",
+            "delete notes, secrets from notes join secrets on 1=1",
+        ] {
+            let err = table_written_by(attack, &allowed)
+                .expect_err("a multi-table delete must be refused");
+            assert_eq!(
+                err,
+                SqlError::MultiTableWrite,
+                "`{attack}` deletes from an unlisted table"
+            );
+        }
+    }
+
+    /// A multi-table UPDATE can assign to a table the allowlist never sees.
+    ///
+    /// Also verified against a real database: with only `notes` allowlisted,
+    /// `update notes join secrets on 1=1 set secrets.id = 'X'` rewrote a row in
+    /// `secrets`.
+    #[test]
+    fn a_multi_table_update_cannot_reach_an_unlisted_table() {
+        let allowed = vec!["notes".to_string()];
+        for attack in [
+            "update notes join secrets on 1=1 set secrets.id = 'X'",
+            "UPDATE notes LEFT JOIN secrets ON 1=1 SET secrets.id = 'X'",
+            "update notes, secrets set secrets.id = 'X'",
+        ] {
+            let err = table_written_by(attack, &allowed)
+                .expect_err("a multi-table update must be refused");
+            assert_eq!(
+                err,
+                SqlError::MultiTableWrite,
+                "`{attack}` writes to an unlisted table"
+            );
+        }
+    }
+
+    /// Restrictive direction: ordinary single-table writes still work.
+    #[test]
+    fn single_table_writes_are_unaffected() {
+        let allowed = vec!["notes".to_string()];
+        for good in [
+            "insert into notes values ('a')",
+            "update notes set id = 'b' where id = 'a'",
+            "delete from notes where id = 'a'",
+        ] {
+            assert_eq!(
+                table_written_by(good, &allowed).expect("a single-table write is allowed"),
+                "notes",
+                "`{good}` must still be admitted"
+            );
+        }
+    }
+
+    /// A table name inside a literal must not be mistaken for a target.
+    #[test]
+    fn a_join_keyword_inside_a_literal_does_not_refuse_a_legitimate_write() {
+        let allowed = vec!["notes".to_string()];
+        assert_eq!(
+            table_written_by("insert into notes values ('join')", &allowed)
+                .expect("the word `join` here is data"),
+            "notes"
         );
     }
 }

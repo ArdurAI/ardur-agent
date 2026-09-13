@@ -735,6 +735,16 @@ rather than reasoning about it, and both are closed:
 - **CTE preambles.** `with c as (select 1) insert into notes values ('x')`
   leads with a read keyword and writes. A `WITH` statement is additionally
   scanned for mutating keywords outside string literals.
+- **Multi-table writes.** `delete secrets from notes join secrets on 1=1`
+  names its target before `FROM`, and `update notes join secrets on 1=1 set
+  secrets.id = 'X'` assigns through a join — both reach a table the allowlist
+  never sees. Multi-table write forms are refused outright rather than
+  resolved.
+
+The write tool accepts single-table `INSERT`, `UPDATE` and `DELETE` only. The
+`dolt` command path is validated at build time against the argv-exec
+allowlist's own rules, so a path that would be denied on every call is refused
+as configuration instead of registering an unusable tool.
 
 The write tool additionally checks the target table against the declared
 allowlist, and refuses DDL entirely: an allowlist of tables cannot meaningfully

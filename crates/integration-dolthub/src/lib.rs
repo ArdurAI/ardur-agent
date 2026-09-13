@@ -75,18 +75,26 @@ impl IntegrationAdapter for DolthubAdapter {
                 .to_string(),
         })?;
 
-        // The same whitespace refusal the beads adapter makes, for the same
-        // reason: `ShellExecTool` cannot match a whitespace-bearing `argv[0]`,
-        // so the tools would build and then be denied on every call.
-        if binary.chars().any(char::is_whitespace) {
+        // Validate against the executor's OWN rules rather than a guess at
+        // them. `ShellExecTool::resolve_argv` applies two checks to `argv[0]` —
+        // the safe charset AND a whitespace refusal — and `is_safe_exec_char`
+        // permits a space, so the charset check alone is not the whole rule.
+        // Missing either one registers a tool that doctor reports healthy and
+        // that is then denied on every invocation.
+        if let Some(bad) = binary
+            .chars()
+            .find(|c| !ardur_tool_registry::is_safe_exec_char(*c) || c.is_whitespace())
+        {
             return Err(AdapterError::Unusable {
                 name: integration.name.to_string(),
                 adapter: ADAPTER_NAME.to_string(),
                 reason: format!(
-                    "the command path `{binary}` contains whitespace, which the \
-                     argv-exec allowlist cannot match — every call would be \
-                     denied; move the executable somewhere without spaces or \
-                     symlink it"
+                    "the command path `{binary}` contains {bad:?}, which the \
+                     argv-exec allowlist does not accept — every call would be \
+                     denied, so the configuration is refused here instead of \
+                     registering a tool that cannot run; move or symlink the \
+                     executable to a whitespace-free path of ASCII \
+                     alphanumerics and -_./:,=+@%"
                 ),
             });
         }
@@ -175,5 +183,58 @@ mod tests {
         let registry = AdapterRegistry::new().with(Arc::new(DolthubAdapter::new()));
 
         assert!(registry.build_active(&set).expect("off is fine").is_empty());
+    }
+}
+
+#[cfg(test)]
+mod exec_path_tests {
+    use super::*;
+    use ardur_integrations::{AdapterRegistry, parse_integrations};
+
+    fn build_result(command: &str) -> Result<Vec<Arc<dyn Tool>>, String> {
+        let set = parse_integrations(&format!(
+            "[integrations.dolthub]\ncommand = \"{command}\"\nenabled = true\n"
+        ))
+        .expect("fixture parses");
+        AdapterRegistry::new()
+            .with(Arc::new(DolthubAdapter::new()))
+            .build_active(&set)
+            .map_err(|e| e.to_string())
+    }
+
+    /// A path the executor would reject must not build.
+    ///
+    /// A whitespace-only check accepts these, so the tools register, doctor
+    /// reports the integration healthy, and every invocation is then denied by
+    /// `ShellExecTool::resolve_argv`. Validating against the executor's own
+    /// predicate means anything that builds can actually run.
+    #[test]
+    fn a_path_the_executor_would_deny_is_refused_at_build() {
+        for bad in [
+            "/opt/dölt",             // non-ASCII
+            "/usr/bin/dolt harness", // whitespace
+            "C:\\dolt\\dolt.exe",    // backslashes
+            "/usr/bin/dolt;rm",      // shell metacharacter
+        ] {
+            let err = match build_result(bad) {
+                Err(e) => e,
+                Ok(_) => panic!("a path the executor denies must not produce tools: {bad}"),
+            };
+            assert!(
+                err.contains("argv-exec allowlist does not accept"),
+                "the error must explain why `{bad}` is unusable: {err}"
+            );
+        }
+    }
+
+    /// Restrictive direction: ordinary paths still build.
+    #[test]
+    fn an_ordinary_path_still_builds() {
+        for good in ["dolt", "/usr/local/bin/dolt", "/opt/dolt-1.2/bin/dolt"] {
+            assert!(
+                build_result(good).is_ok(),
+                "`{good}` is a legitimate path and must build"
+            );
+        }
     }
 }
