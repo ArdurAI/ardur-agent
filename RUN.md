@@ -701,8 +701,61 @@ contents, which can be arbitrarily large and arbitrarily sensitive.
 
 A configured vault that does not exist is **not** a boot failure: an operator
 may write configuration on a machine where the vault is not yet mounted, and
-`ardur doctor` reports it. The `dolthub` adapter is tracked separately and is
-not yet in this build — enabling it fails the boot with `no adapter for it`.
+`ardur doctor` reports it.
+
+### DoltHub
+
+`[integrations.dolthub]` with a `command` endpoint pointing at the `dolt` binary
+yields `dolthub.query`, a read tool. A write tool, `dolthub.execute`, appears
+**only** when the operator declares writable tables:
+
+```toml
+[integrations.dolthub]
+command = "dolt"
+enabled = true
+capabilities = ["table:knowledge"]   # without this there is NO write tool
+```
+
+Queries run against the Dolt clone in the process's working directory. Both
+verbs accept **exactly one SQL statement**, and this is the adapter's central
+constraint rather than a stylistic one: `dolt sql -q` executes *every*
+statement in its argument. `select 1; insert into t values (99)` returns the
+select's rows and performs the insert — verified experimentally, and pinned by a
+test that runs it against a real database. A read-only guard that checks only
+the leading keyword would therefore admit `select 1; delete from notes`, so
+multi-statement input is refused outright instead.
+
+Two further bypasses were found by testing the gate against a real database
+rather than reasoning about it, and both are closed:
+
+- **Backslash escapes.** Dolt treats `\'` as a literal quote, so in
+  `select 'a\'' ; insert into notes values ('x')` the string closes and the
+  `;` is a real separator. Quote tracking that toggles on every `'` concludes
+  the opposite and reads the separator as data.
+- **CTE preambles.** `with c as (select 1) insert into notes values ('x')`
+  leads with a read keyword and writes. A `WITH` statement is additionally
+  scanned for mutating keywords outside string literals.
+- **Multi-table writes.** `delete secrets from notes join secrets on 1=1`
+  names its target before `FROM`, and `update notes join secrets on 1=1 set
+  secrets.id = 'X'` assigns through a join — both reach a table the allowlist
+  never sees. Multi-table write forms are refused outright rather than
+  resolved.
+
+The write tool accepts single-table `INSERT`, `UPDATE` and `DELETE` only. The
+`dolt` command path is validated at build time against the argv-exec
+allowlist's own rules, so a path that would be denied on every call is refused
+as configuration instead of registering an unusable tool.
+
+The write tool additionally checks the target table against the declared
+allowlist, and refuses DDL entirely: an allowlist of tables cannot meaningfully
+constrain a statement that drops one, so schema changes stay an operator
+action.
+
+Reads require `cap.integration.dolthub.read`, writes
+`cap.integration.dolthub.write`, and both declare `cap.shell_exec` and
+`cap.process_spawn` because they spawn `dolt`. The SQL text is passed as a
+single argv entry, so a query containing shell metacharacters is a string to
+Dolt rather than syntax to a shell.
 
 ## Platform integrations
 

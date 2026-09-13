@@ -33,7 +33,7 @@ mod shell;
 pub use files::{ListDirTool, ReadFileTool, WriteFileTool};
 pub use http::{HttpFetchTool, is_internal_ip};
 pub use media::{ImageAnalyzeTool, ImageGenerateTool, SttTool, TtsTool, VoiceNoteTool};
-pub use shell::{ShellExecTool, ShellTool};
+pub use shell::{ShellExecTool, ShellTool, is_safe_exec_char};
 
 use std::path::PathBuf;
 

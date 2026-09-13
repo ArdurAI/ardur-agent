@@ -282,6 +282,47 @@ The platform tool crates are also implemented as explicit integration surfaces:
   absolute path, and a traversal to `/etc/passwd`) are all refused, and a
   refused write is proven to create nothing.
 
+- **The dolthub adapter** (`crates/integration-dolthub`) turns a declared
+  `[integrations.dolthub]` block into `dolthub.query`, and `dolthub.execute`
+  only when the operator declares writable tables via `table:` entries — an
+  integration with no declared table gets no write tool at all, rather than an
+  unconstrained one.
+
+  The admission gate is built around a verified fact: `dolt sql -q` executes
+  **every** statement in its argument, so `select 1; insert into t values (99)`
+  returns the select's rows and performs the insert. A read guard that inspects
+  only the leading keyword is therefore a write hole, and multi-statement input
+  is refused outright rather than classified statement by statement. Comments
+  are stripped and quoting tracked first, so a `;` inside a literal is data and
+  a `;` after a comment still counts.
+
+  Writes additionally check the target table against the allowlist and refuse
+  DDL: a table allowlist cannot constrain a statement that drops a table. Both
+  verbs re-declare `cap.shell_exec` and `cap.process_spawn`, and SQL is passed
+  as one argv entry.
+
+  Two bypasses were found by probing a real database rather than reasoning
+  about the grammar, and both are closed with regression tests: backslash
+  escapes (`\'` keeps a checker's quote state out of step with Dolt's, hiding a
+  separator) and CTE preambles (`with c as (select 1) insert ...` leads with a
+  read keyword and writes).
+
+  Review found a third bypass and a fourth surfaced while checking it: a
+  multi-table `DELETE` names its target before `FROM`, and a multi-table
+  `UPDATE` assigns through a join, so both reach a table the allowlist never
+  sees. Multi-table write forms are now refused outright.
+
+  The real-database tests are `#[ignore]`d and run by a dedicated CI job, for
+  the reason #358 established: an early return on a missing binary is counted
+  as a pass, so the whole suite could report green without executing.
+
+  Covered by 37 unit tests and 6 against a **real Dolt database**, one of which
+  demonstrates the stacked-statement execution the gate exists to stop, and one
+  proving a refused write leaves the row count unchanged.
+
+  With this adapter, ARD-459's config surface, registry, doctor checks and all
+  three reference adapters are complete.
+
 ## Not Yet Turnkey
 
 Do not treat this repo as a public production deployment without additional
