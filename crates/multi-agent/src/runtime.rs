@@ -7,7 +7,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use parking_lot::RwLock;
 
-use ardur_cap_token::{BiscuitCapTokenAttenuator, CapToken, CapTokenAttenuator, Caveat, PublicKey};
+use ardur_cap_token::{
+    BiscuitCapTokenAttenuator, CapToken, CapTokenAttenuator, Caveat, DenyList, PublicKey,
+};
 use ardur_receipt::{CostTuple, UnixTsMillis};
 use ardur_runtime::{
     CapTokenRef, ChatRuntime, CostTuple as RuntimeCostTuple, InMemoryRuntime, ReceiptId, SessionId,
@@ -195,6 +197,27 @@ impl InMemoryMultiAgentRuntime<CapVerifyingRuntime<InMemoryRuntime>> {
         parent_receipt_id: ReceiptId,
     ) -> Self {
         let child = CapVerifyingRuntime::new(InMemoryRuntime::new(), root, audience);
+        Self::new(child, parent_cap_token, root, parent_receipt_id)
+    }
+}
+
+impl<D: DenyList + Send + Sync> InMemoryMultiAgentRuntime<CapVerifyingRuntime<InMemoryRuntime, D>> {
+    /// A verifying runtime whose child consults `deny` on every turn (gh#361).
+    ///
+    /// Hand in a deny list the revoker also holds (`SharedDenyList` clones
+    /// share one set) so revoking a parent token stops its live sub-agents at
+    /// their next turn. Without this, a delegated capability can only be
+    /// waited out: `verifying` gives each child a private empty list, so a
+    /// revocation the parent performs is invisible to the child it targets.
+    pub fn verifying_with_deny(
+        audience: impl Into<String>,
+        parent_cap_token: CapToken,
+        root: PublicKey,
+        parent_receipt_id: ReceiptId,
+        deny: D,
+    ) -> Self {
+        let child =
+            CapVerifyingRuntime::with_deny_list(InMemoryRuntime::new(), root, audience, deny);
         Self::new(child, parent_cap_token, root, parent_receipt_id)
     }
 }

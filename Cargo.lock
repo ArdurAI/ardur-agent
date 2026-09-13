@@ -1012,6 +1012,7 @@ dependencies = [
  "anyhow",
  "ardur-cap-token",
  "ardur-cost-gate",
+ "ardur-fused-runtime",
  "ardur-receipt",
  "ardur-runtime",
  "async-trait",
