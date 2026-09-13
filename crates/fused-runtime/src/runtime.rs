@@ -956,29 +956,38 @@ impl FusedRuntime {
     /// definitions the turn cannot act on and invites calls certain to be
     /// denied.
     ///
-    /// A tool requiring no capability is always advertised: it is subject to no
-    /// cap-token check at invocation either, so filtering it here would hide a
-    /// tool the turn can legitimately call.
+    /// A tool requiring no capability is still checked: the name-scoped
+    /// cap-token check and the Cedar `Action::ToolInvoke` decision apply to
+    /// every call regardless of declared capabilities, so advertisement must
+    /// apply them too or a Cedar-denied tool stays visible.
     fn tool_defs_for(
         &self,
         req: &SubmitRequest,
         provisioning: &PerRequestProvisioning,
+        session_id: SessionId,
         now_unix: u64,
     ) -> Vec<ToolDef> {
         self.tools
             .list()
             .into_iter()
             .filter(|t| {
-                // Exactly the predicate the invocation path applies, so the
-                // advertised set cannot drift from the callable set.
-                self.authorize_tool_capabilities(
-                    req,
-                    provisioning,
-                    now_unix,
-                    &t.id().0,
-                    t.required_capabilities(),
-                )
-                .is_ok()
+                let name = t.id().0;
+                // BOTH gates the invocation path applies, in the same order:
+                // the name-scoped token check plus Cedar, then the tool's
+                // declared capabilities. Applying only the second would leave a
+                // Cedar-denied tool advertised — the same disclosure one gate
+                // over.
+                self.authorize_tool_invocation(req, provisioning, session_id, now_unix, &name)
+                    .is_ok()
+                    && self
+                        .authorize_tool_capabilities(
+                            req,
+                            provisioning,
+                            now_unix,
+                            &name,
+                            t.required_capabilities(),
+                        )
+                        .is_ok()
             })
             .map(|t| {
                 let schema = t.schema();
@@ -2154,7 +2163,7 @@ impl FusedRuntime {
         // gh#415: narrowed to what this turn's cap-token permits, so the model
         // is not told about capabilities the operator withheld.
         let tool_defs_now_unix = self.clock.now_ms().get() / 1000;
-        let tool_defs = self.tool_defs_for(&req, &provisioning, tool_defs_now_unix);
+        let tool_defs = self.tool_defs_for(&req, &provisioning, session_id, tool_defs_now_unix);
 
         // ---- 4. pre-submit hooks (once, on the initial request). A veto aborts
         //         (no reservation is held yet, so no release); a replace swaps the
@@ -2795,7 +2804,7 @@ impl FusedRuntime {
             };
 
             // gh#415: same cap-token narrowing as the non-streaming path.
-            let tool_defs = self.tool_defs_for(&req, &provisioning, now_unix);
+            let tool_defs = self.tool_defs_for(&req, &provisioning, session_id, now_unix);
 
             // ---- 4. pre-submit hooks. A veto needs no release (no reservation
             //         is held) and fires no error hook (matching `submit`).

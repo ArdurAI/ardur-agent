@@ -23,6 +23,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use ardur_cedar_policy::{CedarPolicyBundle, PolicyBundle, PolicySource};
 use ardur_provider_runtime::{
     CompletionRequest, CompletionResponse, FinishReason, Provider, ProviderError, RateCard, Usage,
 };
@@ -215,6 +216,27 @@ fn two_tool_registry(invocations: Arc<AtomicUsize>) -> Arc<ToolRegistry> {
     Arc::new(registry)
 }
 
+/// Permits the chat verb but forbids `Action::ToolInvoke`.
+fn submit_only_policy() -> CedarPolicyBundle {
+    CedarPolicyBundle::load(PolicySource::Embedded(
+        "permit(principal, action == Action::\"Submit\", resource);".to_string(),
+    ))
+    .expect("submit-only policy compiles")
+}
+
+/// A registry where EVERY tool needs a capability, so a bare token permits none.
+fn only_capability_gated_registry() -> Arc<ToolRegistry> {
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(Box::new(CapTool::new(
+            "dolthub.execute",
+            vec![Capability::Custom("integration.dolthub.write".to_string())],
+            Arc::new(AtomicUsize::new(0)),
+        )))
+        .expect("dolthub id is unique");
+    Arc::new(registry)
+}
+
 /// A tool the turn's cap-token cannot use must not be advertised to the model.
 #[tokio::test]
 async fn a_tool_the_token_cannot_call_is_not_advertised() {
@@ -308,5 +330,78 @@ async fn hiding_a_tool_does_not_replace_the_invocation_check() {
         invocations.load(Ordering::SeqCst),
         0,
         "the tool body must never run"
+    );
+}
+
+/// A token that permits nothing yields an empty tool list, not a failed turn.
+///
+/// Review item 4, checked rather than assumed. An empty list is the same shape
+/// a tool-less deployment sends, so the turn proceeds as a plain completion.
+/// Failing the turn instead would make a narrow token indistinguishable from a
+/// broken one, and would let the *absence* of a capability become an error the
+/// model can observe — the same disclosure this change closes.
+#[tokio::test]
+async fn a_token_permitting_nothing_yields_an_empty_tool_list_not_an_error() {
+    let provider = Arc::new(RecordingProvider::new());
+    let runtime = runtime_builder(provider.clone())
+        .with_tools(only_capability_gated_registry())
+        .build()
+        .expect("runtime builds");
+
+    // Grants the chat verb but no tool capability at all.
+    let token = mint_token_as(HOLDER, AUDIENCE, &[TOOL]);
+    runtime
+        .submit(user_request("hi", &token))
+        .await
+        .expect("the turn still completes");
+
+    assert!(
+        provider.last_offered().await.is_empty(),
+        "no tool is permitted, so none may be advertised"
+    );
+}
+
+/// A tool Cedar would deny is not advertised either.
+///
+/// Review item 1, and it found a real gap: the invocation path applies TWO
+/// gates — `authorize_tool_invocation` (name-scoped token check plus the Cedar
+/// `Action::ToolInvoke` decision) and `authorize_tool_capabilities` (the
+/// tool's declared capabilities). Filtering on only the second left a
+/// Cedar-denied tool advertised, which is the same disclosure one gate over.
+#[tokio::test]
+async fn a_tool_cedar_denies_is_not_advertised() {
+    let provider = Arc::new(RecordingProvider::new());
+    // Permits the chat verb but forbids Action::ToolInvoke, so the turn
+    // completes and the advertised list is observable. (deny_all forbids chat
+    // too, so the turn errors before any tool list is built — which is how the
+    // first version of this test passed while asserting nothing.)
+    let runtime = runtime_builder_with_policy(provider.clone(), submit_only_policy())
+        .with_tools(two_tool_registry(Arc::new(AtomicUsize::new(0))))
+        .build()
+        .expect("runtime builds");
+
+    // A token that grants everything, so only Cedar can deny.
+    let token = mint_token_as(
+        HOLDER,
+        AUDIENCE,
+        &[
+            TOOL,
+            "echo",
+            "dolthub.execute",
+            "cap.integration.dolthub.write",
+        ],
+    );
+    let result = runtime.submit(user_request("hi", &token)).await;
+
+    // The turn may complete (no tool was needed) or be denied by policy; what
+    // matters is that nothing Cedar refuses was ever offered.
+    // The assertion must actually run: a test whose only check sits behind an
+    // `if` that is false proves nothing. Cedar denies ToolInvoke but not the
+    // chat verb, so the turn completes and the tool list is observable.
+    result.expect("the turn completes; only tool invocation is denied");
+    let offered = provider.last_offered().await;
+    assert!(
+        offered.is_empty(),
+        "Cedar denies every tool invoke, so none may be advertised: {offered:?}"
     );
 }
