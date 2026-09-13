@@ -216,7 +216,24 @@ impl Tool for ObsidianTool {
             }
             ObsidianVerb::Write => {
                 let path = Self::required_str(&args, "path")?;
-                let content = Self::required_str(&args, "content")?;
+                // Content may legitimately be empty: creating a blank note, or
+                // clearing an existing one, are ordinary operations. The
+                // published schema permits any string and the delegated
+                // builtin supports a zero-byte write, so only the adapter
+                // would have prevented it.
+                let content = match args.get("content") {
+                    Some(Value::String(s)) => s.clone(),
+                    None => {
+                        return Err(ToolError::InvalidArgs(
+                            "`content` is required and must be a string".to_string(),
+                        ));
+                    }
+                    Some(_) => {
+                        return Err(ToolError::InvalidArgs(
+                            "`content` must be a string".to_string(),
+                        ));
+                    }
+                };
                 // Constrained rather than passed through: an unrecognised mode
                 // would reach the builtin as an unknown string.
                 let mode = match args.get("mode") {

@@ -31,6 +31,59 @@ const DEFAULT_MAX_BYTES: usize = 64 * 1024;
 /// Default directory-listing ceiling.
 const DEFAULT_MAX_ENTRIES: usize = 100;
 
+/// Resolve `.` and `..` in a path textually, without touching the filesystem.
+///
+/// Used to judge a symlink's target, which may not exist yet and therefore
+/// cannot be canonicalized. Purely lexical normalisation is sound here because
+/// the result is only compared against an already-canonical root: a target that
+/// normalises outside the root cannot be brought back inside it by a link the
+/// check has not yet followed, and any intermediate link on the *existing*
+/// portion of the path is caught by the canonicalize pass that follows.
+fn normalize_lexically(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                // Popping is correct for a lexical view; `/a/../b` is `/b`.
+                out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+/// Canonicalize the deepest existing ancestor of `path` and re-attach the rest.
+///
+/// A symlink's stored target may name a root by a non-canonical spelling — on
+/// macOS `/var/folders/...` is really `/private/var/folders/...` — so comparing
+/// it against an already-canonical root would reject links that never leave the
+/// tree. Canonicalizing what exists resolves that, while the lexically
+/// normalised tail keeps the comparison meaningful for a target that does not
+/// exist yet.
+fn canonicalize_existing_prefix(path: &Path) -> PathBuf {
+    let mut probe: &Path = path;
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        if let Ok(real) = probe.canonicalize() {
+            let mut out = real;
+            for part in tail.iter().rev() {
+                out.push(part);
+            }
+            return out;
+        }
+        match (probe.file_name(), probe.parent()) {
+            (Some(name), Some(parent)) => {
+                tail.push(name.to_os_string());
+                probe = parent;
+            }
+            // Nothing on this path exists; the lexical form is the best answer.
+            _ => return path.to_path_buf(),
+        }
+    }
+}
+
 /// Resolve `rel` against `root` and confirm the result stays inside `root`.
 ///
 /// Refuses absolute inputs and any `..` (or other non-`Normal`/`CurDir`)
@@ -70,8 +123,46 @@ fn contained_path(root: &Path, rel: &str) -> Result<PathBuf, ToolError> {
     // Defence in depth against symlink escapes: canonicalize the nearest
     // existing ancestor and confirm it is still under the root. (The target
     // itself may not exist yet — e.g. a file about to be written.)
+    //
+    // A *dangling* symlink is the subtle case. `canonicalize` resolves the link
+    // and then fails because its target does not exist, which is
+    // indistinguishable here from "this path simply does not exist yet". Walking
+    // up to the parent would then approve the link's in-vault directory, and the
+    // subsequent open would follow the link and create the target outside the
+    // root. So check for a symlink explicitly before falling back: a path that
+    // *is* a link must resolve inside the root, whether or not its target
+    // currently exists.
     let mut probe: &Path = &joined;
     loop {
+        // `symlink_metadata` does not follow the link, so this is true exactly
+        // when `probe` is itself a symlink — including a dangling one.
+        if probe
+            .symlink_metadata()
+            .is_ok_and(|m| m.file_type().is_symlink())
+        {
+            let target = probe.read_link().map_err(|e| {
+                ToolError::ExecutionFailed(format!("cannot read symlink `{rel}`: {e}"))
+            })?;
+            // A relative link resolves against the link's own directory.
+            let resolved = if target.is_absolute() {
+                target
+            } else {
+                probe.parent().unwrap_or(&canonical_root).join(target)
+            };
+            // The target may not exist, so normalise `.` and `..` lexically
+            // rather than canonicalizing. The link's *stored* target can be
+            // written against a non-canonical spelling of the root (on macOS a
+            // vault under `/var/...` is really `/private/var/...`), so
+            // canonicalize the deepest existing ancestor of the target and
+            // rebuild the remainder on top of it before comparing.
+            let normalized = canonicalize_existing_prefix(&normalize_lexically(&resolved));
+            if !normalized.starts_with(&canonical_root) {
+                return Err(ToolError::Denied {
+                    reason: format!("path resolves outside the tool root via a symlink: `{rel}`"),
+                });
+            }
+        }
+
         match probe.canonicalize() {
             Ok(real) => {
                 if !real.starts_with(&canonical_root) {

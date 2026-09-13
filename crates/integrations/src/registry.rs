@@ -157,6 +157,35 @@ impl AdapterRegistry {
         Ok(tools)
     }
 
+    /// Build the tools for one integration, whether or not it is enabled.
+    ///
+    /// Used by doctor to answer "would this configuration actually work?"
+    /// without booting: an adapter existing by name does not mean it accepts
+    /// this endpoint, and only the adapter can say. `build_active` is the
+    /// runtime path; this is the same question asked of a single entry.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RegistryError::NoAdapter`] if nothing serves this name, or the
+    /// adapter's own refusal.
+    pub fn build_one(
+        &self,
+        integration: &Integration,
+    ) -> Result<Vec<Arc<dyn Tool>>, RegistryError> {
+        let adapter = self
+            .adapters
+            .get(integration.name.as_str())
+            .ok_or_else(|| RegistryError::NoAdapter {
+                name: integration.name.to_string(),
+                known: if self.adapters.is_empty() {
+                    "none".to_string()
+                } else {
+                    self.known().join(", ")
+                },
+            })?;
+        Ok(adapter.build(integration)?)
+    }
+
     /// Whether an adapter exists for `name`. Used by doctor to distinguish
     /// "not configured" from "configured but unsupported by this build".
     #[must_use]

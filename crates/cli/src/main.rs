@@ -636,15 +636,10 @@ fn push_integration_checks(root: &Path, checks: &mut Vec<serde_json::Value>, war
     // adapter fails the boot, so reporting it `ok` because its directory exists
     // would be actively misleading — doctor would be green about a
     // configuration that cannot start.
-    // The adapters this binary carries. Doctor must consult the *same* set the
-    // runtime would, or it reports health for a configuration that cannot boot.
-    let registry = ardur_integrations::AdapterRegistry::new()
-        .with(std::sync::Arc::new(
-            ardur_integration_beads::BeadsAdapter::new(),
-        ))
-        .with(std::sync::Arc::new(
-            ardur_integration_obsidian::ObsidianAdapter::new(),
-        ));
+    // The adapters this binary carries, from the single shared constructor the
+    // chat runtime also uses — so doctor cannot report support the runtime
+    // does not have, or withhold support it does.
+    let registry = ardur_cli::integration_registry();
 
     for integration in set.iter() {
         let (present, detail) = match &integration.endpoint {
@@ -656,6 +651,15 @@ fn push_integration_checks(root: &Path, checks: &mut Vec<serde_json::Value>, war
             }
         };
         let has_adapter = registry.has(&integration.name);
+        // An adapter existing by name is not the same as it accepting this
+        // configuration: the obsidian adapter rejects a `command` endpoint, the
+        // beads adapter rejects a `root`. Asking it to build is the only honest
+        // way to know, and it is the same call the runtime makes.
+        let build_error = if integration.enabled && has_adapter {
+            registry.build_one(integration).err()
+        } else {
+            None
+        };
 
         let (status, note) = if !integration.enabled {
             // Disabled: neither a missing resource nor a missing adapter can
@@ -672,6 +676,12 @@ fn push_integration_checks(root: &Path, checks: &mut Vec<serde_json::Value>, war
                      the configuration declares"
                         .to_string(),
                 ),
+            )
+        } else if let Some(e) = build_error {
+            *warnings += 1;
+            (
+                "warn",
+                Some(format!("enabled, but unusable as configured: {e}")),
             )
         } else if !present {
             *warnings += 1;

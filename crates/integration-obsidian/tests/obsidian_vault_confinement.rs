@@ -203,3 +203,106 @@ async fn the_adapter_builds_three_namespaced_tools() {
         );
     }
 }
+
+/// A dangling symlink must not be a way out of the vault.
+///
+/// This was a real escape, found in review and reproduced before it was fixed:
+/// `canonicalize` resolves a symlink and *then* fails when the target does not
+/// exist, which is indistinguishable from "this path does not exist yet". The
+/// containment check walked up to the link's in-vault parent, approved it, and
+/// the write followed the link — creating the file outside the vault.
+///
+/// Every earlier confinement test used paths whose targets existed, which is
+/// exactly why none of them caught it.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_dangling_symlink_cannot_write_outside_the_vault() {
+    let (dir, vault) = vault_with_outside_secret();
+    let outside = dir.path().join("ESCAPED.md");
+    assert!(!outside.exists(), "precondition: the target does not exist");
+
+    // A link inside the vault aimed at a non-existent path outside it.
+    std::os::unix::fs::symlink(&outside, vault.join("link.md")).expect("symlink");
+
+    let result = tool(ObsidianVerb::Write, &vault)
+        .invoke(
+            &ctx(dir.path().to_path_buf()),
+            json!({ "path": "link.md", "content": "PWNED" }),
+        )
+        .await;
+
+    assert!(
+        result.is_err(),
+        "writing through a dangling symlink must be refused; got {result:?}"
+    );
+    assert!(
+        !outside.exists(),
+        "the write must not have created {} outside the vault",
+        outside.display()
+    );
+}
+
+/// The same hole, reading rather than writing, and with a target that exists.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_symlink_to_an_existing_outside_file_cannot_be_read() {
+    let (dir, vault) = vault_with_outside_secret();
+    std::os::unix::fs::symlink(dir.path().join("secret.txt"), vault.join("leak.md"))
+        .expect("symlink");
+
+    let result = tool(ObsidianVerb::Read, &vault)
+        .invoke(&ctx(dir.path().to_path_buf()), json!({ "path": "leak.md" }))
+        .await;
+
+    match result {
+        Err(_) => {}
+        Ok(output) => assert!(
+            !output.content.to_string().contains("TOP-SECRET-VALUE"),
+            "a symlink must not leak a file outside the vault"
+        ),
+    }
+}
+
+/// A symlink that stays inside the vault is still usable.
+///
+/// The contrast that keeps the two tests above honest: the fix must reject
+/// escaping links, not all links.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_symlink_pointing_inside_the_vault_still_works() {
+    let (dir, vault) = vault_with_outside_secret();
+    std::os::unix::fs::symlink(vault.join("notes").join("idea.md"), vault.join("alias.md"))
+        .expect("symlink");
+
+    let output = tool(ObsidianVerb::Read, &vault)
+        .invoke(
+            &ctx(dir.path().to_path_buf()),
+            json!({ "path": "alias.md" }),
+        )
+        .await
+        .expect("a link wholly inside the vault is legitimate");
+
+    assert!(
+        output.content.to_string().contains("an idea"),
+        "an in-vault symlink must resolve normally: {:?}",
+        output.content
+    );
+}
+
+/// An empty note is a legitimate thing to write.
+#[tokio::test]
+async fn an_empty_note_can_be_written() {
+    let (dir, vault) = vault_with_outside_secret();
+
+    tool(ObsidianVerb::Write, &vault)
+        .invoke(
+            &ctx(dir.path().to_path_buf()),
+            json!({ "path": "notes/blank.md", "content": "" }),
+        )
+        .await
+        .expect("creating a blank note is an ordinary operation");
+
+    let written =
+        std::fs::read_to_string(vault.join("notes").join("blank.md")).expect("the note exists");
+    assert_eq!(written, "", "the note must be empty, not rejected");
+}
