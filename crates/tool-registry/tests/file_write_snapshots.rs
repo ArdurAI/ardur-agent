@@ -208,3 +208,63 @@ async fn an_overwrite_can_be_undone_end_to_end() {
         "the mistaken write must be fully undone"
     );
 }
+
+/// Concurrent writes to the same path do not corrupt the store (review item 5).
+///
+/// Checked rather than asserted in prose. Two writes race between capture and
+/// write, so the second capture may legitimately record the first write's
+/// content — that is a semantics question, not corruption. What must hold is
+/// that every id the tool reports resolves to bytes matching its digest, and
+/// that the file ends as one of the two writes rather than interleaved.
+#[tokio::test]
+async fn concurrent_writes_leave_a_consistent_store() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("root");
+    tokio::fs::create_dir_all(&root).await.expect("root");
+    tokio::fs::write(root.join("hot.md"), b"initial")
+        .await
+        .expect("seed");
+
+    let store = SnapshotStore::new(dir.path().join("snapshots"));
+    let tool =
+        std::sync::Arc::new(WriteFileTool::with_root(root.clone()).with_snapshots(store.clone()));
+
+    let mut handles = Vec::new();
+    for i in 0..8 {
+        let tool = tool.clone();
+        handles.push(tokio::spawn(async move {
+            tool.invoke(
+                &ctx(),
+                json!({ "path": "hot.md", "content": format!("writer {i}") }),
+            )
+            .await
+        }));
+    }
+
+    let mut ids = Vec::new();
+    for h in handles {
+        let out = h.await.expect("task joins").expect("the write succeeds");
+        if let Some(id) = out.receipt_data["snapshot"]["prior_content"].as_str() {
+            ids.push(id.to_string());
+        }
+    }
+
+    assert!(!ids.is_empty(), "at least one write captured prior content");
+
+    // Every reported id must resolve, and to bytes that hash to it — `read`
+    // re-derives the digest, so a corrupt or truncated blob fails here.
+    for id in &ids {
+        store
+            .read(&SnapshotId(id.clone()))
+            .await
+            .unwrap_or_else(|e| panic!("reported id `{id}` must resolve cleanly: {e}"));
+    }
+
+    // The file is exactly one writer's output, not a mix.
+    let final_bytes = tokio::fs::read(root.join("hot.md")).await.expect("read");
+    let final_text = String::from_utf8(final_bytes).expect("utf8");
+    assert!(
+        final_text.starts_with("writer ") && final_text.len() <= "writer 7".len(),
+        "the file must be one writer's content, not interleaved: {final_text:?}"
+    );
+}

@@ -131,6 +131,68 @@ impl SnapshotStore {
         self.root.join(shard).join(rest)
     }
 
+    /// Remove blobs whose last modification is older than `max_age`.
+    ///
+    /// Review item 4: the store otherwise grows without bound, which is a disk
+    /// leak for a long-running session. Pruning is a caller decision — there is
+    /// no ambient policy here about how long an undo should stay available, and
+    /// guessing one would silently discard recovery data an operator expected
+    /// to keep.
+    ///
+    /// Returns the number of blobs removed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SnapshotError`] if the store cannot be traversed. A blob that
+    /// vanishes mid-sweep is not an error: another pruner reaching it first is
+    /// the intended outcome, not a failure.
+    pub async fn prune_older_than(
+        &self,
+        max_age: std::time::Duration,
+    ) -> Result<usize, SnapshotError> {
+        let cutoff = match std::time::SystemTime::now().checked_sub(max_age) {
+            Some(cutoff) => cutoff,
+            // A max_age larger than the clock's epoch would prune everything;
+            // refusing is safer than deleting the whole store on an arithmetic
+            // edge case.
+            None => return Ok(0),
+        };
+
+        let mut removed = 0usize;
+        let mut shards = match tokio::fs::read_dir(&self.root).await {
+            Ok(shards) => shards,
+            // Nothing captured yet is nothing to prune.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(source) => {
+                return Err(SnapshotError::Read {
+                    path: self.root.display().to_string(),
+                    source,
+                });
+            }
+        };
+
+        while let Ok(Some(shard)) = shards.next_entry().await {
+            let mut blobs = match tokio::fs::read_dir(shard.path()).await {
+                Ok(blobs) => blobs,
+                Err(_) => continue,
+            };
+            while let Ok(Some(blob)) = blobs.next_entry().await {
+                let Ok(meta) = blob.metadata().await else {
+                    continue;
+                };
+                let Ok(modified) = meta.modified() else {
+                    // A filesystem without mtime cannot be age-pruned; skipping
+                    // keeps the blob rather than deleting on unknown age.
+                    continue;
+                };
+                if modified < cutoff && tokio::fs::remove_file(blob.path()).await.is_ok() {
+                    removed += 1;
+                }
+            }
+        }
+        Ok(removed)
+    }
+
     /// Capture the current content of `path`, if it has any.
     ///
     /// # Errors
@@ -398,6 +460,56 @@ mod tests {
         assert!(
             matches!(result, Err(SnapshotError::Read { .. })),
             "expected a Read error, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pruning_removes_old_blobs_and_keeps_recent_ones() {
+        let (dir, store) = store().await;
+        let file = dir.path().join("note.md");
+        tokio::fs::write(&file, b"kept").await.expect("seed");
+        let snap = store.capture(&file).await.expect("capture");
+
+        // Nothing is old yet, so a long max_age prunes nothing.
+        assert_eq!(
+            store
+                .prune_older_than(std::time::Duration::from_secs(3600))
+                .await
+                .expect("prune succeeds"),
+            0,
+            "a fresh blob must not be pruned"
+        );
+        assert!(
+            store.restore(&snap, &file).await.is_ok(),
+            "and it must still be restorable"
+        );
+
+        // A zero max_age makes everything older than the cutoff.
+        let removed = store
+            .prune_older_than(std::time::Duration::ZERO)
+            .await
+            .expect("prune succeeds");
+        assert!(removed >= 1, "an aged-out blob must be removed");
+
+        let err = store
+            .restore(&snap, &file)
+            .await
+            .expect_err("a pruned snapshot is gone");
+        assert!(
+            matches!(err, SnapshotError::Missing { .. }),
+            "a pruned blob must report Missing rather than silently succeeding: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pruning_an_empty_store_is_not_an_error() {
+        let (_dir, store) = store().await;
+        assert_eq!(
+            store
+                .prune_older_than(std::time::Duration::ZERO)
+                .await
+                .expect("pruning nothing succeeds"),
+            0
         );
     }
 }
