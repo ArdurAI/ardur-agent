@@ -301,7 +301,13 @@ The platform tool crates are also implemented as explicit integration surfaces:
   verbs re-declare `cap.shell_exec` and `cap.process_spawn`, and SQL is passed
   as one argv entry.
 
-  Covered by 22 unit tests and 5 against a **real Dolt database**, one of which
+  Two bypasses were found by probing a real database rather than reasoning
+  about the grammar, and both are closed with regression tests: backslash
+  escapes (`\'` keeps a checker's quote state out of step with Dolt's, hiding a
+  separator) and CTE preambles (`with c as (select 1) insert ...` leads with a
+  read keyword and writes).
+
+  Covered by 29 unit tests and 6 against a **real Dolt database**, one of which
   demonstrates the stacked-statement execution the gate exists to stop, and one
   proving a refused write leaves the row count unchanged.
 

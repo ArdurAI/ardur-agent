@@ -53,17 +53,34 @@ pub enum SqlError {
 
 /// Statements that only read.
 ///
-/// `WITH` is included because a CTE is a read in practice — but note that
-/// `WITH ... DELETE` exists in some dialects, which is precisely why the
-/// multi-statement and write-verb checks are applied independently rather than
-/// trusting this list alone.
+/// `WITH` is present because a CTE is normally a read — but `WITH ... INSERT`
+/// is accepted by Dolt (verified against a real database: `with c as (select 1)
+/// insert into notes values ('x')` adds a row). So leading with `WITH` is not
+/// sufficient, and [`ensure_single_read_statement`] additionally scans a `WITH`
+/// statement for a mutating keyword.
 const READ_VERBS: &[&str] = &["select", "show", "describe", "desc", "explain", "with"];
+
+/// Keywords that mutate data or schema, in any position.
+///
+/// Used to disqualify a `WITH` statement whose CTE is only a preamble to a
+/// write. Matching these anywhere is deliberately blunt: a column literally
+/// named `insert` would have to be backtick-quoted to parse in the first place,
+/// and refusing an odd-but-legal query is the acceptable direction to be wrong.
+const MUTATING_KEYWORDS: &[&str] = &[
+    "insert", "update", "delete", "replace", "drop", "alter", "truncate", "create", "rename",
+    "grant", "revoke", "call",
+];
 
 /// Strip SQL comments so they cannot hide a statement separator.
 ///
 /// `select 1 -- ;drop` is one statement; `select 1 /* ; */ ; drop table t` is
 /// two. Counting separators without removing comments gets both wrong, in
 /// opposite directions.
+///
+/// Backslash escapes are honoured inside `'` and `"` strings because Dolt
+/// honours them: after `\'` the string is still open. A checker that toggles on
+/// every quote ends up in the opposite state to Dolt, and then reads a real
+/// separator as string data.
 fn strip_comments(sql: &str) -> String {
     let mut out = String::with_capacity(sql.len());
     let bytes: Vec<char> = sql.chars().collect();
@@ -75,6 +92,19 @@ fn strip_comments(sql: &str) -> String {
     while i < bytes.len() {
         let c = bytes[i];
         let next = bytes.get(i + 1).copied();
+
+        // Inside a quoted string, a backslash consumes the next character —
+        // including a quote, and including another backslash.
+        if (in_single || in_double) && c == '\\' {
+            out.push(c);
+            if let Some(escaped) = next {
+                out.push(escaped);
+                i += 2;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
 
         if !in_single && !in_double && !in_backtick {
             // `-- ...` to end of line.
@@ -119,14 +149,24 @@ fn strip_comments(sql: &str) -> String {
 }
 
 /// Split on statement separators that are not inside a quoted literal.
+///
+/// Backslash escapes are honoured for the same reason as in [`strip_comments`].
 fn split_statements(sql: &str) -> Vec<String> {
     let mut parts = Vec::new();
     let mut current = String::new();
     let mut in_single = false;
     let mut in_double = false;
     let mut in_backtick = false;
+    let mut chars = sql.chars().peekable();
 
-    for c in sql.chars() {
+    while let Some(c) = chars.next() {
+        if (in_single || in_double) && c == '\\' {
+            current.push(c);
+            if let Some(escaped) = chars.next() {
+                current.push(escaped);
+            }
+            continue;
+        }
         match c {
             '\'' if !in_double && !in_backtick => {
                 in_single = !in_single;
@@ -186,7 +226,54 @@ pub fn ensure_single_read_statement(sql: &str) -> Result<(), SqlError> {
     if !READ_VERBS.contains(&verb.as_str()) {
         return Err(SqlError::NotAReadStatement { verb });
     }
+
+    // `WITH` needs a second look: Dolt accepts `with c as (select 1) insert
+    // into t values (...)`, which leads with a read keyword and writes. Scan
+    // the statement outside string literals for a mutating keyword.
+    if verb == "with" {
+        let scrubbed = blank_string_literals(&statements[0]);
+        for token in scrubbed.split(|c: char| !c.is_ascii_alphanumeric() && c != '_') {
+            let token = token.to_ascii_lowercase();
+            if MUTATING_KEYWORDS.contains(&token.as_str()) {
+                return Err(SqlError::NotAReadStatement { verb: token });
+            }
+        }
+    }
     Ok(())
+}
+
+/// Replace the contents of string literals with spaces.
+///
+/// Keyword scanning must not fire on `select 'delete'`, where the word is data.
+/// Backslash escapes are honoured, as everywhere else in this module.
+fn blank_string_literals(sql: &str) -> String {
+    let mut out = String::with_capacity(sql.len());
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut chars = sql.chars();
+
+    while let Some(c) = chars.next() {
+        if (in_single || in_double) && c == '\\' {
+            out.push(' ');
+            if chars.next().is_some() {
+                out.push(' ');
+            }
+            continue;
+        }
+        match c {
+            '\'' if !in_double => {
+                in_single = !in_single;
+                out.push(' ');
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+                out.push(' ');
+            }
+            _ if in_single || in_double => out.push(' '),
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 /// The table a single write statement targets, checked against `allowed`.
@@ -429,5 +516,122 @@ mod tests {
     fn an_empty_query_is_refused_on_both_paths() {
         assert_eq!(ensure_single_read_statement("   "), Err(SqlError::Empty));
         assert_eq!(table_written_by(" ; ", &[]), Err(SqlError::Empty));
+    }
+}
+
+#[cfg(test)]
+mod escape_tests {
+    use super::*;
+
+    /// A backslash-escaped quote must not desynchronise quote tracking.
+    ///
+    /// Dolt accepts `\'` as a literal quote inside a string (verified against a
+    /// real database). Tracking quotes by toggling on every `'` therefore ends
+    /// up in the OPPOSITE state to Dolt after `\'`, and one more quote puts the
+    /// checker "inside a string" while Dolt is outside — at which point a real
+    /// statement separator is read as data and the statement behind it is
+    /// invisible.
+    ///
+    /// Proven against dolt before this test was written:
+    ///
+    /// ```text
+    /// dolt sql -q "select 'a\'' ; insert into notes values ('hacked')"
+    /// -> row count 1 -> 2; the insert ran
+    /// ```
+    #[test]
+    fn a_backslash_escaped_quote_cannot_hide_a_statement_separator() {
+        let attack = r"select 'a\'' ; insert into notes values ('hacked')";
+        assert_eq!(
+            ensure_single_read_statement(attack),
+            Err(SqlError::MultipleStatements),
+            "dolt runs the insert in this input, so it must never be admitted"
+        );
+    }
+
+    /// The same desynchronisation on the write path.
+    #[test]
+    fn a_backslash_escaped_quote_cannot_hide_a_second_write() {
+        let allowed = vec!["knowledge".to_string()];
+        let attack = r"insert into knowledge values ('a\'') ; delete from secrets";
+        assert_eq!(
+            table_written_by(attack, &allowed),
+            Err(SqlError::MultipleStatements),
+            "an allowed first statement must not smuggle a second one"
+        );
+    }
+
+    /// An escaped backslash does NOT escape the quote that follows it.
+    ///
+    /// `'a\\'` is a complete string containing one backslash, so the `;` after
+    /// it is a real separator.
+    #[test]
+    fn an_escaped_backslash_does_not_escape_the_closing_quote() {
+        let attack = r"select 'a\\' ; delete from notes";
+        assert_eq!(
+            ensure_single_read_statement(attack),
+            Err(SqlError::MultipleStatements)
+        );
+    }
+
+    /// Restrictive-direction check: a legitimate escaped quote in a single
+    /// statement still parses as one statement and is admitted.
+    #[test]
+    fn an_escaped_quote_in_a_legitimate_single_statement_is_still_admitted() {
+        assert!(
+            ensure_single_read_statement(r"select * from t where s = 'it\'s fine'").is_ok(),
+            "a lone escaped quote inside one statement is legitimate"
+        );
+        assert!(ensure_single_read_statement(r"select * from t where s = 'back\\slash'").is_ok());
+    }
+}
+
+#[cfg(test)]
+mod cte_tests {
+    use super::*;
+
+    /// `WITH` leads with a read keyword but can carry a write.
+    ///
+    /// Verified against a real dolt database before this test existed:
+    /// `with c as (select 1) insert into notes values ('x')` raised the row
+    /// count. Leading-verb classification alone therefore admits a write.
+    #[test]
+    fn a_cte_preamble_cannot_carry_a_write_past_the_read_gate() {
+        for attack in [
+            "with c as (select 1) insert into notes values ('x')",
+            "WITH c AS (SELECT 1) DELETE FROM notes",
+            "with c as (select 1) update notes set id = 'z'",
+            "with c as (select 1) replace into notes values ('x')",
+        ] {
+            assert!(
+                matches!(
+                    ensure_single_read_statement(attack),
+                    Err(SqlError::NotAReadStatement { .. })
+                ),
+                "`{attack}` writes despite leading with WITH and must be refused"
+            );
+        }
+    }
+
+    /// Restrictive direction: a genuine read CTE is still admitted.
+    #[test]
+    fn a_read_only_cte_is_still_admitted() {
+        for good in [
+            "with c as (select 1) select * from c",
+            "WITH recent AS (SELECT id FROM notes) SELECT count(*) FROM recent",
+        ] {
+            assert!(
+                ensure_single_read_statement(good).is_ok(),
+                "`{good}` is a read and must be admitted"
+            );
+        }
+    }
+
+    /// A mutating word inside a string literal is data, not a statement.
+    #[test]
+    fn a_keyword_inside_a_literal_does_not_disqualify_a_read() {
+        assert!(
+            ensure_single_read_statement("with c as (select 'delete') select * from c").is_ok(),
+            "the word `delete` here is a string value, not a verb"
+        );
     }
 }

@@ -725,6 +725,17 @@ test that runs it against a real database. A read-only guard that checks only
 the leading keyword would therefore admit `select 1; delete from notes`, so
 multi-statement input is refused outright instead.
 
+Two further bypasses were found by testing the gate against a real database
+rather than reasoning about it, and both are closed:
+
+- **Backslash escapes.** Dolt treats `\'` as a literal quote, so in
+  `select 'a\'' ; insert into notes values ('x')` the string closes and the
+  `;` is a real separator. Quote tracking that toggles on every `'` concludes
+  the opposite and reads the separator as data.
+- **CTE preambles.** `with c as (select 1) insert into notes values ('x')`
+  leads with a read keyword and writes. A `WITH` statement is additionally
+  scanned for mutating keywords outside string literals.
+
 The write tool additionally checks the target table against the declared
 allowlist, and refuses DDL entirely: an allowlist of tables cannot meaningfully
 constrain a statement that drops one, so schema changes stay an operator

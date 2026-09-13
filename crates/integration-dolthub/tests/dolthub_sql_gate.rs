@@ -241,3 +241,61 @@ async fn a_write_to_an_allowlisted_table_lands() {
     assert_eq!(output.receipt_data["integration"], "dolthub");
     assert_eq!(output.receipt_data["verb"], "execute");
 }
+
+/// The backslash-escape bypass, end to end against a real database.
+///
+/// Dolt treats `\'` as a literal quote, so in `select 'a\'' ; insert ...` the
+/// string closes at the third quote and the `;` is a real separator. A checker
+/// that toggles quote state on every `'` concludes the opposite and reads the
+/// separator as string data — admitting an input whose insert dolt then runs.
+///
+/// The first version of this gate had exactly that bug. This test would have
+/// caught it: it asserts both that dolt performs the write and that the tool
+/// refuses the input.
+#[tokio::test]
+async fn a_backslash_escaped_quote_cannot_smuggle_a_write_past_the_read_tool() {
+    let (dolt, _guard, repo, home) = dolt_fixture!();
+
+    // First: establish that dolt really does execute the smuggled insert, so
+    // the refusal below is known to matter.
+    let before = row_count(&dolt, &repo, &home);
+    let out = Command::new(&dolt)
+        .args([
+            "sql",
+            "-q",
+            r"select 'a\'' ; insert into notes values ('smuggled')",
+            "-r",
+            "json",
+        ])
+        .current_dir(&repo)
+        .env("DOLT_ROOT_PATH", &home)
+        .env("HOME", &home)
+        .output()
+        .expect("dolt runs");
+    assert!(out.status.success(), "dolt accepted the escaped input");
+    assert_eq!(
+        row_count(&dolt, &repo, &home),
+        before + 1,
+        "dolt closes the string at the escaped quote and runs the insert"
+    );
+
+    // Now the tool must refuse that same input.
+    let after_probe = row_count(&dolt, &repo, &home);
+    let tool = DolthubTool::read(dolt.to_string_lossy().to_string(), vec![]);
+    let result = tool
+        .invoke(
+            &ctx(&repo, &home),
+            json!({ "sql": r"select 'a\'' ; insert into notes values ('pwned')" }),
+        )
+        .await;
+
+    assert!(
+        result.is_err(),
+        "the read tool must refuse an input dolt would use to write"
+    );
+    assert_eq!(
+        row_count(&dolt, &repo, &home),
+        after_probe,
+        "and no row may have been added"
+    );
+}
