@@ -259,6 +259,29 @@ The platform tool crates are also implemented as explicit integration surfaces:
   child as a single unexpanded argument, and one proves a non-string `status`
   is refused rather than silently running an unfiltered list.
 
+- **The obsidian adapter** (`crates/integration-obsidian`) turns a declared
+  `[integrations.obsidian]` block into `obsidian.read`, `obsidian.search` and
+  `obsidian.write`, each confined to the configured vault root.
+
+  Path resolution delegates to the `file.*` builtins rather than reimplementing
+  containment: the root is canonicalized, `..` components rejected, and
+  containment re-checked after canonicalization so a symlink cannot point out
+  of the vault. A second containment implementation is the one that eventually
+  has the bug.
+
+  Reads declare `cap.integration.obsidian.read` and `cap.fs_read`; writes add
+  `cap.integration.obsidian.write` and `cap.fs_write`. As with beads, the
+  nested builtins' capabilities are re-declared explicitly because invoking a
+  `Tool` inside a `Tool` bypasses the dispatcher that enforces them. A write's
+  structured record names the path and mode but never the note's contents.
+
+  A configured vault that does not exist still builds: a missing directory is a
+  host fact an operator may legitimately have (an unmounted vault), reported by
+  doctor rather than blocking boot. Covered by 15 tests, seven driving a real
+  filesystem — four distinct escape attempts (`../`, nested `../..`, an
+  absolute path, and a traversal to `/etc/passwd`) are all refused, and a
+  refused write is proven to create nothing.
+
 ## Not Yet Turnkey
 
 Do not treat this repo as a public production deployment without additional

@@ -38,6 +38,7 @@ mod config;
 mod engine;
 mod error;
 mod fused;
+pub use fused::integration_registry;
 mod links;
 mod markdown;
 mod schedule_exec;
