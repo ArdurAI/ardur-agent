@@ -102,6 +102,80 @@ impl<R: ChatRuntime> SubAgent<R> {
     /// Credit `cents` back to the meter — used to roll back a reservation when
     /// the child runtime rejects the turn after the reserve committed.
     pub(crate) fn release(&self, cents: u32) {
-        self.cost_used.fetch_sub(cents, Ordering::AcqRel);
+        // Saturating, not wrapping (gh#367): across a terminate+respawn id
+        // reuse the release can run against a fresh counter, and a wrapping
+        // `fetch_sub` would turn 0 - n into ~4 billion cents of phantom spend,
+        // corrupting the new agent's envelope in the direction that permits
+        // more spending rather than less.
+        let _ = self
+            .cost_used
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                Some(used.saturating_sub(cents))
+            });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ardur_cap_token::{BiscuitCapTokenIssuer, CapScope, CapTokenIssuer, HolderId, KeyPair};
+    use ardur_runtime::InMemoryRuntime;
+
+    /// A real issued token — `CapToken` has no test constructor, so mint one
+    /// exactly the way `tests/common` does.
+    fn issued_token() -> CapToken {
+        BiscuitCapTokenIssuer::new(KeyPair::new())
+            .issue(
+                HolderId("spiffe://ardur/agent/meter-probe".to_string()),
+                CapScope {
+                    audience: "agent".to_string(),
+                    expires_unix: 4_102_444_800,
+                    budget_remaining: 1_000,
+                    tool_allowlist: vec!["chat.submit".to_string()],
+                },
+            )
+            .expect("issue probe token")
+    }
+
+    /// A minimal sub-agent whose meter starts at zero.
+    ///
+    /// Built by struct literal because `SubAgent` has no constructor: the
+    /// runtime builds it inline. Only the cost meter matters here.
+    fn metered(used: u32) -> SubAgent<InMemoryRuntime> {
+        let token = CapTokenRef(String::new());
+        SubAgent {
+            child_runtime: Arc::new(InMemoryRuntime::new()),
+            agent_id: AgentId::new("meter-probe"),
+            parent_cap_token: token.clone(),
+            attenuated_cap_token: token,
+            cost_envelope: CostEnvelope::default(),
+            cost_used: AtomicU32::new(used),
+            session_id: SessionId::new(),
+            goal: "probe".to_string(),
+            parent_session_id: SessionId::new(),
+            parent_receipt_id: ReceiptId::new(),
+            registered_at: UnixTsMillis(0),
+            attenuated_token: issued_token(),
+        }
+    }
+
+    /// gh#367 — releasing more than was reserved must not wrap.
+    #[test]
+    fn releasing_more_than_reserved_saturates_at_zero() {
+        let agent = metered(0);
+        agent.release(500);
+        assert_eq!(
+            agent.cents_used(),
+            0,
+            "an over-release must floor at zero, never wrap to ~4 billion"
+        );
+    }
+
+    /// A normal reserve/release round-trip still nets out.
+    #[test]
+    fn a_release_of_what_was_reserved_returns_to_zero() {
+        let agent = metered(300);
+        agent.release(300);
+        assert_eq!(agent.cents_used(), 0);
     }
 }

@@ -111,11 +111,16 @@ impl DiscordConfig {
         })
     }
 
-    /// Whether `channel_id` is permitted: true when the allowlist is empty
-    /// (all channels) or contains the id.
+    /// Whether `channel_id` is permitted. **Deny-by-default (ARD-475):** an
+    /// empty allowlist admits nothing, so an unconfigured bot reads nothing.
+    ///
+    /// This used to admit every channel when the allowlist was empty, which
+    /// contradicted this struct's own deny-by-default documentation and
+    /// disagreed with the live ingress gate (`Forwarder::channel_allowed`).
+    /// Two same-named methods with opposite senses is a trap (gh#367).
     #[must_use]
     pub fn channel_allowed(&self, channel_id: u64) -> bool {
-        self.allowed_channel_ids.is_empty() || self.allowed_channel_ids.contains(&channel_id)
+        !self.allowed_channel_ids.is_empty() && self.allowed_channel_ids.contains(&channel_id)
     }
 }
 
