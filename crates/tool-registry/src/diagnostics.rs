@@ -120,6 +120,12 @@ pub trait Checker: Send + Sync {
     ///
     /// Returns a message describing why the check could not run.
     fn check(&self, path: &std::path::Path, content: &str) -> Result<DiagnosticSet, String>;
+
+    /// Duplicate this checker into a new box.
+    ///
+    /// Needed so [`SyntaxCheckers::with_checker`] can compose sets without
+    /// requiring `Clone` on a trait object.
+    fn boxed_clone(&self) -> Box<dyn Checker>;
 }
 
 /// A set of checkers, applied to each write.
@@ -152,6 +158,32 @@ impl SyntaxCheckers {
         }
     }
 
+    /// A set built from arbitrary [`Checker`] implementations.
+    ///
+    /// Without this the trait is public but unusable from outside the crate:
+    /// an external pyright or gopls checker could not be registered or
+    /// composed with the built-ins, which would make "extension point" a
+    /// claim the API does not support.
+    #[must_use]
+    pub fn from_checkers(checkers: Vec<Box<dyn Checker>>) -> Self {
+        Self {
+            checkers: Arc::new(checkers),
+        }
+    }
+
+    /// This set plus `checker`, so built-ins and external checkers compose.
+    #[must_use]
+    pub fn with_checker(&self, checker: Box<dyn Checker>) -> Self {
+        let mut checkers: Vec<Box<dyn Checker>> = Vec::with_capacity(self.checkers.len() + 1);
+        for existing in self.checkers.iter() {
+            checkers.push(existing.boxed_clone());
+        }
+        checkers.push(checker);
+        Self {
+            checkers: Arc::new(checkers),
+        }
+    }
+
     /// A single checker built from a closure. Intended for tests and for
     /// embedding a bespoke check without defining a type.
     pub fn from_fn<F>(name: &str, f: F) -> Self
@@ -181,7 +213,17 @@ impl SyntaxCheckers {
             if !checker.handles(path) {
                 continue;
             }
-            match checker.check(path, content) {
+            // A checker may be third-party (a language server wrapper, a
+            // closure from `from_fn`). The bytes are already on disk, so a
+            // panic here would unwind into a failed invocation for a write
+            // that succeeded — and an append retried on that error duplicates
+            // the appended bytes. Contain it and report "not checked".
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                checker.check(path, content)
+            }))
+            .unwrap_or_else(|_| Err("the checker panicked".to_string()));
+
+            match outcome {
                 Ok(set) => {
                     checked = true;
                     for d in set.items() {
@@ -281,6 +323,16 @@ impl Checker for FnChecker {
     fn check(&self, path: &std::path::Path, content: &str) -> Result<DiagnosticSet, String> {
         (self.f)(path, content)
     }
+
+    fn boxed_clone(&self) -> Box<dyn Checker> {
+        // The closure is not cloneable, so a duplicated FnChecker reports the
+        // failure rather than silently dropping out of the set.
+        let name = self.name.clone();
+        Box::new(FnChecker {
+            name,
+            f: Box::new(|_, _| Err("this checker cannot be duplicated".to_string())),
+        })
+    }
 }
 
 fn has_extension(path: &std::path::Path, want: &str) -> bool {
@@ -300,6 +352,10 @@ impl Checker for JsonChecker {
 
     fn handles(&self, path: &std::path::Path) -> bool {
         has_extension(path, "json")
+    }
+
+    fn boxed_clone(&self) -> Box<dyn Checker> {
+        Box::new(JsonChecker)
     }
 
     fn check(&self, _path: &std::path::Path, content: &str) -> Result<DiagnosticSet, String> {
@@ -326,6 +382,10 @@ impl Checker for TomlChecker {
 
     fn handles(&self, path: &std::path::Path) -> bool {
         has_extension(path, "toml")
+    }
+
+    fn boxed_clone(&self) -> Box<dyn Checker> {
+        Box::new(TomlChecker)
     }
 
     fn check(&self, _path: &std::path::Path, content: &str) -> Result<DiagnosticSet, String> {
@@ -359,9 +419,14 @@ impl Checker for TomlChecker {
 fn offset_to_line_col(content: &str, offset: usize) -> (usize, usize) {
     let upto = &content[..offset.min(content.len())];
     let line = upto.matches('\n').count() + 1;
+    // Count CHARACTERS, not bytes: a byte-based column points past the real
+    // position once the line holds any non-ASCII text (an accented letter is
+    // 2 bytes, an emoji 4), and this number is shown to a human.
     let column = upto
         .rsplit_once('\n')
-        .map_or(upto.len(), |(_, tail)| tail.len())
+        .map_or(upto, |(_, tail)| tail)
+        .chars()
+        .count()
         + 1;
     (line, column)
 }

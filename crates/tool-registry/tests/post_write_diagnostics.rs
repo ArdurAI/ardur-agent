@@ -326,3 +326,118 @@ async fn an_append_that_breaks_the_file_is_reported() {
     assert_eq!(out.content["diagnostics"][0]["source"], "json");
     assert_eq!(out.content["diagnostics"][0]["severity"], "error");
 }
+
+/// A checker that PANICS must not fail the write.
+///
+/// Review P1: the earlier panic test only exercised an ordinary `Err`, so an
+/// unwinding checker was uncovered. Checkers are the seam where external
+/// language servers plug in, and those crash. In append mode a failed
+/// invocation is worse than cosmetic — a caller retrying would append the
+/// bytes a second time.
+#[tokio::test]
+async fn a_panicking_checker_does_not_fail_the_write() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let tool = WriteFileTool::with_root(dir.path().to_path_buf()).with_diagnostics(
+        SyntaxCheckers::from_fn("panicker", |_path, _content| {
+            panic!("this checker exploded");
+        }),
+    );
+
+    let out = tool
+        .invoke(&ctx(), json!({ "path": "a.json", "content": "{}" }))
+        .await
+        .expect("a panicking checker must not fail the write");
+
+    assert_eq!(
+        out.content["checked"], false,
+        "a checker that panicked did not check anything"
+    );
+    assert_eq!(
+        tokio::fs::read_to_string(dir.path().join("a.json"))
+            .await
+            .expect("the file exists"),
+        "{}"
+    );
+}
+
+/// Diagnostics reach receipt_data, not just the model-visible content.
+///
+/// Review P2: `output()` mirrors content into `receipt_data`, and inserting
+/// into only one left the receipt auditing a different result than the model
+/// saw — which defeats the purpose of the receipt.
+#[tokio::test]
+async fn diagnostics_are_mirrored_into_receipt_data() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let tool = WriteFileTool::with_root(dir.path().to_path_buf())
+        .with_diagnostics(SyntaxCheckers::builtin());
+
+    let out = tool
+        .invoke(&ctx(), json!({ "path": "bad.json", "content": "{" }))
+        .await
+        .expect("the write succeeds");
+
+    assert_eq!(
+        out.receipt_data["diagnostics"], out.content["diagnostics"],
+        "the receipt must record what the model was told"
+    );
+    assert_eq!(out.receipt_data["checked"], out.content["checked"]);
+    // And the clean case still mirrors `checked`.
+    let clean = tool
+        .invoke(&ctx(), json!({ "path": "ok.json", "content": "{}" }))
+        .await
+        .expect("the write succeeds");
+    assert_eq!(clean.receipt_data["checked"], json!(true));
+}
+
+/// An external checker can be registered and composed with the built-ins.
+///
+/// Review P2: `Checker` was public and documented as the extension point, but
+/// nothing outside the crate could construct a set containing one — which made
+/// "extension point" a claim the API did not support.
+#[tokio::test]
+async fn an_external_checker_composes_with_the_builtins() {
+    #[derive(Debug)]
+    struct PyChecker;
+
+    impl ardur_tool_registry::diagnostics::Checker for PyChecker {
+        fn name(&self) -> &str {
+            "py"
+        }
+        fn handles(&self, path: &std::path::Path) -> bool {
+            path.extension().and_then(|e| e.to_str()) == Some("py")
+        }
+        fn check(&self, _path: &std::path::Path, content: &str) -> Result<DiagnosticSet, String> {
+            if content.contains("import os") {
+                Ok(DiagnosticSet::new(vec![Diagnostic {
+                    severity: Severity::Warning,
+                    line: Some(1),
+                    column: None,
+                    message: "os is discouraged here".to_string(),
+                }]))
+            } else {
+                Ok(DiagnosticSet::clean())
+            }
+        }
+        fn boxed_clone(&self) -> Box<dyn ardur_tool_registry::diagnostics::Checker> {
+            Box::new(PyChecker)
+        }
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let checkers = SyntaxCheckers::builtin().with_checker(Box::new(PyChecker));
+    let tool = WriteFileTool::with_root(dir.path().to_path_buf()).with_diagnostics(checkers);
+
+    // The external checker fires.
+    let out = tool
+        .invoke(&ctx(), json!({ "path": "s.py", "content": "import os\n" }))
+        .await
+        .expect("the write succeeds");
+    assert_eq!(out.content["diagnostics"][0]["source"], "py");
+
+    // And the built-ins still work alongside it.
+    let json_out = tool
+        .invoke(&ctx(), json!({ "path": "b.json", "content": "{" }))
+        .await
+        .expect("the write succeeds");
+    assert_eq!(json_out.content["diagnostics"][0]["source"], "json");
+}

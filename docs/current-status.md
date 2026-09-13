@@ -346,6 +346,9 @@ The platform tool crates are also implemented as explicit integration surfaces:
   Problems are attached to the tool output as `diagnostics`; the write itself
   still succeeds.
 
+  Enable it on a server with `ARDUR_FILE_WRITE_DIAGNOSTICS=1` (off by default,
+  and ignored unless `ARDUR_FILE_TOOL_ROOT` registers the file tools at all).
+
   Advisory by construction: a checker runs after the bytes are on disk, so
   failing the call would report a failed write that actually succeeded, and a
   model retrying on that error would write the same content twice.
@@ -359,6 +362,14 @@ The platform tool crates are also implemented as explicit integration surfaces:
   every applicable checker failed) from a clean check, because an unchecked
   file must not read as validated. The list is capped at 50 with
   `diagnostics_truncated` reporting the drop.
+
+  A checker that panics is contained and reported as unchecked: checkers are
+  where external language servers will plug in, and an unwinding checker would
+  otherwise fail a write that already succeeded — which for an append means a
+  retry duplicates the appended bytes.
+
+  Diagnostics are written to both the tool output and the receipt payload, so
+  an auditor reads the same result the model was given.
 
   Diagnostic messages carry the parser's message only, never its rendered
   source excerpt: `toml::de::Error`'s `Display` echoes the offending line, so a
