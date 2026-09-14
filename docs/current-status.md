@@ -1,512 +1,350 @@
 # Current Status and Ready Features
 
 Implementation baseline reviewed: `dev` at
-`6285be20cbb1a8c9331adb7f2b85866cb5bc5cce` on 2026-09-12. This document is the
-release checklist for `v0.1.0-beta.2`: every claim below is tied to that
-reviewed code baseline and was re-verified against it.
+`6c2599cb9c8d81a5afd8bf6d83910ece83b1a517` on 2026-09-14. This is the
+implementation inventory for `v0.2.0`, not a claim that the open follow-ups
+below have shipped. “Available” distinguishes shipped binary wiring from
+library-only surfaces; a partial slice does not close its larger feature.
 
 ## Repository and Verification Status
 
-- GitHub PRs merged into `dev` for this baseline (the `v0.1.0-beta.2`
-  hardening bundle, closing every finding the beta.1 reviews generated):
-  - `#440` — Dockerfile builder re-pinned to the toolchain's rustc
-    (closes `#436`), `.gitleaksignore` for the two synthetic redaction
-    fixtures (closes `#437`), and the DCO exempt-list read moved to the base
-    ref with append-only + full-SHA enforcement and CODEOWNERS coverage
-    (closes `#435`).
-  - `#441` — `shell.exec`, an argv-exec confinement path with exact
-    `argv[0]` matching, bounded output capture, an absolute-only child
-    `PATH`, and process-group teardown on timeout (closes `#420`).
-  - `#442` — tool-loop receipts settled on cancel: a terminal
-    `llm.completion.cancelled.v1` marker and no success return for an
-    abandoned turn (closes `#422`).
-- The previous baseline's PRs (`#418`, `#419`, `#421`, `#424`, `#423`,
-  `#425`) remain in `dev` unchanged. Also merged in the
-  `09b40df`..`6285be2` range, ahead of this bundle:
-  - `#439` — admin-ui session-id journal reads confined to the sessions root,
-    so an externally supplied session id cannot traverse outside it
-    (closes `#430`). Merged to `dev` as `334540d`; its own required checks were
-    green and it is included in the workflow evidence for the baseline commit
-    below.
-- No GitHub PRs were open at this review.
-- Required GitHub workflows were green before each merge, and the full
-  dev-push check set (CodeQL, CodeQL/Rust, Trivy, build-healthcheck-scan,
-  cargo-deny, hugo, macos-15/stable, ubuntu-latest/stable, qdrant integration
-  `--ignored`) is green on the baseline commit: CI run
-  [34686864849](https://github.com/ArdurAI/ardur-agent/actions/runs/34686864849),
-  docker run
-  [34686864841](https://github.com/ArdurAI/ardur-agent/actions/runs/34686864841),
-  site-deploy run
-  [34686864825](https://github.com/ArdurAI/ardur-agent/actions/runs/34686864825).
-  DCO runs on PRs and was green before each merge. Each of `#440`, `#441` and
-  `#442` merged with all 12 required checks passing and every review thread
-  resolved.
-- Container release path: `.github/workflows/docker.yml` publishes
-  `ghcr.io/ardurai/ardur-agent:<tag>` on `v*` tags — the same image that
-  passed the job's Trivy gate and `/healthz` smoke, with build-provenance
-  attestation. It never tags `:latest`.
-- Release supply-chain path: the `release-supply-chain` workflow
-  (`.github/workflows/release.yml`, job `release-sbom-sign`) runs when a
-  GitHub Release is published for the tag: it builds release binaries,
-  generates an SPDX SBOM and SHA256SUMS, signs assets with keyless cosign,
-  and attaches build provenance.
-- Fresh-machine runbook: [docs/fresh-machine.md](fresh-machine.md) is the
-  operator runbook for the offline stub, one live provider, a private Slack
-  channel, and the published-container smoke.
-- Local no-key baseline on this review:
-  - `cargo test -p ardur-e2e-tests`
-  - `cargo test -p ardur-server --test boot_smoke`
-  - `cargo test -p ardur-cli --test cli_smoke_echo`
-  - `cargo build --workspace --bins`
-- Cargo metadata reports 58 workspace packages.
+The previous main promotion, `663cd1b` (`v0.1.0-beta.2`), has the same tree as
+its integration baseline `44ed0aa`. The following 12 integration merges are
+new relative to that main tree:
+
+| PR / dev commit | Landed slice | What it did not deliver |
+| --- | --- | --- |
+| #450 / `c695d92` | ARD-463 approval proposals wired into opt-in server boot; approved cards consumed before invocation | Automatic resume, stable channel/ACP approval sessions, complete accounting of rejected provider rounds |
+| #453 / `e5d24d1` | Strict integration declarations, registry API and doctor inspection | Server integration-config wiring or a CLI guarantee that invalid integrations abort startup |
+| #454 / `7d00f37` | Beads reference adapter | Server registration or custom mutation metadata in signed receipts |
+| #455 / `bea7404` | Obsidian reference adapter; CLI chat integration registration; dangling-symlink containment fix in shared file tools | Full-text vault search, server registration, snapshot/diagnostic hooks on Obsidian writes |
+| #456 / `e527d14` | Dolt CLI SQL reference adapter and gated real-Dolt tests | A remote DoltHub session/sync service or server integration registration |
+| #457 / `9194f62` | #415 capability/Cedar-scoped tool advertisement | Tool search, ranking or deferred schema loading; #458 remains open |
+| #459 / `46a86cc` | #413 opt-in content-addressed capture/restore library | Binary enablement, receipt-linked rollback, shadow-git history or serialized capture/write; #460 remains open |
+| #461 / `cacd7ee` | #414 advisory JSON/TOML post-write syntax diagnostics, server opt-in | Language-server semantic diagnostics, CLI/Obsidian enablement or readable diagnostics embedded in signed receipts |
+| #463 / `06a8cd0` | #417 additive cap-token gate on approval decisions | Revocation, other write-admin endpoints or a general write-admin dashboard |
+| #465 / `d822c85` | #361 shared-deny-list constructors for verifying sub-agents | Production `delegate_task` revocation, durable/cross-process revocation or in-flight cancellation |
+| #466 / `0b01d6c` | #364 case-insensitive wildcard host matching with a dot boundary | `web.fetch` SSRF/timeout/redirect hardening, browser DNS validation or CDP argument encoding |
+| #467 / `6c2599c` | #367 meter saturation and instance-bound reserve/rollback; redaction-pattern compilation; deny-by-default config helpers | Bounded SDK ingress queues, orphan-module cleanup or automatic redaction of journal writes |
+
+The earlier shell-exec, cancellation, journal-path and supply-chain hardening
+remains present, including the beta.2 promotion review fixes. It is inherited
+work, not counted again in the table above.
+
+Evidence for the reviewed implementation SHA:
+
+- CI run [34792700474](https://github.com/ArdurAI/ardur-agent/actions/runs/34792700474),
+  docker run [34792700473](https://github.com/ArdurAI/ardur-agent/actions/runs/34792700473),
+  and site run [34792700493](https://github.com/ArdurAI/ardur-agent/actions/runs/34792700493)
+  completed successfully. These links prove that SHA, not a later promotion.
+- `.github/workflows/ci.yml` defines the Python checks, formatting, all-target
+  clippy/check, all-feature workspace tests, security analysis, and separate
+  live Qdrant and Dolt jobs. DCO runs on PRs. Branch protection and optional
+  analysis annotations are distinct gates; inspect the current check set.
+- Cargo metadata reports 62 workspace packages.
+- `.github/workflows/docker.yml` publishes the scanned and healthchecked image
+  as `ghcr.io/ardurai/ardur-agent:<tag>` on eligible `v*` tags, with provenance;
+  it does not publish `:latest`. The package remains **private**.
+- `.github/workflows/release.yml` runs on Release publication and attaches Linux
+  binaries, an SPDX SBOM, `SHA256SUMS`, cosign bundles and provenance. Tag,
+  promoted-main SHA, workflow results and image digest belong in the
+  [release record](https://github.com/ArdurAI/ardur-agent/releases), not in
+  inferred claims about a newer branch tip.
+- [Fresh-machine runbook](fresh-machine.md) describes offline CLI, live-provider,
+  private-channel and container checks. Source inspection or an offline test
+  does not substitute for a live provider, channel or remote-store smoke.
+
+### Required local release checks
+
+These are requirements, not completed validation evidence:
+
+- Run `python3 -m unittest discover -s tests`, `cargo fmt --all -- --check`,
+  all-target clippy/check, `cargo test --workspace` (not just `--lib`), the
+  e2e/boot/CLI smoke targets, workspace binaries, `cargo deny check`, and
+  push-range secret scanning. Record results against the exact PR head.
+  Provider keys must be unset for the no-key suite.
 
 ## Ready Without External Accounts
 
-These paths are usable on a developer machine without model-provider keys.
-
-| Area | What is ready | How to use it |
+| Area | Available path | Boundary |
 | --- | --- | --- |
-| Offline fused chat | `ardur chat` falls back to a network-free stub when `ANTHROPIC_API_KEY` is absent, while still exercising the fused runtime, receipts, journals, memory, cost gate, cap-token path, and Cedar policy. First-run `ardur setup --yes` writes a scoped starter Cedar policy so a fresh install is not a silent deny-all. | `ardur setup --yes`, then `cargo run -p ardur-cli -- chat --plain` |
-| Legacy echo chat | A minimal in-memory echo path with no provider, cost, or persistent state. | `cargo run -p ardur-cli -- chat --echo` |
-| Local setup and diagnostics | Setup, redacted config, redacted logs, redacted state snapshot, doctor checks, and [session lifecycle commands](session-lifecycle.md) are present in the CLI. | `ardur setup --yes`, `ardur doctor`, `ardur config`, `ardur logs`, `ardur debug`, `ardur sessions ...` |
-| E2E substrate tests | Stub-provider scenarios prove fused cap-token, Cedar, cost gate, provider, receipt, journal, memory, and `/chat` SSE paths without network calls. | `cargo test -p ardur-e2e-tests` |
-| Skills | Filesystem `SKILL.md` loading with progressive disclosure is implemented. Example skills include code review, runbooks, postmortems, onboarding, and `cite-or-refuse`. | Set `ARDUR_SKILLS_DIRS=./examples/skills` |
-| Admin UI binary | `ardur-admin` is a read-only dashboard over journals, receipts, costs, memory, and Trust Center APIs. Approval approve/reject actions proxy to ardur-server. | `cargo run -p ardur-admin -- --help` |
-| Evaluation harness | `ardur-eval` can run scenario files against the server `/chat` contract and emit JSON, JUnit, or Markdown. It posts the consolidated (non-stream) body. | `cargo run -p ardur-eval -- --help` |
-| Static PWA shell | `web-client/` is installable as a static PWA. It streams `POST /chat` `{ stream: true }`, renders only fused `content` frames, and calls `/approvals/{id}/approve|reject`. Cross-origin use needs `ARDUR_CORS_ORIGINS`. | `cd web-client && python3 -m http.server 4173` (see `web-client/README.md`) |
+| Offline fused CLI chat | With the default `anthropic` backend, absent `ANTHROPIC_API_KEY` selects the CLI stub; use the [offline CLI recipe](#offline-cli-recipe) | Exercises local authorization, cost, receipts, journals and memory; not a live-provider test or a server fallback |
+| Legacy echo chat | `cargo run -p ardur-cli -- chat --echo` | Minimal in-memory echo, without the fused persistent substrate |
+| Setup and inspection | `ardur setup`, `doctor`, `config`, `logs`, `debug`, and [session lifecycle commands](session-lifecycle.md) | Redacted inspection/export surfaces are not a promise that raw persisted journals contain no sensitive content |
+| E2E substrate suite | `cargo test -p ardur-e2e-tests` | Stub scenarios run locally; live-service scenarios are explicitly ignored unless opted in |
+| Skills | Filesystem `SKILL.md` discovery and progressive disclosure via `ARDUR_SKILLS_DIRS` | Executable tool authority still depends on the caller's grants/policy |
+| Operator UI | `ardur-admin` provides read-oriented inspection and can proxy approval decisions | Not the general write-admin dashboard requested in #417 |
+| Static PWA | `web-client/` streams `/chat` and calls approval endpoints | Needs a running server; cross-origin use needs `ARDUR_CORS_ORIGINS`; push delivery still lacks a VAPID endpoint |
+| Evaluation harness | `ardur-eval` drives the consolidated `/chat` contract and emits JSON/JUnit/Markdown | Needs a running server; not an independent offline provider |
 
-## Ready With Local Services or Credentials
+### Offline CLI recipe
 
-These features are implemented but need a provider key, local daemon, channel
-token, or explicit operator configuration.
+With `ardur` already built/installed and on `PATH`:
 
-| Area | What is ready | Required inputs |
+```sh
+(
+  export ARDUR_PROVIDER=anthropic
+  unset ANTHROPIC_API_KEY
+  ardur setup --yes &&
+    ardur chat --plain
+)
+```
+
+The subshell overrides inherited provider selection and removes an inherited
+key without changing the parent shell. `FusedEngine::new_for_session` resolves
+`ARDUR_PROVIDER` before fallback: clearing `ANTHROPIC_API_KEY` alone does not
+make a non-key backend offline.
+
+## Ready With Services or Explicit Configuration
+
+- `ARDUR_PROVIDER` selects hosted, compatible HTTP, local-daemon or CLI-backed
+  providers. Required credentials/services depend on that selection.
+  **The default server provider requires `ANTHROPIC_API_KEY`; unlike CLI chat,
+  the server has no automatic offline-stub fallback.** This key requirement
+  is conditional on the selected backend, not universal to every server boot
+  (`Config::from_env` in `crates/server/src/config.rs`).
+- The HTTP router exposes `/chat` (JSON/SSE), `/acp`, `/healthz`, `/health`,
+  `/metrics`, `/admin/runtime`, approval list/decide endpoints and
+  `/openapi.json`; Slack events are mounted when configured. HTTP-only boot
+  without Slack is supported. `/metrics` and `/admin/runtime` use admin
+  authorization. The OpenAPI document is incomplete and duplicates approval
+  paths at this baseline (#366, #464); it is not a complete route inventory.
+- Slack, Matrix, Discord and Telegram route inbound messages through the fused
+  runtime when enabled with credentials and allowlists. Start with private
+  channels. Empty ingress allowlists deny access.
+- `in_memory` is the default memory backend. `qdrant` provides durable
+  bi-temporal memory; `hybrid` adds a file-backed BM25/Tantivy sparse index and
+  reciprocal-rank fusion. Qdrant-backed modes require `QDRANT_URL`; local dense
+  embedding may require a first-run model download. The scroll ceiling in
+  #357 remains a correctness limitation, including forget/tombstone reads.
+- `ARDUR_OTEL_ENABLED=true` plus an OTLP endpoint enables telemetry export.
+  Operational inspection and exported diagnostics are redacted where their
+  readers implement redaction; this is not an at-rest encryption guarantee.
+- MCP serving is opt-in with `ARDUR_MCP_ENABLED=true` and
+  `ARDUR_MCP_BEARER_TOKENS`; remote tool discovery uses
+  `ARDUR_MCP_REMOTE_SERVERS`. Direct MCP exposes only capability-free tools
+  until its requests carry the fused authorization context.
+- Voice transcription is registered when `OPENAI_WHISPER_API_KEY` or
+  `OPENAI_API_KEY` is present. Local STT/TTS providers exist as command-backed
+  library surfaces but are not automatically registered by server boot.
+
+## Tool Registration and Authority
+
+`assemble_tool_registry` in `crates/server/src/mcp.rs` is the server assembly
+entry point. It includes example tools, `delegate_task`, explicitly enabled
+built-ins, credential-dependent media tools, filesystem skills and discovered
+remote MCP tools. Registration does not mean every caller may invoke a tool.
+
+Hardened `shell.run`, `file.read`, `file.write`, `file.list` and `http.fetch`
+are off until the corresponding CLI grant or server configuration enables them.
+Server controls include `ARDUR_ENABLE_SHELL_TOOL`, `ARDUR_ENABLE_HTTP_TOOL`,
+allowlists, and `ARDUR_FILE_TOOL_ROOT`. CLI chat reads its grant ledger.
+
+`shell.exec` is the direct argv-exec sibling: exact executable allowlisting,
+bounded output, sanitized absolute-only `PATH`, and Unix process-group cleanup
+on timeout. It is available through `BuiltinOpts::enable_shell_exec` and is
+used internally by command integrations, but no general server flag or CLI
+grant registers it as a standalone tool. Windows descendant cleanup remains
+incomplete. Neither shell tool is an OS sandbox: granting an interpreter or
+launcher grants what that executable can do. Authorization is not argv-level
+or process-level confinement.
+
+`tool_defs_for` in `crates/fused-runtime/src/runtime.rs` filters advertised
+schemas through name-scoped cap-token/Cedar authorization and declared
+capabilities. Invocation still checks authorization independently. This #415
+slice does **not** implement #458 catalog search or deferred loading: every
+admitted tool's full schema is still advertised. Advertisement also does not
+promise later approval, budget admission or execution success.
+
+`ardur-browser`, `ardur-terminal` and `ardur-web` remain explicit library
+integration surfaces, not the normal binary registries. In particular, real
+CDP transport is not implemented, and the weak `web.fetch` implementation must
+not be equated with the separately hardened `http.fetch`.
+
+## Approvals: Shipped Server Loop, Explicit Limits
+
+ARD-463's propose-half **is wired into server boot**. A nonempty
+`ARDUR_APPROVAL_GATED_CAPABILITIES` CSV attaches the approval store and its
+capability set together; empty configuration leaves the gate absent. Labels
+must match registered capabilities exactly, with no wildcard expansion.
+
+The runtime matches a card on tool name, argument digest and session. A gated
+call proposes a pending card and attempts an `approval.propose.created.v1`
+receipt instead of running the tool. An approved card is consumed before the
+retried invocation, so even a failed tool does not make that approval reusable.
+See `authorize_or_propose_approval`, `crates/server/tests/approval_gate_boot.rs`
+and `crates/fused-runtime/tests/approval_gate.rs`.
+
+Limits that remain:
+
+- This is a retry loop, not automatic execution after approval. HTTP retries
+  must preserve the session ID. Channel and ACP messages create fresh sessions
+  and cannot complete that matching loop (#451). CLI chat does not attach this
+  server approval gate.
+- A rejected tool request has already incurred its provider round, but that
+  round is not charged to the budget on the rejection path (#452).
+- Server cards live under its configured data directory. CLI `ardur approvals`
+  uses its own home-based state layout. They share a store only when those
+  locations actually coincide; the CLI has no data-dir override yet (#366).
+- Card persistence and receipt/journal persistence are not one transaction.
+  Proposal storage precedes receipt creation. HTTP decisions persist before
+  receipt minting; a mint/journal failure is logged and can still return 200.
+  A returned decision receipt ID is not written back into the persisted card.
+
+The #417 slice adds `ARDUR_ADMIN_CAP_TOKEN_GATE=1`: approval decisions require
+both the existing admin bearer (401 on failure) and an
+`X-Ardur-Cap-Token` authorizing `approval.decide` (403 on failure). The token
+is checked before mutation and used for the attempted decision receipt; CORS
+allows the header. Verification uses the normal issuer key.
+
+This is **approvals-only, opt-in, and without admin revocation**: the verifier
+uses an empty deny list. Keep token lifetimes short. Config/key/MCP/webhook/
+cron/skill write-admin endpoints and the broader dashboard are not delivered
+by this slice; #417 remains open.
+
+## Integrations: Three Reference Adapters, CLI Wiring
+
+`[integrations.<name>]` blocks in CLI configuration declare exactly one
+`command` or `root` endpoint. Parsing rejects unknown keys, invalid types and
+ambiguous endpoints. `ARDUR_INTEGRATIONS_<NAME>_{ENABLED,COMMAND,ROOT}` may
+adjust declared integrations but cannot introduce a new integration. Disabled
+entries are not passed to adapters.
+
+The library registry returns an error for an active unknown/rejected adapter.
+**CLI chat catches parse/override/adapter errors, warns and omits integration
+tools rather than aborting startup.** Missing/unreadable configuration also
+yields no tools. `ardur doctor` reports validation and resource presence; it
+does not prove that an invocation or remote service works.
+
+All three adapters are reachable through CLI chat and doctor via the shared
+`integration_registry` constructor in `crates/cli/src/fused.rs`. The server's
+environment-based assembly does not load these integration declarations or
+register these adapters.
+
+| Adapter | Tools and confinement | Boundary |
 | --- | --- | --- |
-| Providers | Anthropic, OpenRouter, generic OpenAI-compatible endpoints, Ollama, Codex CLI, and Claude CLI are selectable through `ARDUR_PROVIDER`. Anthropic, OpenRouter, OpenAI-compatible, and Ollama expose provider-level streaming. | API keys, local Ollama daemon, or logged-in `codex` / `claude` CLIs depending on provider. |
-| HTTP agent API | `ardur-server` exposes `POST /chat` (JSON or SSE), `POST /acp`, optional `POST /slack/events`, `GET /healthz`, `GET /health`, `GET /metrics`, `GET /admin/runtime`, `GET /approvals`, `POST /approvals/{id}/approve`, `POST /approvals/{id}/reject`, `GET /openapi.json`, and generated Rust/Python clients. HTTP-only boot (no Slack credentials) is supported. | Server environment, optional Slack credentials, provider selection, chat/admin bearer tokens where configured. |
-| Chat channels | Slack is the primary channel; Matrix, Discord, and Telegram can be enabled alongside it. All route inbound messages through the same fused runtime. | Bot credentials and allowlists. Use private channels first. |
-| Durable memory | `in_memory` is the default. `qdrant` persists bi-temporal memory. `hybrid` adds Qdrant dense search plus a file-backed Tantivy/BM25 sparse index fused by reciprocal-rank fusion. | `QDRANT_URL` for `qdrant` or `hybrid`; local embedder download on first hybrid boot. |
-| Observability | Provider calls emit OpenTelemetry GenAI spans; `/health`, `/metrics`, and `/admin/runtime` expose operational posture with secret redaction. | `ARDUR_OTEL_ENABLED=true` and an OTLP endpoint for export. |
-| MCP | Ardur can serve MCP over bearer-gated Streamable HTTP and consume remote MCP servers into the runtime tool registry. | `ARDUR_MCP_ENABLED=true`, `ARDUR_MCP_BEARER_TOKENS`, optional `ARDUR_MCP_REMOTE_SERVERS`. |
-| Voice transcription | `voice.transcribe` is registered by the server when Whisper credentials are present. The provider validates size, duration, HTTPS base URLs except loopback test URLs, and records provider receipt hashes. | `OPENAI_WHISPER_API_KEY` or `OPENAI_API_KEY`. |
-| Local voice providers | `ardur-media-audio` has command-backed local STT and TTS providers for on-device engines such as whisper.cpp, Vosk, Piper, or OS speech tools. They execute commands directly, not through a shell. | `ARDUR_LOCAL_STT_COMMAND` / `ARDUR_LOCAL_TTS_COMMAND`; integration into server default registry is not yet automatic. |
-| Operator grants | `ardur grant allow` records a ledger consumed by CLI chat (and env opt-ins on the server) to register hardened `shell.run` / `file.*` / `http.fetch` tools with scoped allowlists. | `ardur grant allow <tool> …`; server: `ARDUR_ENABLE_SHELL_TOOL` + allowlist, `ARDUR_ENABLE_HTTP_TOOL` + allowlist, `ARDUR_FILE_TOOL_ROOT`. |
-
-## Security and Trust Features Available Now
-
-- Cap-token authorization with offline attenuation and revocation-oriented
-  design.
-- Cedar policy evaluation in the fused runtime. Fresh CLI installs get a
-  scoped starter policy from `ardur setup`; production server boots without a
-  policy path remain deny-all unless `ARDUR_DEV_PERMISSIVE_POLICY=true`.
-- Cost-gate projection, ceiling checks, reservation, finalization, and refund.
-- Prompt-injection defense before provider dispatch and on tool output.
-- JWS ES256 receipt chain with parent-hash linkage, including approval-decision
-  receipts on `/approvals/{id}/approve|reject`.
-- Append-only JSONL session journals.
-- Receipt-linked memory writes and append-only memory forget/tombstone behavior.
-- Redacted operator surfaces for config, logs, debug output, metrics, and admin
-  runtime inspection.
-- Webhook signature replay protection and hardened SSRF / shell-denylist checks.
-- Fail-closed CORS: empty `ARDUR_CORS_ORIGINS` emits no CORS headers; `*` is
-  refused at config load.
-
-## Tooling Status
-
-The fused runtime tool loop is implemented: model-requested tool calls can loop
-back into the provider, are bounded by iteration and timeout limits, pass through
-cost/injection/receipt handling, and record tool evidence.
-
-Default `ardur-server` boot currently registers:
-
-- `echo`
-- `health_check`
-- `voice.transcribe` when Whisper credentials are present
-- filesystem skills from `ARDUR_SKILLS_DIRS`
-- remote MCP tools from `ARDUR_MCP_REMOTE_SERVERS`
-- operator-granted hardened built-ins only when the matching env opt-ins are set
-
-The hardened built-in tools are implemented and tested in `ardur-tool-registry`:
-
-- `shell.run`
-- `shell.exec`
-- `file.read`
-- `file.write`
-- `file.list`
-- `http.fetch`
-
-They are capability-gated and include command allowlists, filesystem root
-confinement, HTTP host allowlists, and SSRF defenses. They are **not**
-default-on. CLI chat consumes `~/.ardur/grants.json` from `ardur grant`; the
-server consumes `ARDUR_ENABLE_SHELL_TOOL` / `ARDUR_ENABLE_HTTP_TOOL` /
-`ARDUR_FILE_TOOL_ROOT` (ARD-457).
-
-The platform tool crates are also implemented as explicit integration surfaces:
-
-- `ardur-browser`: `browser.navigate`, `browser.click`, `browser.type`,
-  `browser.screenshot`, `browser.extract`
-- `ardur-terminal`: `terminal.exec`, `terminal.session`
-- `ardur-web`: `web.fetch`, `web.parse`, `web.screenshot`, `web.form_fill`
-
-## Automation, Learning, and Grounding
-
-- `ardur-automation::DefaultTaskFlowOrchestrator` is no longer a placeholder.
-  It validates DAG shape, dispatch allowlists, depth/fanout, retries, and
-  fail-closed control-flow constraints. Effectful external dispatch is still a
-  later phase.
-- `ardur-automation::proactive` implements a scheduled/triggered automation loop
-  with durable schedule storage, attenuated cap-token requirements, per-fire
-  budget provisioning, fused-runtime submission, and channel delivery sinks.
-  This is a programmatic Rust surface, not a complete operator UI.
-- `ardur-automation::learning` implements a receipt-chained proposal loop for
-  self-improvement playbooks, gated by cap-token, Cedar, and human approval.
-- The `cite-or-refuse` example skill provides a strict grounding policy: cite
-  every corpus-dependent claim or refuse when retrieval is empty/unsupported.
-
-## Streaming and approvals
-
-- `POST /chat` with `stream: true` returns `text/event-stream` of fused-runtime
-  events (`stage_start`/`stage_end`, `content`, tool events, `usage`, `receipt`,
-  `finish`, in-band `error`). Dropping the body closes the receiver and the
-  worker drops the fused stream, attempting cancellation before
-  receipt/journal/memory side effects commit; a fast stream can still commit if
-  frames are already buffered. Covered by `crates/server/tests/streaming.rs`
-  and `crates/e2e-tests/tests/scenario_streaming_chat_sse.rs`.
-- Non-stream turns abandoned by the HTTP timeout or a client hang-up hit the
-  commit gate (`#359` / `#421`): a flag set synchronously in the dropping
-  thread is consulted after each provider round and before the
-  receipt/journal/billing commit, so an abandoned turn releases its cost
-  reservation and mints no final receipt. Intermediate tool-loop receipts from
-  earlier rounds can still survive such a cancel — see `#422` below. Covered
-  by `crates/fused-runtime/tests/turn_cancellation.rs` and
-  `crates/server/tests/chat_turn_timeout.rs`.
-- `GET /approvals`, `POST /approvals/{id}/approve`, and
-  `POST /approvals/{id}/reject` are admin-bearer gated, persist to the same
-  on-disk store as `ardur approvals`, and mint decision receipts. This is the
-  **decide-half** of ARD-463 / ARD-139.
-- The **propose-half** is now reachable from a server boot (ARD-463). Setting
-  `ARDUR_APPROVAL_GATED_CAPABILITIES` to a CSV of capability labels attaches the
-  approval store to the runtime; a tool call carrying a listed capability then
-  does not execute — it proposes a pending card into that same store, mints
-  `approval.propose.created.v1`, and is refused until an operator decides it. A
-  retry of the identical call (matched on `sha256(arguments)`) reuses the
-  existing card rather than proposing a second one, and proceeds once approved.
-
-  Gating is by capability, not tool name, so a capability stays gated however
-  many tools declare it. The variable is **empty by default**, which builds the
-  runtime with no approval store at all — the gate is absent rather than present
-  and passing everything. A label containing whitespace can never match a
-  capability, so it is rejected at config load rather than silently gating
-  nothing. Covered by `crates/server/tests/approval_gate_boot.rs` (wiring) and
-  `crates/fused-runtime/tests/approval_gate.rs` (gate behaviour).
-
-  Known limitation: the gate is consulted on the tool-invocation path. Capability
-  labels must match what the tool registry declares (`cap.shell_exec`,
-  `cap.fs_write`, and so on); there is no wildcard form, and a label that matches
-  no registered capability gates nothing.
-
-- **Integration configuration** (ARD-459) lands the declaration surface, not yet
-  the adapters. `[integrations.<name>]` blocks in `~/.ardur/config.toml` declare
-  an external tool as either a `command` (an executable driven through
-  argv-exec) or a `root` (a confining directory), validated strictly at load:
-  unknown keys, wrong types, and missing or ambiguous endpoints all fail the
-  parse rather than being normalised, because a silently-ignored key looks like
-  a setting that took effect. `ARDUR_INTEGRATIONS_<NAME>_ENABLED`, `_COMMAND`
-  and `_ROOT` adjust a declared integration but cannot introduce one, so the set
-  of possible integrations stays in reviewed configuration rather than in an
-  inherited environment variable.
-
-  Everything is off by default and off means absent: a disabled integration is
-  never passed to an adapter at all, so it cannot execute adapter code. An
-  enabled integration with no compiled-in adapter fails the boot rather than
-  running without a capability its configuration declares. `ardur doctor`
-  reports each integration's enabled state and whether its backing resource is
-  present — presence only, never values.
-
-  What is **not** here: the `dolthub` and `obsidian` adapters. Until one
-  exists, enabling those integrations fails the boot by design. Covered by 30
-  unit tests in `crates/integrations` and
-  `crates/cli/tests/cli_integrations_doctor.rs`, which drives the real
-  `ardur doctor` binary.
-
-- **The beads adapter** (`crates/integration-beads`) turns a declared
-  `[integrations.beads]` block into six tools: `beads.ready`, `beads.list`,
-  `beads.show`, `beads.create`, `beads.update`, `beads.close`. Each verb is its
-  own tool, because a tool is the unit the runtime authorises, gates on cost,
-  and receipts — collapsing them behind a `verb` argument would make
-  `beads.close` indistinguishable from `beads.list` at authorisation time.
-
-  Reads require `cap.integration.beads.read`, writes
-  `cap.integration.beads.write`, so consulting the tracker and mutating it are
-  separately grantable. Every verb also declares `cap.shell_exec` and
-  `cap.process_spawn`: `invoke` runs `ShellExecTool` directly rather than
-  dispatching through the runtime, so that tool's own capability requirements
-  are never consulted, and declaring them here is what keeps a deployment's
-  process-spawn gate honest.
-
-  Mutating verbs attach structured detail (verb plus operands) to their output.
-  The runtime does **not** consume it yet — `ToolCallReceipt` is built from the
-  call name, an arguments digest, an output digest and the cost, appended
-  uniformly for every tool call, and nothing reads `ToolOutput::receipt_data`.
-  Beads mutations are therefore receipted like any other tool call today; the
-  verb-level record exists ahead of the runtime learning to fold it in.
-
-  Invocation delegates to `ShellExecTool` with a single-entry allowlist rather
-  than spawning directly, so the #420 argv-exec confinement applies unchanged
-  and improves in one place. A command path containing whitespace is refused at
-  build, since the allowlist can never match one. Covered by 17 tests, four of
-  which drive a real process: one proves a hostile issue title reaches the
-  child as a single unexpanded argument, and one proves a non-string `status`
-  is refused rather than silently running an unfiltered list.
-
-- **The obsidian adapter** (`crates/integration-obsidian`) turns a declared
-  `[integrations.obsidian]` block into `obsidian.read`, `obsidian.search` and
-  `obsidian.write`, each confined to the configured vault root.
-
-  Path resolution delegates to the `file.*` builtins rather than reimplementing
-  containment: the root is canonicalized, `..` components rejected, and
-  containment re-checked after canonicalization so a symlink cannot point out
-  of the vault. A second containment implementation is the one that eventually
-  has the bug.
-
-  Reads declare `cap.integration.obsidian.read` and `cap.fs_read`; writes add
-  `cap.integration.obsidian.write` and `cap.fs_write`. As with beads, the
-  nested builtins' capabilities are re-declared explicitly because invoking a
-  `Tool` inside a `Tool` bypasses the dispatcher that enforces them. A write's
-  structured record names the path and mode but never the note's contents.
-
-  A configured vault that does not exist still builds: a missing directory is a
-  host fact an operator may legitimately have (an unmounted vault), reported by
-  doctor rather than blocking boot. Covered by 15 tests, seven driving a real
-  filesystem — four distinct escape attempts (`../`, nested `../..`, an
-  absolute path, and a traversal to `/etc/passwd`) are all refused, and a
-  refused write is proven to create nothing.
-
-- **The dolthub adapter** (`crates/integration-dolthub`) turns a declared
-  `[integrations.dolthub]` block into `dolthub.query`, and `dolthub.execute`
-  only when the operator declares writable tables via `table:` entries — an
-  integration with no declared table gets no write tool at all, rather than an
-  unconstrained one.
-
-  The admission gate is built around a verified fact: `dolt sql -q` executes
-  **every** statement in its argument, so `select 1; insert into t values (99)`
-  returns the select's rows and performs the insert. A read guard that inspects
-  only the leading keyword is therefore a write hole, and multi-statement input
-  is refused outright rather than classified statement by statement. Comments
-  are stripped and quoting tracked first, so a `;` inside a literal is data and
-  a `;` after a comment still counts.
-
-  Writes additionally check the target table against the allowlist and refuse
-  DDL: a table allowlist cannot constrain a statement that drops a table. Both
-  verbs re-declare `cap.shell_exec` and `cap.process_spawn`, and SQL is passed
-  as one argv entry.
-
-  Two bypasses were found by probing a real database rather than reasoning
-  about the grammar, and both are closed with regression tests: backslash
-  escapes (`\'` keeps a checker's quote state out of step with Dolt's, hiding a
-  separator) and CTE preambles (`with c as (select 1) insert ...` leads with a
-  read keyword and writes).
-
-  Review found a third bypass and a fourth surfaced while checking it: a
-  multi-table `DELETE` names its target before `FROM`, and a multi-table
-  `UPDATE` assigns through a join, so both reach a table the allowlist never
-  sees. Multi-table write forms are now refused outright.
-
-  The real-database tests are `#[ignore]`d and run by a dedicated CI job, for
-  the reason #358 established: an early return on a missing binary is counted
-  as a pass, so the whole suite could report green without executing.
-
-  Covered by 37 unit tests and 6 against a **real Dolt database**, one of which
-  demonstrates the stacked-statement execution the gate exists to stop, and one
-  proving a refused write leaves the row count unchanged.
-
-  With this adapter, ARD-459's config surface, registry, doctor checks and all
-  three reference adapters are complete.
-
-- **Tool advertisement is cap-token scoped** (gh#415). The list of tools sent
-  to the provider is filtered through the same predicate the invocation path
-  uses, so a turn is told about exactly the tools its cap-token permits. Tool
-  names are not neutral — `dolthub.execute` or a customer-named connector
-  discloses what a deployment is wired to — so a withheld capability is not
-  discoverable by reading the tool list. Enforcement is unchanged: a call to an
-  unadvertised tool is still denied at invocation, pinned by a test asserting
-  the tool body never runs.
-
-- **Destructive file writes can capture what they overwrite** (gh#413).
-  `SnapshotStore` puts the prior bytes in a content-addressed store before
-  `file.write` lands, so a mistaken write is recoverable and an audit can say
-  what a file changed *from*, not just that it changed. Opt-in per deployment
-  via `WriteFileTool::with_snapshots`; without it the tool behaves exactly as
-  before. An absent file is recorded as absent rather than as empty content, so
-  undoing a creation removes the file. A blob whose bytes no longer match its
-  digest is refused rather than restored.
-
-- **Cap-token gated admin mutations (gh#417, first slice).** With
-  `ARDUR_ADMIN_CAP_TOKEN_GATE=1`, an admin *mutation* additionally requires an
-  `X-Ardur-Cap-Token` header carrying a token that names that mutation's verb
-  (`approval.decide` for the approvals decide endpoints).
-
-  The gate is **additive**: the admin bearer check still answers "who are you"
-  with 401, and the cap-token answers "may you do this" with 403. Accepting a
-  cap-token *instead of* the bearer would let the gate widen access rather than
-  narrow it. It runs before any mutation, because gating that rejects the
-  response after writing would leave the record changed and the caller merely
-  told otherwise.
-
-  Why it matters: a bearer token is one shared secret with no audience, no
-  expiry, no per-verb allowlist and no revocation — presenting it grants every
-  admin route at once. A cap-token carries those constraints, so authority to
-  decide an approval can be delegated without also delegating authority to
-  rewrite configuration.
-
-  The decision receipt binds to the **presented** token, so the audit chain
-  records which delegated capability performed the mutation rather than the
-  gateway that happened to mint one. The gate's verb is the same string the
-  receipt path verifies (`approval.decide`) — two names for one authority would
-  let a token pass the gate and then be refused by receipt minting, leaving the
-  decision persisted with no receipt.
-
-  `X-Ardur-Cap-Token` is advertised in the CORS preflight; it is non-safelisted,
-  so a cross-origin client would otherwise be blocked before the handler runs.
-
-  Tokens are verified against the same issuer key turns use
-  (`<data_dir>/keys/issuer.key`), so operators mint admin authority with
-  existing tooling rather than a second key hierarchy.
-
-  Limitations, stated rather than implied:
-
-  - **No revocation.** The verifier runs against an empty deny list because the
-    server holds no revocation store, so a minted admin token is valid until it
-    expires. Keep admin token lifetimes short.
-  - Only the approvals decide endpoints are gated so far. The remaining
-    surfaces gh#417 names (config, keys, MCP servers, webhooks, cron, skills)
-    do not exist as write endpoints yet, and the dashboard half is unbuilt.
-
-- **Post-write diagnostics (gh#414).** `file.write` can run syntax checkers
-  over the content it just wrote, enabled through `BuiltinOpts::diagnostics`.
-  Problems are attached to the tool output as `diagnostics`; the write itself
-  still succeeds.
-
-  Enable it on a server with `ARDUR_FILE_WRITE_DIAGNOSTICS=1` (off by default,
-  and ignored unless `ARDUR_FILE_TOOL_ROOT` registers the file tools at all).
-
-  Advisory by construction: a checker runs after the bytes are on disk, so
-  failing the call would report a failed write that actually succeeded, and a
-  model retrying on that error would write the same content twice.
-
-  An append is checked against the resulting file on disk, not the appended
-  fragment — a fragment rarely parses alone, so checking it in isolation would
-  report spurious errors and miss real breakage. Files over 8 MiB are not read
-  back for this, and report `checked: false`.
-
-  The output distinguishes `checked: false` (nothing understood this file, or
-  every applicable checker failed) from a clean check, because an unchecked
-  file must not read as validated. The list is capped at 50 with
-  `diagnostics_truncated` reporting the drop.
-
-  A checker that panics is contained and reported as unchecked: checkers are
-  where external language servers will plug in, and an unwinding checker would
-  otherwise fail a write that already succeeded — which for an append means a
-  retry duplicates the appended bytes.
-
-  Diagnostics are written to both the tool output and the receipt payload, so
-  an auditor reads the same result the model was given.
-
-  Diagnostic messages carry the parser's message only, never its rendered
-  source excerpt: `toml::de::Error`'s `Display` echoes the offending line, so a
-  syntax error on a line holding a credential would copy that credential into
-  the model's context and the receipt.
-
-  Limitation, stated rather than implied: gh#414 asks for real language servers
-  (pyright, gopls, rust-analyzer). What ships here is the extension point plus
-  dependency-free JSON and TOML syntax checkers. Real language servers need an
-  LSP/JSON-RPC client (absent from this workspace), host binaries, and process
-  spawning that must go through the gh#420 argv-exec confinement — none of
-  which is built.
-
-  Enable it through `BuiltinOpts::snapshot_store`. Blobs are written
-  owner-only (0600) under a 0700 store, verified against their digest before
-  reuse and before restore, and written atomically so an interrupted capture
-  cannot leave a blob a later capture would accept. A file over the configured
-  ceiling (64 MiB by default) refuses the write rather than being read into
-  memory. Symlinked paths are refused: writing through a link changes its
-  target, so an undo cannot be expressed as restoring that entry.
-
-  Limitations, stated rather than implied:
-
-  - The snapshot id is written to `ToolOutput::receipt_data`, but the runtime
-    builds its `ToolCallReceipt` unconditionally and never reads that field —
-    so snapshots are **not** yet linked into the receipt chain.
-  - Under concurrent writers to the same path, two captures can both record the
-    original content before either write lands, so the second snapshot cannot
-    restore the state immediately before it. The store stays consistent; the
-    undo *history* is not linearisable. Serialising capture and write behind a
-    per-path lock would fix it — tracked as gh#460 with the design questions
-    it raises (lock-map eviction, canonical-path keying, block-vs-fail-fast).
-  - Shadow-git proper (history semantics) is not built; it needs a git
-    dependency this workspace does not have.
-
-## Not Yet Turnkey
-
-Do not treat this repo as a public production deployment without additional
-hardening and operator work.
-
-- Run live deployments in private channels first.
-- Direct MCP exposes only capability-free tools until MCP requests can carry the
-  same fused-runtime cap-token/Cedar context as normal tool calls.
-- Hardened shell/file/http tools exist but stay off until an operator grant or
-  server env opt-in (ARD-457).
-- `#420`'s hardened sibling `shell.exec` is implemented and tested — it execs
-  argv directly with no shell, matches `argv[0]` exactly, bounds captured
-  output, gives the child an absolute-only `PATH`, and (on **Unix**) tears down
-  the whole process group on timeout — but is not yet wired to a server config
-  flag, so it is never registered at boot. `shell.run` remains a prefix gate,
-  not full argv confinement. Deployments that construct a registry directly can
-  opt in via `BuiltinOpts::enable_shell_exec`.
-
-  Process-group teardown is Unix-only: the Windows path has `kill_on_drop`
-  alone, which reaps the immediate child but not descendants it spawned, so a
-  timed-out process can leave grandchildren running there. A Job Object
-  implementation is follow-up work.
-
-  Neither tool sandboxes the binary it runs: allowlisting `sh`, `env`,
-  `xargs`, `find -exec`, or any interpreter grants what that binary can do.
-  Cap-token and Cedar authorize *whether* a tool may be invoked — they never
-  see argv — so confining a running process needs an OS-level sandbox or a
-  genuinely leaf binary.
-- Tool-loop intermediate receipts are settled on cancel for **non-streaming**
-  submissions (`#422`): the receipt log is append-only, so a turn abandoned
-  mid-loop cannot un-mint the rounds that already committed. `submit_inner`
-  now appends a terminal `llm.completion.cancelled.v1` receipt so the chain
-  never ends on an intermediate round, and an abandoned turn is never reported
-  as a success carrying an earlier round's receipt.
-
-  **The streaming path does not yet have this.** `stream_inner` commits one
-  receipt per provider round but never records a cancellation marker, and
-  `handle_http_stream` drops the fused stream when forwarding fails. An SSE
-  client that disconnects after a tool-use round has persisted its receipt but
-  before the final round settles can therefore still leave the chain ending on
-  an intermediate receipt. Tracked as follow-up work below.
-- Local STT/TTS providers exist in `ardur-media-audio`, but the server currently
-  auto-registers Whisper transcription only.
-- Approval *propose* (the agent creating a pending card before an irreversible
-  tool) is not mounted; only decide endpoints exist.
-- PWA push subscriptions still wait on a VAPID endpoint.
-- Live provider/channel/Qdrant checks were not run in this no-key review.
-
-## Recommended Next Work
-
-Post-beta follow-ups (not part of the `v0.1.0-beta.2` gate):
-
-1. `#420` follow-through: wire `shell.exec` to a server config flag
-   (`ARDUR_ENABLE_SHELL_EXEC_TOOL` + binary allowlist) so operators can register
-   the hardened exec path, and migrate grant-driven registration to prefer it
-   over `shell.run`. Windows process-tree teardown (a Job Object equivalent of
-   the Unix process-group kill) belongs with it.
-2. `#422` follow-through: give the streaming path the same cancellation
-   settlement as `submit_inner`, so an SSE client disconnecting mid tool-loop
-   cannot leave the chain ending on an intermediate receipt.
-3. ARD-463 propose-half: emit pending approval cards before irreversible tools,
-   with `RequiresApproval` caveats.
-4. Auto-register local STT/TTS when `ARDUR_LOCAL_STT_COMMAND` /
-   `ARDUR_LOCAL_TTS_COMMAND` are set.
+| Beads | `beads.ready`, `list`, `show`, `create`, `update`, `close`; configured executable via `ShellExecTool` | Read/write capabilities are separate; both also require shell-exec and process-spawn authority |
+| Obsidian | `obsidian.read`, `search`, `write`; delegates to root-confined file built-ins | `search` is directory listing, not full-text/semantic search; writes enable neither snapshots nor diagnostics |
+| DoltHub | `dolthub.query`; `dolthub.execute` only with declared `table:` write targets | Runs the configured **local Dolt CLI** in the tool context's cwd; does not establish remote DoltHub credentials or sync |
+
+Dolt SQL is passed as one argv operand. The lexical admission gate rejects
+stacked statements, mutating CTE forms, DDL and unsupported multi-table write
+forms; it is not a complete SQL parser. The dedicated ignored tests in
+`crates/integration-dolthub/tests/dolthub_sql_gate.rs` use a real Dolt database.
+
+Nested tools do not inherit dispatcher authorization automatically. These
+adapters explicitly declare the capabilities of their inner shell/file tools.
+Their custom mutation metadata is not a separate signed receipt. Current
+`ToolCallReceipt` records call ID, tool name, argument/output-content digests
+and cost; neither fused path consumes `ToolOutput::receipt_data`. Successful
+fused calls therefore retain verb-specific digest evidence, not the custom
+mutation operands or an atomic transaction over the external store.
+
+## File Writes: Two Partial Features
+
+### Snapshot capture (#413, #460)
+
+`SnapshotStore`, `WriteFileTool::with_snapshots` and
+`BuiltinOpts::snapshot_store` provide library opt-in capture/restore. Capture
+records prior content or prior absence before a write; restoring prior absence
+removes a created file. Blobs are digest-checked, written through a temporary
+file and rename, and use owner-only store/blob modes on Unix. Symlinked capture
+paths are refused and prior files above the default 64 MiB ceiling refuse the
+write.
+
+No shipped binary enables this hook: server opts use `snapshot_store: None`,
+and CLI grants and Obsidian construct plain root-confined writers. The snapshot
+ID exists only in `receipt_data`, which the runtime does not consume. Thus
+**no binary-enabled, receipt-linked rollback or shadow-git history ships**.
+Capture plus write also lacks a per-path critical section: concurrent writers
+can both capture the same old state, yielding non-linearizable undo history
+(#460). #413 remains open.
+
+### Advisory syntax diagnostics (#414)
+
+Server operators may set `ARDUR_FILE_WRITE_DIAGNOSTICS=1` alongside
+`ARDUR_FILE_TOOL_ROOT`. `BuiltinOpts::diagnostics` then enables built-in JSON
+and TOML syntax checkers after `file.write`. Findings do not turn an already
+completed write into a failure. Unsupported files, failed checkers and caught
+checker panics report unchecked rather than clean. Results are capped at 50,
+with `diagnostics_truncated` indicating omitted findings.
+
+Append checks inspect the resulting file, not just the new fragment; the read-
+back is limited to 8 MiB. That is not a universal bound on overwrite input or
+all checker memory. Parser source excerpts are withheld from diagnostic
+messages. Results are in the returned tool content; signed receipts bind its
+**digest**, not a readable diagnostic payload. The separate `receipt_data`
+copy is currently ignored by the runtime.
+
+CLI and Obsidian writes do not enable this hook. There is a checker extension
+trait, but no language-server client or semantic diagnostics integration for
+pyright, gopls or rust-analyzer. #414 remains open.
+
+## Security Hardening: What the Audit Slices Mean
+
+Core paths include cap-token/Cedar authorization, cost projection/reservation/
+finalization/refund, injection scanning, ES256 hash-linked receipts and
+append-only journals/memory tombstones. Server policy defaults to deny-all
+without a configured policy unless `ARDUR_DEV_PERMISSIVE_POLICY=true`;
+first-run CLI setup writes a scoped starter policy. Empty CORS configuration
+emits no allow headers, and `*` is refused.
+
+The Phase 5 audit slices are deliberately narrower than full audit closure:
+
+- **#361:** `CapVerifyingRuntime::with_deny_list` and
+  `InMemoryMultiAgentRuntime::verifying_with_deny` permit a shared deny list and
+  reject revoked authority on a later child submission. Production
+  `delegate_task` still uses the empty-deny constructor and an in-memory echo
+  child, not another provider runtime. The fused list is process-local;
+  `FileDenyList` has no production wiring. Durable/cross-process revocation and
+  in-flight cancellation are not delivered.
+- **#364:** wildcard web/browser host checks now require a dot boundary and
+  ignore case. `web.fetch` still lacks the hardened fetch path's SSRF guard,
+  timeout and validated redirect handling. Browser DNS validation (#320) and
+  JSON-encoded CDP selector/text arguments remain open; dormant transport is
+  not evidence that those surfaces are safe to activate.
+- **#367:** sub-agent release saturates rather than wrapping; reserve/rollback
+  binds to the instance that reserved, not a reused ID. Redaction constants
+  fail loudly on compilation errors, and Discord/Telegram config helpers now
+  agree with deny-by-default live ingress. Matrix/Discord/Telegram SDK queues
+  are still unbounded. Orphan automation/ACP/webhook modules and other
+  low-severity residuals remain on #367. Journal-export redaction does not
+  mean `FileSessionJournal::append` redacts persisted entries.
+- **#362/#363:** attenuation's nominal budget axis is not a spend cap;
+  `CostEnvelope` is the actual ceiling. Cap-tokens remain bearer credentials:
+  possession confers authority, subject to verification and expiry. No general
+  per-request replay cache or proof-of-possession is delivered. Do not log
+  tokens or infer durable revocation from the existence of a storage type.
+
+## Streaming, Automation and Remaining Ceilings
+
+`POST /chat` with `stream: true` returns fused stage/content/tool/usage/receipt/
+finish events and in-band errors. Disconnecting closes forwarding and drops
+the stream, but already committed provider rounds are not undone. SSE has no
+terminal tool-loop cancellation marker yet.
+
+For non-stream submissions, the #359 commit handshake blocks successful final
+completion after cancellation wins. When earlier rounds have committed, #422
+attempts a zero-cost `llm.completion.cancelled.v1` terminal marker; its
+persistence failure is logged, so settlement is best-effort, not guaranteed.
+The worker drains abandoned submissions to let that cleanup run. The unbounded
+drain (#447) and current serial turn worker (#360) remain throughput limits.
+See `crates/fused-runtime/tests/turn_cancellation.rs`,
+`crates/server/tests/chat_turn_timeout.rs` and the streaming suites.
+
+The task-flow orchestrator validates DAGs, allowlists, depth/fanout and control
+flow, but **simulates step results rather than dispatching effectful work**.
+Its `execute_parallel` walks branches sequentially. Conditional DAGs are
+rejected by validation, so an unreachable conditional execution branch is not
+a shipped feature (#352). Proactive scheduling and learning/proposal loops
+remain programmatic surfaces rather than a complete operator UI. The
+`cite-or-refuse` example skill provides a grounding policy, not proof that a
+retrieval backend returned the right material.
+
+Open work includes the security/durability/concurrency remainders above, #357
+Qdrant pagination (a late tombstone must still suppress recall), #366 operability
+and data-directory consistency, #464 raw OpenAPI duplicates, #458 catalog
+search and #460 snapshot ordering. The ambient-provider-key test defect #462
+also remains open. These must not be inferred complete from the v0.2.0 tag.
+Run deployments in private channels and review these limitations before
+assuming public production readiness.
