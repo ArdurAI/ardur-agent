@@ -6,7 +6,7 @@ mod support;
 
 use std::sync::Arc;
 
-use ardur_runtime::{CapTokenRef, SessionId};
+use ardur_runtime::{CapTokenRef, RuntimeError, SessionId};
 use ardur_session_journals::{FileSessionJournal, JournalEntry, SessionJournal};
 
 use support::{AUDIENCE, HOLDER, cap_root, mint_token_as, permissive_policy, receipt_key};
@@ -288,4 +288,85 @@ async fn checkpoint_and_rollback_receipts_chain_together() {
     ardur_fused_runtime::verify_persisted_chain(&chain).expect("the chain verifies");
     let _ = receipt_key();
     let _ = cap_root();
+}
+
+// ---------------------------------------------------------------------------
+// gh#470 review round 2: the cost-0 receipt-verification relaxation must be
+// confined to approval decisions. A zero-budget token must still be refused
+// for checkpoint (and every other non-approval control operation), because
+// those verify at the runtime's cost_units like the turns they serve.
+// ---------------------------------------------------------------------------
+
+/// A cap-token granting `session.checkpoint` with ZERO remaining budget.
+fn zero_budget_checkpoint_token() -> String {
+    checkpoint_token_with_budget(0)
+}
+
+/// The same token shape with budget to spend — the positive-budget control
+/// proving the zero-budget refusal is the cost gate, not the fixture.
+fn checkpoint_token_with_budget(budget: u64) -> String {
+    use ardur_cap_token::{CapScope, CapTokenIssuer, HolderId as CapHolderId};
+    support::cap_issuer()
+        .issue(
+            CapHolderId(HOLDER.to_string()),
+            CapScope {
+                audience: AUDIENCE.to_string(),
+                expires_unix: support::NOW_UNIX + 3_600,
+                budget_remaining: budget,
+                tool_allowlist: vec!["session.checkpoint".to_string()],
+            },
+        )
+        .expect("the cap-token issues")
+        .to_base64()
+        .expect("the cap-token serializes")
+}
+
+/// The contrast guard: the relaxation that lets a zero-budget token mint an
+/// APPROVAL receipt (whose HTTP gate admits at cost 0) must NOT let the same
+/// token checkpoint a session — checkpoint has no cost-0 gate, so its
+/// verification stays at `cost_units`.
+#[tokio::test]
+async fn a_zero_budget_token_cannot_checkpoint_a_session() {
+    let dir = tempfile::tempdir().expect("journal dir");
+    let session_id = SessionId::new();
+    let journal = Arc::new(FileSessionJournal::new(dir.path(), session_id).expect("journal opens"));
+    let runtime = build_runtime_with_journal(journal.clone()).await;
+    let cap_token = CapTokenRef(zero_budget_checkpoint_token());
+
+    let result = runtime
+        .checkpoint(session_id, &cap_token, "session.checkpoint", None)
+        .await;
+
+    // The refusal must be an authorization denial from cost gating, not an
+    // incidental failure (missing journal, bad clock, ...): the token is
+    // otherwise valid, correctly scoped and unexpired. The cost gate denies
+    // an exhausted budget as CapDenied.
+    assert!(
+        matches!(&result, Err(RuntimeError::CapDenied { reason }) if reason.contains("budget")),
+        "checkpoint verification must stay at cost_units (a CapDenied \\
+         budget refusal), got: {result:?}"
+    );
+    let entries = journal.replay(session_id).await.expect("journal replays");
+    assert!(
+        entries.is_empty(),
+        "nothing may be journaled for a refused control operation"
+    );
+    // No receipt may be minted for the refused control operation.
+    let chain_path = dir.path().join("receipts").join("chain.jsonl");
+    if chain_path.exists() {
+        let chain = ardur_fused_runtime::load_persisted_chain(&chain_path)
+            .expect("chain loads when present");
+        assert!(
+            chain.is_empty(),
+            "a refused control operation must not mint a receipt"
+        );
+    }
+    // Positive-budget control in the SAME fixture: with budget available the
+    // identical call succeeds, proving the refusal above is the cost gate
+    // and not the token's shape or fixture wiring.
+    let funded = CapTokenRef(checkpoint_token_with_budget(1_000));
+    runtime
+        .checkpoint(session_id, &funded, "session.checkpoint", None)
+        .await
+        .expect("a funded token checkpoints: the zero-budget refusal is the cost gate");
 }
