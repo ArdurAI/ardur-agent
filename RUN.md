@@ -733,15 +733,84 @@ rather than reasoning about it, and both are closed:
   `;` is a real separator. Quote tracking that toggles on every `'` concludes
   the opposite and reads the separator as data.
 - **CTE preambles.** `with c as (select 1) insert into notes values ('x')`
-  leads with a read keyword and writes. A `WITH` statement is additionally
-  scanned for mutating keywords outside string literals.
+  leads with a read keyword and writes. The parser classifies it from the
+  AST (`Query { body: Insert }`) — a `WITH`-wrapped DML is a write by shape,
+  and every nested query body is inspected by the purity walk described
+  below, not by keyword scanning.
 - **Multi-table writes.** `delete secrets from notes join secrets on 1=1`
   names its target before `FROM`, and `update notes join secrets on 1=1 set
   secrets.id = 'X'` assigns through a join — both reach a table the allowlist
   never sees. Multi-table write forms are refused outright rather than
   resolved.
 
-The write tool accepts single-table `INSERT`, `UPDATE` and `DELETE` only. The
+Review rounds 2–4 (gh#469) kept finding new lexical laundering shapes —
+quote-poisoned executable comments, glued version prefixes, quote characters
+inside backtick identifiers, quoted qualifiers, one-sided commas — each patch
+closing the previous round's bypass while admitting a new one. The lesson is
+structural: a gate that blanks or strips quoting and then re-guesses the
+identifier can never agree with the engine about what it is executing.
+
+The admission check is therefore a **strict-subset parse boundary**: the
+statement must parse (real SQL parser, MySQL dialect) into exactly one
+statement whose resolved table identifiers are checked against the allowlist
+directly from the parse tree — no blanking, no quote-stripping, no token
+re-folding. A backtick-quoted name containing apostrophes (`'notes'`) is the
+distinct table it names, never `notes`; a qualified name (`db`.`notes`)
+resolves on its final segment; a `DELETE` with a comma anywhere in its target
+list, a `USING` clause, or a JOIN names more than one table and is refused as
+a multi-table write; `EXPLAIN` wrapping DML is not a read; a `WITH` whose body
+is DML is a write. Three lexical facts the parser cannot see are enforced
+before parsing, each live-verified against dolt:
+
+- **Executable comments are refused outright.** `/*! ... */` bodies are
+  conditionally executed by MySQL-style engines while a standard parser
+  discards them as comments. No lexical scan of the body is sound (quotes
+  inside it poison tracking; `/*!50000INSERT` hides the verb), and a
+  legitimate read or single-table DML statement never needs
+  version-conditional syntax.
+- **`#` comments are refused outright.** dolt's statement splitter splits on
+  `;` inside `#` comments while the parser treats them as comments to end of
+  line (review round 5, live-verified: `select 1 # x ; delete from secrets`
+  returned the select AND emptied the table). No lexical treatment of the
+  body is sound, and the admitted subset never needs `#` — `--` and `/* */`
+  are the agreed comment forms.
+- **Control and non-ASCII characters are refused.** dolt ends `#` comments at
+  a carriage return AND at any non-ASCII codepoint (U+00A0, U+2028, emoji —
+  the whole class was live-verified), while a parser treats those as comment
+  text or data. Rather than reconciling per-codepoint, any character outside
+  printable ASCII plus newline and tab refuses the input. This is
+  deliberately quote-unaware: a `#` or an `é` inside a string literal is
+  refused too, because a quote tracker is exactly the mechanism earlier
+  review rounds used to smuggle.
+- **Every nested query is inspected, wherever it sits.** The gate walks every
+  `Query` node in the parsed statement — CTE bodies (including `WITH` clauses
+  nested inside parenthesized query expressions, set-operation operands,
+  derived tables and scalar subqueries), `INSERT ... SELECT` sources, and the
+  WHERE/limit filters of the SHOW variants the parser models — and refuses
+  the statement if any of them mutates or selects INTO a table, even though
+  dolt 2.3.3 rejects DML CTEs today: an engine that accepts them would
+  execute the mutation under an admitted read. `SELECT ... INTO <table>` is
+  likewise not a read: INTO names a table destination.
+- **Unmodeled SHOW variants are refused.** SHOW forms the parser does not
+  model (`SHOW ENGINES`, `SHOW GRANTS`, `SHOW PROCESSLIST`, `SHOW TRIGGERS`,
+  …) are refused outright: the parser's fallback for them flattens the rest
+  of the input into bare identifiers — swallowing `;` (so
+  `show engines; delete from secrets` parsed as one admitted read while dolt
+  executed both statements) and flattening WHERE subqueries the walk could
+  never see. A token-level guard additionally refuses any single parsed
+  statement whose token stream contains a non-trailing `;`, so a parser that
+  swallows a statement boundary fails closed. `SHOW TABLES`, `SHOW COLUMNS`,
+  `SHOW DATABASES`/`SCHEMAS`, `SHOW VARIABLES`, `SHOW STATUS`, `SHOW CREATE`,
+  `SHOW COLLATION`, `SHOW FUNCTIONS`, `DESCRIBE` and `EXPLAIN`-wrapping-a-read
+  remain admitted.
+- Anything that does not parse is refused (fail-closed) — including valid
+  MySQL the parser's dialect does not model, which may over-refuse an odd
+  but legitimate query. That is the acceptable direction to be wrong.
+
+The write tool accepts single-table plain `INSERT`, `UPDATE` and `DELETE`
+only. MySQL `REPLACE` — which parses as an INSERT but deletes conflicting
+rows before inserting — is refused: that hidden delete is not a write the
+table allowlist consented to. The
 `dolt` command path is validated at build time against the argv-exec
 allowlist's own rules, so a path that would be denied on every call is refused
 as configuration instead of registering an unusable tool.

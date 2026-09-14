@@ -236,17 +236,32 @@ register these adapters.
 | Obsidian | `obsidian.read`, `search`, `write`; delegates to root-confined file built-ins | `search` is directory listing, not full-text/semantic search; writes enable neither snapshots nor diagnostics |
 | DoltHub | `dolthub.query`; `dolthub.execute` only with declared `table:` write targets | Runs the configured **local Dolt CLI** in the tool context's cwd; does not establish remote DoltHub credentials or sync |
 
-Dolt SQL is passed as one argv operand. The lexical admission gate rejects
-stacked statements, DDL and multi-table write forms, but it is **not a
-complete SQL parser and currently admits three known bypass shapes** (filed
-with reproduction evidence): MySQL-style executable `/*! ... */` comments that
-hide a mutation from the read gate, a quote character inside a backtick
-identifier that conceals a mutating CTE body, and whitespace-separated
-`DELETE FROM ... USING` targets that bypass the single-table allowlist. Until
-those are fixed, treat the gate as a tripwire, not a boundary: run the
-adapter against a clone whose contents a misled query may not corrupt, and
-prefer read-only credentials where possible. The dedicated ignored tests in
-`crates/integration-dolthub/tests/dolthub_sql_gate.rs` use a real Dolt database.
+Dolt SQL is passed as one argv operand. Admission is a strict-subset parse
+boundary (gh#469): a real SQL parser (MySQL dialect) resolves table
+identifiers from the parse tree against the allowlist — no lexical blanking
+or quote-stripping — and everything that does not parse is refused
+(fail-closed). Executable `/*! ... */` comments, `#` comments (dolt's
+statement splitter splits on `;` inside them while the parser does not),
+control characters and non-ASCII characters (dolt ends `#` comments at
+codepoints the parser treats as comment text) are refused before parsing.
+`DESCRIBE`, `SHOW DATABASES`/`SCHEMAS` and read-only `WITH` CTEs are
+admitted; `EXPLAIN` wrapping DML, DML inside CTE bodies (at any nesting
+depth — the gate walks every query node in the parsed statement, so a `WITH`
+carrying DML inside a parenthesized query, set operand, derived table,
+scalar subquery, `INSERT ... SELECT` source or modeled SHOW filter is
+refused too) and `SELECT ... INTO <table>` are not reads. Unmodeled SHOW
+variants (`SHOW ENGINES` and kin) are refused: the parser's fallback for
+them swallows `;` — `show engines; delete from secrets` parsed as one read
+while dolt executed both — and a token-level guard refuses any single
+parsed statement containing a non-trailing `;`. Single-table plain `INSERT`/`UPDATE`/`DELETE` only (MySQL `REPLACE`, which deletes conflicting rows before inserting, is refused); DDL,
+multi-table writes and unknown targets are refused. The dedicated ignored
+tests in `crates/integration-dolthub/tests/dolthub_sql_gate.rs` prove each
+refusal against a real Dolt database, including the engine-side premise
+(dolt executing the smuggled statement) for every bypass shape. The gate is
+still not a complete SQL parser: valid MySQL outside the admitted subset is
+refused (over-refusal is the acceptable direction), and a future engine
+update that changes dolt's comment or splitting behavior needs a fresh
+review of these premises.
 
 Nested tools do not inherit dispatcher authorization automatically. These
 adapters explicitly declare the capabilities of their inner shell/file tools.
