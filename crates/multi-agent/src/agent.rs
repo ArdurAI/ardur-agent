@@ -178,4 +178,27 @@ mod tests {
         agent.release(300);
         assert_eq!(agent.cents_used(), 0);
     }
+
+    /// gh#367 review — a stale rollback must not erase a respawned agent's use.
+    ///
+    /// The saturating fix stops the wrap, but on its own it converts the bug
+    /// into silent under-counting: if an id is reused across terminate+respawn
+    /// and the old reservation rolls back against the NEW instance, the new
+    /// agent's legitimate usage is erased and later asks can exceed its
+    /// envelope. The runtime therefore only releases when the registry entry
+    /// still matches the reserving instance's `session_id`; this pins the
+    /// meter arithmetic that guard protects.
+    #[test]
+    fn a_release_never_credits_more_than_was_used() {
+        let agent = metered(100);
+        // A stale rollback for 500 arriving at an agent that has only used 100
+        // must not manufacture credit beyond zero.
+        agent.release(500);
+        assert_eq!(
+            agent.cents_used(),
+            0,
+            "saturates rather than wrapping; the instance guard is what stops \
+             the stale release reaching a respawned agent at all"
+        );
+    }
 }

@@ -280,7 +280,15 @@ impl<R: ChatRuntime> MultiAgentRuntime for InMemoryMultiAgentRuntime<R> {
             let agents = self.agents.read();
             let sub = agents
                 .get(&handle.agent_id)
+                .filter(|sub| sub.session_id == handle.session_id)
                 .ok_or_else(|| self.absent_error(&handle.agent_id))?;
+            // The id alone is not identity (gh#367 review). `terminate`
+            // removes the entry and a later `spawn` may reuse the id, so a
+            // handle to a terminated agent would otherwise reserve, spend and
+            // roll back against whichever *different* agent now holds that id
+            // — charging a live agent's envelope for work its holder never
+            // asked for. `session_id` is minted per instance, so it is what
+            // distinguishes them.
             sub.try_reserve(request.max_cost_cents)?;
             (
                 sub.child_runtime.clone(),
@@ -301,7 +309,17 @@ impl<R: ChatRuntime> MultiAgentRuntime for InMemoryMultiAgentRuntime<R> {
             Err(err) => {
                 // The turn never ran — roll the reservation back so a failed
                 // ask does not permanently consume the envelope.
-                if let Some(sub) = self.agents.read().get(&handle.agent_id) {
+                // Roll back only if the registry still holds the SAME instance
+                // that took the reservation (gh#367 review). Ids can be reused
+                // across terminate+respawn, and releasing against a fresh
+                // agent would erase that agent's own legitimate usage — a
+                // saturating subtract turns the old wrap bug into silent
+                // under-counting, which still lets later asks exceed the new
+                // envelope. `session_id` is per-instance, so it is the
+                // discriminator.
+                if let Some(sub) = self.agents.read().get(&handle.agent_id)
+                    && sub.session_id == handle.session_id
+                {
                     sub.release(request.max_cost_cents);
                 }
                 return Err(MultiAgentError::Runtime(err));
