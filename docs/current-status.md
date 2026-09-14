@@ -79,7 +79,9 @@ These are requirements, not completed validation evidence:
 
 ### Offline CLI recipe
 
-With `ardur` already built/installed and on `PATH`:
+With `ardur` already built/installed and on `PATH`, on a machine **without an
+existing `~/.ardur` state tree** (`ardur setup --yes` writes a default
+configuration and would overwrite one):
 
 ```sh
 (
@@ -89,6 +91,9 @@ With `ardur` already built/installed and on `PATH`:
     ardur chat --plain
 )
 ```
+
+An already-configured machine should skip the `setup` line; the subshell's
+export/unset is all the offline path needs.
 
 The subshell overrides inherited provider selection and removes an inherited
 key without changing the parent shell. `FusedEngine::new_for_session` resolves
@@ -212,9 +217,13 @@ entries are not passed to adapters.
 
 The library registry returns an error for an active unknown/rejected adapter.
 **CLI chat catches parse/override/adapter errors, warns and omits integration
-tools rather than aborting startup.** Missing/unreadable configuration also
-yields no tools. `ardur doctor` reports validation and resource presence; it
-does not prove that an invocation or remote service works.
+tools rather than aborting startup.** A missing configuration file yields no
+tools; a configuration file that exists but cannot be read or parsed aborts
+`ardur chat` before integration loading (`Config::load` in
+`crates/cli/src/config.rs`), so only integration-specific errors — and files
+that parse but declare nothing usable — take the warn-and-omit path. `ardur
+doctor` reports validation and resource presence; it does not prove that an
+invocation or remote service works.
 
 All three adapters are reachable through CLI chat and doctor via the shared
 `integration_registry` constructor in `crates/cli/src/fused.rs`. The server's
@@ -228,8 +237,15 @@ register these adapters.
 | DoltHub | `dolthub.query`; `dolthub.execute` only with declared `table:` write targets | Runs the configured **local Dolt CLI** in the tool context's cwd; does not establish remote DoltHub credentials or sync |
 
 Dolt SQL is passed as one argv operand. The lexical admission gate rejects
-stacked statements, mutating CTE forms, DDL and unsupported multi-table write
-forms; it is not a complete SQL parser. The dedicated ignored tests in
+stacked statements, DDL and multi-table write forms, but it is **not a
+complete SQL parser and currently admits three known bypass shapes** (filed
+with reproduction evidence): MySQL-style executable `/*! ... */` comments that
+hide a mutation from the read gate, a quote character inside a backtick
+identifier that conceals a mutating CTE body, and whitespace-separated
+`DELETE FROM ... USING` targets that bypass the single-table allowlist. Until
+those are fixed, treat the gate as a tripwire, not a boundary: run the
+adapter against a clone whose contents a misled query may not corrupt, and
+prefer read-only credentials where possible. The dedicated ignored tests in
 `crates/integration-dolthub/tests/dolthub_sql_gate.rs` use a real Dolt database.
 
 Nested tools do not inherit dispatcher authorization automatically. These
