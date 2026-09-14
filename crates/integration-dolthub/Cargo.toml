@@ -11,6 +11,7 @@ ardur-integrations = { workspace = true }
 ardur-tool-registry = { workspace = true }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
+sqlparser = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
