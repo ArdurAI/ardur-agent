@@ -307,7 +307,36 @@ impl FusedRuntime {
         cap_token: &CapTokenRef,
         tool: &str,
     ) -> Result<VerifiedClaims, RuntimeError> {
-        self.stage_cap_token_for_tool(
+        self.verify_cap_token_for_tool_at(cap_token, tool, self.cost_units)
+    }
+
+    /// Verify `cap_token` for an unmetered control-plane capability.
+    ///
+    /// gh#470 R2: the server's admin gate verifies `approval.decide` at
+    /// cost 0 because admin mutations are not metered against a turn
+    /// budget — but the receipt path re-verified the SAME token at
+    /// `cost_units` (default 1), so a legitimately-issued zero-budget
+    /// token passed the gate and could then never mint its receipt: the
+    /// decision persisted while the audit chain silently lost the entry.
+    /// Control-plane receipts must be verified under the SAME predicate
+    /// the gate used, or the gate and the receipt chain disagree about
+    /// what was authorized.
+    pub fn verify_control_cap_token(
+        &self,
+        cap_token: &CapTokenRef,
+        tool: &str,
+    ) -> Result<VerifiedClaims, RuntimeError> {
+        self.verify_cap_token_for_tool_at(cap_token, tool, 0)
+    }
+
+    /// Verify `cap_token` for `tool` at an explicit cost.
+    fn verify_cap_token_for_tool_at(
+        &self,
+        cap_token: &CapTokenRef,
+        tool: &str,
+        cost_units: u64,
+    ) -> Result<VerifiedClaims, RuntimeError> {
+        self.stage_cap_token_for_tool_at(
             &SubmitRequest {
                 messages: Vec::new(),
                 cap_token: cap_token.clone(),
@@ -317,6 +346,7 @@ impl FusedRuntime {
             &PerRequestProvisioning::default(),
             self.clock.now_ms().get() / 1000,
             tool,
+            cost_units,
         )
     }
 
@@ -1075,6 +1105,20 @@ impl FusedRuntime {
         now_unix: u64,
         tool: &str,
     ) -> Result<VerifiedClaims, RuntimeError> {
+        self.stage_cap_token_for_tool_at(req, provisioning, now_unix, tool, self.cost_units)
+    }
+
+    /// The same verification as [`stage_cap_token_for_tool`] at an explicit
+    /// cost: control-plane callers verify at the cost the authorizing GATE
+    /// used (gh#470 R2), not the chat-turn default.
+    fn stage_cap_token_for_tool_at(
+        &self,
+        req: &SubmitRequest,
+        provisioning: &PerRequestProvisioning,
+        now_unix: u64,
+        tool: &str,
+        cost_units: u64,
+    ) -> Result<VerifiedClaims, RuntimeError> {
         if req.cap_token.0.is_empty() {
             return Err(RuntimeError::CapTokenMissing);
         }
@@ -1095,7 +1139,7 @@ impl FusedRuntime {
                     now_unix,
                     audience,
                     tool: tool.to_string(),
-                    cost: self.cost_units,
+                    cost: cost_units,
                 },
             )
             .map_err(|e| match e {
@@ -1251,7 +1295,7 @@ impl FusedRuntime {
         payload_digest: Sha256Digest,
         cost: ardur_receipt::CostTuple,
     ) -> Result<ReceiptBody, RuntimeError> {
-        let claims = self.verify_cap_token_for_tool(cap_token, tool)?;
+        let claims = self.verify_control_cap_token(cap_token, tool)?;
         let verb = VerbObject::new(verb)
             .map_err(|e| RuntimeError::Internal(anyhow::anyhow!("invalid receipt verb: {e}")))?;
         let now_ms = self.clock.now_ms().get();

@@ -504,3 +504,178 @@ async fn the_openapi_spec_is_unchanged_without_the_gate() {
     );
     assert!(post["responses"]["403"].is_null());
 }
+
+// ---------------------------------------------------------------------------
+// gh#470 — the gate and the receipt path must not diverge.
+//
+// Both defects below leave an AUTHORIZED mutation without its signed receipt:
+// the decision persists, the route returns 200, and only an error log line
+// records that the audit chain lost an entry. The receipt is the reason the
+// #417 slice exists, so "the gate accepted it but the receipt path refused
+// it" is a defect even though the mutation itself was authorized.
+// ---------------------------------------------------------------------------
+
+/// Mint a serialized cap-token with an explicit `budget_remaining`.
+///
+/// gh#470 R2: the route gate verifies `approval.decide` at cost 0 (admin
+/// mutations are not metered), but the receipt path re-verifies the SAME
+/// token at `cost_units` (default 1). A token issued with
+/// `budget_remaining: 0` is legitimately issued (cost 0 <= budget 0) and
+/// legitimately accepted by the gate, yet can never mint its receipt. The
+/// verifier rejects it deterministically — not a race, not a clock skew: a
+/// structurally unreachable receipt.
+fn mint_with_budget(
+    keypair: KeyPair,
+    verbs: &[&str],
+    expires_unix: u64,
+    budget_remaining: u64,
+) -> String {
+    BiscuitCapTokenIssuer::new(keypair)
+        .issue(
+            CapHolderId(HOLDER.to_string()),
+            CapScope {
+                audience: AUDIENCE.to_string(),
+                expires_unix,
+                budget_remaining,
+                tool_allowlist: verbs.iter().map(|v| (*v).to_string()).collect(),
+            },
+        )
+        .expect("a token is issued")
+        .to_base64()
+        .expect("the token serializes")
+}
+
+/// R2: a zero-budget token passes the gate at cost 0 AND mints its receipt.
+///
+/// RED today: the receipt half fails because `commit_control_receipt`
+/// re-verifies at `cost_units` (1), and 1 > 0 budget. The mutation succeeds
+/// (200, card approved) while the receipt chain stays empty — the exact
+/// silent audit gap #417 exists to close.
+#[tokio::test]
+async fn a_zero_budget_cap_token_still_mints_its_decision_receipt() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let id = "card-r2-zero-budget";
+    seed_pending(dir.path(), id);
+
+    let mut config = support::test_config_with_admin(&dir, None, vec![ADMIN_TOKEN.to_string()]);
+    config.admin_cap_token_gate = true;
+    let router = support::boot_router(&config).await;
+    let keypair = server_issuer_keypair(&config.data_dir);
+
+    let request = Request::builder()
+        .method("POST")
+        .uri(format!("/approvals/{id}/approve"))
+        .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+        .header(
+            "X-Ardur-Cap-Token",
+            mint_with_budget(keypair, &[APPROVAL_DECIDE_VERB], far_future(), 0),
+        )
+        .body(Body::empty())
+        .expect("request builds");
+    let (status, _) = support::oneshot(router, request).await;
+    assert_eq!(status, StatusCode::OK, "the gate admits cost-0 at budget 0");
+
+    let chain =
+        ardur_fused_runtime::load_persisted_chain(dir.path().join("receipts").join("chain.jsonl"))
+            .expect("chain loads");
+    assert_eq!(
+        chain.len(),
+        1,
+        "the decision that passed the gate must produce its signed receipt"
+    );
+    assert_eq!(
+        chain[0].body.subject.0, HOLDER,
+        "the receipt binds to the presented capability's holder"
+    );
+}
+
+/// R1: with the gate OFF, a presented token is NOT forwarded for receipt
+/// binding — the gateway mints its own scoped token instead.
+///
+/// RED today: `presented_cap_token(&headers)` forwards ANY non-empty header
+/// unconditionally, so `handle_approval_receipt` prefers the presented
+/// string. A client that sends garbage alongside a valid bearer gets its
+/// decision persisted while the receipt mint fails (`not-a-biscuit`), the
+/// route returns 200, and the chain loses the entry. When the gate is off
+/// there is no verification step the presented token passed, so forwarding
+/// it converts an unverified header into a receipt-mint failure.
+///
+/// The contrast in `without_the_gate_the_receipt_keeps_the_gateway_subject`
+/// (no header at all) is unchanged by this fix.
+#[tokio::test]
+async fn without_the_gate_a_presented_cap_token_is_not_forwarded_for_receipt_binding() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let id = "card-r1-gate-off-forwarded";
+    seed_pending(dir.path(), id);
+
+    // Gate OFF — the default.
+    let config = support::test_config_with_admin(&dir, None, vec![ADMIN_TOKEN.to_string()]);
+    let router = support::boot_router(&config).await;
+
+    let request = Request::builder()
+        .method("POST")
+        .uri(format!("/approvals/{id}/approve"))
+        .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+        .header("X-Ardur-Cap-Token", "not-a-biscuit")
+        .body(Body::empty())
+        .expect("request builds");
+    let (status, _) = support::oneshot(router, request).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let chain =
+        ardur_fused_runtime::load_persisted_chain(dir.path().join("receipts").join("chain.jsonl"))
+            .expect("chain loads");
+    assert_eq!(
+        chain.len(),
+        1,
+        "an un-gated decision must still mint its gateway-subject receipt"
+    );
+    assert_ne!(
+        chain[0].body.subject.0, HOLDER,
+        "the receipt must fall back to the gateway subject, not bind to an \
+         unverified header the gate never checked"
+    );
+}
+
+/// R1 (gated side of the same coin): with the gate ON, an invalid token in
+/// the header never reaches the mutation — pinned by existing tests — but a
+/// VALID presented token must still bind the receipt to its holder. Guards
+/// against over-correction: suppressing the header entirely would regress
+/// `the_receipt_binds_to_the_presented_capability`.
+///
+/// This test is expected GREEN before the fix (it is the existing pinned
+/// behaviour); it exists to catch the naive fix for R1 (dropping the
+/// header everywhere) breaking the gated binding.
+#[tokio::test]
+async fn with_the_gate_on_a_presented_token_still_binds_the_receipt() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let id = "card-r1-gate-on-binding";
+    seed_pending(dir.path(), id);
+
+    let mut config = support::test_config_with_admin(&dir, None, vec![ADMIN_TOKEN.to_string()]);
+    config.admin_cap_token_gate = true;
+    let router = support::boot_router(&config).await;
+    let keypair = server_issuer_keypair(&config.data_dir);
+
+    let request = Request::builder()
+        .method("POST")
+        .uri(format!("/approvals/{id}/approve"))
+        .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+        .header(
+            "X-Ardur-Cap-Token",
+            mint(keypair, &[APPROVAL_DECIDE_VERB], far_future()),
+        )
+        .body(Body::empty())
+        .expect("request builds");
+    let (status, _) = support::oneshot(router, request).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let chain =
+        ardur_fused_runtime::load_persisted_chain(dir.path().join("receipts").join("chain.jsonl"))
+            .expect("chain loads");
+    assert_eq!(chain.len(), 1);
+    assert_eq!(
+        chain[0].body.subject.0, HOLDER,
+        "gated decisions bind to the presented capability's holder"
+    );
+}

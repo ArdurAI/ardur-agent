@@ -505,7 +505,15 @@ async fn approvals_approve(
             &state,
             &id,
             ApprovalDecision::Approve,
-            presented_cap_token(&headers),
+            // gh#470 R1: forward the presented token ONLY when the gate is
+            // enabled. `authorize_admin_mutation` verifies it in exactly that
+            // case; with the gate off the header was never checked, and
+            // forwarding an unverified string makes `handle_approval_receipt`
+            // prefer it over the gateway token — so a garbage header alongside
+            // a valid bearer persisted the decision while the receipt mint
+            // failed and the route still returned 200. The audit chain cannot
+            // lose an entry to a header nobody verified.
+            gated_cap_token(&state, &headers),
         )
         .await
     }
@@ -534,7 +542,7 @@ async fn approvals_reject(
             &state,
             &id,
             ApprovalDecision::Reject { reason },
-            presented_cap_token(&headers),
+            gated_cap_token(&state, &headers),
         )
         .await
     }
@@ -1283,6 +1291,21 @@ fn authorize_admin_mutation(
 fn presented_cap_token(headers: &HeaderMap) -> Option<String> {
     let raw = header_str(headers, "X-Ardur-Cap-Token");
     (!raw.is_empty()).then(|| raw.to_string())
+}
+
+/// The cap-token to bind the decision receipt to: the caller's, but only
+/// when the gh#417 gate actually verified it (gh#470 R1).
+///
+/// With the gate disabled there is no verification step the presented header
+/// passed, so forwarding it would let an arbitrary unverified string decide
+/// whether the receipt mints (`handle_approval_receipt` prefers a presented
+/// token over the gateway's own). Returning `None` there keeps un-gated
+/// deployments on the gateway-subject receipt they have always minted.
+fn gated_cap_token(state: &AppState, headers: &HeaderMap) -> Option<String> {
+    state
+        .admin_cap_token_gate()
+        .then(|| presented_cap_token(headers))
+        .flatten()
 }
 
 /// 403 for a mutation the presented cap-token does not authorize.
