@@ -55,6 +55,10 @@ pub struct WebPolicy {
     pub allow_loopback_http: bool,
     /// Maximum response body bytes.
     pub max_body_bytes: usize,
+    /// Per-request wall-clock ceiling for network tools, in seconds.
+    /// Mirrors http.fetch's `DEFAULT_TIMEOUT_SECS` (30) so the two tools share
+    /// one egress posture.
+    pub timeout_secs: u64,
 }
 
 impl Default for WebPolicy {
@@ -63,6 +67,7 @@ impl Default for WebPolicy {
             allowlist: Vec::new(),
             allow_loopback_http: false,
             max_body_bytes: 1024 * 1024,
+            timeout_secs: 30,
         }
     }
 }
@@ -194,7 +199,6 @@ fn receipt(action: &str, target: &str) -> Value {
 /// `web.fetch` — fetch HTTPS pages, with loopback HTTP allowed only for dev.
 pub struct WebFetchTool {
     policy: WebPolicy,
-    client: reqwest::Client,
     schema: ToolSchema,
 }
 
@@ -204,7 +208,6 @@ impl WebFetchTool {
     pub fn new(policy: WebPolicy) -> Self {
         Self {
             policy,
-            client: reqwest::Client::new(),
             schema: ToolSchema {
                 description:
                     "Fetch a URL with HTTPS-only validation (HTTP loopback allowed in dev policy)."
@@ -238,23 +241,38 @@ impl Tool for WebFetchTool {
             .policy
             .check_url(raw, "fetch")
             .map_err(|reason| ardur_tool_registry::ToolError::Denied { reason })?;
-        let response = self
-            .client
-            .get(url.clone())
-            .send()
-            .await
-            .map_err(|e| ardur_tool_registry::ToolError::ExecutionFailed(e.to_string()))?;
-        let status = response.status().as_u16();
-        let final_url = response.url().to_string();
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|e| ardur_tool_registry::ToolError::ExecutionFailed(e.to_string()))?;
-        let truncated = bytes.len() > self.policy.max_body_bytes;
-        let body = String::from_utf8_lossy(&bytes[..bytes.len().min(self.policy.max_body_bytes)])
-            .into_owned();
+        // The transport is the shared guarded machinery from http.fetch
+        // (gh#364 gap 1): per-hop scheme+host re-validation via this policy,
+        // resolved-IP vetting (the DNS-rebind defence), manual redirect
+        // following, a wall-clock timeout, and a capped body read. The old
+        // bespoke transport had none of those, so web.fetch was a weaker
+        // duplicate of http.fetch's guards.
+        let fetch = ardur_tool_registry::fetch_guarded(ardur_tool_registry::GuardedFetchParams {
+            url,
+            method: reqwest::Method::GET,
+            validate_hop: &|hop: &url::Url| {
+                self.policy
+                    .check_url(hop.as_str(), "fetch")
+                    .map(|_| ())
+                    .map_err(|reason| ardur_tool_registry::ToolError::Denied { reason })
+            },
+            // web.fetch has no private-IP grant: the DNS-rebind defence
+            // applies unconditionally.
+            allow_private_ips: false,
+            timeout: std::time::Duration::from_secs(self.policy.timeout_secs),
+            max_bytes: self.policy.max_body_bytes,
+            redirect_limit: 5,
+            headers: &serde_json::Map::new(),
+        })
+        .await?;
         Ok(ToolOutput {
-            content: json!({"status": status, "body": body, "final_url": final_url, "truncated": truncated}),
+            content: json!({
+                "status": fetch.status.as_u16(),
+                "body": String::from_utf8_lossy(&fetch.body),
+                "final_url": fetch.final_url.as_str(),
+                "truncated": fetch.truncated,
+                "bytes_read": fetch.body.len(),
+            }),
             cost: CostTuple::default(),
             receipt_data: receipt("web.fetch", raw),
         })

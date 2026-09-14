@@ -170,8 +170,11 @@ promise later approval, budget admission or execution success.
 
 `ardur-browser`, `ardur-terminal` and `ardur-web` remain explicit library
 integration surfaces, not the normal binary registries. In particular, real
-CDP transport is not implemented, and the weak `web.fetch` implementation must
-not be equated with the separately hardened `http.fetch`.
+CDP transport is not implemented. `web.fetch` delegates to the same guarded
+transport as `http.fetch` (per-hop scheme/host re-validation, resolved-IP
+vetting, manual redirect following, wall-clock timeout, capped body read), so
+the two tools share one egress posture; `web.fetch` additionally enforces
+HTTPS for non-loopback hosts via its own policy gate.
 
 ## Approvals: Shipped Server Loop, Explicit Limits
 
@@ -337,8 +340,10 @@ The Phase 5 audit slices are deliberately narrower than full audit closure:
   `FileDenyList` has no production wiring. Durable/cross-process revocation and
   in-flight cancellation are not delivered.
 - **#364:** wildcard web/browser host checks now require a dot boundary and
-  ignore case. `web.fetch` still lacks the hardened fetch path's SSRF guard,
-  timeout and validated redirect handling. Browser DNS validation (#320) and
+  ignore case. `web.fetch` now shares `http.fetch`'s guarded transport
+  (per-hop re-validation, resolved-IP vetting incl. link-local/metadata
+  ranges, manual redirects, wall-clock timeout, capped read), fault-proven by
+  `crates/web/tests/web_fetch_ssrf.rs`. Browser DNS validation (#320) and
   JSON-encoded CDP selector/text arguments remain open; dormant transport is
   not evidence that those surfaces are safe to activate.
 - **#367:** sub-agent release saturates rather than wrapping; reserve/rollback

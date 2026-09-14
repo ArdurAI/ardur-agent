@@ -33,6 +33,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use reqwest::Method;
+use reqwest::StatusCode;
 use reqwest::redirect::Policy;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -386,52 +387,247 @@ impl HttpFetchTool {
             ),
         })
     }
+}
 
-    /// Resolve `host`/`port` to socket addresses and apply Gate B — the SSRF
-    /// IP blocklist — to each, returning the vetted addresses to pin the
-    /// connection to.
-    ///
-    /// `is_localhost` marks a request whose target *is* localhost (the bare name
-    /// or a loopback literal): the dev exception is honoured by skipping the IP
-    /// check. A non-localhost host that merely *resolves* to a loopback or
-    /// private address is still refused — that is the DNS-rebind defence.
-    async fn resolve_and_vet(
-        &self,
-        host: &Host<&str>,
-        host_str: &str,
-        port: u16,
-        is_localhost: bool,
-    ) -> Result<Vec<SocketAddr>, ToolError> {
-        let addrs: Vec<SocketAddr> = match host {
-            Host::Ipv4(ip) => vec![SocketAddr::new(IpAddr::V4(*ip), port)],
-            Host::Ipv6(ip) => vec![SocketAddr::new(IpAddr::V6(*ip), port)],
-            Host::Domain(d) => tokio::net::lookup_host((*d, port))
-                .await
-                .map_err(|e| ToolError::ExecutionFailed(format!("could not resolve `{d}`: {e}")))?
-                .collect(),
-        };
+/// The terminal outcome of a guarded fetch: the response after a manually
+/// followed, per-hop re-validated redirect chain.
+pub struct GuardedFetch {
+    /// HTTP status of the terminal response.
+    pub status: StatusCode,
+    /// Response headers as a JSON object.
+    pub headers: Value,
+    /// Body bytes, capped at `max_bytes`.
+    pub body: Vec<u8>,
+    /// True when the body hit the ceiling mid-read.
+    pub truncated: bool,
+    /// The final URL after redirects.
+    pub final_url: Url,
+}
 
-        if addrs.is_empty() {
-            return Err(ToolError::ExecutionFailed(format!(
-                "host `{host_str}` resolved to no addresses"
-            )));
+/// Resolve `host`/`port` and refuse any address on the internal-IP blocklist
+/// unless the target is literally localhost (the dev exception). Shared by
+/// every egress tool so the DNS-rebind defence cannot drift between them.
+pub async fn resolve_and_vet_host(
+    host: &Host<&str>,
+    host_str: &str,
+    port: u16,
+    is_localhost: bool,
+    allow_private_ips: bool,
+) -> Result<Vec<SocketAddr>, ToolError> {
+    let addrs: Vec<SocketAddr> = match host {
+        Host::Ipv4(ip) => vec![SocketAddr::new(IpAddr::V4(*ip), port)],
+        Host::Ipv6(ip) => vec![SocketAddr::new(IpAddr::V6(*ip), port)],
+        Host::Domain(d) => tokio::net::lookup_host((*d, port))
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(format!("could not resolve `{d}`: {e}")))?
+            .collect(),
+    };
+
+    if addrs.is_empty() {
+        return Err(ToolError::ExecutionFailed(format!(
+            "host `{host_str}` resolved to no addresses"
+        )));
+    }
+
+    if !allow_private_ips && !is_localhost {
+        for addr in &addrs {
+            if is_internal_ip(addr.ip()) {
+                return Err(ToolError::Denied {
+                    reason: format!(
+                        "host `{host_str}` resolves to a private/internal address \
+                         ({}); refusing to fetch (SSRF defence)",
+                        addr.ip()
+                    ),
+                });
+            }
+        }
+    }
+
+    Ok(addrs)
+}
+
+/// Parameters for [`fetch_guarded`] — the shared egress posture every
+/// network tool must adopt (gh#364). Grouped so the signature stays small and
+/// every knob is named at the call site.
+pub struct GuardedFetchParams<'a> {
+    /// Absolute URL to fetch; each redirect target is re-validated.
+    pub url: Url,
+    /// Request method — `GET` or `HEAD`; the caller enforces its own policy.
+    pub method: Method,
+    /// The tool's own per-hop policy gate (scheme and host rules); runs on
+    /// the initial URL and on every resolved `Location` target.
+    pub validate_hop: &'a (dyn Fn(&Url) -> Result<(), ToolError> + Sync),
+    /// Whether the caller was granted private/internal-IP access. `false`
+    /// means the DNS-rebind defence refuses non-vetted resolutions.
+    pub allow_private_ips: bool,
+    /// Per-request wall-clock ceiling.
+    pub timeout: Duration,
+    /// Body ceiling in bytes; the read stops (truncated) past it.
+    pub max_bytes: usize,
+    /// Cap on followed redirects before erroring.
+    pub redirect_limit: usize,
+    /// Extra request headers, already filtered by the caller.
+    pub headers: &'a Map<String, Value>,
+}
+
+/// Fetch `params.url` with the shared egress guards (gh#364): each redirect
+/// hop is re-validated by `params.validate_hop` AND re-vetted against
+/// internal IPs, the connection is pinned to the vetted addresses,
+/// reqwest's own follower is disabled so nothing bypasses the checks, a
+/// wall-clock timeout applies to every request, and the body is read in
+/// capped chunks.
+pub async fn fetch_guarded(params: GuardedFetchParams<'_>) -> Result<GuardedFetch, ToolError> {
+    let GuardedFetchParams {
+        url: start,
+        method,
+        validate_hop,
+        allow_private_ips,
+        timeout,
+        max_bytes,
+        redirect_limit,
+        headers,
+    } = params;
+    let mut current = start;
+    let mut redirects = 0usize;
+
+    loop {
+        let scheme = current.scheme();
+        if scheme != "http" && scheme != "https" {
+            return Err(ToolError::Denied {
+                reason: format!("scheme `{scheme}` is not permitted; only http and https"),
+            });
         }
 
-        if !self.allow_private_ips && !is_localhost {
-            for addr in &addrs {
-                if is_internal_ip(addr.ip()) {
-                    return Err(ToolError::Denied {
-                        reason: format!(
-                            "host `{host_str}` resolves to a private/internal address \
-                             ({}); refusing to fetch (SSRF defence)",
-                            addr.ip()
-                        ),
-                    });
-                }
+        validate_hop(&current)?;
+
+        let host = current.host().ok_or_else(|| ToolError::Denied {
+            reason: format!("url `{current}` has no host"),
+        })?;
+        let host_str = current
+            .host_str()
+            .ok_or_else(|| {
+                ToolError::Internal(anyhow::anyhow!(
+                    "url has host but host_str returned None: {current}"
+                ))
+            })?
+            .to_string();
+        let port = current
+            .port_or_known_default()
+            .ok_or_else(|| ToolError::Denied {
+                reason: format!("url `{current}` has no port and no known default"),
+            })?;
+
+        let is_localhost = host_is_localhost(&host);
+        let addrs =
+            resolve_and_vet_host(&host, &host_str, port, is_localhost, allow_private_ips).await?;
+
+        // Pin the connection to the exact addresses we vetted, and follow
+        // redirects ourselves so each hop is re-checked above.
+        let client = reqwest::Client::builder()
+            .redirect(Policy::none())
+            .timeout(timeout)
+            .resolve_to_addrs(&host_str, &addrs)
+            .build()
+            .map_err(|e| {
+                ToolError::Internal(anyhow::anyhow!("failed to build http client: {e}"))
+            })?;
+
+        let mut request = client.request(method.clone(), current.clone());
+        for (name, value) in headers {
+            // Denylist headers that a prompt-controlled fetch must not set —
+            // prevents credential smuggling, cache poisoning, and request
+            // routing attacks against internal services behind an allowlisted host.
+            let lower = name.to_ascii_lowercase();
+            if matches!(
+                lower.as_str(),
+                "authorization"
+                    | "proxy-authorization"
+                    | "cookie"
+                    | "set-cookie"
+                    | "host"
+                    | "forwarded"
+                    | "x-forwarded-for"
+                    | "x-forwarded-host"
+                    | "x-forwarded-proto"
+                    | "x-real-ip"
+                    | "via"
+                    | "connection"
+                    | "transfer-encoding"
+                    | "content-length"
+                    | "upgrade"
+            ) {
+                continue;
+            }
+            if let Some(v) = value.as_str() {
+                request = request.header(name, v);
             }
         }
 
-        Ok(addrs)
+        let mut resp = request.send().await.map_err(|e| {
+            if e.is_timeout() {
+                ToolError::Timeout
+            } else {
+                ToolError::Internal(anyhow::anyhow!("request to `{current}` failed: {e}"))
+            }
+        })?;
+
+        let status = resp.status();
+        if status.is_redirection() {
+            if let Some(location) = resp
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|v| v.to_str().ok())
+            {
+                redirects += 1;
+                if redirects > redirect_limit {
+                    return Err(ToolError::ExecutionFailed(format!(
+                        "too many redirects (exceeded limit of {redirect_limit})"
+                    )));
+                }
+                // Resolve the `Location` against the current URL so a
+                // relative redirect target is made absolute.
+                current = current.join(location).map_err(|e| {
+                    ToolError::ExecutionFailed(format!("invalid redirect target `{location}`: {e}"))
+                })?;
+                continue;
+            }
+        }
+
+        // Terminal response — read the body up to the ceiling.
+        let headers = {
+            let mut map = Map::new();
+            for (name, value) in resp.headers() {
+                map.insert(
+                    name.as_str().to_string(),
+                    Value::String(String::from_utf8_lossy(value.as_bytes()).into_owned()),
+                );
+            }
+            Value::Object(map)
+        };
+
+        let mut body = Vec::new();
+        let mut truncated = false;
+        loop {
+            let chunk = resp.chunk().await.map_err(|e| {
+                ToolError::Internal(anyhow::anyhow!("reading body of `{current}` failed: {e}"))
+            })?;
+            let Some(chunk) = chunk else { break };
+            let remaining = max_bytes.saturating_sub(body.len());
+            if chunk.len() > remaining {
+                body.extend_from_slice(&chunk[..remaining]);
+                truncated = true;
+                break;
+            }
+            body.extend_from_slice(&chunk);
+        }
+
+        return Ok(GuardedFetch {
+            status,
+            headers,
+            body,
+            truncated,
+            final_url: current,
+        });
     }
 }
 
@@ -470,163 +666,55 @@ impl Tool for HttpFetchTool {
 
         // `Url::parse` rejects relative URLs (`RelativeUrlWithoutBase`), so a
         // bare path never reaches the request path.
-        let mut current = Url::parse(&args.url)
+        let start_url = Url::parse(&args.url)
             .map_err(|e| ToolError::InvalidArgs(format!("invalid url `{}`: {e}", args.url)))?;
 
         let start = Instant::now();
-        let mut redirects = 0usize;
 
-        loop {
-            let scheme = current.scheme();
-            if scheme != "http" && scheme != "https" {
-                return Err(ToolError::Denied {
-                    reason: format!("scheme `{scheme}` is not permitted; only http and https"),
-                });
-            }
-
-            let host = current.host().ok_or_else(|| ToolError::Denied {
-                reason: format!("url `{current}` has no host"),
-            })?;
-            let host_str = current
-                .host_str()
-                .ok_or_else(|| {
-                    ToolError::Internal(anyhow::anyhow!(
-                        "url has host but host_str returned None: {current}"
-                    ))
-                })?
-                .to_string();
-            let port = current
-                .port_or_known_default()
-                .ok_or_else(|| ToolError::Denied {
-                    reason: format!("url `{current}` has no port and no known default"),
+        // The transport is the shared guarded machinery (gh#364): every hop
+        // re-runs the allowlist (Gate A) and the private-IP vet (Gate B), the
+        // connection is pinned to the vetted addresses, redirects are followed
+        // manually, a wall-clock timeout applies, and the body read is capped.
+        let fetch = fetch_guarded(GuardedFetchParams {
+            url: start_url,
+            method,
+            validate_hop: &|url: &Url| {
+                let host = url.host().ok_or_else(|| ToolError::Denied {
+                    reason: format!("url `{url}` has no host"),
                 })?;
-
-            // Gate A then Gate B, on every hop — including redirect targets.
-            let is_localhost = host_is_localhost(&host);
-            self.check_host_allowed(&host, &host_str)?;
-            let addrs = self
-                .resolve_and_vet(&host, &host_str, port, is_localhost)
-                .await?;
-
-            // Pin the connection to the exact addresses we vetted, and follow
-            // redirects ourselves so each hop is re-checked above.
-            let client = reqwest::Client::builder()
-                .redirect(Policy::none())
-                .timeout(timeout)
-                .resolve_to_addrs(&host_str, &addrs)
-                .build()
-                .map_err(|e| {
-                    ToolError::Internal(anyhow::anyhow!("failed to build http client: {e}"))
-                })?;
-
-            let mut request = client.request(method.clone(), current.clone());
-            for (name, value) in &args.headers {
-                // Denylist headers that a prompt-controlled fetch must not set —
-                // prevents credential smuggling, cache poisoning, and request
-                // routing attacks against internal services behind an allowlisted host.
-                let lower = name.to_ascii_lowercase();
-                if matches!(
-                    lower.as_str(),
-                    "authorization"
-                        | "proxy-authorization"
-                        | "cookie"
-                        | "set-cookie"
-                        | "host"
-                        | "forwarded"
-                        | "x-forwarded-for"
-                        | "x-forwarded-host"
-                        | "x-forwarded-proto"
-                        | "x-real-ip"
-                        | "via"
-                        | "connection"
-                        | "transfer-encoding"
-                        | "content-length"
-                        | "upgrade"
-                ) {
-                    continue;
-                }
-                if let Some(v) = value.as_str() {
-                    request = request.header(name, v);
-                }
-            }
-
-            let mut resp = request.send().await.map_err(|e| {
-                if e.is_timeout() {
-                    ToolError::Timeout
-                } else {
-                    ToolError::Internal(anyhow::anyhow!("request to `{current}` failed: {e}"))
-                }
-            })?;
-
-            let status = resp.status();
-            if status.is_redirection() {
-                if let Some(location) = resp
-                    .headers()
-                    .get(reqwest::header::LOCATION)
-                    .and_then(|v| v.to_str().ok())
-                {
-                    redirects += 1;
-                    if redirects > self.redirect_limit {
-                        return Err(ToolError::ExecutionFailed(format!(
-                            "too many redirects (exceeded limit of {})",
-                            self.redirect_limit
-                        )));
-                    }
-                    // Resolve the `Location` against the current URL so a
-                    // relative redirect target is made absolute.
-                    current = current.join(location).map_err(|e| {
-                        ToolError::ExecutionFailed(format!(
-                            "invalid redirect target `{location}`: {e}"
+                let host_str = url
+                    .host_str()
+                    .ok_or_else(|| {
+                        ToolError::Internal(anyhow::anyhow!(
+                            "url has host but host_str returned None: {url}"
                         ))
-                    })?;
-                    continue;
-                }
-            }
+                    })?
+                    .to_string();
+                self.check_host_allowed(&host, &host_str)
+            },
+            allow_private_ips: self.allow_private_ips,
+            timeout,
+            max_bytes,
+            redirect_limit: self.redirect_limit,
+            headers: &args.headers,
+        })
+        .await?;
 
-            // Terminal response — read the body up to the ceiling.
-            let headers = {
-                let mut map = Map::new();
-                for (name, value) in resp.headers() {
-                    map.insert(
-                        name.as_str().to_string(),
-                        Value::String(String::from_utf8_lossy(value.as_bytes()).into_owned()),
-                    );
-                }
-                Value::Object(map)
-            };
+        let content = json!({
+            "status": fetch.status.as_u16(),
+            "headers": fetch.headers,
+            "body": String::from_utf8_lossy(&fetch.body),
+            "body_truncated": fetch.truncated,
+            "bytes_read": fetch.body.len(),
+            "final_url": fetch.final_url.as_str(),
+            "elapsed_ms": start.elapsed().as_millis() as u64,
+        });
 
-            let mut body = Vec::new();
-            let mut truncated = false;
-            loop {
-                let chunk = resp.chunk().await.map_err(|e| {
-                    ToolError::Internal(anyhow::anyhow!("reading body of `{current}` failed: {e}"))
-                })?;
-                let Some(chunk) = chunk else { break };
-                let remaining = max_bytes.saturating_sub(body.len());
-                if chunk.len() > remaining {
-                    body.extend_from_slice(&chunk[..remaining]);
-                    truncated = true;
-                    break;
-                }
-                body.extend_from_slice(&chunk);
-            }
-
-            let content = json!({
-                "status": status.as_u16(),
-                "headers": headers,
-                "body": String::from_utf8_lossy(&body),
-                "body_truncated": truncated,
-                "bytes_read": body.len(),
-                "final_url": current.as_str(),
-                "elapsed_ms": start.elapsed().as_millis() as u64,
-            });
-
-            return Ok(ToolOutput {
-                content: content.clone(),
-                cost: CostTuple::default(),
-                receipt_data: content,
-            });
-        }
+        Ok(ToolOutput {
+            content: content.clone(),
+            cost: CostTuple::default(),
+            receipt_data: content,
+        })
     }
 
     fn required_capabilities(&self) -> &[Capability] {

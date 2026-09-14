@@ -879,7 +879,12 @@ Backends: local shell, Docker exec, SSH remote, and Modal/cloud sandbox.
 Tools: `web.fetch`, `web.parse`, `web.screenshot`, and `web.form_fill`.
 
 - `web.fetch` enforces HTTPS for external URLs. HTTP is allowed only for loopback
-  development URLs when `WebPolicy::dev_loopback()` is used.
+  development URLs when `WebPolicy::dev_loopback()` is used. The transport is the
+  shared guarded fetch (`fetch_guarded` in `ardur-tool-registry`): every redirect
+  hop is re-validated against the policy and against internal/private IP ranges
+  (the DNS-rebind defence, including link-local metadata addresses), a
+  wall-clock timeout (`WebPolicy::timeout_secs`, default 30s) applies per
+  request, and the body read stops at `WebPolicy::max_body_bytes`.
 - `WebPolicy::with_allowlist(["example.com"])` narrows eligible hosts; each
   fetch/screenshot/form-fill validates the URL before network or browser work.
 - `web.parse` extracts titles, selector text, links, and form metadata from HTML

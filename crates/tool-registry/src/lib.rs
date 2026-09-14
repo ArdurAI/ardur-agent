@@ -63,8 +63,9 @@ pub mod snapshot;
 mod tool;
 
 pub use builtins::{
-    BuiltinOpts, HttpFetchOpts, HttpFetchTool, ListDirTool, ReadFileTool, ShellExecTool, ShellTool,
-    WriteFileTool, is_internal_ip, is_safe_exec_char,
+    BuiltinOpts, GuardedFetch, GuardedFetchParams, HttpFetchOpts, HttpFetchTool, ListDirTool,
+    ReadFileTool, ShellExecTool, ShellTool, WriteFileTool, fetch_guarded, is_internal_ip,
+    is_safe_exec_char, resolve_and_vet_host,
 };
 pub use capability::Capability;
 pub use echo::EchoTool;
