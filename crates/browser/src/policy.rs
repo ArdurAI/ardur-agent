@@ -44,9 +44,23 @@ impl SiteAction {
     /// Check if this permit matches the given domain and action.
     #[must_use]
     pub fn matches(&self, domain: &str, action: &str) -> bool {
+        // The wildcard needs a dot boundary (gh#364): a bare `ends_with` lets
+        // an attacker-registered `evilexample.com` satisfy an
+        // `*.example.com` permit. `*.example.com` grants the apex and any
+        // subdomain of it, and nothing else.
         let domain_match = self.domain == "*"
             || self.domain.eq_ignore_ascii_case(domain)
-            || (self.domain.starts_with("*.") && domain.ends_with(&self.domain[2..]));
+            || self.domain.strip_prefix("*.").is_some_and(|base| {
+                domain.eq_ignore_ascii_case(base)
+                    || domain
+                        .len()
+                        .checked_sub(base.len())
+                        .and_then(|i| i.checked_sub(1))
+                        .is_some_and(|i| {
+                            domain.as_bytes()[i] == b'.'
+                                && domain[i + 1..].eq_ignore_ascii_case(base)
+                        })
+            });
         let action_match = self.action == "*" || self.action == action;
         domain_match && action_match
     }
@@ -342,5 +356,18 @@ mod tests {
         let policy = BrowserPolicy::permissive().with_confirmation(ConfirmationLevel::EveryAction);
         assert!(policy.check_confirmation("screenshot", false).is_err());
         assert!(policy.check_confirmation("screenshot", true).is_ok());
+    }
+
+    /// gh#364 — the browser permit wildcard needs the same dot boundary.
+    #[test]
+    fn a_site_action_wildcard_requires_a_dot_boundary() {
+        let sa = SiteAction::new("*.example.com", "*");
+        assert!(sa.matches("example.com", "click"), "apex");
+        assert!(sa.matches("api.example.com", "click"), "subdomain");
+        assert!(
+            !sa.matches("evilexample.com", "click"),
+            "a lookalike registration must not satisfy the permit"
+        );
+        assert!(!sa.matches("xexample.com", "click"));
     }
 }

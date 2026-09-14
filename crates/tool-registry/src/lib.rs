@@ -52,17 +52,19 @@
 
 mod builtins;
 mod capability;
+pub mod diagnostics;
 mod echo;
 mod error;
 mod health;
 mod mcp;
 mod registry;
 mod skills;
+pub mod snapshot;
 mod tool;
 
 pub use builtins::{
     BuiltinOpts, HttpFetchOpts, HttpFetchTool, ListDirTool, ReadFileTool, ShellExecTool, ShellTool,
-    WriteFileTool, is_internal_ip,
+    WriteFileTool, is_internal_ip, is_safe_exec_char,
 };
 pub use capability::Capability;
 pub use echo::EchoTool;

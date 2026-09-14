@@ -91,10 +91,15 @@ mod tests {
         let config = FakeEnv::required().resolve().expect("required var set");
         assert!(
             config.allowed_chat_ids.is_empty(),
-            "an unset allowlist means all chats"
+            "an unset allowlist is empty; the gate treats that as deny-all"
         );
-        // The allowlist gate is open when empty.
-        assert!(config.chat_allowed(-100_123));
+        // Deny-by-default (gh#367): an empty allowlist admits nothing, so an
+        // unconfigured bot reads no chats. This assertion used to claim the
+        // opposite, which is how a fail-open helper kept a green suite.
+        assert!(
+            !config.chat_allowed(-100_123),
+            "an empty allowlist must admit nothing"
+        );
     }
 
     #[test]

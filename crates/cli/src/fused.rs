@@ -405,6 +405,27 @@ impl FusedEngine {
         // corrupt one) means no grant tools: fail-closed, as before.
         let grant_tooling = GrantTooling::from_ledger(dirs);
 
+        // Integration tools (ARD-459). Registering an adapter's tools in the
+        // doctor registry only tells an operator the configuration is sound; it
+        // does not make the tools callable. They have to join the registry the
+        // engine actually runs with, and their capabilities have to join the
+        // session cap-token, or a configured integration is reported healthy
+        // and then cannot be invoked.
+        //
+        // Mirrors the grant invariant above: a capability joins the allowlist
+        // only if its tool actually registered.
+        let integration_tooling = IntegrationTooling::from_config(dirs);
+
+        // Fold the integration tools into the grant registry BEFORE the
+        // cap-token is minted. Registration is what decides which capabilities
+        // are legitimate — a capability is granted only if its tool actually
+        // registered — so the allowlist cannot be read until this has run.
+        // Reading it earlier yields an empty list and every integration call is
+        // denied despite the tool being present.
+        let mut integration_capabilities = Vec::new();
+        let engine_registry = integration_tooling
+            .into_registry_recording(&mut integration_capabilities, grant_tooling.registry);
+
         let subject = dirs.local_subject();
         let holder = GateHolderId(subject.clone());
 
@@ -425,6 +446,7 @@ impl FusedEngine {
             INTERRUPT_CAPABILITY.to_string(),
         ];
         tool_allowlist.extend(grant_tooling.extra_allowlist.iter().cloned());
+        tool_allowlist.extend(integration_capabilities.iter().cloned());
         let cap = issuer
             .issue(
                 CapHolderId(subject.clone()),
@@ -486,7 +508,10 @@ impl FusedEngine {
         .with_journal(Arc::new(journal))
         // ARD-457: the operator-granted hardened tools (empty registry when no
         // grants exist — fail-closed).
-        .with_tools(Arc::new(grant_tooling.registry))
+        // ARD-459: integration tools are folded into the same registry, so a
+        // configured integration is actually callable rather than merely
+        // reported healthy by doctor.
+        .with_tools(Arc::new(engine_registry))
         // ARD-H1: install the built-in injection-defense signatures so `ardur
         // chat` scans prompts too, rather than shipping stage 4.5 inert.
         .with_default_injection_filters()
@@ -971,6 +996,154 @@ fn per_turn_cents(budget_cents: u64) -> u64 {
         .max(1)
 }
 
+/// Tools contributed by configured integrations (ARD-459).
+///
+/// Registering an adapter's tools in the doctor registry tells an operator the
+/// configuration is sound; it does not make the tools callable. This is what
+/// puts them in the registry the engine runs with, and their capability labels
+/// into the session cap-token.
+struct IntegrationTooling {
+    /// Built tools, not yet registered — `ToolRegistry` cannot be drained, so
+    /// registration is deferred until the grant registry is available to merge
+    /// into.
+    tools: Vec<Arc<dyn ardur_tool_registry::Tool>>,
+    /// Capability labels to mint into the session cap-token. Populated in
+    /// `into_registry`, so a capability is granted only if its tool actually
+    /// registered — the same invariant `GrantTooling` keeps.
+    extra_allowlist: Vec<String>,
+}
+
+impl IntegrationTooling {
+    /// Build the tools for every enabled integration in `~/.ardur/config.toml`.
+    ///
+    /// Fail-soft by design: an unreadable or malformed config yields no tools
+    /// rather than refusing to start a chat. The server's boot path is the
+    /// fail-closed surface for integrations; `ardur chat` should still run when
+    /// an unrelated part of the config file is wrong, and `ardur doctor`
+    /// reports the problem in detail.
+    fn from_config(dirs: &StateDirs) -> Self {
+        let path = dirs.root.join("config.toml");
+        let Ok(document) = std::fs::read_to_string(&path) else {
+            return Self::empty();
+        };
+        let Ok(mut set) = ardur_integrations::parse_integrations(&document) else {
+            tracing::warn!(
+                "integration configuration could not be parsed; no integration tools registered \
+                 (run `ardur doctor` for the reason)"
+            );
+            return Self::empty();
+        };
+        let env: std::collections::BTreeMap<String, String> = std::env::vars()
+            .filter(|(k, _)| k.starts_with("ARDUR_INTEGRATIONS_"))
+            .collect();
+        if ardur_integrations::apply_env_overrides(&mut set, &env).is_err() {
+            tracing::warn!(
+                "an ARDUR_INTEGRATIONS_* override was rejected; no integration tools registered"
+            );
+            return Self::empty();
+        }
+
+        match integration_registry().build_active(&set) {
+            Ok(tools) => Self {
+                tools,
+                extra_allowlist: Vec::new(),
+            },
+            Err(e) => {
+                // An enabled integration with no adapter, or an adapter that
+                // refused its endpoint. Warn and register nothing rather than
+                // registering a partial set: half an integration is harder to
+                // reason about than none.
+                tracing::warn!(error = %e, "integration tools unavailable");
+                Self::empty()
+            }
+        }
+    }
+
+    fn empty() -> Self {
+        Self {
+            tools: Vec::new(),
+            extra_allowlist: Vec::new(),
+        }
+    }
+
+    /// Fold the integration tools into `registry`, reporting the capabilities
+    /// that registration actually granted.
+    ///
+    /// The capabilities come back through `granted_out` rather than a field so
+    /// the caller cannot read them before this has run: registration is what
+    /// decides which are legitimate, and an allowlist read too early is empty,
+    /// which denies every integration call while the tools look present.
+    fn into_registry_recording(
+        mut self,
+        granted_out: &mut Vec<String>,
+        mut registry: ToolRegistry,
+    ) -> ToolRegistry {
+        let mut granted = Vec::new();
+        for tool in self.tools.drain(..) {
+            let id = tool.id();
+            let caps: Vec<String> = tool
+                .required_capabilities()
+                .iter()
+                .map(ardur_tool_registry::Capability::as_str)
+                .collect();
+            match registry.register(Box::new(ArcTool(tool))) {
+                Ok(()) => {
+                    tracing::info!(tool = %id, "registered integration tool");
+                    granted.push(id.to_string());
+                    granted.extend(caps);
+                }
+                Err(e) => {
+                    tracing::warn!(tool = %id, error = %e, "integration tool registration failed");
+                }
+            }
+        }
+        granted.sort();
+        granted.dedup();
+        granted_out.clone_from(&granted);
+        self.extra_allowlist = granted;
+        registry
+    }
+}
+
+/// The adapters this binary carries.
+///
+/// One constructor, used by both the chat runtime and `ardur doctor`, so the
+/// two cannot drift into disagreeing about which integrations are supported.
+pub fn integration_registry() -> ardur_integrations::AdapterRegistry {
+    ardur_integrations::AdapterRegistry::new()
+        .with(Arc::new(ardur_integration_beads::BeadsAdapter::new()))
+        .with(Arc::new(ardur_integration_obsidian::ObsidianAdapter::new()))
+        .with(Arc::new(ardur_integration_dolthub::DolthubAdapter::new()))
+}
+
+/// Adapts an `Arc<dyn Tool>` into the `Box<dyn Tool>` the registry stores.
+///
+/// Adapters hand out `Arc` so a tool can be shared; the registry owns a `Box`.
+struct ArcTool(Arc<dyn ardur_tool_registry::Tool>);
+
+#[async_trait::async_trait]
+impl ardur_tool_registry::Tool for ArcTool {
+    fn id(&self) -> ToolId {
+        self.0.id()
+    }
+
+    fn schema(&self) -> &ardur_tool_registry::ToolSchema {
+        self.0.schema()
+    }
+
+    async fn invoke(
+        &self,
+        ctx: &ardur_tool_registry::ToolContext,
+        args: serde_json::Value,
+    ) -> Result<ardur_tool_registry::ToolOutput, ardur_tool_registry::ToolError> {
+        self.0.invoke(ctx, args).await
+    }
+
+    fn required_capabilities(&self) -> &[ardur_tool_registry::Capability] {
+        self.0.required_capabilities()
+    }
+}
+
 #[cfg(test)]
 mod grant_tooling_tests {
     use super::*;
@@ -1232,5 +1405,81 @@ mod grant_tooling_tests {
         let tooling = GrantTooling::from_records(&records);
         assert!(tooling.registry.list().is_empty());
         assert!(tooling.extra_allowlist.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod integration_tooling_tests {
+    use super::*;
+
+    /// A configured integration's tools must reach the registry the engine
+    /// runs with, and their capabilities the session cap-token.
+    ///
+    /// Registering adapters in the doctor registry only reports the
+    /// configuration as sound. Before this, `ardur doctor` said an integration
+    /// was healthy while chat could not invoke a single one of its tools —
+    /// the same reachability mistake as the adapter never being wired in at
+    /// all, one layer further in.
+    #[test]
+    fn configured_integration_tools_join_the_engine_registry_and_allowlist() {
+        let vault = tempfile::tempdir().expect("tempdir");
+        let set = ardur_integrations::parse_integrations(&format!(
+            "[integrations.obsidian]\nroot = \"{}\"\nenabled = true\n",
+            vault.path().display()
+        ))
+        .expect("fixture parses");
+
+        let tools = integration_registry()
+            .build_active(&set)
+            .expect("the obsidian adapter builds");
+        let tooling = IntegrationTooling {
+            tools,
+            extra_allowlist: Vec::new(),
+        };
+
+        // Fold into an empty grant registry, as a no-grants install would.
+        let mut registry = ToolRegistry::new();
+        let mut allowlist = Vec::new();
+        let folded = {
+            let t = tooling;
+            let r = t.into_registry_recording(&mut allowlist, registry);
+            registry = ToolRegistry::new();
+            let _ = &registry;
+            r
+        };
+
+        assert!(
+            folded.get(&ToolId::new("obsidian.read")).is_some(),
+            "obsidian.read must be callable from the engine registry"
+        );
+        assert!(folded.get(&ToolId::new("obsidian.write")).is_some());
+
+        // And its capabilities must be mintable into the session cap-token,
+        // or every call is denied despite the tool existing.
+        assert!(
+            allowlist.contains(&"cap.integration.obsidian.read".to_string()),
+            "the read capability must join the allowlist: {allowlist:?}"
+        );
+        assert!(
+            allowlist.contains(&"cap.fs_read".to_string()),
+            "the nested filesystem capability must join too: {allowlist:?}"
+        );
+    }
+
+    /// No configuration means no integration tools — the default posture.
+    #[test]
+    fn an_install_with_no_integrations_registers_nothing() {
+        let tooling = IntegrationTooling::empty();
+        let mut allowlist = Vec::new();
+        let folded = tooling.into_registry_recording(&mut allowlist, ToolRegistry::new());
+
+        assert!(
+            folded.list().is_empty(),
+            "a fresh install registers no integration tools"
+        );
+        assert!(
+            allowlist.is_empty(),
+            "and mints no integration capabilities"
+        );
     }
 }

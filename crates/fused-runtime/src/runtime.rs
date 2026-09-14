@@ -277,6 +277,19 @@ pub struct FusedRuntime {
     pub(crate) approval_gated_capabilities: HashSet<String>,
 }
 
+/// Which cost predicate a control-plane receipt verifies under.
+///
+/// gh#470 R2 + review round 2: the relaxation to cost 0 is correct ONLY
+/// for approval decisions, whose HTTP gate admits them at cost 0. It
+/// must not silently widen to checkpoint/rollback/task-control paths.
+#[derive(Clone, Copy)]
+pub enum ControlVerifyCost {
+    /// `approval.decide`: mirror the HTTP admin gate's cost-0 predicate.
+    ApprovalDecision,
+    /// Every other control operation: the runtime's `cost_units`.
+    RuntimeDefault,
+}
+
 impl FusedRuntime {
     /// The hook registry threaded through every turn.
     #[must_use]
@@ -307,7 +320,26 @@ impl FusedRuntime {
         cap_token: &CapTokenRef,
         tool: &str,
     ) -> Result<VerifiedClaims, RuntimeError> {
-        self.stage_cap_token_for_tool(
+        self.verify_cap_token_for_tool_at(cap_token, tool, self.cost_units)
+    }
+
+    /// Verify `cap_token` for `tool` at an explicit cost.
+    ///
+    /// gh#470 R2: the server's admin gate verifies `approval.decide` at
+    /// cost 0 because admin mutations are not metered against a turn
+    /// budget — so the approval-decision receipt path mirrors that COST
+    /// (see [`ControlVerifyCost::ApprovalDecision`]). Cost equality is
+    /// what matters here; the two paths still differ deliberately in the
+    /// rest of their state (the gate uses a fresh empty deny list and an
+    /// earlier timestamp; the runtime uses its shared deny list and a
+    /// later clock reading).
+    fn verify_cap_token_for_tool_at(
+        &self,
+        cap_token: &CapTokenRef,
+        tool: &str,
+        cost_units: u64,
+    ) -> Result<VerifiedClaims, RuntimeError> {
+        self.stage_cap_token_for_tool_at(
             &SubmitRequest {
                 messages: Vec::new(),
                 cap_token: cap_token.clone(),
@@ -317,6 +349,7 @@ impl FusedRuntime {
             &PerRequestProvisioning::default(),
             self.clock.now_ms().get() / 1000,
             tool,
+            cost_units,
         )
     }
 
@@ -370,6 +403,7 @@ impl FusedRuntime {
                     wall_ms: 0,
                     attention_score: 0,
                 },
+                ControlVerifyCost::RuntimeDefault,
             )
             .await?;
 
@@ -475,6 +509,7 @@ impl FusedRuntime {
                     wall_ms: 0,
                     attention_score: 0,
                 },
+                ControlVerifyCost::RuntimeDefault,
             )
             .await?;
         let receipt_id = ReceiptId(receipt.receipt_id);
@@ -587,6 +622,7 @@ impl FusedRuntime {
                 "context.compact.applied.v1",
                 Sha256Digest::of(response.content.as_bytes()),
                 response.cost,
+                ControlVerifyCost::RuntimeDefault,
             )
             .await?;
 
@@ -672,6 +708,7 @@ impl FusedRuntime {
                         "task.background.completed.v1",
                         Sha256Digest::of(response.content.as_bytes()),
                         response.cost,
+                        ControlVerifyCost::RuntimeDefault,
                     )
                     .await?;
                 Ok(BackgroundTaskOutcome {
@@ -696,6 +733,7 @@ impl FusedRuntime {
                             wall_ms: 0,
                             attention_score: 0,
                         },
+                        ControlVerifyCost::RuntimeDefault,
                     )
                     .await?;
                 Ok(BackgroundTaskOutcome {
@@ -736,6 +774,7 @@ impl FusedRuntime {
                     wall_ms: 0,
                     attention_score: 0,
                 },
+                ControlVerifyCost::RuntimeDefault,
             )
             .await?;
         Ok(ReceiptId(receipt.receipt_id))
@@ -780,6 +819,7 @@ impl FusedRuntime {
                     wall_ms: 0,
                     attention_score: 0,
                 },
+                ControlVerifyCost::RuntimeDefault,
             )
             .await?;
         Ok(ReceiptId(receipt.receipt_id))
@@ -818,6 +858,7 @@ impl FusedRuntime {
                     wall_ms: 0,
                     attention_score: 0,
                 },
+                ControlVerifyCost::RuntimeDefault,
             )
             .await?;
         Ok(ReceiptId(receipt.receipt_id))
@@ -935,13 +976,60 @@ impl FusedRuntime {
     }
 
     /// **§6.0.** The tools advertised to the provider this turn — one
-    /// [`ToolDef`] per registered tool, projected from its registry schema. An
-    /// empty registry yields an empty list, so the request is byte-identical to
-    /// a pre-tool one and the loop settles on the first provider response.
-    fn tool_defs(&self) -> Vec<ToolDef> {
+    /// [`ToolDef`] per *permitted* tool, projected from its registry schema. An
+    /// empty registry — or one whose tools the turn's cap-token all deny —
+    /// yields an empty list, so the request is byte-identical to a pre-tool one
+    /// and the loop settles on the first provider response.
+    ///
+    /// The tools to advertise to the provider this turn.
+    ///
+    /// **gh#415.** Filtered by the turn's cap-token, so the model is told about
+    /// exactly the tools it is allowed to call. The invocation-time check in
+    /// [`Self::authorize_tool_capabilities`] is unchanged and remains the
+    /// enforcement point — this is about what is *disclosed*, not what is
+    /// *permitted*.
+    ///
+    /// Tool names and descriptions are not neutral: `dolthub.execute` or a
+    /// customer-named connector tells the model — and anything that can read or
+    /// influence the transcript — what this deployment is wired to. A
+    /// capability the operator withheld should not be discoverable by reading
+    /// the tool list. Advertising unusable tools also spends context on
+    /// definitions the turn cannot act on and invites calls certain to be
+    /// denied.
+    ///
+    /// A tool requiring no capability is still checked: the name-scoped
+    /// cap-token check and the Cedar `Action::ToolInvoke` decision apply to
+    /// every call regardless of declared capabilities, so advertisement must
+    /// apply them too or a Cedar-denied tool stays visible.
+    fn tool_defs_for(
+        &self,
+        req: &SubmitRequest,
+        provisioning: &PerRequestProvisioning,
+        session_id: SessionId,
+        now_unix: u64,
+    ) -> Vec<ToolDef> {
         self.tools
             .list()
             .into_iter()
+            .filter(|t| {
+                let name = t.id().0;
+                // BOTH gates the invocation path applies, in the same order:
+                // the name-scoped token check plus Cedar, then the tool's
+                // declared capabilities. Applying only the second would leave a
+                // Cedar-denied tool advertised — the same disclosure one gate
+                // over.
+                self.authorize_tool_invocation(req, provisioning, session_id, now_unix, &name)
+                    .is_ok()
+                    && self
+                        .authorize_tool_capabilities(
+                            req,
+                            provisioning,
+                            now_unix,
+                            &name,
+                            t.required_capabilities(),
+                        )
+                        .is_ok()
+            })
             .map(|t| {
                 let schema = t.schema();
                 ToolDef {
@@ -1028,6 +1116,20 @@ impl FusedRuntime {
         now_unix: u64,
         tool: &str,
     ) -> Result<VerifiedClaims, RuntimeError> {
+        self.stage_cap_token_for_tool_at(req, provisioning, now_unix, tool, self.cost_units)
+    }
+
+    /// The same verification as [`stage_cap_token_for_tool`] at an explicit
+    /// cost: control-plane callers verify at the cost the authorizing GATE
+    /// used (gh#470 R2), not the chat-turn default.
+    fn stage_cap_token_for_tool_at(
+        &self,
+        req: &SubmitRequest,
+        provisioning: &PerRequestProvisioning,
+        now_unix: u64,
+        tool: &str,
+        cost_units: u64,
+    ) -> Result<VerifiedClaims, RuntimeError> {
         if req.cap_token.0.is_empty() {
             return Err(RuntimeError::CapTokenMissing);
         }
@@ -1048,7 +1150,7 @@ impl FusedRuntime {
                     now_unix,
                     audience,
                     tool: tool.to_string(),
-                    cost: self.cost_units,
+                    cost: cost_units,
                 },
             )
             .map_err(|e| match e {
@@ -1187,6 +1289,7 @@ impl FusedRuntime {
                     wall_ms: 0,
                     attention_score: 0,
                 },
+                ControlVerifyCost::ApprovalDecision,
             )
             .await?;
         Ok(ReceiptId(receipt.receipt_id))
@@ -1195,6 +1298,7 @@ impl FusedRuntime {
     /// turns — the same `commit_lock`, the same `chain_tail`, the same
     /// fsync'd receipt log — so a control-plane receipt sits in the *same*
     /// hash chain as ordinary turn receipts.
+    #[allow(clippy::too_many_arguments)]
     async fn commit_control_receipt(
         &self,
         session_id: SessionId,
@@ -1203,8 +1307,29 @@ impl FusedRuntime {
         verb: &str,
         payload_digest: Sha256Digest,
         cost: ardur_receipt::CostTuple,
+        verify_cost: ControlVerifyCost,
     ) -> Result<ReceiptBody, RuntimeError> {
-        let claims = self.verify_cap_token_for_tool(cap_token, tool)?;
+        let claims = match verify_cost {
+            // gh#470 R2: approval decisions are verified at cost 0,
+            // MIRRORING THE COST the HTTP admin gate used, so a
+            // legitimately-issued zero-budget token that passed the gate is
+            // not priced out of its own receipt. This is cost equality
+            // only — the gate's deny list is a fresh empty one and its
+            // clock reading is earlier; receipt verification uses the
+            // runtime's shared deny list, so a token revoked between gate
+            // and receipt still fails here, and receipt minting can still
+            // fail for other reasons after the decision persists. Every
+            // OTHER control operation keeps the runtime's cost_units:
+            // those have no external gate whose cost must be mirrored
+            // (review round 2: relaxing them would let a zero-budget token
+            // checkpoint, roll back, or accept steers).
+            ControlVerifyCost::ApprovalDecision => {
+                self.verify_cap_token_for_tool_at(cap_token, tool, 0)?
+            }
+            ControlVerifyCost::RuntimeDefault => {
+                self.verify_cap_token_for_tool_at(cap_token, tool, self.cost_units)?
+            }
+        };
         let verb = VerbObject::new(verb)
             .map_err(|e| RuntimeError::Internal(anyhow::anyhow!("invalid receipt verb: {e}")))?;
         let now_ms = self.clock.now_ms().get();
@@ -1283,7 +1408,26 @@ impl FusedRuntime {
             })?;
 
         match existing {
-            Some(card) if card.status == ApprovalStatus::Approved => Ok(()),
+            // The approval is spent by this call: consume the card so the next
+            // identical call proposes a fresh one. Without this, one approval
+            // is a standing permission to repeat the call without limit, which
+            // is a materially larger grant than the operator gave.
+            //
+            // Consumed before the tool runs, not after: a card consumed on
+            // success only would let a failed-then-retried call reuse the same
+            // grant, and a crash between invoke and consume would leave the
+            // approval spendable again. Erring toward re-asking the operator is
+            // the safe direction for a human-in-the-loop control.
+            Some(card) if card.status == ApprovalStatus::Approved => {
+                if let Some(id) = card.id.as_deref() {
+                    store.consume(id).map_err(|e| {
+                        RuntimeError::Internal(anyhow::anyhow!(
+                            "approval card {id} could not be consumed: {e}"
+                        ))
+                    })?;
+                }
+                Ok(())
+            }
             Some(card) if card.status == ApprovalStatus::Denied => {
                 Err(RuntimeError::ApprovalRejected {
                     approval_id: card.id.unwrap_or_default(),
@@ -1326,6 +1470,7 @@ impl FusedRuntime {
                         wall_ms: 0,
                         attention_score: 0,
                     },
+                    ControlVerifyCost::RuntimeDefault,
                 )
                 .await?;
                 Err(RuntimeError::ApprovalRequired {
@@ -2094,7 +2239,10 @@ impl FusedRuntime {
         };
 
         // The tools advertised to the provider every iteration of this turn.
-        let tool_defs = self.tool_defs();
+        // gh#415: narrowed to what this turn's cap-token permits, so the model
+        // is not told about capabilities the operator withheld.
+        let tool_defs_now_unix = self.clock.now_ms().get() / 1000;
+        let tool_defs = self.tool_defs_for(&req, &provisioning, session_id, tool_defs_now_unix);
 
         // ---- 4. pre-submit hooks (once, on the initial request). A veto aborts
         //         (no reservation is held yet, so no release); a replace swaps the
@@ -2734,7 +2882,8 @@ impl FusedRuntime {
                 }
             };
 
-            let tool_defs = self.tool_defs();
+            // gh#415: same cap-token narrowing as the non-streaming path.
+            let tool_defs = self.tool_defs_for(&req, &provisioning, session_id, now_unix);
 
             // ---- 4. pre-submit hooks. A veto needs no release (no reservation
             //         is held) and fires no error hook (matching `submit`).

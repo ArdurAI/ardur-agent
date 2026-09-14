@@ -17,6 +17,10 @@ name = "ardur_cli"
 path = "src/lib.rs"
 
 [dependencies]
+ardur-integration-beads = { workspace = true }
+ardur-integration-dolthub = { workspace = true }
+ardur-integration-obsidian = { workspace = true }
+ardur-integrations = { workspace = true }
 # §1.0 runtime — the ChatRuntime + CommandBus + Session this REPL drives.
 ardur-runtime = { workspace = true }
 # §11.14 cap-tokens — the CliError::CapToken surface and the verified-token

@@ -7,7 +7,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use parking_lot::RwLock;
 
-use ardur_cap_token::{BiscuitCapTokenAttenuator, CapToken, CapTokenAttenuator, Caveat, PublicKey};
+use ardur_cap_token::{
+    BiscuitCapTokenAttenuator, CapToken, CapTokenAttenuator, Caveat, DenyList, PublicKey,
+};
 use ardur_receipt::{CostTuple, UnixTsMillis};
 use ardur_runtime::{
     CapTokenRef, ChatRuntime, CostTuple as RuntimeCostTuple, InMemoryRuntime, ReceiptId, SessionId,
@@ -199,6 +201,27 @@ impl InMemoryMultiAgentRuntime<CapVerifyingRuntime<InMemoryRuntime>> {
     }
 }
 
+impl<D: DenyList + Send + Sync> InMemoryMultiAgentRuntime<CapVerifyingRuntime<InMemoryRuntime, D>> {
+    /// A verifying runtime whose child consults `deny` on every turn (gh#361).
+    ///
+    /// Hand in a deny list the revoker also holds (`SharedDenyList` clones
+    /// share one set) so revoking a parent token stops its live sub-agents at
+    /// their next turn. Without this, a delegated capability can only be
+    /// waited out: `verifying` gives each child a private empty list, so a
+    /// revocation the parent performs is invisible to the child it targets.
+    pub fn verifying_with_deny(
+        audience: impl Into<String>,
+        parent_cap_token: CapToken,
+        root: PublicKey,
+        parent_receipt_id: ReceiptId,
+        deny: D,
+    ) -> Self {
+        let child =
+            CapVerifyingRuntime::with_deny_list(InMemoryRuntime::new(), root, audience, deny);
+        Self::new(child, parent_cap_token, root, parent_receipt_id)
+    }
+}
+
 #[async_trait(?Send)]
 impl<R: ChatRuntime> MultiAgentRuntime for InMemoryMultiAgentRuntime<R> {
     async fn spawn(&self, spec: SubAgentSpec) -> Result<SubAgentHandle, MultiAgentError> {
@@ -257,7 +280,15 @@ impl<R: ChatRuntime> MultiAgentRuntime for InMemoryMultiAgentRuntime<R> {
             let agents = self.agents.read();
             let sub = agents
                 .get(&handle.agent_id)
+                .filter(|sub| sub.session_id == handle.session_id)
                 .ok_or_else(|| self.absent_error(&handle.agent_id))?;
+            // The id alone is not identity (gh#367 review). `terminate`
+            // removes the entry and a later `spawn` may reuse the id, so a
+            // handle to a terminated agent would otherwise reserve, spend and
+            // roll back against whichever *different* agent now holds that id
+            // — charging a live agent's envelope for work its holder never
+            // asked for. `session_id` is minted per instance, so it is what
+            // distinguishes them.
             sub.try_reserve(request.max_cost_cents)?;
             (
                 sub.child_runtime.clone(),
@@ -278,7 +309,17 @@ impl<R: ChatRuntime> MultiAgentRuntime for InMemoryMultiAgentRuntime<R> {
             Err(err) => {
                 // The turn never ran — roll the reservation back so a failed
                 // ask does not permanently consume the envelope.
-                if let Some(sub) = self.agents.read().get(&handle.agent_id) {
+                // Roll back only if the registry still holds the SAME instance
+                // that took the reservation (gh#367 review). Ids can be reused
+                // across terminate+respawn, and releasing against a fresh
+                // agent would erase that agent's own legitimate usage — a
+                // saturating subtract turns the old wrap bug into silent
+                // under-counting, which still lets later asks exceed the new
+                // envelope. `session_id` is per-instance, so it is the
+                // discriminator.
+                if let Some(sub) = self.agents.read().get(&handle.agent_id)
+                    && sub.session_id == handle.session_id
+                {
                     sub.release(request.max_cost_cents);
                 }
                 return Err(MultiAgentError::Runtime(err));

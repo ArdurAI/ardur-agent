@@ -4,6 +4,7 @@
 // helpers, so unused ones are expected per-binary.
 #![allow(dead_code)]
 
+use ardur_fused_runtime::SharedDenyList;
 use ardur_multi_agent::{
     AttenuationRule, BiscuitCapTokenIssuer, CapScope, CapToken, CapTokenIssuer,
     CapVerifyingRuntime, ChatMessage, CostEnvelope, HolderId, InMemoryMultiAgentRuntime,
@@ -66,6 +67,31 @@ pub fn verifying_runtime_with(
     let parent_receipt_id = ReceiptId::new();
     let runtime = InMemoryMultiAgentRuntime::verifying(AUDIENCE, token, root, parent_receipt_id);
     (runtime, parent_receipt_id, root)
+}
+
+/// A verifying runtime plus the shared deny list and parent token, so a test
+/// can revoke mid-flight and watch the next turn be refused (gh#361).
+pub fn verifying_runtime_with_deny(
+    tools: &[&str],
+    budget: u64,
+) -> (
+    InMemoryMultiAgentRuntime<CapVerifyingRuntime<InMemoryRuntime, SharedDenyList>>,
+    ReceiptId,
+    PublicKey,
+    SharedDenyList,
+    CapToken,
+) {
+    let (token, root) = parent_token(tools, budget);
+    let parent_receipt_id = ReceiptId::new();
+    let deny = SharedDenyList::new();
+    let runtime = InMemoryMultiAgentRuntime::verifying_with_deny(
+        AUDIENCE,
+        token.clone(),
+        root,
+        parent_receipt_id,
+        deny.clone(),
+    );
+    (runtime, parent_receipt_id, root, deny, token)
 }
 
 /// A spawn spec with a fresh parent session and the given attenuation + budget.

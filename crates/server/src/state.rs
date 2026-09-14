@@ -36,13 +36,14 @@
 //! session budget provisioning, which needs a request-time provisioning API on
 //! the runtime (or an injectable shared budget store).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use ardur_approvals::ApprovalStore;
 use ardur_cap_token::{
     BiscuitCapTokenIssuer, CapScope, CapTokenIssuer, HolderId as CapHolderId, KeyPair, PublicKey,
 };
@@ -143,6 +144,11 @@ enum WorkItem {
 struct ApprovalReceiptRequest {
     approval_id: String,
     verb: String,
+    /// The cap-token the operator actually presented, when the gh#417 gate is
+    /// on. The receipt must record THAT capability: minting a fresh gateway
+    /// token here would attribute every gated decision to the gateway, and the
+    /// audit chain could not say which delegated authority performed it.
+    presented_cap_token: Option<String>,
     reply: oneshot::Sender<Result<ReceiptId, RuntimeError>>,
 }
 
@@ -369,6 +375,10 @@ pub struct AppState {
     data_dir: PathBuf,
     chat_bearer_tokens: Vec<String>,
     admin_bearer_tokens: Vec<String>,
+    /// gh#417: require a verb-scoped cap-token on admin mutations.
+    admin_cap_token_gate: bool,
+    /// The root key those cap-tokens are verified against.
+    cap_issuer_public_key: PublicKey,
     cors_origins: Vec<String>,
     tool_allowlist: Vec<String>,
     cost_budget_cents: u64,
@@ -557,6 +567,26 @@ impl AppState {
         // inert (an empty registry passes everything through).
         .with_default_injection_filters()
         .receipt_log(&receipt_log)
+        // ARD-463: the propose-half of the approval loop. Attaching the store
+        // is what arms the gate — with no store the runtime's
+        // `authorize_or_propose_approval` returns `Ok(())` immediately, so an
+        // unconfigured boot is behaviourally unchanged rather than running a
+        // gate that passes everything.
+        //
+        // Both are attached together or neither is. A store without gated
+        // capabilities would gate nothing; gated capabilities without a store
+        // would be silently ignored, which is the more dangerous half of that
+        // pair because the operator asked for a gate and would not get one.
+        .maybe_with_approvals((!config.approval_gated_capabilities.is_empty()).then(|| {
+            (
+                ApprovalStore::new(&approvals_dir),
+                config
+                    .approval_gated_capabilities
+                    .iter()
+                    .cloned()
+                    .collect::<HashSet<String>>(),
+            )
+        }))
         .build_reconciled()
         .await
         .map_err(|e| anyhow::anyhow!("building/reconciling fused runtime: {e}"))?;
@@ -659,6 +689,8 @@ impl AppState {
             data_dir,
             chat_bearer_tokens: config.chat_bearer_tokens.clone(),
             admin_bearer_tokens: config.admin_bearer_tokens.clone(),
+            admin_cap_token_gate: config.admin_cap_token_gate,
+            cap_issuer_public_key: issuer_public_key(&config.data_dir)?,
             cors_origins: config.cors_origins.clone(),
             tool_allowlist,
             cost_budget_cents: config.cost_budget_cents,
@@ -683,6 +715,21 @@ impl AppState {
     #[must_use]
     pub fn admin_bearer_tokens(&self) -> &[String] {
         &self.admin_bearer_tokens
+    }
+
+    /// Whether admin *mutations* additionally require a verb-scoped cap-token
+    /// (gh#417). Off by default.
+    #[must_use]
+    pub fn admin_cap_token_gate(&self) -> bool {
+        self.admin_cap_token_gate
+    }
+
+    /// The root key admin cap-tokens are verified against — the same issuer
+    /// key turns use, so an operator mints admin authority with the existing
+    /// tooling rather than a second key hierarchy.
+    #[must_use]
+    pub fn cap_issuer_public_key(&self) -> &PublicKey {
+        &self.cap_issuer_public_key
     }
 
     /// Exact browser origins allowed to call `/chat` and `/approvals*` (empty =
@@ -972,11 +1019,13 @@ impl AppState {
         &self,
         approval_id: String,
         verb: String,
+        presented_cap_token: Option<String>,
     ) -> Result<ReceiptId, ChatSubmitError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         let item = WorkItem::ApprovalReceipt(ApprovalReceiptRequest {
             approval_id,
             verb,
+            presented_cap_token,
             reply: reply_tx,
         });
         let Some(work_tx) = self.work_sender() else {
@@ -1677,17 +1726,27 @@ impl Processor {
         let ApprovalReceiptRequest {
             approval_id,
             verb,
+            presented_cap_token,
             reply,
         } = request;
         let result = async {
+            // Prefer the token the operator actually presented (gh#417). A
+            // freshly-minted gateway token would make every gated decision
+            // receipt read as if the gateway performed it, so the chain could
+            // not answer which delegated capability did. Falling back to the
+            // gateway token keeps un-gated deployments behaving exactly as
+            // before.
             let now_unix = now_unix();
-            let token = self
-                .mint_scoped_token(now_unix, APPROVAL_DECIDE_TOOL)
-                .map_err(|e| {
-                    RuntimeError::Internal(anyhow::anyhow!(
-                        "minting approval decision cap-token: {e}"
-                    ))
-                })?;
+            let token = match presented_cap_token {
+                Some(token) => token,
+                None => self
+                    .mint_scoped_token(now_unix, APPROVAL_DECIDE_TOOL)
+                    .map_err(|e| {
+                        RuntimeError::Internal(anyhow::anyhow!(
+                            "minting approval decision cap-token: {e}"
+                        ))
+                    })?,
+            };
             self.runtime
                 .mint_approval_decision_receipt(
                     SessionId::new(),
@@ -2122,6 +2181,8 @@ mod tests {
             data_dir: tempdir.path().to_path_buf(),
             chat_bearer_tokens: Vec::new(),
             admin_bearer_tokens: Vec::new(),
+            admin_cap_token_gate: false,
+            cap_issuer_public_key: KeyPair::new().public(),
             cors_origins: Vec::new(),
             tool_allowlist: Vec::new(),
             cost_budget_cents: 0,
@@ -2209,6 +2270,8 @@ mod tests {
             data_dir: tempdir.path().to_path_buf(),
             chat_bearer_tokens: Vec::new(),
             admin_bearer_tokens: Vec::new(),
+            admin_cap_token_gate: false,
+            cap_issuer_public_key: KeyPair::new().public(),
             cors_origins: Vec::new(),
             tool_allowlist: Vec::new(),
             cost_budget_cents: 0,

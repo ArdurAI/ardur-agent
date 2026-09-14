@@ -33,7 +33,7 @@ mod shell;
 pub use files::{ListDirTool, ReadFileTool, WriteFileTool};
 pub use http::{HttpFetchTool, is_internal_ip};
 pub use media::{ImageAnalyzeTool, ImageGenerateTool, SttTool, TtsTool, VoiceNoteTool};
-pub use shell::{ShellExecTool, ShellTool};
+pub use shell::{ShellExecTool, ShellTool, is_safe_exec_char};
 
 use std::path::PathBuf;
 
@@ -63,6 +63,19 @@ pub struct BuiltinOpts {
     /// exactly those names; `None` registers the **dev-only** unrestricted
     /// variant. Ignored unless `enable_shell_exec` is `true`.
     pub shell_exec_allowlist: Option<Vec<String>>,
+    /// Checkers run over content after `file.write` (gh#414). `None` disables
+    /// post-write diagnostics.
+    ///
+    /// Present for the same reason as `snapshot_store`: an opt-in builder with
+    /// no registration path calling it is unreachable in every shipped binary.
+    pub diagnostics: Option<crate::diagnostics::SyntaxCheckers>,
+    /// Where `file.write` puts the prior content of a file before overwriting
+    /// it (gh#413). `None` keeps the pre-snapshot behaviour.
+    ///
+    /// This field exists because the opt-in builder alone left the feature
+    /// unreachable: no registration path called it, so no shipped binary could
+    /// enable snapshots however the operator configured things.
+    pub snapshot_store: Option<crate::snapshot::SnapshotStore>,
     /// The root for the file tools (`file.read`, `file.write`, `file.list`).
     /// `Some(root)` registers all three confined to it; `None` installs no file
     /// tool.
@@ -150,7 +163,14 @@ impl ToolRegistry {
 
         if let Some(root) = opts.file_root {
             self.register(Box::new(ReadFileTool::with_root(root.clone())))?;
-            self.register(Box::new(WriteFileTool::with_root(root.clone())))?;
+            let mut write_tool = WriteFileTool::with_root(root.clone());
+            if let Some(store) = &opts.snapshot_store {
+                write_tool = write_tool.with_snapshots(store.clone());
+            }
+            if let Some(checkers) = &opts.diagnostics {
+                write_tool = write_tool.with_diagnostics(checkers.clone());
+            }
+            self.register(Box::new(write_tool))?;
             self.register(Box::new(ListDirTool::with_root(root)))?;
         }
 

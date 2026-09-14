@@ -69,6 +69,7 @@ pub fn test_config(data_dir: &TempDir, slack_base: Option<String>) -> Config {
         bind_addr: "127.0.0.1:0".to_string(),
         chat_bearer_tokens: vec![CHAT_TOKEN.to_string()],
         admin_bearer_tokens: Vec::new(),
+        admin_cap_token_gate: false,
         cors_origins: Vec::new(),
         dev_permissive_policy: true,
         model: "claude-opus-4-8".to_string(),
@@ -92,6 +93,10 @@ pub fn test_config(data_dir: &TempDir, slack_base: Option<String>) -> Config {
         enable_http_tool: false,
         http_allowlist: Vec::new(),
         file_tool_root: None,
+        file_write_diagnostics: false,
+        // ARD-463: tests boot with the approval gate off, matching a default
+        // deployment. Tests that want it armed set this field explicitly.
+        approval_gated_capabilities: Vec::new(),
         http_turn_timeout: std::time::Duration::from_secs(30),
     }
 }

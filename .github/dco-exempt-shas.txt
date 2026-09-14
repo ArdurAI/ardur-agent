@@ -20,3 +20,8 @@ d82725f
 # passed; only the generated squash commit lacks the trailer. Exempt so the
 # dev -> main promotion passes Check DCO sign-off.
 43742ebe7a4aac20f9fe0d5cafaa0f0da0907f30
+
+# Squash merge of PR #456 (Dolt SQL integration adapter). The merge commit
+# omitted its sign-off trailer. Record this already-merged source SHA before
+# release promotion; do not rewrite the integration branch's history.
+e527d1469e61b9c08ac714a4b4fe78d094b40ea6

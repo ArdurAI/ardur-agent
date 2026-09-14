@@ -118,6 +118,38 @@ jobs:
       - name: cargo test
         run: cargo test --workspace --all-features
 
+  dolt-integration:
+    # The dolthub adapter's SQL admission gate is built around what `dolt sql -q`
+    # actually does with multi-statement input, so its tests drive a real Dolt
+    # database. Without `dolt` those tests would early-return and the harness
+    # would count them as `passed` — so they are `#[ignore]`d (the same
+    # convention as the Qdrant suite above) and this job runs them with
+    # `--ignored`, where a missing binary is a hard failure rather than a skip.
+    name: dolt integration (--ignored)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install pinned toolchain
+        run: rustup toolchain install 1.98.1 --profile minimal
+
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+
+      - name: Install dolt
+        run: |
+          set -euo pipefail
+          # Pinned tag, and the asset is a tarball (there is no bare binary
+          # asset) — both confirmed against the releases API rather than
+          # guessed.
+          curl -fsSL -o /tmp/dolt.tar.gz \
+            https://github.com/dolthub/dolt/releases/download/v2.3.3/dolt-linux-amd64.tar.gz
+          tar -xzf /tmp/dolt.tar.gz -C /tmp
+          sudo install -m 0755 /tmp/dolt-linux-amd64/bin/dolt /usr/local/bin/dolt
+          dolt version
+
+      - name: Gated dolt integration tests (--ignored)
+        run: cargo test -p ardur-integration-dolthub --test dolthub_sql_gate -- --ignored
+
   qdrant-integration:
     # §7.0 Phase 2: the durable/hybrid Qdrant memory backend needs a live Qdrant,
     # which the gauntlet lacks — so those scenarios are `#[ignore]`d there (they

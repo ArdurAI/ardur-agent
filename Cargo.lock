@@ -468,6 +468,10 @@ dependencies = [
  "ardur-durability",
  "ardur-embeddings",
  "ardur-fused-runtime",
+ "ardur-integration-beads",
+ "ardur-integration-dolthub",
+ "ardur-integration-obsidian",
+ "ardur-integrations",
  "ardur-memory",
  "ardur-provider-runtime",
  "ardur-provider-selector",
@@ -807,6 +811,53 @@ dependencies = [
 ]
 
 [[package]]
+name = "ardur-integration-beads"
+version = "0.0.1"
+dependencies = [
+ "ardur-integrations",
+ "ardur-tool-registry",
+ "async-trait",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "ardur-integration-dolthub"
+version = "0.0.1"
+dependencies = [
+ "ardur-integrations",
+ "ardur-tool-registry",
+ "async-trait",
+ "serde_json",
+ "sqlparser",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+]
+
+[[package]]
+name = "ardur-integration-obsidian"
+version = "0.0.1"
+dependencies = [
+ "ardur-integrations",
+ "ardur-tool-registry",
+ "async-trait",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "ardur-integrations"
+version = "0.0.1"
+dependencies = [
+ "ardur-tool-registry",
+ "thiserror 2.0.20",
+ "toml",
+]
+
+[[package]]
 name = "ardur-lifecycle-hooks"
 version = "0.0.1"
 dependencies = [
@@ -962,6 +1013,7 @@ dependencies = [
  "anyhow",
  "ardur-cap-token",
  "ardur-cost-gate",
+ "ardur-fused-runtime",
  "ardur-receipt",
  "ardur-runtime",
  "async-trait",
@@ -1147,6 +1199,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "ardur-acp",
+ "ardur-approvals",
  "ardur-automation",
  "ardur-cap-token",
  "ardur-cedar-policy",
@@ -1278,6 +1331,7 @@ name = "ardur-tool-registry"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "ardur-core-types",
  "ardur-resilience",
  "ardur-runtime",
  "async-trait",
@@ -1294,6 +1348,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
+ "toml",
  "tracing",
  "url",
  "uuid",
@@ -1572,9 +1627,9 @@ dependencies = [
 
 [[package]]
 name = "aws-lc-rs"
-version = "1.17.0"
+version = "1.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5ec2f1fc3ec205783a5da9a7e6c1509cc69dedf09a1949e412c1e18469326d00"
+checksum = "b281d307588d634de920874890732659e2e7672f72b5e10e81badc1a8a83621e"
 dependencies = [
  "aws-lc-sys",
  "untrusted 0.7.1",
@@ -1583,14 +1638,15 @@ dependencies = [
 
 [[package]]
 name = "aws-lc-sys"
-version = "0.41.0"
+version = "0.45.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a2f9779ce85b93ab6170dd940ad0169b5766ff848247aff13bb788b832fe3f4"
+checksum = "9bff6c3b54fad79a2e60b8102caf565819711497c1f5f092f49508e2f5c31b27"
 dependencies = [
  "cc",
  "cmake",
  "dunce",
  "fs_extra",
+ "pkg-config",
 ]
 
 [[package]]
@@ -7405,6 +7461,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "recursive"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0786a43debb760f491b1bc0269fe5e84155353c67482b9e60d0cfb596054b43e"
+dependencies = [
+ "recursive-proc-macro-impl",
+ "stacker",
+]
+
+[[package]]
+name = "recursive-proc-macro-impl"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "76009fbe0614077fc1a2ce255e3a1881a2e3a3527097d5dc6d8212c585e7e38b"
+dependencies = [
+ "quote",
+ "syn 2.0.118",
+]
+
+[[package]]
 name = "redox_syscall"
 version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7970,9 +8046,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.40"
+version = "0.23.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef86cd5876211988985292b91c96a8f2d298df24e75989a43a3c73f2d4d8168b"
+checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
 dependencies = [
  "aws-lc-rs",
  "log",
@@ -8035,9 +8111,9 @@ checksum = "f87165f0995f63a9fbeea62b64d10b4d9d8e78ec6d7d51fb2125fda7bb36788f"
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.13"
+version = "0.103.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61c429a8649f110dddef65e2a5ad240f747e85f7758a6bccc7e5777bd33f756e"
+checksum = "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"
 dependencies = [
  "aws-lc-rs",
  "ring",
@@ -8839,6 +8915,28 @@ name = "sponge-cursor"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a0219bd7d979d58245a4f41f695e1ac9f8befdffadd7f61f1bae9e39abc6620"
+
+[[package]]
+name = "sqlparser"
+version = "0.55.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c4521174166bac1ff04fe16ef4524c70144cd29682a45978978ca3d7f4e0be11"
+dependencies = [
+ "log",
+ "recursive",
+ "sqlparser_derive",
+]
+
+[[package]]
+name = "sqlparser_derive"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "da5fc6819faabb412da764b99d3b713bb55083c11e7e0c00144d386cd6a1939c"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.118",
+]
 
 [[package]]
 name = "sse-stream"

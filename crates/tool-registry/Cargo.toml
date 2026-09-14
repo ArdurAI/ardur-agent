@@ -26,11 +26,13 @@ rustix = { workspace = true, features = ["process"] }
 serde = { workspace = true }
 # Tool input/output payloads and JSON-Schema documents are untyped JSON.
 serde_json = { workspace = true }
+toml = { workspace = true }
 # §8.X — SKILL.md frontmatter is YAML; parsed into `SkillFrontmatter`.
 serde_yaml = { workspace = true }
 # §8.X — the skill loader warns (not fails) on a malformed SKILL.md so one bad
 # skill never blocks the rest.
 tracing = { workspace = true }
+ardur-core-types = { workspace = true }
 thiserror = { workspace = true }
 # `ToolError::Internal` carries an opaque execution failure verbatim.
 anyhow = { workspace = true }
