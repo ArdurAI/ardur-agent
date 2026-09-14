@@ -679,3 +679,187 @@ async fn with_the_gate_on_a_presented_token_still_binds_the_receipt() {
         "gated decisions bind to the presented capability's holder"
     );
 }
+
+// ---- review suggestion 2 (re-review round 3): the added cases exercised the
+// approve endpoint only. Mirror them on REJECT so the same guarantees hold on
+// both decision verbs.
+
+/// Zero-budget acceptance on REJECT: the gate admits cost-0, and the decision
+/// receipt mints (the #470 defect on the reject path).
+#[tokio::test]
+async fn a_zero_budget_cap_token_still_mints_its_reject_receipt() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let id = "card-r2-zero-budget-reject";
+    seed_pending(dir.path(), id);
+
+    let mut config = support::test_config_with_admin(&dir, None, vec![ADMIN_TOKEN.to_string()]);
+    config.admin_cap_token_gate = true;
+    let router = support::boot_router(&config).await;
+    let keypair = server_issuer_keypair(&config.data_dir);
+
+    let request = Request::builder()
+        .method("POST")
+        .uri(format!("/approvals/{id}/reject"))
+        .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+        .header(
+            "X-Ardur-Cap-Token",
+            mint_with_budget(keypair, &[APPROVAL_DECIDE_VERB], far_future(), 0),
+        )
+        .body(Body::empty())
+        .expect("request builds");
+    let (status, _) = support::oneshot(router, request).await;
+    assert_eq!(status, StatusCode::OK, "the gate admits cost-0 at budget 0");
+
+    let chain =
+        ardur_fused_runtime::load_persisted_chain(dir.path().join("receipts").join("chain.jsonl"))
+            .expect("chain loads");
+    assert_eq!(
+        chain.len(),
+        1,
+        "the reject decision that passed the gate must produce its signed receipt"
+    );
+    assert_eq!(
+        chain[0].body.subject.0, HOLDER,
+        "the reject receipt binds to the presented capability's holder"
+    );
+}
+
+/// R1 on REJECT, malformed header side: with the gate OFF, a garbage presented
+/// token is not forwarded — the gateway mints its own scoped receipt.
+#[tokio::test]
+async fn reject_without_the_gate_a_malformed_cap_token_is_not_forwarded() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let id = "card-r1-reject-gate-off-malformed";
+    seed_pending(dir.path(), id);
+
+    let config = support::test_config_with_admin(&dir, None, vec![ADMIN_TOKEN.to_string()]);
+    let router = support::boot_router(&config).await;
+
+    let request = Request::builder()
+        .method("POST")
+        .uri(format!("/approvals/{id}/reject"))
+        .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+        .header("X-Ardur-Cap-Token", "not-a-biscuit")
+        .body(Body::empty())
+        .expect("request builds");
+    let (status, _) = support::oneshot(router, request).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let chain =
+        ardur_fused_runtime::load_persisted_chain(dir.path().join("receipts").join("chain.jsonl"))
+            .expect("chain loads");
+    assert_eq!(chain.len(), 1, "an un-gated reject still mints a receipt");
+    assert_ne!(
+        chain[0].body.subject.0, HOLDER,
+        "the reject receipt falls back to the gateway subject, not an \\\\
+         unverified header the gate never checked"
+    );
+}
+
+/// R1 on REJECT, valid-header side: gate OFF + a VALID token still mints the
+/// gateway-subject receipt (no verification ran, so the header is data).
+#[tokio::test]
+async fn reject_without_the_gate_a_valid_cap_token_is_not_forwarded_either() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let id = "card-r1-reject-gate-off-valid";
+    seed_pending(dir.path(), id);
+
+    let config = support::test_config_with_admin(&dir, None, vec![ADMIN_TOKEN.to_string()]);
+    let router = support::boot_router(&config).await;
+    let keypair = server_issuer_keypair(&config.data_dir);
+
+    let request = Request::builder()
+        .method("POST")
+        .uri(format!("/approvals/{id}/reject"))
+        .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+        .header(
+            "X-Ardur-Cap-Token",
+            mint(keypair, &[APPROVAL_DECIDE_VERB], far_future()),
+        )
+        .body(Body::empty())
+        .expect("request builds");
+    let (status, _) = support::oneshot(router, request).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let chain =
+        ardur_fused_runtime::load_persisted_chain(dir.path().join("receipts").join("chain.jsonl"))
+            .expect("chain loads");
+    assert_eq!(chain.len(), 1);
+    assert_ne!(
+        chain[0].body.subject.0, HOLDER,
+        "no gate verified the token, so the receipt must keep the gateway \\\\
+         subject even for a well-formed header"
+    );
+}
+
+/// Gate ON + REJECT + a token WITHOUT the approval verb: refused, nothing
+/// mutates, no receipt.
+#[tokio::test]
+async fn reject_with_the_gate_a_token_without_the_verb_is_refused() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let id = "card-gate-on-reject-no-verb";
+    seed_pending(dir.path(), id);
+
+    let mut config = support::test_config_with_admin(&dir, None, vec![ADMIN_TOKEN.to_string()]);
+    config.admin_cap_token_gate = true;
+    let router = support::boot_router(&config).await;
+    let keypair = server_issuer_keypair(&config.data_dir);
+
+    let request = Request::builder()
+        .method("POST")
+        .uri(format!("/approvals/{id}/reject"))
+        .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+        .header(
+            "X-Ardur-Cap-Token",
+            mint(keypair, &["some.other.verb"], far_future()),
+        )
+        .body(Body::empty())
+        .expect("request builds");
+    let (status, _) = support::oneshot(router, request).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "the gate refuses the wrong verb"
+    );
+
+    let chain_path = dir.path().join("receipts").join("chain.jsonl");
+    if chain_path.exists() {
+        let chain = ardur_fused_runtime::load_persisted_chain(&chain_path).expect("chain loads");
+        assert!(chain.is_empty(), "a refused reject must mint no receipt");
+    }
+}
+
+/// Gate ON + REJECT + valid token: the receipt binds to the holder.
+#[tokio::test]
+async fn reject_with_the_gate_a_presented_token_still_binds_the_receipt() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let id = "card-gate-on-reject-binding";
+    seed_pending(dir.path(), id);
+
+    let mut config = support::test_config_with_admin(&dir, None, vec![ADMIN_TOKEN.to_string()]);
+    config.admin_cap_token_gate = true;
+    let router = support::boot_router(&config).await;
+    let keypair = server_issuer_keypair(&config.data_dir);
+
+    let request = Request::builder()
+        .method("POST")
+        .uri(format!("/approvals/{id}/reject"))
+        .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+        .header(
+            "X-Ardur-Cap-Token",
+            mint(keypair, &[APPROVAL_DECIDE_VERB], far_future()),
+        )
+        .body(Body::empty())
+        .expect("request builds");
+    let (status, _) = support::oneshot(router, request).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let chain =
+        ardur_fused_runtime::load_persisted_chain(dir.path().join("receipts").join("chain.jsonl"))
+            .expect("chain loads");
+    assert_eq!(chain.len(), 1);
+    assert_eq!(
+        chain[0].body.subject.0, HOLDER,
+        "a gated reject binds to the presented capability's holder"
+    );
+}

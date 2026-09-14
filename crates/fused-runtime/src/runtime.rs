@@ -277,6 +277,19 @@ pub struct FusedRuntime {
     pub(crate) approval_gated_capabilities: HashSet<String>,
 }
 
+/// Which cost predicate a control-plane receipt verifies under.
+///
+/// gh#470 R2 + review round 2: the relaxation to cost 0 is correct ONLY
+/// for approval decisions, whose HTTP gate admits them at cost 0. It
+/// must not silently widen to checkpoint/rollback/task-control paths.
+#[derive(Clone, Copy)]
+pub enum ControlVerifyCost {
+    /// `approval.decide`: mirror the HTTP admin gate's cost-0 predicate.
+    ApprovalDecision,
+    /// Every other control operation: the runtime's `cost_units`.
+    RuntimeDefault,
+}
+
 impl FusedRuntime {
     /// The hook registry threaded through every turn.
     #[must_use]
@@ -310,26 +323,16 @@ impl FusedRuntime {
         self.verify_cap_token_for_tool_at(cap_token, tool, self.cost_units)
     }
 
-    /// Verify `cap_token` for an unmetered control-plane capability.
+    /// Verify `cap_token` for `tool` at an explicit cost.
     ///
     /// gh#470 R2: the server's admin gate verifies `approval.decide` at
     /// cost 0 because admin mutations are not metered against a turn
-    /// budget — but the receipt path re-verified the SAME token at
-    /// `cost_units` (default 1), so a legitimately-issued zero-budget
-    /// token passed the gate and could then never mint its receipt: the
-    /// decision persisted while the audit chain silently lost the entry.
-    /// Control-plane receipts must be verified under the SAME predicate
-    /// the gate used, or the gate and the receipt chain disagree about
-    /// what was authorized.
-    pub fn verify_control_cap_token(
-        &self,
-        cap_token: &CapTokenRef,
-        tool: &str,
-    ) -> Result<VerifiedClaims, RuntimeError> {
-        self.verify_cap_token_for_tool_at(cap_token, tool, 0)
-    }
-
-    /// Verify `cap_token` for `tool` at an explicit cost.
+    /// budget — so the approval-decision receipt path mirrors that COST
+    /// (see [`ControlVerifyCost::ApprovalDecision`]). Cost equality is
+    /// what matters here; the two paths still differ deliberately in the
+    /// rest of their state (the gate uses a fresh empty deny list and an
+    /// earlier timestamp; the runtime uses its shared deny list and a
+    /// later clock reading).
     fn verify_cap_token_for_tool_at(
         &self,
         cap_token: &CapTokenRef,
@@ -400,6 +403,7 @@ impl FusedRuntime {
                     wall_ms: 0,
                     attention_score: 0,
                 },
+                ControlVerifyCost::RuntimeDefault,
             )
             .await?;
 
@@ -505,6 +509,7 @@ impl FusedRuntime {
                     wall_ms: 0,
                     attention_score: 0,
                 },
+                ControlVerifyCost::RuntimeDefault,
             )
             .await?;
         let receipt_id = ReceiptId(receipt.receipt_id);
@@ -617,6 +622,7 @@ impl FusedRuntime {
                 "context.compact.applied.v1",
                 Sha256Digest::of(response.content.as_bytes()),
                 response.cost,
+                ControlVerifyCost::RuntimeDefault,
             )
             .await?;
 
@@ -702,6 +708,7 @@ impl FusedRuntime {
                         "task.background.completed.v1",
                         Sha256Digest::of(response.content.as_bytes()),
                         response.cost,
+                        ControlVerifyCost::RuntimeDefault,
                     )
                     .await?;
                 Ok(BackgroundTaskOutcome {
@@ -726,6 +733,7 @@ impl FusedRuntime {
                             wall_ms: 0,
                             attention_score: 0,
                         },
+                        ControlVerifyCost::RuntimeDefault,
                     )
                     .await?;
                 Ok(BackgroundTaskOutcome {
@@ -766,6 +774,7 @@ impl FusedRuntime {
                     wall_ms: 0,
                     attention_score: 0,
                 },
+                ControlVerifyCost::RuntimeDefault,
             )
             .await?;
         Ok(ReceiptId(receipt.receipt_id))
@@ -810,6 +819,7 @@ impl FusedRuntime {
                     wall_ms: 0,
                     attention_score: 0,
                 },
+                ControlVerifyCost::RuntimeDefault,
             )
             .await?;
         Ok(ReceiptId(receipt.receipt_id))
@@ -848,6 +858,7 @@ impl FusedRuntime {
                     wall_ms: 0,
                     attention_score: 0,
                 },
+                ControlVerifyCost::RuntimeDefault,
             )
             .await?;
         Ok(ReceiptId(receipt.receipt_id))
@@ -1278,6 +1289,7 @@ impl FusedRuntime {
                     wall_ms: 0,
                     attention_score: 0,
                 },
+                ControlVerifyCost::ApprovalDecision,
             )
             .await?;
         Ok(ReceiptId(receipt.receipt_id))
@@ -1286,6 +1298,7 @@ impl FusedRuntime {
     /// turns — the same `commit_lock`, the same `chain_tail`, the same
     /// fsync'd receipt log — so a control-plane receipt sits in the *same*
     /// hash chain as ordinary turn receipts.
+    #[allow(clippy::too_many_arguments)]
     async fn commit_control_receipt(
         &self,
         session_id: SessionId,
@@ -1294,8 +1307,29 @@ impl FusedRuntime {
         verb: &str,
         payload_digest: Sha256Digest,
         cost: ardur_receipt::CostTuple,
+        verify_cost: ControlVerifyCost,
     ) -> Result<ReceiptBody, RuntimeError> {
-        let claims = self.verify_control_cap_token(cap_token, tool)?;
+        let claims = match verify_cost {
+            // gh#470 R2: approval decisions are verified at cost 0,
+            // MIRRORING THE COST the HTTP admin gate used, so a
+            // legitimately-issued zero-budget token that passed the gate is
+            // not priced out of its own receipt. This is cost equality
+            // only — the gate's deny list is a fresh empty one and its
+            // clock reading is earlier; receipt verification uses the
+            // runtime's shared deny list, so a token revoked between gate
+            // and receipt still fails here, and receipt minting can still
+            // fail for other reasons after the decision persists. Every
+            // OTHER control operation keeps the runtime's cost_units:
+            // those have no external gate whose cost must be mirrored
+            // (review round 2: relaxing them would let a zero-budget token
+            // checkpoint, roll back, or accept steers).
+            ControlVerifyCost::ApprovalDecision => {
+                self.verify_cap_token_for_tool_at(cap_token, tool, 0)?
+            }
+            ControlVerifyCost::RuntimeDefault => {
+                self.verify_cap_token_for_tool_at(cap_token, tool, self.cost_units)?
+            }
+        };
         let verb = VerbObject::new(verb)
             .map_err(|e| RuntimeError::Internal(anyhow::anyhow!("invalid receipt verb: {e}")))?;
         let now_ms = self.clock.now_ms().get();
@@ -1436,6 +1470,7 @@ impl FusedRuntime {
                         wall_ms: 0,
                         attention_score: 0,
                     },
+                    ControlVerifyCost::RuntimeDefault,
                 )
                 .await?;
                 Err(RuntimeError::ApprovalRequired {
