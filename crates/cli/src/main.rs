@@ -830,7 +830,7 @@ fn run_doctor(args: DoctorArgs) -> Result<(), CliError> {
         checks.push(json!({"name": "cedar_policy", "status": "ok", "present": false, "note": "no policy file; dev-permissive fallback active (ARDUR_DEV_PERMISSIVE_POLICY)"}));
     } else {
         warnings += 1;
-        // #408 / codex review: `ardur setup` writes only the HOME-resolved
+        // #408: `ardur setup` writes only the HOME-resolved
         // `~/.ardur`, so when `--state-dir` inspects another directory the
         // remedy text must name the inspected path explicitly.
         checks.push(json!({"name": "cedar_policy", "status": "warn", "present": false, "note": format!("policy file not found at {} — `ardur setup` writes a starter policy under the HOME-resolved ~/.ardur; for this state directory, write or copy a cedar.policies into it", cedar_path.display())}));

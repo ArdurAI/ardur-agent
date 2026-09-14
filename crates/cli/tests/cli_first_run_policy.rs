@@ -76,7 +76,7 @@ fn setup_writes_starter_policy_and_offline_chat_works_without_dev_flag() {
     );
 
     // Re-running setup is idempotent: the starter is kept, never replaced
-    // (codex review: create-new-only semantics, no replacement race).
+    // (create-new-only semantics, no replacement race).
     let again = ardur(&home_path)
         .args(["setup", "--yes"])
         .output()

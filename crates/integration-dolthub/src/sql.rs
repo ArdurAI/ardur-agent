@@ -473,7 +473,7 @@ pub fn table_written_by(sql: &str, allowed: &[String]) -> Result<String, SqlErro
     // MySQL `REPLACE [INTO]` parses as Statement::Insert with
     // replace_into = true: it DELETES conflicting rows before inserting — a
     // delete the table allowlist never consented to. The write tool admits
-    // plain INSERT only (codex review of ac90afb).
+    // plain INSERT only.
     if let Statement::Insert(insert) = &statement {
         if insert.replace_into {
             return Err(SqlError::NotAReadStatement { verb });
@@ -1672,7 +1672,7 @@ mod round9_tests {
 mod round10_tests {
     use super::*;
 
-    // ---- codex review round (post-round-9), P2 findings ----
+    // ---- post-round-9 review findings ----
     // REPLACE [INTO] parses as Statement::Insert with replace_into = true.
     // The write path's shape-only match admitted it even though the gate
     // documents INSERT/UPDATE/DELETE only, and REPLACE deletes conflicting

@@ -1,7 +1,10 @@
 # Current Status and Ready Features
 
 Implementation baseline reviewed: `dev` at
-`6c2599cb9c8d81a5afd8bf6d83910ece83b1a517` on 2026-09-14. This is the
+`947f0e24d5eb5c2b23587d2e2ebebd4ab0ae56d7` on 2026-09-14 (includes the
+v0.2.0 release-gate merges: #468 docs rebaseline, #474 rustls
+RUSTSEC-2026-0285, #473 Dolt SQL admission parse boundary, #472
+approval-receipt/admin-gate parity). This is the
 implementation inventory for `v0.2.0`, not a claim that the open follow-ups
 below have shipped. “Available” distinguishes shipped binary wiring from
 library-only surfaces; a partial slice does not close its larger feature.
@@ -36,7 +39,11 @@ Evidence for the reviewed implementation SHA:
 - CI run [34792700474](https://github.com/ArdurAI/ardur-agent/actions/runs/34792700474),
   docker run [34792700473](https://github.com/ArdurAI/ardur-agent/actions/runs/34792700473),
   and site run [34792700493](https://github.com/ArdurAI/ardur-agent/actions/runs/34792700493)
-  completed successfully. These links prove that SHA, not a later promotion.
+  completed successfully. Those runs prove the pre-gate baseline `6c2599c`;
+  the v0.2.0 gate merges that follow (#474 rustls, #473 SQL gate, #472
+  approval parity) each carried their own green CI and parity evidence on
+  their merged heads (`65c7f3c`, `87529c2`, `947f0e2`). The v0.2.0 release
+  record must cite the promoted-main run IDs, not these.
 - `.github/workflows/ci.yml` defines the Python checks, formatting, all-target
   clippy/check, all-feature workspace tests, security analysis, and separate
   live Qdrant and Dolt jobs. DCO runs on PRs. Branch protection and optional
