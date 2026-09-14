@@ -45,3 +45,7 @@ uuid = { workspace = true, features = ["v4"] }
 # the concurrent sub-agent asks without spawning (the runtime is `?Send`).
 tokio = { workspace = true }
 futures = { workspace = true }
+# gh#361: `SharedDenyList` lives in fused-runtime. Tests need it to revoke a
+# parent token mid-flight; a dev-dependency keeps that out of the production
+# dependency graph (multi-agent stays generic over `DenyList`).
+ardur-fused-runtime = { workspace = true }

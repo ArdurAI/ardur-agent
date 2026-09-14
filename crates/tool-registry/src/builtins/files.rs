@@ -31,6 +31,59 @@ const DEFAULT_MAX_BYTES: usize = 64 * 1024;
 /// Default directory-listing ceiling.
 const DEFAULT_MAX_ENTRIES: usize = 100;
 
+/// Resolve `.` and `..` in a path textually, without touching the filesystem.
+///
+/// Used to judge a symlink's target, which may not exist yet and therefore
+/// cannot be canonicalized. Purely lexical normalisation is sound here because
+/// the result is only compared against an already-canonical root: a target that
+/// normalises outside the root cannot be brought back inside it by a link the
+/// check has not yet followed, and any intermediate link on the *existing*
+/// portion of the path is caught by the canonicalize pass that follows.
+fn normalize_lexically(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                // Popping is correct for a lexical view; `/a/../b` is `/b`.
+                out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+/// Canonicalize the deepest existing ancestor of `path` and re-attach the rest.
+///
+/// A symlink's stored target may name a root by a non-canonical spelling — on
+/// macOS `/var/folders/...` is really `/private/var/folders/...` — so comparing
+/// it against an already-canonical root would reject links that never leave the
+/// tree. Canonicalizing what exists resolves that, while the lexically
+/// normalised tail keeps the comparison meaningful for a target that does not
+/// exist yet.
+fn canonicalize_existing_prefix(path: &Path) -> PathBuf {
+    let mut probe: &Path = path;
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        if let Ok(real) = probe.canonicalize() {
+            let mut out = real;
+            for part in tail.iter().rev() {
+                out.push(part);
+            }
+            return out;
+        }
+        match (probe.file_name(), probe.parent()) {
+            (Some(name), Some(parent)) => {
+                tail.push(name.to_os_string());
+                probe = parent;
+            }
+            // Nothing on this path exists; the lexical form is the best answer.
+            _ => return path.to_path_buf(),
+        }
+    }
+}
+
 /// Resolve `rel` against `root` and confirm the result stays inside `root`.
 ///
 /// Refuses absolute inputs and any `..` (or other non-`Normal`/`CurDir`)
@@ -70,8 +123,46 @@ fn contained_path(root: &Path, rel: &str) -> Result<PathBuf, ToolError> {
     // Defence in depth against symlink escapes: canonicalize the nearest
     // existing ancestor and confirm it is still under the root. (The target
     // itself may not exist yet — e.g. a file about to be written.)
+    //
+    // A *dangling* symlink is the subtle case. `canonicalize` resolves the link
+    // and then fails because its target does not exist, which is
+    // indistinguishable here from "this path simply does not exist yet". Walking
+    // up to the parent would then approve the link's in-vault directory, and the
+    // subsequent open would follow the link and create the target outside the
+    // root. So check for a symlink explicitly before falling back: a path that
+    // *is* a link must resolve inside the root, whether or not its target
+    // currently exists.
     let mut probe: &Path = &joined;
     loop {
+        // `symlink_metadata` does not follow the link, so this is true exactly
+        // when `probe` is itself a symlink — including a dangling one.
+        if probe
+            .symlink_metadata()
+            .is_ok_and(|m| m.file_type().is_symlink())
+        {
+            let target = probe.read_link().map_err(|e| {
+                ToolError::ExecutionFailed(format!("cannot read symlink `{rel}`: {e}"))
+            })?;
+            // A relative link resolves against the link's own directory.
+            let resolved = if target.is_absolute() {
+                target
+            } else {
+                probe.parent().unwrap_or(&canonical_root).join(target)
+            };
+            // The target may not exist, so normalise `.` and `..` lexically
+            // rather than canonicalizing. The link's *stored* target can be
+            // written against a non-canonical spelling of the root (on macOS a
+            // vault under `/var/...` is really `/private/var/...`), so
+            // canonicalize the deepest existing ancestor of the target and
+            // rebuild the remainder on top of it before comparing.
+            let normalized = canonicalize_existing_prefix(&normalize_lexically(&resolved));
+            if !normalized.starts_with(&canonical_root) {
+                return Err(ToolError::Denied {
+                    reason: format!("path resolves outside the tool root via a symlink: `{rel}`"),
+                });
+            }
+        }
+
         match probe.canonicalize() {
             Ok(real) => {
                 if !real.starts_with(&canonical_root) {
@@ -93,6 +184,25 @@ fn contained_path(root: &Path, rel: &str) -> Result<PathBuf, ToolError> {
 
 /// Build the standard `{ content, cost, receipt_data }` output where the receipt
 /// mirrors the content.
+/// Read at most `limit` bytes of `path` as UTF-8, or `None`.
+///
+/// `None` means "not checked": the file is over the limit, is not valid UTF-8,
+/// or could not be read. Never "clean".
+async fn read_bounded(path: &std::path::Path, limit: u64) -> Option<String> {
+    use tokio::io::AsyncReadExt;
+
+    let file = tokio::fs::File::open(path).await.ok()?;
+    // Read one byte past the ceiling: if it arrives, the file is over the
+    // limit and is skipped rather than partially checked — a truncated file
+    // reports syntax errors that are artefacts of the truncation.
+    let mut buf = Vec::new();
+    file.take(limit + 1).read_to_end(&mut buf).await.ok()?;
+    if buf.len() as u64 > limit {
+        return None;
+    }
+    String::from_utf8(buf).ok()
+}
+
 fn output(content: serde_json::Value) -> ToolOutput {
     ToolOutput {
         content: content.clone(),
@@ -224,16 +334,47 @@ fn default_mode() -> String {
 }
 
 /// Writes a file inside the tool root, creating parent directories as needed.
-/// Returns `{ bytes_written, path_written }`.
+/// Returns `{ bytes_written, path_written }`, plus `checked`, `diagnostics`
+/// and `diagnostics_truncated` when post-write diagnostics are enabled.
 pub struct WriteFileTool {
     schema: ToolSchema,
     root: PathBuf,
     caps: Vec<Capability>,
+    /// gh#413: where prior content goes before a write destroys it. `None`
+    /// keeps the pre-existing behaviour, so a deployment that has not opted in
+    /// writes exactly as before.
+    snapshots: Option<crate::snapshot::SnapshotStore>,
+    /// gh#414: checkers run over the content after a write. Advisory — the
+    /// bytes are already on disk, so problems are reported, never raised as a
+    /// failed call.
+    diagnostics: Option<crate::diagnostics::SyntaxCheckers>,
 }
 
 impl WriteFileTool {
     /// The id [`WriteFileTool`] registers under.
     pub const ID: &'static str = "file.write";
+
+    /// Run `checkers` over the content after each write (gh#414).
+    ///
+    /// Advisory by construction: a checker runs after the bytes are on disk,
+    /// so returning an error would report a failed write that succeeded — and
+    /// a model retrying on that error would write the content twice.
+    #[must_use]
+    pub fn with_diagnostics(mut self, checkers: crate::diagnostics::SyntaxCheckers) -> Self {
+        self.diagnostics = Some(checkers);
+        self
+    }
+
+    /// Capture prior file content into `store` before each write (gh#413).
+    ///
+    /// Opt-in: without it the tool behaves exactly as before, so enabling
+    /// snapshots is a deployment decision rather than a silent change in what
+    /// the agent writes to disk.
+    #[must_use]
+    pub fn with_snapshots(mut self, store: crate::snapshot::SnapshotStore) -> Self {
+        self.snapshots = Some(store);
+        self
+    }
 
     /// A [`WriteFileTool`] confined to `root`.
     #[must_use]
@@ -259,6 +400,35 @@ impl WriteFileTool {
                 "type": "object",
                 "properties": {
                     "bytes_written": { "type": "integer" },
+                    // gh#414. Present only when diagnostics are enabled, so a
+                    // schema-driven client can generate types for them and a
+                    // strict consumer does not reject the response.
+                    "checked": {
+                        "type": "boolean",
+                        "description": "Whether any checker ran. False means the file type was \
+                                        unrecognised or every applicable checker failed — NOT \
+                                        that the file is clean."
+                    },
+                    "diagnostics": {
+                        "type": "array",
+                        "description": "Problems found in what was written. Advisory: the write \
+                                        succeeded regardless.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "source": { "type": "string" },
+                                "severity": { "type": "string", "enum": ["error", "warning"] },
+                                "line": { "type": ["integer", "null"] },
+                                "column": { "type": ["integer", "null"] },
+                                "message": { "type": "string" }
+                            },
+                            "required": ["source", "severity", "message"]
+                        }
+                    },
+                    "diagnostics_truncated": {
+                        "type": "integer",
+                        "description": "How many diagnostics were dropped by the cap."
+                    },
                     "path_written": { "type": "string" }
                 },
                 "required": ["bytes_written", "path_written"]
@@ -269,6 +439,8 @@ impl WriteFileTool {
             schema,
             root,
             caps: vec![Capability::FsWrite],
+            snapshots: None,
+            diagnostics: None,
         }
     }
 }
@@ -310,6 +482,25 @@ impl Tool for WriteFileTool {
             })?;
         }
 
+        // gh#413: capture what is about to be lost, BEFORE the write. Taking
+        // it afterwards would capture the new content, which is exactly the
+        // thing that is not worth keeping.
+        //
+        // A capture failure fails the write. The alternative — proceed and
+        // return a warning — destroys unrecoverable content in the one case
+        // the snapshot exists to protect, and the caller asked for snapshots
+        // by opting in.
+        let snapshot = match &self.snapshots {
+            Some(store) => Some(store.capture(&path).await.map_err(|e| {
+                ToolError::ExecutionFailed(format!(
+                    "could not snapshot the prior content of `{}`, so the write \
+                     was not attempted: {e}",
+                    args.path
+                ))
+            })?),
+            None => None,
+        };
+
         if append {
             let mut file = tokio::fs::OpenOptions::new()
                 .create(true)
@@ -332,10 +523,93 @@ impl Tool for WriteFileTool {
                 .map_err(|e| ToolError::ExecutionFailed(format!("write `{}`: {e}", args.path)))?;
         }
 
-        Ok(output(json!({
+        let mut out = output(json!({
             "bytes_written": bytes.len(),
             "path_written": path.display().to_string(),
-        })))
+        }));
+
+        // The snapshot id rides in `receipt_data`. NOTE: the runtime currently
+        // builds its `ToolCallReceipt` unconditionally and never reads this
+        // field, so the snapshot is recorded here but is NOT yet linked into
+        // the receipt chain. Populating it now means the link becomes real the
+        // moment the runtime consumes it; claiming the link exists today would
+        // be false.
+        if let Some(snapshot) = &snapshot {
+            // MERGE, do not replace: `output` already put bytes_written and
+            // path_written here, and a consumer that gets only a content hash
+            // cannot say which file the snapshot belongs to — which is the
+            // audit question.
+            let snapshot_json = json!({
+                "snapshot": match snapshot {
+                    crate::snapshot::Snapshot::Captured(id) => json!({
+                        "prior_content": id.as_str(),
+                    }),
+                    crate::snapshot::Snapshot::NothingToCapture => json!({
+                        "prior_content": serde_json::Value::Null,
+                        "note": "the file did not exist; undoing this write means removing it",
+                    }),
+                },
+            });
+            if let (Some(base), Some(extra)) =
+                (out.receipt_data.as_object_mut(), snapshot_json.as_object())
+            {
+                for (k, v) in extra {
+                    base.insert(k.clone(), v.clone());
+                }
+            } else {
+                out.receipt_data = snapshot_json;
+            }
+        }
+        // gh#414: check what was just written. The bytes are already on disk,
+        // so this NEVER fails the call — problems ride along in the output.
+        if let Some(checkers) = &self.diagnostics {
+            // Check what is ON DISK, not what was passed in. For an overwrite
+            // those are the same string, but for an append `args.content` is
+            // only the added chunk — checking that in isolation reports
+            // syntax errors for perfectly good appends (a fragment rarely
+            // parses alone) and misses breakage the append actually caused.
+            let to_check = if append {
+                // Bound the READ itself. A metadata pre-check is racy: another
+                // writer can grow the file between the stat and the read, so
+                // the ceiling would be enforced against a stale size while the
+                // read allocates whatever is actually there now.
+                read_bounded(&path, crate::diagnostics::MAX_CHECK_BYTES).await
+            } else {
+                Some(args.content.clone())
+            };
+
+            let report = to_check
+                .as_deref()
+                .map(|c| checkers.run(&path, c))
+                .unwrap_or_else(crate::diagnostics::DiagnosticReport::not_checked);
+            // Build once, then apply to BOTH payloads. `output()` mirrors
+            // content into receipt_data, and inserting into only one leaves
+            // the receipt auditing a different result than the model saw.
+            let mut additions = vec![
+                // `checked` distinguishes "nothing understood this file" from
+                // "checked and clean". Collapsing them would let an unchecked
+                // file read as validated.
+                ("checked".to_string(), json!(report.was_checked())),
+            ];
+            if !report.is_empty() {
+                additions.push(("diagnostics".to_string(), report.to_json()));
+                if report.truncated() > 0 {
+                    additions.push((
+                        "diagnostics_truncated".to_string(),
+                        json!(report.truncated()),
+                    ));
+                }
+            }
+            for target in [&mut out.content, &mut out.receipt_data] {
+                if let Some(obj) = target.as_object_mut() {
+                    for (k, v) in &additions {
+                        obj.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+        }
+
+        Ok(out)
     }
 
     fn required_capabilities(&self) -> &[Capability] {

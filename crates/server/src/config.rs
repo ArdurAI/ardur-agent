@@ -85,6 +85,19 @@ pub struct Config {
     /// (`ARDUR_ADMIN_BEARER_TOKENS`, comma-separated). When empty, admin routes
     /// deny every request with `401` (fail-closed).
     pub admin_bearer_tokens: Vec<String>,
+    /// **gh#417.** Require a verb-scoped cap-token on admin *mutations*
+    /// (`ARDUR_ADMIN_CAP_TOKEN_GATE`, default off).
+    ///
+    /// A bearer token is one shared secret with no audience, no expiry, no
+    /// per-verb allowlist and no revocation: presenting it grants every admin
+    /// route at once. With this on, a mutation additionally requires a
+    /// cap-token naming that mutation's verb, so authority to decide an
+    /// approval can be delegated without also delegating authority to rewrite
+    /// configuration.
+    ///
+    /// Off by default: a control that breaks every existing operator on
+    /// upgrade gets switched off rather than adopted.
+    pub admin_cap_token_gate: bool,
     /// Exact browser origins allowed to call `/chat` and `/approvals*` from a
     /// separately-hosted PWA (`ARDUR_CORS_ORIGINS`, comma-separated
     /// `http(s)://host[:port]` values). Empty (the default) emits no CORS
@@ -182,6 +195,28 @@ pub struct Config {
     /// `file.list` built-in tools (`ARDUR_FILE_TOOL_ROOT`). `Some(root)`
     /// registers all three confined to it; `None` registers no file tool.
     pub file_tool_root: Option<PathBuf>,
+    /// **gh#414.** Run post-write syntax checkers over what `file.write`
+    /// writes (`ARDUR_FILE_WRITE_DIAGNOSTICS`, default off). Advisory: a
+    /// problem is reported in the tool output and never fails the write.
+    /// Ignored unless [`file_tool_root`](Self::file_tool_root) is set, since
+    /// without it no file tool is registered at all.
+    pub file_write_diagnostics: bool,
+    /// **ARD-463.** Capability labels whose tool calls require an operator's
+    /// approval before they run (`ARDUR_APPROVAL_GATED_CAPABILITIES`, CSV).
+    ///
+    /// Empty (the default) leaves approval-gating **off**: the runtime is
+    /// built without an approval store, so `authorize_or_propose_approval` is
+    /// a no-op and no boot behaviour changes. When non-empty, a tool call
+    /// carrying any listed capability does not execute — it proposes a pending
+    /// card into the shared on-disk store the decide-half endpoints
+    /// (`GET /approvals`, `POST /approvals/{id}/approve|reject`) and the
+    /// `ardur approvals` CLI already read, mints
+    /// `approval.propose.created.v1`, and the call is refused until an
+    /// operator decides it.
+    ///
+    /// Gating is by **capability**, not tool name, so a capability stays gated
+    /// however many tools declare it.
+    pub approval_gated_capabilities: Vec<String>,
     /// How long a synchronous `POST /chat` (and ACP) turn may run before the
     /// HTTP surface stops waiting on it (`ARDUR_HTTP_TURN_TIMEOUT_SECS`, default
     /// `30`). When the wait elapses the client receives `504`; the worker
@@ -238,6 +273,7 @@ impl fmt::Debug for Config {
                 "chat_bearer_tokens",
                 &redacted_count(self.chat_bearer_tokens.len()),
             )
+            .field("admin_cap_token_gate", &self.admin_cap_token_gate)
             .field(
                 "admin_bearer_tokens",
                 &redacted_count(self.admin_bearer_tokens.len()),
@@ -268,6 +304,11 @@ impl fmt::Debug for Config {
             .field("enable_http_tool", &self.enable_http_tool)
             .field("http_allowlist", &self.http_allowlist)
             .field("file_tool_root", &self.file_tool_root)
+            .field("file_write_diagnostics", &self.file_write_diagnostics)
+            .field(
+                "approval_gated_capabilities",
+                &self.approval_gated_capabilities,
+            )
             .field("http_turn_timeout", &self.http_turn_timeout)
             .finish()
     }
@@ -428,6 +469,30 @@ impl Config {
             .is_some_and(is_truthy);
         let http_allowlist = parse_csv(optional("ARDUR_HTTP_ALLOWLIST").as_deref());
         let file_tool_root = optional("ARDUR_FILE_TOOL_ROOT").map(PathBuf::from);
+        let file_write_diagnostics = optional("ARDUR_FILE_WRITE_DIAGNOSTICS")
+            .as_deref()
+            .is_some_and(is_truthy);
+
+        // ARD-463: approval-gating is opt-in and off by default. An empty list
+        // leaves the runtime without an approval store at all, so the gate is
+        // a no-op rather than a gate that silently passes everything.
+        //
+        // Entries are capability labels, not tool names. A tool name would let
+        // the same capability slip through under a differently-named tool, and
+        // the runtime matches on `Capability::as_str()`.
+        let approval_gated_capabilities =
+            parse_csv(optional("ARDUR_APPROVAL_GATED_CAPABILITIES").as_deref());
+        if approval_gated_capabilities
+            .iter()
+            .any(|label| label.contains(char::is_whitespace))
+        {
+            return Err(ConfigError::Invalid {
+                var: "ARDUR_APPROVAL_GATED_CAPABILITIES",
+                reason: "capability labels must not contain whitespace; a label that never \
+                         matches would gate nothing while appearing to be configured"
+                    .to_string(),
+            });
+        }
 
         // The synchronous-turn wait ceiling. A slow-but-legitimate turn (a long
         // tool loop, a slow provider) should be able to outlast the default 30s
@@ -463,6 +528,9 @@ impl Config {
             bind_addr: optional("ARDUR_BIND_ADDR").unwrap_or_else(|| "127.0.0.1:3000".to_string()),
             chat_bearer_tokens: parse_csv(optional("ARDUR_CHAT_BEARER_TOKENS").as_deref()),
             admin_bearer_tokens: parse_csv(optional("ARDUR_ADMIN_BEARER_TOKENS").as_deref()),
+            admin_cap_token_gate: optional("ARDUR_ADMIN_CAP_TOKEN_GATE")
+                .as_deref()
+                .is_some_and(is_truthy),
             cors_origins: parse_cors_origins(optional("ARDUR_CORS_ORIGINS").as_deref())?,
             dev_permissive_policy: optional("ARDUR_DEV_PERMISSIVE_POLICY")
                 .as_deref()
@@ -511,6 +579,8 @@ impl Config {
             enable_http_tool,
             http_allowlist,
             file_tool_root,
+            file_write_diagnostics,
+            approval_gated_capabilities,
             http_turn_timeout,
         })
     }
@@ -542,6 +612,13 @@ impl Config {
             enable_shell_exec: false,
             shell_exec_allowlist: None,
             file_root: self.file_tool_root.clone(),
+            snapshot_store: None,
+            // gh#414: without this the feature is unreachable in every shipped
+            // server — the only callers able to enable it would be tests and
+            // external embedders, however the operator configures things.
+            diagnostics: self
+                .file_write_diagnostics
+                .then(ardur_tool_registry::diagnostics::SyntaxCheckers::builtin),
             http: self.enable_http_tool.then(|| HttpFetchOpts {
                 enable: true,
                 allowlist: self.http_allowlist.clone(),

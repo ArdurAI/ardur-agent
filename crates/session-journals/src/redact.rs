@@ -36,7 +36,15 @@ pub fn default_secret_patterns() -> Vec<regex::Regex> {
     ];
     patterns
         .iter()
-        .filter_map(|p| regex::Regex::new(p).ok())
+        .map(|p| {
+            // These patterns are compile-time constants. `filter_map(..ok())`
+            // silently dropped any that failed to compile, which would disable
+            // a secret-redaction rule with no signal at all — the journal would
+            // simply start recording the secret it was meant to mask. A broken
+            // constant is a build defect, so fail at startup instead.
+            regex::Regex::new(p)
+                .unwrap_or_else(|e| panic!("built-in redaction pattern {p:?} must compile: {e}"))
+        })
         .collect()
 }
 
@@ -203,5 +211,38 @@ mod tests {
             serde_json::to_string(&redacted[1]).unwrap(),
             serde_json::to_string(&entries[1]).unwrap()
         );
+    }
+
+    /// gh#367 — every built-in redaction pattern must compile.
+    ///
+    /// The compile used to be `filter_map(..ok())`, which silently dropped a
+    /// broken pattern: the rule would vanish and the journal would record the
+    /// secret it was meant to mask, with no error anywhere. This test is what
+    /// makes the new fail-loud behaviour meaningful — it turns a startup panic
+    /// into a build-time failure instead.
+    #[test]
+    fn every_builtin_redaction_pattern_compiles() {
+        let compiled = default_secret_patterns();
+        assert!(
+            !compiled.is_empty(),
+            "the built-in redaction set must not be empty"
+        );
+    }
+
+    /// The set actually masks the secret shapes it claims to.
+    ///
+    /// A count-only assertion would pass even if a pattern compiled to
+    /// something that matches nothing, so check behaviour on real examples.
+    #[test]
+    fn builtin_patterns_mask_representative_secrets() {
+        let patterns = default_secret_patterns();
+        for probe in [
+            "AKIAIOSFODNN7EXAMPLE",
+            "-----BEGIN PRIVATE KEY-----abc-----END",
+            "authorization: bearer abcdefghijklmnopqrstuvwxyz012345",
+        ] {
+            let masked = redact_text(probe, &patterns);
+            assert_ne!(masked, probe, "pattern set must mask: {probe}");
+        }
     }
 }

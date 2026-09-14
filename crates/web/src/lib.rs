@@ -131,9 +131,21 @@ fn host_is_loopback(host: &Host<&str>) -> bool {
 fn host_matches(pattern: &str, host: &str) -> bool {
     pattern == "*"
         || pattern.eq_ignore_ascii_case(host)
-        || pattern
-            .strip_prefix("*.")
-            .is_some_and(|suffix| host.ends_with(suffix))
+        || pattern.strip_prefix("*.").is_some_and(|base| {
+            // Require the dot boundary (gh#364). A bare `ends_with` lets an
+            // attacker-registered `evilexample.com` satisfy an
+            // `*.example.com` allowlist, which turns the allowlist into an
+            // invitation. `*.example.com` covers the apex and any subdomain,
+            // and nothing else.
+            host.eq_ignore_ascii_case(base)
+                || host
+                    .len()
+                    .checked_sub(base.len())
+                    .and_then(|i| i.checked_sub(1))
+                    .is_some_and(|i| {
+                        host.as_bytes()[i] == b'.' && host[i + 1..].eq_ignore_ascii_case(base)
+                    })
+        })
 }
 
 fn ensure_authorized(
@@ -580,5 +592,38 @@ mod tests {
             first_capture("<title>Hello</title>", r"(?is)<title[^>]*>(.*?)</title>").unwrap(),
             "Hello"
         );
+    }
+
+    /// gh#364 — a wildcard allowlist must not match a lookalike registration.
+    ///
+    /// `host.ends_with("example.com")` is true for `evilexample.com`, which
+    /// anyone can register. An allowlist that admits attacker-controlled hosts
+    /// is worse than no allowlist, because it reads as a control.
+    #[test]
+    fn a_wildcard_requires_a_dot_boundary() {
+        assert!(host_matches("*.example.com", "example.com"), "apex");
+        assert!(
+            host_matches("*.example.com", "api.example.com"),
+            "subdomain"
+        );
+        assert!(
+            host_matches("*.example.com", "deep.api.example.com"),
+            "nested subdomain"
+        );
+
+        assert!(
+            !host_matches("*.example.com", "evilexample.com"),
+            "a lookalike registration must not satisfy the allowlist"
+        );
+        assert!(!host_matches("*.example.com", "xexample.com"));
+        assert!(!host_matches("*.example.com", "notexample.com"));
+    }
+
+    /// Case-insensitivity survives the boundary check (DNS is case-insensitive).
+    #[test]
+    fn a_wildcard_match_stays_case_insensitive() {
+        assert!(host_matches("*.example.com", "API.Example.COM"));
+        assert!(host_matches("*.EXAMPLE.com", "api.example.com"));
+        assert!(!host_matches("*.example.com", "EVILexample.com"));
     }
 }

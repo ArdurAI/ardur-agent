@@ -504,6 +504,328 @@ Provider support (Phase 1): **anthropic** (Messages API `tool_use`),
 `claude` CLI providers orchestrate their own tools internally, so the runtime
 loop does not drive tools through them.
 
+### Requiring human approval before a tool runs
+
+A tool call carrying an approval-gated capability does not execute. It proposes
+a **pending approval card** and the turn is refused until an operator decides
+it. Off by default:
+
+```bash
+ARDUR_APPROVAL_GATED_CAPABILITIES=cap.shell_exec,cap.fs_write
+```
+
+Entries are **capability labels**, not tool names, so a capability stays gated
+however many tools declare it. Leave the variable unset and the runtime is built
+with no approval store at all — the gate is absent, not present-and-permissive.
+A label containing whitespace can never match a capability, so it is rejected at
+startup rather than silently gating nothing.
+
+When a gated call is attempted the runtime:
+
+1. writes a pending card to `<ARDUR_DATA_DIR>/approvals/<id>.json`, recording the
+   tool, the capability, `sha256(arguments)`, and the session;
+2. mints an `approval.propose.created.v1` receipt into the chain;
+3. refuses the call.
+
+Decide it through the endpoints or the CLI, which share that same store:
+
+```bash
+curl -H "Authorization: Bearer $ADMIN_TOKEN" http://127.0.0.1:8080/approvals
+curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
+  http://127.0.0.1:8080/approvals/<id>/approve
+# or reject, optionally with {"reason": "..."}
+ardur approvals list
+```
+
+Retrying the **identical** call (same tool, same arguments, same session) reuses
+the pending card rather than proposing a second one, and proceeds once it is
+approved. The approval is then **spent**: the card is marked `consumed` and a
+further identical call proposes a fresh one. An approval authorises one
+invocation, not a standing permission. A rejected card refuses the retry with
+the operator's reason.
+
+Approval is an additional gate, not a replacement: the cap-token and Cedar checks
+still run first, so approving a card cannot grant a capability the token never
+carried.
+
+**Limitations, verified against the code — read before enabling:**
+
+- **HTTP with an explicit `session_id` only.** Card matching includes the
+  session id, and the channel adapters (Slack, Matrix, Discord, Telegram) and
+  the ACP route mint a fresh `SessionId` per inbound message. A retry there
+  never matches the approved card, so the loop cannot complete — every attempt
+  proposes another card. Send `session_id` explicitly on `POST /chat` and reuse
+  it for the retry.
+- **A gated call still costs provider tokens.** The gate is consulted after the
+  provider round that requested the tool, and the refused turn releases its
+  reservation at zero cost, so repeated gated attempts consume tokens without
+  decrementing `ARDUR_COST_BUDGET_CENTS`.
+- **The CLI reads `$HOME/.ardur`.** `ardur approvals` resolves its own state
+  directory and does not follow `ARDUR_DATA_DIR`. If the server runs with a
+  different data directory (the documented Docker setup uses `/var/lib/ardur`),
+  use the HTTP endpoints, which read the server's store directly.
+
+## Declaring an integration
+
+An *integration* is an external tool the runtime can be taught to drive — the
+`bd` CLI, a Dolt clone, an Obsidian vault. Integrations are declared in
+`~/.ardur/config.toml` and are **off by default**; a fresh install has none.
+
+```toml
+[integrations.obsidian]
+root = "/Users/me/vault"     # a directory that confines every read and write
+enabled = true
+
+[integrations.beads]
+command = "bd"               # an executable, driven through argv-exec
+capabilities = ["cap.integration.beads"]
+```
+
+Each integration declares exactly one endpoint: `command` for an executable, or
+`root` for a confining directory. The two are not interchangeable — they carry
+different confinement rules — so declaring both is a load error rather than a
+silent preference for one.
+
+Three properties are worth knowing before enabling anything:
+
+- **Declaring is not enabling.** A block without `enabled = true` is inert. A
+  disabled integration never reaches its adapter at all, so it cannot run
+  adapter code, spawn a process, or touch a path.
+- **Configuration is validated at load, strictly.** Unknown keys are refused
+  rather than ignored: a typo'd `enable = true` fails the parse instead of
+  leaving you convinced you switched something on.
+- **An enabled integration with no adapter in this build fails the boot.** The
+  configuration claims a capability the binary cannot provide, and starting
+  anyway would hide that.
+
+### Environment overrides
+
+`ARDUR_INTEGRATIONS_<NAME>_ENABLED`, `_COMMAND`, and `_ROOT` adjust a declared
+integration, so an image can ship the file and a deployment decide what is on:
+
+```bash
+export ARDUR_INTEGRATIONS_OBSIDIAN_ENABLED=false
+export ARDUR_INTEGRATIONS_BEADS_COMMAND=/opt/homebrew/bin/bd
+```
+
+An override **cannot introduce** an integration the file never declared, and
+cannot change an endpoint's kind. Environment variables are the part of a
+deployment most likely to be inherited or templated from a parent process;
+requiring a declaration keeps the set of *possible* integrations in a file
+someone reviews, and leaves the environment in charge only of the ones already
+there.
+
+### Checking your work
+
+`ardur doctor` reports every declared integration, whether it is enabled, and
+whether its backing resource is actually present:
+
+```json
+{ "name": "integration:obsidian", "status": "ok", "enabled": true,
+  "kind": "directory", "present": true, "adapter": true,
+  "endpoint": "directory: /Users/me/vault" }
+```
+
+Doctor reports the **effective** configuration — environment overrides are
+applied before it reports, so what you see is what the runtime would use. An
+enabled integration warns when its backing resource is missing, or when this
+build carries no adapter for it; either way it will fail at first use. The same
+integration disabled is reported but not warned about, so one config file can be
+shared across machines where the tool is not installed. For a `command`
+endpoint, "present" means a file that is actually executable — a file on `PATH`
+without an execute bit would otherwise look healthy and fail with
+`PermissionDenied`.
+
+Doctor reports presence only, never the contents of a vault or a database. When
+the configuration cannot be parsed it reports the error's *location* but
+withholds the source excerpt, because a malformed assignment elsewhere in the
+file — an unterminated `api_key` string, say — would otherwise put that
+credential into a report advertised as safe to paste into an issue.
+
+**Current status:** this release lands the configuration surface, the adapter
+registry, the doctor checks, and the **beads adapter**. `[integrations.beads]`
+with a `command` endpoint yields six tools — `beads.ready`, `beads.list`,
+`beads.show`, `beads.create`, `beads.update`, `beads.close`.
+
+Reads and writes carry **different capabilities**
+(`cap.integration.beads.read` and `cap.integration.beads.write`), so a grant
+that lets an agent consult the tracker does not also let it close issues. Every
+verb additionally declares `cap.shell_exec` and `cap.process_spawn`, because it
+ultimately spawns `bd` — a deployment that gates process spawning must not find
+`beads.*` doing it underneath. Capabilities listed in the config block are
+*added* to the verb's own, never substituted for it.
+
+Every invocation goes through the same argv-exec confinement as `shell.exec`:
+no shell interpretation, `argv[0]` matched exactly against a single-entry
+allowlist, bounded output, and process-group teardown on timeout. Arguments are
+passed as separate argv entries, so an issue title containing `;` or `$(...)`
+is one operand rather than shell syntax. A configured command path containing
+whitespace is refused at boot, since the allowlist could never match it and
+every call would otherwise fail with a confusing denial.
+
+**On receipts:** mutating verbs attach structured detail (the verb and its
+operands) to their output. The runtime does **not** yet consume it — it
+receipts every tool call uniformly from the call name, an arguments digest, an
+output digest, and the cost, and nothing reads the per-tool field. So beads
+mutations are receipted exactly like any other tool call today; the verb-level
+record is populated in advance of the runtime learning to fold it in, not as a
+distinction that already exists.
+
+### Obsidian
+
+`[integrations.obsidian]` with a `root` endpoint yields three tools —
+`obsidian.read`, `obsidian.search`, `obsidian.write` — every one confined to
+the configured vault.
+
+```toml
+[integrations.obsidian]
+root = "/Users/me/vault"
+enabled = true
+```
+
+Paths are vault-relative. Path resolution is delegated to the same `file.*`
+machinery the built-in file tools use: the root is canonicalized, `..`
+components are rejected, and containment is re-checked *after* canonicalization,
+so a symlink inside the vault cannot point out of it. Reading `../secret.txt`,
+`notes/../../etc/passwd`, or an absolute path outside the root are all refused,
+and a refused write creates nothing.
+
+Reads require `cap.integration.obsidian.read` and `cap.fs_read`; writes also
+require `cap.integration.obsidian.write` and `cap.fs_write`. The filesystem
+capabilities are declared explicitly because this adapter invokes the file
+builtins directly — a caller holding no filesystem capability must not reach
+the filesystem through an integration.
+
+A write's structured record names the path and mode but **not** the note's
+contents, which can be arbitrarily large and arbitrarily sensitive.
+
+A configured vault that does not exist is **not** a boot failure: an operator
+may write configuration on a machine where the vault is not yet mounted, and
+`ardur doctor` reports it.
+
+### DoltHub
+
+`[integrations.dolthub]` with a `command` endpoint pointing at the `dolt` binary
+yields `dolthub.query`, a read tool. A write tool, `dolthub.execute`, appears
+**only** when the operator declares writable tables:
+
+```toml
+[integrations.dolthub]
+command = "dolt"
+enabled = true
+capabilities = ["table:knowledge"]   # without this there is NO write tool
+```
+
+Queries run against the Dolt clone in the process's working directory. Both
+verbs accept **exactly one SQL statement**, and this is the adapter's central
+constraint rather than a stylistic one: `dolt sql -q` executes *every*
+statement in its argument. `select 1; insert into t values (99)` returns the
+select's rows and performs the insert — verified experimentally, and pinned by a
+test that runs it against a real database. A read-only guard that checks only
+the leading keyword would therefore admit `select 1; delete from notes`, so
+multi-statement input is refused outright instead.
+
+Two further bypasses were found by testing the gate against a real database
+rather than reasoning about it, and both are closed:
+
+- **Backslash escapes.** Dolt treats `\'` as a literal quote, so in
+  `select 'a\'' ; insert into notes values ('x')` the string closes and the
+  `;` is a real separator. Quote tracking that toggles on every `'` concludes
+  the opposite and reads the separator as data.
+- **CTE preambles.** `with c as (select 1) insert into notes values ('x')`
+  leads with a read keyword and writes. The parser classifies it from the
+  AST (`Query { body: Insert }`) — a `WITH`-wrapped DML is a write by shape,
+  and every nested query body is inspected by the purity walk described
+  below, not by keyword scanning.
+- **Multi-table writes.** `delete secrets from notes join secrets on 1=1`
+  names its target before `FROM`, and `update notes join secrets on 1=1 set
+  secrets.id = 'X'` assigns through a join — both reach a table the allowlist
+  never sees. Multi-table write forms are refused outright rather than
+  resolved.
+
+Review rounds 2–4 (gh#469) kept finding new lexical laundering shapes —
+quote-poisoned executable comments, glued version prefixes, quote characters
+inside backtick identifiers, quoted qualifiers, one-sided commas — each patch
+closing the previous round's bypass while admitting a new one. The lesson is
+structural: a gate that blanks or strips quoting and then re-guesses the
+identifier can never agree with the engine about what it is executing.
+
+The admission check is therefore a **strict-subset parse boundary**: the
+statement must parse (real SQL parser, MySQL dialect) into exactly one
+statement whose resolved table identifiers are checked against the allowlist
+directly from the parse tree — no blanking, no quote-stripping, no token
+re-folding. A backtick-quoted name containing apostrophes (`'notes'`) is the
+distinct table it names, never `notes`; a qualified name (`db`.`notes`)
+resolves on its final segment; a `DELETE` with a comma anywhere in its target
+list, a `USING` clause, or a JOIN names more than one table and is refused as
+a multi-table write; `EXPLAIN` wrapping DML is not a read; a `WITH` whose body
+is DML is a write. Three lexical facts the parser cannot see are enforced
+before parsing, each live-verified against dolt:
+
+- **Executable comments are refused outright.** `/*! ... */` bodies are
+  conditionally executed by MySQL-style engines while a standard parser
+  discards them as comments. No lexical scan of the body is sound (quotes
+  inside it poison tracking; `/*!50000INSERT` hides the verb), and a
+  legitimate read or single-table DML statement never needs
+  version-conditional syntax.
+- **`#` comments are refused outright.** dolt's statement splitter splits on
+  `;` inside `#` comments while the parser treats them as comments to end of
+  line (review round 5, live-verified: `select 1 # x ; delete from secrets`
+  returned the select AND emptied the table). No lexical treatment of the
+  body is sound, and the admitted subset never needs `#` — `--` and `/* */`
+  are the agreed comment forms.
+- **Control and non-ASCII characters are refused.** dolt ends `#` comments at
+  a carriage return AND at any non-ASCII codepoint (U+00A0, U+2028, emoji —
+  the whole class was live-verified), while a parser treats those as comment
+  text or data. Rather than reconciling per-codepoint, any character outside
+  printable ASCII plus newline and tab refuses the input. This is
+  deliberately quote-unaware: a `#` or an `é` inside a string literal is
+  refused too, because a quote tracker is exactly the mechanism earlier
+  review rounds used to smuggle.
+- **Every nested query is inspected, wherever it sits.** The gate walks every
+  `Query` node in the parsed statement — CTE bodies (including `WITH` clauses
+  nested inside parenthesized query expressions, set-operation operands,
+  derived tables and scalar subqueries), `INSERT ... SELECT` sources, and the
+  WHERE/limit filters of the SHOW variants the parser models — and refuses
+  the statement if any of them mutates or selects INTO a table, even though
+  dolt 2.3.3 rejects DML CTEs today: an engine that accepts them would
+  execute the mutation under an admitted read. `SELECT ... INTO <table>` is
+  likewise not a read: INTO names a table destination.
+- **Unmodeled SHOW variants are refused.** SHOW forms the parser does not
+  model (`SHOW ENGINES`, `SHOW GRANTS`, `SHOW PROCESSLIST`, `SHOW TRIGGERS`,
+  …) are refused outright: the parser's fallback for them flattens the rest
+  of the input into bare identifiers — swallowing `;` (so
+  `show engines; delete from secrets` parsed as one admitted read while dolt
+  executed both statements) and flattening WHERE subqueries the walk could
+  never see. A token-level guard additionally refuses any single parsed
+  statement whose token stream contains a non-trailing `;`, so a parser that
+  swallows a statement boundary fails closed. `SHOW TABLES`, `SHOW COLUMNS`,
+  `SHOW DATABASES`/`SCHEMAS`, `SHOW VARIABLES`, `SHOW STATUS`, `SHOW CREATE`,
+  `SHOW COLLATION`, `SHOW FUNCTIONS`, `DESCRIBE` and `EXPLAIN`-wrapping-a-read
+  remain admitted.
+- Anything that does not parse is refused (fail-closed) — including valid
+  MySQL the parser's dialect does not model, which may over-refuse an odd
+  but legitimate query. That is the acceptable direction to be wrong.
+
+The write tool accepts single-table plain `INSERT`, `UPDATE` and `DELETE`
+only. MySQL `REPLACE` — which parses as an INSERT but deletes conflicting
+rows before inserting — is refused: that hidden delete is not a write the
+table allowlist consented to. The
+`dolt` command path is validated at build time against the argv-exec
+allowlist's own rules, so a path that would be denied on every call is refused
+as configuration instead of registering an unusable tool.
+
+The write tool additionally checks the target table against the declared
+allowlist, and refuses DDL entirely: an allowlist of tables cannot meaningfully
+constrain a statement that drops one, so schema changes stay an operator
+action.
+
+Reads require `cap.integration.dolthub.read`, writes
+`cap.integration.dolthub.write`, and both declare `cap.shell_exec` and
+`cap.process_spawn` because they spawn `dolt`. The SQL text is passed as a
+single argv entry, so a query containing shell metacharacters is a string to
+Dolt rather than syntax to a shell.
+
 ## Platform integrations
 
 EPIC-PLATFORM adds dedicated platform crates for browser, terminal, and web
