@@ -85,11 +85,19 @@ impl TelegramConfig {
         })
     }
 
-    /// Whether `chat_id` is permitted: true when the allowlist is empty
-    /// (all chats) or contains the id.
+    /// Whether `chat_id` is permitted. **Deny-by-default (ARD-475):** an empty
+    /// allowlist admits nothing, so an unconfigured bot reads no chats.
+    ///
+    /// This used to return `true` for every chat when the allowlist was empty,
+    /// which contradicted this struct's own deny-by-default documentation and
+    /// disagreed with the live ingress gate (`Forwarder::chat_allowed`). Two
+    /// same-named methods with opposite senses is a trap: anyone consolidating
+    /// them onto the config object would silently swap a closed gate for an
+    /// open one, and the tests asserting the old behaviour would have called
+    /// that correct (gh#367).
     #[must_use]
     pub fn chat_allowed(&self, chat_id: i64) -> bool {
-        self.allowed_chat_ids.is_empty() || self.allowed_chat_ids.contains(&chat_id)
+        !self.allowed_chat_ids.is_empty() && self.allowed_chat_ids.contains(&chat_id)
     }
 }
 

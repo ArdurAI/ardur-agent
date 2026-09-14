@@ -102,14 +102,19 @@ mod tests {
         assert_eq!(config.application_id, 123_456_789_012_345_678);
         assert!(
             config.allowed_channel_ids.is_empty(),
-            "an unset allowlist means all channels"
+            "an unset allowlist is empty; the gate treats that as deny-all"
         );
         assert_eq!(
             config.intents, DEFAULT_INTENTS,
             "intents default to the guild+dm+content set"
         );
-        // The allowlist gate is open when empty.
-        assert!(config.channel_allowed(42));
+        // Deny-by-default (gh#367): an empty allowlist admits nothing, so an
+        // unconfigured bot reads no channels. This assertion used to claim the
+        // opposite, which is how a fail-open helper kept a green suite.
+        assert!(
+            !config.channel_allowed(42),
+            "an empty allowlist must admit nothing"
+        );
     }
 
     #[test]
