@@ -352,9 +352,14 @@ The Phase 5 audit slices are deliberately narrower than full audit closure:
 - **#367:** sub-agent release saturates rather than wrapping; reserve/rollback
   binds to the instance that reserved, not a reused ID. Redaction constants
   fail loudly on compilation errors, and Discord/Telegram config helpers now
-  agree with deny-by-default live ingress. Matrix/Discord/Telegram SDK queues
-  are still unbounded. Orphan automation/ACP/webhook modules and other
-  low-severity residuals remain on #367. Journal-export redaction does not
+  agree with deny-by-default live ingress. Matrix/Discord/Telegram inbound
+  SDK queues are now bounded at 1024 and shed-with-error-log on full
+  (backpressure by dropping newest, never stalling the SDK event loop);
+  fault-proven. The orphaned `automation/{engine,task}.rs`,
+  `acp/{server,protocol}.rs`, and `webhook/registry.rs` files — never declared
+  as modules, never compiled — are deleted. `LogStream::new(0)` had no
+  dependent (ardur-logs is unused); nothing to wire. Journal-export redaction
+  does not
   mean `FileSessionJournal::append` redacts persisted entries.
 - **#362/#363:** attenuation's nominal budget axis is not a spend cap;
   `CostEnvelope` is the actual ceiling. Cap-tokens remain bearer credentials:
