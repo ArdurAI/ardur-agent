@@ -96,6 +96,26 @@ impl std::fmt::Display for CdpError {
 
 impl std::error::Error for CdpError {}
 
+/// Build the Runtime.evaluate expression for a click on `selector`
+/// (gh#364 gap 3). The selector is JSON-encoded, which produces a valid
+/// JavaScript string literal — model-controlled quotes, backslashes, or
+/// newlines in the selector cannot escape it, unlike the previous
+/// single-quote interpolation.
+fn click_expression(selector: &str) -> String {
+    let encoded = serde_json::to_string(selector).unwrap_or_else(|_| "\"\"".to_string());
+    format!("document.querySelector({encoded}).click()")
+}
+
+/// Build the Runtime.evaluate expression for typing `text` into `selector`
+/// (gh#364 gap 3). Both arguments are JSON-encoded into JavaScript string
+/// literals; interpolation is the injection (see the pre-fix single-quote
+/// format! construction).
+fn type_text_expression(selector: &str, text: &str) -> String {
+    let encoded_selector = serde_json::to_string(selector).unwrap_or_else(|_| "\"\"".to_string());
+    let encoded_text = serde_json::to_string(text).unwrap_or_else(|_| "\"\"".to_string());
+    format!("document.querySelector({encoded_selector}).value = {encoded_text}")
+}
+
 /// Generate a mock CDP response for testing.
 fn mock_response(method: &str, _params: Value) -> Value {
     match method {
@@ -174,7 +194,7 @@ impl CdpBrowser {
             .send(
                 "Runtime.evaluate",
                 serde_json::json!({
-                    "expression": format!("document.querySelector('{selector}').click()")
+                    "expression": click_expression(selector)
                 }),
             )
             .await
@@ -186,9 +206,7 @@ impl CdpBrowser {
             .send(
                 "Runtime.evaluate",
                 serde_json::json!({
-                    "expression": format!(
-                        "document.querySelector('{selector}').value = '{text}'"
-                    )
+                    "expression": type_text_expression(selector, text)
                 }),
             )
             .await
@@ -296,5 +314,51 @@ mod tests {
         let browser = CdpBrowser::mock();
         let text = browser.extract_text().await.unwrap();
         assert_eq!(text, "mock evaluation result");
+    }
+
+    /// gh#364 gap 3: a selector containing a single quote must be JSON-encoded
+    /// into the evaluated expression, not interpolated raw — otherwise
+    /// `document.querySelector('{selector}')` lets the quote escape the string
+    /// literal and the rest executes as JavaScript.
+    #[test]
+    fn click_expression_json_encodes_selector() {
+        assert_eq!(
+            click_expression("#submit"),
+            r##"document.querySelector("#submit").click()"##
+        );
+        let hostile = "';alert(1);//";
+        let expr = click_expression(hostile);
+        assert_eq!(expr, r##"document.querySelector("';alert(1);//").click()"##);
+        // The hostile bytes stay inside the encoded literal; no bare quote
+        // terminates the querySelector argument.
+        assert!(!expr.contains("querySelector('"));
+    }
+
+    #[test]
+    fn type_text_expression_json_encodes_both_arguments() {
+        assert_eq!(
+            type_text_expression("#field", "hello"),
+            r##"document.querySelector("#field").value = "hello""##
+        );
+        let hostile = "\\';alert(1);//\n";
+        let expr = type_text_expression("#field", hostile);
+        // JSON escapes backslash and newline: the literal stays one token.
+        assert!(expr.contains(r#"\\';alert(1);//\n"#));
+        assert!(!expr.contains("querySelector('"));
+        assert!(!expr.contains("= '"));
+    }
+
+    /// Encoding is total: even a null byte and every ASCII control character
+    /// must not produce a parseable-but-escaped JavaScript break-out.
+    #[test]
+    fn expression_builders_never_emit_bare_single_quote_wrapping() {
+        for payload in ["'", "\"", "\\", "\u{0}", "\u{1f}", "\n\t\r"] {
+            let c = click_expression(payload);
+            let t = type_text_expression(payload, payload);
+            assert!(c.starts_with("document.querySelector(\""), "{c}");
+            assert!(t.starts_with("document.querySelector(\""), "{t}");
+            assert!(!c.contains("querySelector('"), "{c}");
+            assert!(!t.contains("querySelector('"), "{t}");
+        }
     }
 }

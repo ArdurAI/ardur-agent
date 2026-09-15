@@ -343,9 +343,12 @@ The Phase 5 audit slices are deliberately narrower than full audit closure:
   ignore case. `web.fetch` now shares `http.fetch`'s guarded transport
   (per-hop re-validation, resolved-IP vetting incl. link-local/metadata
   ranges, manual redirects, wall-clock timeout, capped read), fault-proven by
-  `crates/web/tests/web_fetch_ssrf.rs`. Browser DNS validation (#320) and
-  JSON-encoded CDP selector/text arguments remain open; dormant transport is
-  not evidence that those surfaces are safe to activate.
+  `crates/web/tests/web_fetch_ssrf.rs`. CDP `click`/`type_text` now
+  JSON-encode selector and text into the evaluated expression (the pre-fix
+  single-quote interpolation was a live injection; the injection policy
+  blocks prompt-injection phrases, not quotes). Browser DNS validation
+  (#320) remains open; dormant transport is not evidence that surface is
+  safe to activate.
 - **#367:** sub-agent release saturates rather than wrapping; reserve/rollback
   binds to the instance that reserved, not a reused ID. Redaction constants
   fail loudly on compilation errors, and Discord/Telegram config helpers now
