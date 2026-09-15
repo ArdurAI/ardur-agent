@@ -197,9 +197,14 @@ async fn dropping_sse_response_before_reading_mints_no_receipt() {
         rate_card: RateCard::anthropic_2026_q2_v1(),
     });
     let tools = Arc::new(example_registry("stub", "in-memory"));
-    let state = AppState::boot(&config, provider, tools)
-        .await
-        .expect("AppState boots");
+    let state = AppState::boot(
+        &config,
+        provider,
+        tools,
+        ardur_fused_runtime::SharedDenyList::new(),
+    )
+    .await
+    .expect("AppState boots");
     let router = build_router(state.clone());
 
     let request = Request::builder()
@@ -232,9 +237,14 @@ async fn streaming_error_event_is_valid_json() {
         rate_card: RateCard::anthropic_2026_q2_v1(),
     });
     let tools = Arc::new(example_registry("stub", "in-memory"));
-    let state = AppState::boot(&config, provider, tools)
-        .await
-        .expect("AppState boots");
+    let state = AppState::boot(
+        &config,
+        provider,
+        tools,
+        ardur_fused_runtime::SharedDenyList::new(),
+    )
+    .await
+    .expect("AppState boots");
     let router = build_router(state);
 
     let request = Request::builder()

@@ -35,16 +35,30 @@ async fn assemble(opts: BuiltinOpts) -> ToolRegistry {
     // A throwaway cap-root key: the delegate_task tool registers against it but
     // these tests never mint/verify tokens, so any valid Ed25519 public key works.
     let cap_root = KeyPair::new().public();
-    assemble_tool_registry("stub", "in-memory", &[] as &[PathBuf], &[], cap_root, opts).await
+    assemble_tool_registry(
+        "stub",
+        "in-memory",
+        &[] as &[PathBuf],
+        &[],
+        cap_root,
+        opts,
+        ardur_fused_runtime::SharedDenyList::new(),
+    )
+    .await
 }
 
 /// Boot an `AppState` over the stub provider with the already-assembled `tools`.
 async fn boot(config: &Config, tools: Arc<ToolRegistry>) -> Arc<AppState> {
     let provider: Arc<dyn Provider> =
         Arc::new(AnthropicProvider::stub(ModelId::new(&config.model)));
-    AppState::boot(config, provider, tools)
-        .await
-        .expect("AppState boots")
+    AppState::boot(
+        config,
+        provider,
+        tools,
+        ardur_fused_runtime::SharedDenyList::new(),
+    )
+    .await
+    .expect("AppState boots")
 }
 
 #[tokio::test]

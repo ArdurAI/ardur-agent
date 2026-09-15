@@ -53,7 +53,8 @@ use ardur_channel_matrix::MatrixChannel;
 use ardur_channel_telegram::TelegramChannel;
 use ardur_cost_gate::{CostEnvelope, CostTuple as GateCostTuple, HolderId as GateHolderId};
 use ardur_fused_runtime::{
-    FusedEvent, FusedRuntime, FusedRuntimeBuilder, TurnCommitHandshake, VerifiedReceiptCache,
+    FusedEvent, FusedRuntime, FusedRuntimeBuilder, SharedDenyList, TurnCommitHandshake,
+    VerifiedReceiptCache,
 };
 use ardur_memory::{InMemoryMemoryRuntime, MemoryRuntime};
 use ardur_memory_qdrant::{
@@ -425,7 +426,49 @@ pub struct McpSurface {
 }
 
 impl AppState {
+    /// Boot the configured server, opening durable revocation state before
+    /// assembling tools and sharing that state with the fused verifier.
+    ///
+    /// This is the production binary's assembly path. The provider is injected
+    /// so tests can exercise the same wiring without live provider credentials.
+    /// Run on the long-lived async runtime that drives remote MCP sessions.
+    ///
+    /// # Errors
+    /// Returns key/deny-list I/O errors before opening the worker, or any error
+    /// from [`boot`](Self::boot). No in-memory fallback is used on file errors.
+    pub async fn boot_configured(
+        config: &Config,
+        provider: Arc<dyn Provider>,
+    ) -> anyhow::Result<Arc<Self>> {
+        let cap_root = issuer_public_key(&config.data_dir)?;
+        let deny = SharedDenyList::open_file(config.data_dir.join("security").join("deny.list"))
+            .map_err(|e| anyhow::anyhow!("opening revocation deny list: {e}"))?;
+        let memory_label = match config.memory_backend {
+            MemoryBackend::InMemory => "in-memory",
+            MemoryBackend::Qdrant => "qdrant",
+            MemoryBackend::Hybrid => "hybrid",
+        };
+        let tools = Arc::new(
+            crate::assemble_tool_registry(
+                provider.id().0.clone(),
+                memory_label,
+                &config.skills_dirs,
+                &config.mcp_remote_servers,
+                cap_root,
+                config.builtin_tool_opts(),
+                deny.clone(),
+            )
+            .await,
+        );
+        Self::boot(config, provider, tools, deny).await
+    }
+
     /// Run the boot sequence and return the shared state.
+    ///
+    /// Embedders must pass the same deny-list handle used by their tool
+    /// registry. Prefer [`boot_configured`](Self::boot_configured) for the
+    /// production file-backed assembly. The explicit deny argument replaces
+    /// the former three-argument API; it is a required migration choice.
     ///
     /// `provider` is injected so the binary can pass the live
     /// [`AnthropicProvider`](ardur_provider_runtime::AnthropicProvider) while
@@ -439,6 +482,7 @@ impl AppState {
         config: &Config,
         provider: Arc<dyn Provider>,
         tools: Arc<ToolRegistry>,
+        deny: SharedDenyList,
     ) -> anyhow::Result<Arc<Self>> {
         // `tools` is the §6.0 registry the fused runtime invokes (local tools plus
         // any remote MCP toolsets the caller connected from
@@ -555,6 +599,10 @@ impl AppState {
         )
         .audience(AUDIENCE)
         .tool(TOOL)
+        // gh#361: the same durable deny list the delegate_task tool was
+        // registered with (opened in main before the registry) — revoking a
+        // caller's token here stops its live delegate_task children.
+        .deny_list(deny)
         .action(ActionRef("Action::Submit".to_string()))
         .principal_entity_type("User")
         .projected_envelope(envelope)
@@ -2054,6 +2102,9 @@ fn create_private(keys_dir: &Path, name: &str, contents: &str) -> std::io::Resul
     ardur_durability::create_new_atomic_no_follow(&keys_dir.join(name), contents.as_bytes())
         .map_err(durability_to_io)
 }
+
+#[cfg(test)]
+mod late_delegation_denial_tests;
 
 #[cfg(test)]
 mod tests {

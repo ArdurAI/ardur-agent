@@ -20,6 +20,10 @@ const EXPIRY_UNIX: u64 = 4_000_000_000; // ~2096, far past any test's runtime.
 /// Issue a parent cap-token granting `tools`, returning it (base64) alongside
 /// the issuer root the tool must be constructed with.
 fn parent_token(tools: &[&str], budget: u64) -> (String, PublicKey) {
+    parent_token_with_expiry(tools, budget, EXPIRY_UNIX)
+}
+
+fn parent_token_with_expiry(tools: &[&str], budget: u64, expires_unix: u64) -> (String, PublicKey) {
     let issuer = BiscuitCapTokenIssuer::new(KeyPair::new());
     let root = issuer.public_key();
     let token = issuer
@@ -27,7 +31,7 @@ fn parent_token(tools: &[&str], budget: u64) -> (String, PublicKey) {
             HolderId("spiffe://ardur/agent/parent-test".to_string()),
             CapScope {
                 audience: AUDIENCE.to_string(),
-                expires_unix: EXPIRY_UNIX,
+                expires_unix,
                 budget_remaining: budget,
                 tool_allowlist: tools.iter().map(|t| t.to_string()).collect(),
             },
@@ -45,6 +49,12 @@ fn ctx_with(cap_token: String, invocation_id: InvocationId) -> ToolContext {
         env: HashMap::new(),
         cost_budget_cents: 1_000,
     }
+}
+
+#[test]
+fn default_tool_id_remains_available_without_type_arguments() {
+    let id: &'static str = DelegateTaskTool::ID;
+    assert_eq!(id, "delegate_task");
 }
 
 #[tokio::test]
@@ -206,7 +216,27 @@ async fn delegate_task_rejects_undecodable_cap_token() {
         .await
         .expect_err("a malformed cap-token must be denied before spawn");
 
-    assert!(matches!(err, ToolError::Denied { .. }));
+    assert!(
+        matches!(err, ToolError::CapTokenDenied { .. }),
+        "malformed parent credential must be a typed token denial, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn expired_parent_is_a_token_denial_not_an_execution_failure() {
+    let (token, root) = parent_token_with_expiry(&["chat.submit"], 10_000, 1);
+    let tool = DelegateTaskTool::new(root, AUDIENCE);
+    let err = tool
+        .invoke(
+            &ctx_with(token, InvocationId::new()),
+            json!({"goal": "must not run"}),
+        )
+        .await
+        .expect_err("expired credential must not authorize a child");
+    assert!(
+        matches!(err, ToolError::CapTokenDenied { .. }),
+        "expired credential must stay a typed token denial, got {err:?}"
+    );
 }
 
 #[test]
@@ -221,4 +251,44 @@ fn schema_requires_goal_and_advertises_the_delegate_capability() {
     assert!(required.iter().any(|v| v == "goal"));
 
     assert_eq!(tool.required_capabilities().len(), 1);
+}
+
+/// gh#361 half two: a parent token revoked through the shared deny list must
+/// make `delegate_task` fail — the child's runtime consults the same list the
+/// revoker writes to. Before this wiring, each delegation got a private empty
+/// deny list, so a revocation was invisible to it.
+#[tokio::test]
+async fn revoked_parent_token_cannot_delegate() {
+    let (token, root) = parent_token(&["chat.submit"], 10_000);
+    let deny = ardur_fused_runtime::SharedDenyList::new();
+    let tool = DelegateTaskTool::with_deny_list(root, AUDIENCE, deny.clone());
+
+    // Revoke the caller's token through the shared handle (the runtime's
+    // revoke_cap_token path in production).
+    let parsed = ardur_cap_token::CapToken::from_base64(&token, &root).expect("parse");
+    deny.revoke_token(&parsed).expect("revocation persists");
+
+    let ctx = ctx_with(token, InvocationId::new());
+    let err = tool
+        .invoke(&ctx, json!({ "goal": "should be denied" }))
+        .await
+        .expect_err("a revoked caller's delegation must be denied");
+    assert!(
+        matches!(err, ToolError::CapTokenDenied { .. }),
+        "revoked parent must remain a typed token denial, got {err:?}"
+    );
+}
+
+/// The shared list must not deny unrevoked tokens (no fail-closed overreach).
+#[tokio::test]
+async fn unrevoked_parent_token_delegates_with_shared_deny_list() {
+    let (token, root) = parent_token(&["chat.submit"], 10_000);
+    let deny = ardur_fused_runtime::SharedDenyList::new();
+    let tool = DelegateTaskTool::with_deny_list(root, AUDIENCE, deny);
+    let ctx = ctx_with(token, InvocationId::new());
+    let output = tool
+        .invoke(&ctx, json!({ "goal": "still works" }))
+        .await
+        .expect("an unrevoked token must still delegate");
+    assert_eq!(output.content["outcome"], "completed");
 }

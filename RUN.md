@@ -1258,6 +1258,75 @@ process.
   now exposes (see [HTTP endpoints](#http-endpoints)). The path is overridable
   with `--chat-path` if you front the server with a different route.
 
+## Delegated revocation state and API migration
+
+The server binary uses `AppState::boot_configured(config, provider)`. It opens
+`<data_dir>/security/deny.list` before assembling tools, then shares that
+file-backed state with the fused verifier and `delegate_task`. Persisted
+revocation is consulted on later verification, including after process restart.
+The file contains revocation identifiers, not serialized bearer tokens.
+
+Revocation writers are currently library/embedding APIs:
+`SharedDenyList::open_file(path)?.revoke_token(&token)?` and
+`FusedRuntime::revoke_cap_token`. Use the exact server path and handle every I/O
+error; append/sync failure means persistence is unconfirmed, possibly partial.
+Do not acknowledge success, log a token, clear the file, or substitute an empty
+list on error. Protect the directory against modification by untrusted users.
+Writers hold an exclusive file lock through append and sync; reads take a
+shared lock. All processes must follow this protocol on a filesystem that
+supports it. Lock waits are blocking; do not truncate, replace, or unlink the
+live path. This is not replication between independent data directories or a
+promise of network-filesystem semantics. An explicit open of an absent path
+initializes an empty list, so loss of the entire file requires operator recovery;
+do not restart into newly empty security state as recovery.
+
+Complete existing Ed25519 and P-256 hex-line records remain readable, including
+uppercase hex and CRLF. Blank records, malformed signature framing, and
+unterminated tails are now rejected; repair must preserve known revocations. The cap-token
+crate declares Rust 1.89 as its minimum for standard file locks; the build/test
+toolchain remains pinned to 1.98.1. No physical power-cut guarantee is claimed,
+and parent-directory creation is not fsynced.
+
+There is no new server HTTP or CLI revoke command in this slice. The existing
+`delegate_task` performs one echo-child ask and termination, not a persistent
+multi-turn provider worker. Acknowledged revocation blocks subsequent verifier
+checks; it does not cancel work whose check already passed. The admin approval
+cap-token gate retains its separately documented revocation limitation.
+
+Embedding migration (intentional integration-branch API change):
+
+- `AppState::boot` now requires the shared deny handle as its fourth argument.
+- `assemble_tool_registry` now requires that same handle as its seventh argument.
+- Pass clones of one live handle to both, not independently created in-memory
+  lists. Prefer `boot_configured` when using the standard production registry.
+- `DelegateTaskTool::new`, `with_max_concurrency`, and the unqualified
+  `DelegateTaskTool::ID` remain available. These legacy constructors retain a
+  private in-memory list; use `with_deny_list` for externally supplied revocation.
+  A custom deny type's clones must observe the same live backend, not snapshots.
+- `ToolError` adds `CapTokenDenied { reason }` for a rejected credential;
+  downstream exhaustive matches must handle it. It is distinct from a specific
+  missing grant (`CapabilityDenied`) and tool-local policy (`Denied`). Typed
+  token/grant denials remain `RuntimeError::CapDenied` through submit and stream
+  and reach the existing denial metrics/audit consumers. Classification never
+  parses the reason text. Upstream failures already flattened to `Internal` are
+  not reinterpreted or reclassified by this adapter.
+
+Tests: `delegated_revocation_survives_server_process_restart` boots the actual
+configured assembly in three separate processes; it proves success before
+revocation, parent-to-descendant denial after revocation/restart, and success
+for unrelated authority. `running_server_and_delegate_fail_closed_when_deny_file_disappears`
+checks the assembled delegate and fused runtime separately. The binary startup
+guard refuses malformed revocation state before listening.
+
+Replay decision (#363): use the same protected data-directory trust boundary,
+but do **not** reuse an append-only lookup as a replay cache. Replay protection
+needs an atomic cross-process check-and-insert before dispatch, bounded expiry,
+and a defined retry/idempotency contract in the request envelope. Those semantics
+are not provided by `DenyList`, so nonce-cache implementation is explicitly
+deferred rather than claiming the storage wrapper prevents replay. No general
+nonce cache or proof-of-possession is delivered here; proof-of-possession needs
+a separate token/envelope and migration design.
+
 ## Closed learning loop
 
 `ardur-automation::learning` implements the closed self-improvement loop. A

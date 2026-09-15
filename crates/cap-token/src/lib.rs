@@ -23,9 +23,9 @@
 //! - [`DenyList`] / [`HashSetDenyList`] / [`FileDenyList`] — revocation by
 //!   Biscuit revocation id, either in-memory or persisted to a shared file.
 //!
-//! Biscuit's `KeyPair`/`PublicKey` are Ed25519; they are re-exported below so
-//! callers issue and verify against the same key types the token is signed
-//! with.
+//! Biscuit's `KeyPair`/`PublicKey` support Ed25519 and P-256; they are
+//! re-exported below so callers issue and verify against the same key types
+//! and signature algorithm used by the token.
 //!
 //! # Security model (gh#363)
 //!
@@ -39,12 +39,14 @@
 //!   lifetime (`CAP_TTL_SECS = 5 * 60`, crates/server/src/state.rs), so a
 //!   leaked token's replay window is bounded by that expiry plus the
 //!   revocation check. Do not lengthen the TTL without a design note.
-//! - **Revocation is in-memory unless wired otherwise.** [`DenyList`] is
-//!   consulted at verification time, but the shipped wiring is
-//!   [`HashSetDenyList`]: revocation survives only for the life of the
-//!   process. [`FileDenyList`] exists for durable, cross-process revocation
-//!   but has no production wiring yet — do not assume a revoked delegated
-//!   token stays revoked across a restart.
+//! - **Revocation depends on the verifier's configured backend.** The server
+//!   shares a [`FileDenyList`]-backed handle between its fused runtime and
+//!   `delegate_task` at `<data_dir>/security/deny.list`. Acknowledged writes
+//!   survive process restart and are consulted on later verification.
+//!   [`HashSetDenyList`] and default library constructors remain process-local;
+//!   this does not add a server HTTP revoke endpoint or immediate cancellation.
+//!   Embedders must use the revocation writer API and propagate its I/O errors.
+//!   A token or request is not single-use: no general nonce/replay cache ships.
 //! - **Never log tokens.** This crate performs no logging; the base64 wire
 //!   form must not be passed to a logger, a journal, or an error message
 //!   that surfaces to a caller. A logged token is a leaked token.
@@ -63,7 +65,7 @@ mod verify;
 
 /// Re-exported Biscuit primitives. Cap-tokens are Biscuits under the hood;
 /// callers that need to verify or inspect raw key material use these directly.
-/// `KeyPair` and `PublicKey` are Ed25519.
+/// `KeyPair` and `PublicKey` support Ed25519 and P-256.
 pub use biscuit_auth::{Biscuit, KeyPair, PublicKey};
 
 pub use attenuate::{BiscuitCapTokenAttenuator, CapTokenAttenuator};

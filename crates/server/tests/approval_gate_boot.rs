@@ -42,15 +42,29 @@ async fn assemble_with_shell() -> ToolRegistry {
         shell_allowlist: Some(vec!["echo".to_string()]),
         ..BuiltinOpts::default()
     };
-    assemble_tool_registry("stub", "in-memory", &[] as &[PathBuf], &[], cap_root, opts).await
+    assemble_tool_registry(
+        "stub",
+        "in-memory",
+        &[] as &[PathBuf],
+        &[],
+        cap_root,
+        opts,
+        ardur_fused_runtime::SharedDenyList::new(),
+    )
+    .await
 }
 
 async fn boot(config: &Config, tools: Arc<ToolRegistry>) -> Arc<AppState> {
     let provider: Arc<dyn Provider> =
         Arc::new(AnthropicProvider::stub(ModelId::new(&config.model)));
-    AppState::boot(config, provider, tools)
-        .await
-        .expect("AppState boots")
+    AppState::boot(
+        config,
+        provider,
+        tools,
+        ardur_fused_runtime::SharedDenyList::new(),
+    )
+    .await
+    .expect("AppState boots")
 }
 
 #[tokio::test]

@@ -6,12 +6,10 @@
 //! drains it.
 #![forbid(unsafe_code)]
 
-use std::sync::Arc;
-
 use ardur_provider_runtime::{InstrumentedProvider, ModelId, TelemetryConfig};
 use ardur_provider_runtime::{init_genai_tracing, shutdown_genai_tracing};
 use ardur_provider_selector as provider_selector;
-use ardur_server::{AppState, Config, MemoryBackend, assemble_tool_registry, build_router};
+use ardur_server::{AppState, Config, build_router};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -50,40 +48,9 @@ async fn main() -> anyhow::Result<()> {
     let provider = InstrumentedProvider::wrap(provider);
     let provider_id = provider.id().0.clone();
 
-    // §6.0: assemble the tool registry the runtime invokes — the local tools plus
-    // any remote MCP toolsets from `ARDUR_MCP_REMOTE_SERVERS`. Connecting happens
-    // here on the long-lived `#[tokio::main]` runtime so the remote MCP client
-    // sessions stay driven for the life of the process.
-    let memory_label = match config.memory_backend {
-        MemoryBackend::InMemory => "in-memory",
-        MemoryBackend::Qdrant => "qdrant",
-        MemoryBackend::Hybrid => "hybrid",
-    };
-    // Loaded here (rather than only inside `AppState::boot`) so the
-    // `delegate_task` tool — which must parse and attenuate a caller's
-    // cap-token — can be constructed against the real issuer root before the
-    // registry is sealed into `Arc` and handed to `boot`. `AppState::boot`
-    // reads the same persisted `keys/issuer.key` a second time; the file is
-    // minted on the first-ever read of an absent key, so the two reads agree.
-    let cap_root = ardur_server::issuer_public_key(&config.data_dir)
-        .map_err(|e| anyhow::anyhow!("loading cap-token issuer key: {e}"))?;
-    // ARD-457: `builtin_tool_opts()` maps the operator's fail-closed opt-ins
-    // (`ARDUR_ENABLE_SHELL_TOOL` + allowlist, `ARDUR_ENABLE_HTTP_TOOL`,
-    // `ARDUR_FILE_TOOL_ROOT`) to the hardened built-ins registered below. With no
-    // opt-ins set it grants nothing, so the default boot is unchanged.
-    let tools = Arc::new(
-        assemble_tool_registry(
-            provider_id.clone(),
-            memory_label,
-            &config.skills_dirs,
-            &config.mcp_remote_servers,
-            cap_root,
-            config.builtin_tool_opts(),
-        )
-        .await,
-    );
-
-    let state = AppState::boot(&config, provider, tools).await?;
+    // Use the shared production assembly path: durable deny state is opened
+    // before registry construction and passed to the runtime and delegate tool.
+    let state = AppState::boot_configured(&config, provider).await?;
     tracing::info!(
         data_dir = %state.data_dir().display(),
         bind = %config.bind_addr,

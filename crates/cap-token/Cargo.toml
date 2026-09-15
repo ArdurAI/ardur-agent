@@ -2,7 +2,8 @@
 name = "ardur-cap-token"
 version = "0.0.1"
 edition.workspace = true
-rust-version.workspace = true
+# Standard-library advisory file locks stabilized in Rust 1.89.
+rust-version = "1.89"
 license.workspace = true
 repository.workspace = true
 

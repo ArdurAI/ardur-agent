@@ -15,14 +15,26 @@ pub enum ToolError {
     #[error("capability denied: {0:?}")]
     CapabilityDenied(Capability),
 
+    /// A capability token was rejected during tool execution (for example by
+    /// a delegated child's verifier after the outer runtime admitted the tool).
+    /// Unlike [`ToolError::CapabilityDenied`], this does not identify a missing
+    /// grant: the credential itself was rejected. Unlike [`ToolError::Denied`],
+    /// this is an authorization denial, not a tool-local policy refusal.
+    #[error("capability token denied: {reason}")]
+    CapTokenDenied {
+        /// The verifier's diagnostic context; classification uses the variant,
+        /// never the wording of this reason.
+        reason: String,
+    },
+
     /// The supplied arguments did not match the tool's input schema.
     #[error("invalid arguments: {0}")]
     InvalidArgs(String),
 
     /// The tool refused the request under its own configured policy — distinct
-    /// from [`ToolError::CapabilityDenied`], which is the *authorization* layer
-    /// withholding a capability. `Denied` is the tool itself declining: a shell
-    /// command outside its allowlist, or a file path that escapes its root.
+    /// from [`ToolError::CapabilityDenied`] and [`ToolError::CapTokenDenied`],
+    /// which are *authorization* refusals. `Denied` is the tool itself declining:
+    /// a shell command outside its allowlist, or a file path that escapes its root.
     #[error("denied: {reason}")]
     Denied {
         /// Why the tool refused to run the request.

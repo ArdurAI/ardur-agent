@@ -60,9 +60,14 @@ async fn scripted_router(provider: Arc<dyn Provider>) -> Router {
     let dir = Box::leak(Box::new(tempfile::tempdir().expect("tempdir")));
     let config: Config = support::test_config(dir, None);
     let tools = Arc::new(example_registry("scripted", "in-memory"));
-    let state = AppState::boot(&config, provider, tools)
-        .await
-        .expect("AppState boots");
+    let state = AppState::boot(
+        &config,
+        provider,
+        tools,
+        ardur_fused_runtime::SharedDenyList::new(),
+    )
+    .await
+    .expect("AppState boots");
     build_router(state)
 }
 
@@ -75,9 +80,14 @@ async fn production_deny_all_router(provider: Arc<dyn Provider>) -> Router {
     config.dev_permissive_policy = false;
     config.cedar_policy_path = None;
     let tools = Arc::new(example_registry("scripted", "in-memory"));
-    let state = AppState::boot(&config, provider, tools)
-        .await
-        .expect("AppState boots");
+    let state = AppState::boot(
+        &config,
+        provider,
+        tools,
+        ardur_fused_runtime::SharedDenyList::new(),
+    )
+    .await
+    .expect("AppState boots");
     build_router(state)
 }
 

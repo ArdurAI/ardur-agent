@@ -879,9 +879,8 @@ impl FusedRuntime {
             }
         })?;
         self.deny.revoke_token(&token).map_err(|e| {
-            // Fail-closed (gh#361): with a durable backend an I/O failure means
-            // the revocation did NOT land on disk — the caller must not be told
-            // it succeeded.
+            // Do not acknowledge unconfirmed persistence (gh#361): append or
+            // sync errors may follow a partial write, so durability is unknown.
             RuntimeError::Internal(anyhow::anyhow!("persisting revocation failed: {e}"))
         })?;
         let ctx = RevokeCtx {
@@ -3541,11 +3540,18 @@ fn map_provider_error(err: &ProviderError) -> RuntimeError {
     }
 }
 
-/// Map a tool-registry failure onto the runtime's error surface. A tool that
-/// reported its own timeout maps to [`RuntimeError::ToolTimeout`]; everything
-/// else degrades to [`RuntimeError::Internal`] carrying the tool name.
+/// Preserve typed authorization denials and timeouts across the tool boundary.
+/// Tool-local policy refusals are not cap-token denials; they and execution
+/// faults retain the existing [`RuntimeError::Internal`] mapping.
 fn map_tool_error(err: ToolError, tool: &str) -> RuntimeError {
     match err {
+        ToolError::CapTokenDenied { reason } => RuntimeError::CapDenied { reason },
+        ToolError::CapabilityDenied(capability) => RuntimeError::CapDenied {
+            reason: format!(
+                "tool `{tool}` requires capability `{}`",
+                capability.as_str()
+            ),
+        },
         ToolError::Timeout => RuntimeError::ToolTimeout {
             tool: tool.to_string(),
         },
@@ -3673,4 +3679,60 @@ fn last_user_message(messages: &[ChatMessage]) -> Option<&str> {
         .rev()
         .find(|m| matches!(m.role, Role::User))
         .map(|m| m.content.as_str())
+}
+
+#[cfg(test)]
+mod tool_error_tests {
+    use super::*;
+    use ardur_tool_registry::Capability;
+
+    #[test]
+    fn tool_token_denial_stays_an_authorization_denial_without_reason_matching() {
+        let err = map_tool_error(
+            ToolError::CapTokenDenied {
+                reason: "opaque verifier diagnostic".to_string(),
+            },
+            "probe",
+        );
+        assert!(
+            matches!(err, RuntimeError::CapDenied { .. }),
+            "typed token denial must preserve authorization-denial classification, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn missing_tool_grant_stays_an_authorization_denial() {
+        let err = map_tool_error(ToolError::CapabilityDenied(Capability::FsRead), "probe");
+        assert!(
+            matches!(err, RuntimeError::CapDenied { .. }),
+            "missing tool grant must preserve authorization-denial classification, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn tool_local_policy_denial_is_not_a_cap_token_denial() {
+        // Authorization words in a tool-local reason must not change its type.
+        let err = map_tool_error(
+            ToolError::Denied {
+                reason: "capability token denied: revoked".to_string(),
+            },
+            "probe",
+        );
+        assert!(
+            matches!(err, RuntimeError::Internal(_)),
+            "tool-local policy must not be relabeled as token authorization, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn tool_timeout_and_execution_failure_keep_their_classes() {
+        assert!(matches!(
+            map_tool_error(ToolError::Timeout, "probe"),
+            RuntimeError::ToolTimeout { tool } if tool == "probe"
+        ));
+        assert!(matches!(
+            map_tool_error(ToolError::ExecutionFailed("revoked".to_string()), "probe"),
+            RuntimeError::Internal(_)
+        ));
+    }
 }

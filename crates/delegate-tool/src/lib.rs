@@ -65,7 +65,9 @@ use serde_json::json;
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 
-use ardur_cap_token::{AttenuationRule, CapToken, CapTokenError, PublicKey};
+use ardur_cap_token::{
+    AttenuationRule, CapToken, CapTokenError, DenyList, HashSetDenyList, PublicKey,
+};
 use ardur_cost_gate::CostEnvelope;
 use ardur_multi_agent::{
     AgentId, CHAT_SUBMIT_TOOL, InMemoryMultiAgentRuntime, MultiAgentError, MultiAgentRuntime,
@@ -98,6 +100,7 @@ pub const DEFAULT_MAX_CONCURRENCY: usize = 3;
 /// session token — see `ardur-server`'s `tool_allowlist_for_runtime`), so no
 /// separate grant step is needed to make delegation reachable.
 const DELEGATE_CAPABILITY: &str = "multi_agent_delegate";
+const DELEGATE_TOOL_ID: &str = "delegate_task";
 
 /// The model-facing arguments a `delegate_task` call decodes into.
 ///
@@ -122,7 +125,7 @@ struct DelegateTaskArgs {
 ///
 /// See the crate-level docs for the attenuation and receipt-chaining
 /// contract.
-pub struct DelegateTaskTool {
+pub struct DelegateTaskTool<D: DenyList + Clone + Send + Sync + 'static = HashSetDenyList> {
     schema: ToolSchema,
     capabilities: Vec<Capability>,
     /// The issuer root every session cap-token (and so every `delegate_task`
@@ -141,11 +144,18 @@ pub struct DelegateTaskTool {
     /// `ConcurrencyOverflowPosture`.
     concurrency: Arc<Semaphore>,
     max_concurrency: usize,
+    /// The shared revocation deny-list every spawned child's verifier
+    /// consults (gh#361). Cloning shares the underlying set, so a caller's
+    /// token revoked through the server's runtime handle stops that caller's
+    /// live delegations at their next turn. The plain constructors use a
+    /// private in-memory list and do NOT see server-side revocations; only
+    /// [`with_deny_list`](Self::with_deny_list) wires a shared one.
+    deny: D,
 }
 
-impl DelegateTaskTool {
-    /// The id this tool registers under.
-    pub const ID: &'static str = "delegate_task";
+impl DelegateTaskTool<HashSetDenyList> {
+    /// The id this tool registers under, available without type arguments.
+    pub const ID: &'static str = DELEGATE_TOOL_ID;
 
     /// Build a `delegate_task` tool that attenuates and verifies against
     /// `root`, checking spawned children's turns against `audience`, with the
@@ -156,7 +166,9 @@ impl DelegateTaskTool {
     }
 
     /// Build a `delegate_task` tool with an explicit concurrency ceiling in
-    /// place of [`DEFAULT_MAX_CONCURRENCY`].
+    /// place of [`DEFAULT_MAX_CONCURRENCY`]. The deny list is private and
+    /// in-memory; see [`with_deny_list`](Self::with_deny_list) for the shared
+    /// variant.
     #[must_use]
     pub fn with_max_concurrency(
         root: PublicKey,
@@ -210,14 +222,35 @@ impl DelegateTaskTool {
             audience: audience.into(),
             concurrency: Arc::new(Semaphore::new(max_concurrency)),
             max_concurrency,
+            deny: HashSetDenyList::new(),
+        }
+    }
+}
+
+impl<D: DenyList + Clone + Send + Sync + 'static> DelegateTaskTool<D> {
+    /// Build a `delegate_task` tool whose spawned children consult the shared
+    /// deny-list `deny` on every turn (gh#361): revoking a caller's token
+    /// through the handle the server handed the fused runtime stops that
+    /// caller's live delegations at their next turn.
+    #[must_use]
+    pub fn with_deny_list(root: PublicKey, audience: impl Into<String>, deny: D) -> Self {
+        let base = DelegateTaskTool::new(root, audience);
+        Self {
+            schema: base.schema,
+            capabilities: base.capabilities,
+            root: base.root,
+            audience: base.audience,
+            concurrency: base.concurrency,
+            max_concurrency: base.max_concurrency,
+            deny,
         }
     }
 }
 
 #[async_trait]
-impl Tool for DelegateTaskTool {
+impl<D: DenyList + Clone + Send + Sync + 'static> Tool for DelegateTaskTool<D> {
     fn id(&self) -> ToolId {
-        ToolId::new(Self::ID)
+        ToolId::new(DELEGATE_TOOL_ID)
     }
 
     fn schema(&self) -> &ToolSchema {
@@ -262,6 +295,7 @@ impl Tool for DelegateTaskTool {
             goal: args.goal,
             task_name: args.task_name,
             max_cost_cents: args.max_cost_cents.unwrap_or(DEFAULT_MAX_COST_CENTS),
+            deny: self.deny.clone(),
         };
 
         // `MultiAgentRuntime` is `#[async_trait(?Send)]` (its child `ChatRuntime`
@@ -286,7 +320,7 @@ impl Tool for DelegateTaskTool {
 
 /// The plain-data request handed to the blocking worker — every field is
 /// `Send + 'static` so it can cross into `spawn_blocking`.
-struct DelegationWorkerRequest {
+struct DelegationWorkerRequest<D: DenyList + Clone + Send + Sync + 'static> {
     root: PublicKey,
     audience: String,
     parent_cap_token: String,
@@ -295,6 +329,7 @@ struct DelegationWorkerRequest {
     goal: String,
     task_name: Option<String>,
     max_cost_cents: u32,
+    deny: D,
 }
 
 /// The plain-data result of a completed delegation, folded into a
@@ -362,7 +397,9 @@ fn termination_reason_label(reason: &TerminationReason) -> &'static str {
 
 /// Run one full spawn -> ask -> terminate sequence to completion on the
 /// current (blocking-pool) thread, inside a dedicated single-threaded runtime.
-fn run_delegation(req: DelegationWorkerRequest) -> Result<DelegationOutcome, ToolError> {
+fn run_delegation<D: DenyList + Clone + Send + Sync + 'static>(
+    req: DelegationWorkerRequest<D>,
+) -> Result<DelegationOutcome, ToolError> {
     let parent_token =
         CapToken::from_base64(&req.parent_cap_token, &req.root).map_err(cap_token_denied)?;
 
@@ -379,15 +416,16 @@ fn run_delegation(req: DelegationWorkerRequest) -> Result<DelegationOutcome, Too
     local.block_on(&rt, drive_delegation(req, parent_token))
 }
 
-async fn drive_delegation(
-    req: DelegationWorkerRequest,
+async fn drive_delegation<D: DenyList + Clone + Send + Sync + 'static>(
+    req: DelegationWorkerRequest<D>,
     parent_token: CapToken,
 ) -> Result<DelegationOutcome, ToolError> {
-    let runtime = InMemoryMultiAgentRuntime::verifying(
+    let runtime = InMemoryMultiAgentRuntime::verifying_with_deny(
         req.audience,
         parent_token,
         req.root,
         ReceiptId(req.parent_receipt_id),
+        req.deny,
     );
 
     let label = req.task_name.unwrap_or_else(|| "delegate".to_string());
@@ -442,10 +480,20 @@ async fn drive_delegation(
         .map_err(multi_agent_denied)?;
 
     if let Err(e) = ask_result {
-        return Err(ToolError::ExecutionFailed(format!(
+        let reason = format!(
             "sub-agent {agent_id} turn failed: {e} (termination receipt {} recorded)",
             receipt.receipt_id.0
-        )));
+        );
+        // Preserve the capability denial after recording termination. A revoked
+        // credential is an authorization refusal, not an execution fault.
+        return Err(match e {
+            MultiAgentError::Runtime(
+                ardur_runtime::RuntimeError::CapDenied { .. }
+                | ardur_runtime::RuntimeError::CapTokenMissing
+                | ardur_runtime::RuntimeError::CapTokenExpired,
+            ) => ToolError::CapTokenDenied { reason },
+            _ => ToolError::ExecutionFailed(reason),
+        });
     }
 
     Ok(DelegationOutcome {
@@ -458,7 +506,7 @@ async fn drive_delegation(
 }
 
 fn cap_token_denied(err: CapTokenError) -> ToolError {
-    ToolError::Denied {
+    ToolError::CapTokenDenied {
         reason: format!("parent cap-token invalid or expired: {err}"),
     }
 }
@@ -474,7 +522,7 @@ fn multi_agent_denied(err: MultiAgentError) -> ToolError {
                 "sub-agent {agent} budget exhausted: used {used}c of {envelope}c envelope"
             ),
         },
-        MultiAgentError::CapTokenError(e) => ToolError::Denied {
+        MultiAgentError::CapTokenError(e) => ToolError::CapTokenDenied {
             reason: format!("sub-agent cap-token attenuation/authorization failed: {e}"),
         },
         MultiAgentError::AgentNotFound(id) => {
@@ -487,5 +535,32 @@ fn multi_agent_denied(err: MultiAgentError) -> ToolError {
             ToolError::ExecutionFailed(format!("child runtime rejected the turn: {e}"))
         }
         MultiAgentError::Internal(e) => ToolError::Internal(e),
+    }
+}
+
+#[cfg(test)]
+mod denial_tests {
+    use super::*;
+
+    #[test]
+    fn multi_agent_token_error_is_an_authorization_denial() {
+        let err = multi_agent_denied(MultiAgentError::CapTokenError(CapTokenError::Expired));
+        assert!(
+            matches!(err, ToolError::CapTokenDenied { .. }),
+            "multi-agent credential failure must remain typed, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn child_budget_exhaustion_remains_tool_local() {
+        let err = multi_agent_denied(MultiAgentError::BudgetExhausted {
+            agent: AgentId::new("budget-probe"),
+            used: 1,
+            envelope: 0,
+        });
+        assert!(
+            matches!(err, ToolError::Denied { .. }),
+            "child envelope refusal is tool-local, not a token denial, got {err:?}"
+        );
     }
 }

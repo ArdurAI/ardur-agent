@@ -152,9 +152,14 @@ pub async fn boot_stub(config: &Config) -> Arc<AppState> {
     let provider: Arc<dyn Provider> =
         Arc::new(AnthropicProvider::stub(ModelId::new(&config.model)));
     let tools = Arc::new(example_registry("stub", "in-memory"));
-    AppState::boot(config, provider, tools)
-        .await
-        .expect("AppState boots")
+    AppState::boot(
+        config,
+        provider,
+        tools,
+        ardur_fused_runtime::SharedDenyList::new(),
+    )
+    .await
+    .expect("AppState boots")
 }
 
 /// Boot the stub-backed router for `config`.
