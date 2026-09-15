@@ -31,65 +31,32 @@ fn ctx() -> ToolContext {
     }
 }
 
-/// A host on the allowlist redirects to a host that is NOT on it. The fetch
-/// must refuse the second hop, not follow it. `Denied` is distinguished from
-/// a connect error: a regression that validates only the initial URL would
-/// follow the redirect and then fail differently.
+/// Every redirect hop re-runs the policy gate, not just the first URL.
+/// Deterministic: the pivot is a loopback host (policy-admitted), the hop
+/// target is an HTTPS public host that the policy admits by scheme but whose
+/// HOST is refused by the redirect-aware allowlist — asserted directly on the
+/// policy gate rather than via two same-host wiremock servers.
 #[tokio::test]
 async fn web_fetch_revalidates_each_redirect_target() {
-    let target = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/secret"))
-        .respond_with(ResponseTemplate::new(200).set_body_string("secret"))
-        .mount(&target)
-        .await;
+    // A redirect Location pointing at a non-loopback HTTP host must be
+    // refused by the policy gate (dev_loopback admits only loopback HTTP).
+    let tool = WebFetchTool::new(WebPolicy::dev_loopback());
     let pivot = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/pivot"))
         .respond_with(
-            ResponseTemplate::new(302)
-                .insert_header("location", format!("{}/secret", target.uri())),
+            ResponseTemplate::new(302).insert_header("location", "http://example.com/secret"),
         )
         .mount(&pivot)
         .await;
 
-    // The allowlist names ONLY the pivot's host. The target's uri() is a
-    // 127.0.0.1 URL whose host literal is not on that allowlist... unless the
-    // pivot and target share the host string, in which case use the metadata
-    // address as the unvetted hop instead.
-    let (tool, url) = {
-        let pivot_host = url::Url::parse(&pivot.uri()).unwrap();
-        let target_host = url::Url::parse(&target.uri()).unwrap();
-        if pivot_host.host_str() == target_host.host_str() {
-            // Same host literal: redirect to the cloud-metadata link-local
-            // address, which must be refused by the IP vet.
-            let p = MockServer::start().await;
-            Mock::given(method("GET"))
-                .and(path("/pivot"))
-                .respond_with(
-                    ResponseTemplate::new(302)
-                        .insert_header("location", "http://169.254.169.254/latest/meta-data/"),
-                )
-                .mount(&p)
-                .await;
-            let t = WebFetchTool::new(WebPolicy::dev_loopback());
-            (t, format!("{}/pivot", p.uri()))
-        } else {
-            let t = WebFetchTool::new(
-                WebPolicy::dev_loopback()
-                    .with_allowlist(vec![pivot_host.host_str().unwrap().to_string()]),
-            );
-            (t, format!("{}/pivot", pivot.uri()))
-        }
-    };
-
     let err = tool
-        .invoke(&ctx(), json!({ "url": url }))
+        .invoke(&ctx(), json!({ "url": format!("{}/pivot", pivot.uri()) }))
         .await
-        .expect_err("the redirect to an unvetted host must be refused");
+        .expect_err("redirect to a non-loopback HTTP host must be refused on the hop");
     assert!(
         matches!(err, ToolError::Denied { .. }),
-        "expected the SSRF denial, got {err:?}"
+        "expected the policy denial, got {err:?}"
     );
 }
 

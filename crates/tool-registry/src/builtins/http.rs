@@ -518,14 +518,24 @@ pub async fn fetch_guarded(params: GuardedFetchParams<'_>) -> Result<GuardedFetc
             })?;
 
         let is_localhost = host_is_localhost(&host);
-        let addrs =
-            resolve_and_vet_host(&host, &host_str, port, is_localhost, allow_private_ips).await?;
+        // DNS sits inside the hop's wall-clock ceiling: a slow resolver must
+        // not outlive the configured timeout.
+        let addrs = tokio::time::timeout(
+            timeout,
+            resolve_and_vet_host(&host, &host_str, port, is_localhost, allow_private_ips),
+        )
+        .await
+        .map_err(|_| ToolError::Timeout)??;
 
         // Pin the connection to the exact addresses we vetted, and follow
         // redirects ourselves so each hop is re-checked above.
         let client = reqwest::Client::builder()
             .redirect(Policy::none())
             .timeout(timeout)
+            // A configured system proxy would route the connection through
+            // itself and re-resolve the hostname proxy-side, bypassing the
+            // pinned vetted addresses. Guarded fetches never use a proxy.
+            .no_proxy()
             .resolve_to_addrs(&host_str, &addrs)
             .build()
             .map_err(|e| {
@@ -572,7 +582,8 @@ pub async fn fetch_guarded(params: GuardedFetchParams<'_>) -> Result<GuardedFetc
         })?;
 
         let status = resp.status();
-        if status.is_redirection() {
+        let followed_redirect_status = matches!(status.as_u16(), 301 | 302 | 303 | 307 | 308);
+        if followed_redirect_status {
             if let Some(location) = resp
                 .headers()
                 .get(reqwest::header::LOCATION)
@@ -609,7 +620,11 @@ pub async fn fetch_guarded(params: GuardedFetchParams<'_>) -> Result<GuardedFetc
         let mut truncated = false;
         loop {
             let chunk = resp.chunk().await.map_err(|e| {
-                ToolError::Internal(anyhow::anyhow!("reading body of `{current}` failed: {e}"))
+                if e.is_timeout() {
+                    ToolError::Timeout
+                } else {
+                    ToolError::Internal(anyhow::anyhow!("reading body of `{current}` failed: {e}"))
+                }
             })?;
             let Some(chunk) = chunk else { break };
             let remaining = max_bytes.saturating_sub(body.len());
