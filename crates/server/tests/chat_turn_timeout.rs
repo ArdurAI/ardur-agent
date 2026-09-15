@@ -86,9 +86,14 @@ async fn boot_with_timeout(
     let mut config: Config = support::test_config(dir, None);
     config.http_turn_timeout = timeout;
     let tools = Arc::new(example_registry("slow", "in-memory"));
-    let state = AppState::boot(&config, provider, tools)
-        .await
-        .expect("AppState boots");
+    let state = AppState::boot(
+        &config,
+        provider,
+        tools,
+        ardur_fused_runtime::SharedDenyList::new(),
+    )
+    .await
+    .expect("AppState boots");
     let router = build_router(Arc::clone(&state));
     (state, router)
 }

@@ -608,6 +608,7 @@ dependencies = [
  "anyhow",
  "ardur-cap-token",
  "ardur-cost-gate",
+ "ardur-fused-runtime",
  "ardur-multi-agent",
  "ardur-receipt",
  "ardur-runtime",

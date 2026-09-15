@@ -29,3 +29,5 @@ uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+# The gh#361 revocation test wires the shared deny-list type the server uses.
+ardur-fused-runtime = { workspace = true }

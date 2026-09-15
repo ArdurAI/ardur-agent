@@ -332,13 +332,24 @@ emits no allow headers, and `*` is refused.
 
 The Phase 5 audit slices are deliberately narrower than full audit closure:
 
-- **#361:** `CapVerifyingRuntime::with_deny_list` and
-  `InMemoryMultiAgentRuntime::verifying_with_deny` permit a shared deny list and
-  reject revoked authority on a later child submission. Production
-  `delegate_task` still uses the empty-deny constructor and an in-memory echo
-  child, not another provider runtime. The fused list is process-local;
-  `FileDenyList` has no production wiring. Durable/cross-process revocation and
-  in-flight cancellation are not delivered.
+- **#361:** the binary calls `AppState::boot_configured`, which opens
+  `<data_dir>/security/deny.list` before building the registry and hands the
+  same file-backed deny state to `delegate_task` and the fused verifier.
+  `crates/server/tests/delegated_revocation.rs` exercises that assembly in
+  separate processes: a real attenuated token is allowed, its parent is
+  revoked, and a restarted process denies it while unrelated authority stays
+  allowed. It tests the assembled delegate separately from the fused turn
+  path so an outer denial cannot conceal an unwired child verifier.
+  Writers use `SharedDenyList::open_file(path)?.revoke_token(&token)?` (or
+  `FusedRuntime::revoke_cap_token` in an embedding application); failures must
+  not be acknowledged. There is **no server HTTP/CLI revoke operation** in
+  this slice. `delegate_task` still makes one echo-child ask and terminates,
+  not a controllable multi-turn provider delegation. Revocation is checked at
+  verification boundaries, not immediate cancellation of in-flight work.
+  Cross-process visibility requires the same protected file on a filesystem
+  supporting the locking/durability protocol, not independent replica disks.
+  Replay nonces and proof-of-possession remain unshipped; see the decision
+  and migration notes in `RUN.md`.
 - **#364:** wildcard web/browser host checks now require a dot boundary and
   ignore case. `web.fetch` now shares `http.fetch`'s guarded transport
   (per-hop re-validation, resolved-IP vetting incl. link-local/metadata
@@ -362,7 +373,8 @@ The Phase 5 audit slices are deliberately narrower than full audit closure:
   does not
   mean `FileSessionJournal::append` redacts persisted entries.
 - **#362/#363:** attenuation's nominal budget axis is not a spend cap;
-  `CostEnvelope` is the actual ceiling. Cap-tokens remain bearer credentials:
+  `CostEnvelope` is a projected admission reservation; finalization can debit
+  provider-reported overage after the call. Cap-tokens remain bearer credentials:
   possession confers authority, subject to verification and expiry. No general
   per-request replay cache or proof-of-possession is delivered. Do not log
   tokens or infer durable revocation from the existence of a storage type.

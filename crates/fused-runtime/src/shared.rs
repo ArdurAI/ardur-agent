@@ -1,9 +1,9 @@
 //! Shared, interior-mutable wrappers that let the `&self` [`submit`] path mutate
 //! state two substrate crates expect to own by value.
 //!
-//! - [`SharedDenyList`] wraps a [`HashSetDenyList`] so the cap-token verifier and
-//!   the runtime's [`revoke_cap_token`] entry point write the *same* revocation
-//!   set — a token revoked mid-session is denied on the next turn.
+//! - [`SharedDenyList`] shares a [`HashSetDenyList`] or [`FileDenyList`] backend
+//!   between the cap-token verifier and the runtime's [`revoke_cap_token`]
+//!   entry point — acknowledged revocation is consulted on the next check.
 //! - [`SharedBudget`] wraps an [`InMemoryBudgetStore`] so the cost gate and the
 //!   runtime's [`remaining_budget`] query observe the *same* ledger.
 //!
@@ -82,9 +82,9 @@ impl SharedDenyList {
     /// [`CapTokenError::Revoked`](ardur_cap_token::CapTokenError::Revoked).
     ///
     /// # Errors
-    /// With the durable backend this persists to disk; an I/O failure means
-    /// the revocation did NOT land and the caller must not report success.
-    /// The in-memory backend is infallible.
+    /// With the durable backend this persists to disk. An I/O failure can
+    /// follow a partial append or failed sync, so durability is not confirmed
+    /// and the caller must not report success. The in-memory backend is infallible.
     pub fn revoke_token(&self, token: &ardur_cap_token::CapToken) -> io::Result<()> {
         match &mut *self.0.lock() {
             DenyBackend::Memory(list) => {

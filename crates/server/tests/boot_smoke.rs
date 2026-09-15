@@ -150,7 +150,14 @@ async fn configured_missing_cedar_policy_fails_boot() {
     let provider: Arc<dyn Provider> =
         Arc::new(AnthropicProvider::stub(ModelId::new(&config.model)));
     let tools = Arc::new(example_registry("stub", "in-memory"));
-    let err = match AppState::boot(&config, provider, tools).await {
+    let err = match AppState::boot(
+        &config,
+        provider,
+        tools,
+        ardur_fused_runtime::SharedDenyList::new(),
+    )
+    .await
+    {
         Ok(_) => panic!("missing policy unexpectedly booted"),
         Err(err) => err,
     };

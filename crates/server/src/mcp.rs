@@ -25,6 +25,7 @@ use rmcp::transport::{StreamableHttpServerConfig, StreamableHttpService};
 
 use ardur_cap_token::PublicKey;
 use ardur_delegate_tool::DelegateTaskTool;
+use ardur_fused_runtime::SharedDenyList;
 use ardur_media_audio::{VoiceTranscribeTool, WhisperApiTranscriptionProvider};
 use ardur_media_video::{
     GeminiVideoAnalyzeProvider, VideoAnalyzeTool, VideoDescribeTool, VideoGenerateTool,
@@ -243,6 +244,10 @@ fn register_hardened_builtins(registry: &mut ToolRegistry, opts: BuiltinOpts) {
 /// `data_dir` (see [`crate::issuer_public_key`]) — `delegate_task` parses and
 /// attenuates the caller's own cap-token against it, so a mismatched root would
 /// make every delegation fail cap-token verification.
+///
+/// `deny` must be the same live revocation state passed to [`crate::AppState::boot`].
+/// This required seventh argument replaces the former six-argument API; for
+/// standard server assembly prefer [`crate::AppState::boot_configured`].
 pub async fn assemble_tool_registry<P: AsRef<Path>>(
     provider: impl Into<String>,
     memory_backend: impl Into<String>,
@@ -250,9 +255,15 @@ pub async fn assemble_tool_registry<P: AsRef<Path>>(
     servers: &[(String, String)],
     cap_root: PublicKey,
     builtin_opts: BuiltinOpts,
+    deny: SharedDenyList,
 ) -> ToolRegistry {
     let mut registry = example_registry(provider, memory_backend);
-    if let Err(e) = registry.register(Box::new(DelegateTaskTool::new(cap_root, AUDIENCE))) {
+    // gh#361: delegate_task children verify every turn against the SAME deny
+    // list the fused runtime revokes through — a revoked caller's live
+    // delegations stop at their next turn.
+    if let Err(e) = registry.register(Box::new(DelegateTaskTool::with_deny_list(
+        cap_root, AUDIENCE, deny,
+    ))) {
         tracing::warn!(error = %e, "skipping delegate_task tool registration");
     }
     // ARD-457: install the operator-granted hardened built-ins before skills and

@@ -85,6 +85,7 @@ async fn voice_transcribe_is_registered_when_a_whisper_key_is_present() {
         &[],
         KeyPair::new().public(),
         BuiltinOpts::default(),
+        ardur_fused_runtime::SharedDenyList::new(),
     )
     .await;
     assert!(
@@ -106,6 +107,7 @@ async fn voice_transcribe_falls_back_to_the_general_openai_key() {
         &[],
         KeyPair::new().public(),
         BuiltinOpts::default(),
+        ardur_fused_runtime::SharedDenyList::new(),
     )
     .await;
     assert!(
@@ -126,6 +128,7 @@ async fn voice_transcribe_is_absent_without_any_key() {
         &[],
         KeyPair::new().public(),
         BuiltinOpts::default(),
+        ardur_fused_runtime::SharedDenyList::new(),
     )
     .await;
     assert!(
@@ -155,6 +158,7 @@ async fn voice_transcribe_is_skipped_not_panicking_on_an_invalid_base_url_overri
         &[],
         KeyPair::new().public(),
         BuiltinOpts::default(),
+        ardur_fused_runtime::SharedDenyList::new(),
     )
     .await;
     assert!(
