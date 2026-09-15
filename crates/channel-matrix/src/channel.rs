@@ -52,7 +52,7 @@ pub struct MatrixChannel {
     forwarder: Forwarder,
     /// The drain side of the inbound queue. `receive(&self)` needs `&mut` access
     /// to `recv`, so a Mutex hands out exclusive access behind the shared ref.
-    inbound_rx: Mutex<mpsc::UnboundedReceiver<IncomingMessage>>,
+    inbound_rx: Mutex<mpsc::Receiver<IncomingMessage>>,
 }
 
 /// The clone-able context the SDK event handlers run against: where to forward an
@@ -60,7 +60,7 @@ pub struct MatrixChannel {
 /// prevention), and the namespaced channel-id prefix.
 #[derive(Clone)]
 struct Forwarder {
-    tx: mpsc::UnboundedSender<IncomingMessage>,
+    tx: mpsc::Sender<IncomingMessage>,
     allowed_rooms: Arc<HashSet<String>>,
     user_id: OwnedUserId,
     channel_prefix: String,
@@ -74,6 +74,11 @@ impl Forwarder {
         self.allowed_rooms.contains(room_id)
     }
 }
+
+/// Bounded inbound queue capacity (gh#367). Inbound events shed with an error
+/// log when the queue is full — a stalled SDK event loop would be worse than
+/// dropping newest. 1024 inbound messages per channel worker.
+pub const INBOUND_QUEUE_CAPACITY: usize = 1024;
 
 impl MatrixChannel {
     /// Build the client, open the sqlite state/crypto store, and restore the bot
@@ -113,7 +118,7 @@ impl MatrixChannel {
             .await
             .map_err(|e| MatrixError::Connect(e.to_string()))?;
 
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(INBOUND_QUEUE_CAPACITY);
         let channel_id = ChannelId(format!("matrix://{user_id}"));
         let forwarder = Forwarder {
             tx,
@@ -312,8 +317,14 @@ async fn on_room_message(ev: OriginalSyncRoomMessageEvent, room: Room, ctx: Ctx<
         thread_id: None,
     };
 
-    if ctx.tx.send(incoming).is_err() {
-        tracing::error!(room = %room_id, "matrix inbound receiver is gone; dropping message");
+    match ctx.tx.try_send(incoming) {
+        Ok(()) => {}
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            tracing::error!(room = %room_id, "matrix inbound queue full; dropping message (backpressure)");
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            tracing::error!(room = %room_id, "matrix inbound receiver is gone; dropping message");
+        }
     }
 }
 
@@ -353,4 +364,36 @@ fn now_millis() -> UnixTsMillis {
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inbound_queue_is_bounded_and_sheds_on_full() {
+        // gh#367: the inbound queue is bounded at INBOUND_QUEUE_CAPACITY; a
+        // full queue sheds the newest message (try_send -> Full), which the
+        // forwarder logs as backpressure. The bound is pinned at 1024 so a
+        // silent relaxation (e.g. usize::MAX, an effective unbounded queue)
+        // fails this test.
+        assert_eq!(INBOUND_QUEUE_CAPACITY, 1024);
+        let (tx, mut rx) = mpsc::channel(INBOUND_QUEUE_CAPACITY);
+        let mk = || IncomingMessage {
+            message_id: Uuid::new_v4(),
+            channel_id: ChannelId("x".to_string()),
+            sender: SenderRef("s".to_string()),
+            body: MessageBody::Text("t".to_string()),
+            received_at: UnixTsMillis(0),
+            thread_id: None,
+        };
+        for _ in 0..INBOUND_QUEUE_CAPACITY {
+            tx.try_send(mk()).expect("queue not yet full");
+        }
+        assert!(
+            matches!(tx.try_send(mk()), Err(mpsc::error::TrySendError::Full(_))),
+            "a full bounded queue must reject the next message"
+        );
+        assert!(rx.try_recv().is_ok(), "queued messages are retrievable");
+    }
 }

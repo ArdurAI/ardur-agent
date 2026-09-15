@@ -45,7 +45,7 @@ pub struct TelegramChannel {
     forwarder: Forwarder,
     /// The drain side of the inbound queue. `receive(&self)` needs `&mut` access
     /// to `recv`, so a Mutex hands out exclusive access behind the shared ref.
-    inbound_rx: Mutex<mpsc::UnboundedReceiver<IncomingMessage>>,
+    inbound_rx: Mutex<mpsc::Receiver<IncomingMessage>>,
     /// Set once [`start`](Self::start) has spawned the dispatcher, so a second
     /// call is a no-op rather than a second polling loop (which Telegram rejects
     /// with a 409 conflict).
@@ -57,7 +57,7 @@ pub struct TelegramChannel {
 /// prevention), and the namespaced channel-id prefix.
 #[derive(Clone)]
 struct Forwarder {
-    tx: mpsc::UnboundedSender<IncomingMessage>,
+    tx: mpsc::Sender<IncomingMessage>,
     allowed_chats: Arc<HashSet<i64>>,
     bot_id: u64,
     channel_prefix: String,
@@ -104,14 +104,28 @@ impl Forwarder {
             thread_id: None,
         };
 
-        if self.tx.send(incoming).is_err() {
-            tracing::error!(
-                chat = chat_id,
-                "telegram inbound receiver is gone; dropping message"
-            );
+        match self.tx.try_send(incoming) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                tracing::error!(
+                    chat = chat_id,
+                    "telegram inbound queue full; dropping message (backpressure)"
+                );
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                tracing::error!(
+                    chat = chat_id,
+                    "telegram inbound receiver is gone; dropping message"
+                );
+            }
         }
     }
 }
+
+/// Bounded inbound queue capacity (gh#367). Inbound events shed with an error
+/// log when the queue is full — a stalled SDK event loop would be worse than
+/// dropping newest. 1024 inbound messages per channel worker.
+pub const INBOUND_QUEUE_CAPACITY: usize = 1024;
 
 impl TelegramChannel {
     /// Build the bot and validate the token (a `get_me` call that also yields the
@@ -130,7 +144,7 @@ impl TelegramChannel {
             .map_err(|e| TelegramError::Connect(e.to_string()))?;
         let bot_id = me.user.id.0;
 
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(INBOUND_QUEUE_CAPACITY);
         let channel_prefix = format!("telegram://{bot_id}");
         let channel_id = ChannelId(channel_prefix.clone());
         let forwarder = Forwarder {
@@ -296,13 +310,40 @@ fn now_millis() -> UnixTsMillis {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn inbound_queue_is_bounded_and_sheds_on_full() {
+        // gh#367: the inbound queue is bounded at INBOUND_QUEUE_CAPACITY; a
+        // full queue sheds the newest message (try_send -> Full), which the
+        // forwarder logs as backpressure. The bound is pinned at 1024 so a
+        // silent relaxation (e.g. usize::MAX, an effective unbounded queue)
+        // fails this test.
+        assert_eq!(INBOUND_QUEUE_CAPACITY, 1024);
+        let (tx, mut rx) = mpsc::channel(INBOUND_QUEUE_CAPACITY);
+        let mk = || IncomingMessage {
+            message_id: Uuid::new_v4(),
+            channel_id: ChannelId("x".to_string()),
+            sender: SenderRef("s".to_string()),
+            body: MessageBody::Text("t".to_string()),
+            received_at: UnixTsMillis(0),
+            thread_id: None,
+        };
+        for _ in 0..INBOUND_QUEUE_CAPACITY {
+            tx.try_send(mk()).expect("queue not yet full");
+        }
+        assert!(
+            matches!(tx.try_send(mk()), Err(mpsc::error::TrySendError::Full(_))),
+            "a full bounded queue must reject the next message"
+        );
+        assert!(rx.try_recv().is_ok(), "queued messages are retrievable");
+    }
     use super::*;
 
     #[test]
     fn chat_allowed_is_deny_by_default() {
         // ARD-475: an empty allowlist denies every chat (previously it allowed
         // all); a configured allowlist admits only its members.
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(INBOUND_QUEUE_CAPACITY);
         let deny_all = Forwarder {
             tx,
             allowed_chats: Arc::new(HashSet::new()),
@@ -312,7 +353,7 @@ mod tests {
         assert!(!deny_all.chat_allowed(-100));
         assert!(!deny_all.chat_allowed(0));
 
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(INBOUND_QUEUE_CAPACITY);
         let allow_one = Forwarder {
             tx,
             allowed_chats: Arc::new([-42_i64].into_iter().collect()),
