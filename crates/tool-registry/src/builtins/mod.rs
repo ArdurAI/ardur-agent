@@ -31,7 +31,10 @@ mod media;
 mod shell;
 
 pub use files::{ListDirTool, ReadFileTool, WriteFileTool};
-pub use http::{HttpFetchTool, is_internal_ip};
+pub use http::{
+    GuardedFetch, GuardedFetchParams, HttpFetchTool, fetch_guarded, is_internal_ip,
+    resolve_and_vet_host,
+};
 pub use media::{ImageAnalyzeTool, ImageGenerateTool, SttTool, TtsTool, VoiceNoteTool};
 pub use shell::{ShellExecTool, ShellTool, is_safe_exec_char};
 
