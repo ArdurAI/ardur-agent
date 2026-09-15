@@ -42,6 +42,19 @@ pub enum AttenuationRule {
     /// Bring the expiry forward to this Unix-seconds timestamp.
     EarlierExpiry(u64),
     /// Lower the spend ceiling to this many budget units.
+    ///
+    /// **Not a spend cap** (gh#362). This caveat binds only the *nominal*
+    /// `cost($c)` fact the verifier is given at request time, and every
+    /// current runtime call site passes a constant `cost: 1`
+    /// (`crates/fused-runtime/src/runtime.rs`, `crates/multi-agent/src/child.rs`).
+    /// It therefore admits any request while `budget_remaining >= 1` and says
+    /// nothing about real provider spend — a token attenuated with
+    /// `ReduceBudget(1)` permits a 9 000-credit ask and then a 900-credit
+    /// ask. The real per-turn ceiling is the [`CostEnvelope`] cost gate
+    /// (`ardur_cost_gate`), resolved from provisioning, not this caveat.
+    /// Making the caveat bite is the behaviour half of gh#362.
+    ///
+    /// [`CostEnvelope`]: https://docs.rs/ardur-cost-gate
     ReduceBudget(u64),
     /// Shrink the tool allowlist to this subset.
     RestrictTools(Vec<String>),
