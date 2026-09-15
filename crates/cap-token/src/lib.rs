@@ -27,6 +27,28 @@
 //! callers issue and verify against the same key types the token is signed
 //! with.
 //!
+//! # Security model (gh#363)
+//!
+//! - **Possession is authority.** A cap-token is a bearer credential: whoever
+//!   presents a structurally valid, signature-verifying token holds its
+//!   authority. There is no proof-of-possession binding (no DPoP, no mTLS) —
+//!   if a token leaks in a log, a journal, or a captured request, the
+//!   attacker can replay it until it expires or is revoked. Treat the base64
+//!   string as a secret.
+//! - **Short TTL as containment.** The server mints tokens with a 5-minute
+//!   lifetime (`CAP_TTL_SECS = 5 * 60`, crates/server/src/state.rs), so a
+//!   leaked token's replay window is bounded by that expiry plus the
+//!   revocation check. Do not lengthen the TTL without a design note.
+//! - **Revocation is in-memory unless wired otherwise.** [`DenyList`] is
+//!   consulted at verification time, but the shipped wiring is
+//!   [`HashSetDenyList`]: revocation survives only for the life of the
+//!   process. [`FileDenyList`] exists for durable, cross-process revocation
+//!   but has no production wiring yet — do not assume a revoked delegated
+//!   token stays revoked across a restart.
+//! - **Never log tokens.** This crate performs no logging; the base64 wire
+//!   form must not be passed to a logger, a journal, or an error message
+//!   that surfaces to a caller. A logged token is a leaked token.
+//!
 //! Phase 2 (see inline `// TODO §11.14 Phase 2:` markers) adds third-party
 //! caveats and sealed tokens.
 #![forbid(unsafe_code)]
