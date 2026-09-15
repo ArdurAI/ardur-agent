@@ -41,7 +41,24 @@ pub enum AttenuationRule {
     RestrictAudience(String),
     /// Bring the expiry forward to this Unix-seconds timestamp.
     EarlierExpiry(u64),
-    /// Lower the spend ceiling to this many budget units.
+    /// Lower the nominal verifier cost claim to this many budget units.
+    ///
+    /// **Not a spend cap** (gh#362). This caveat binds only the `cost($c)`
+    /// fact the verifier is given at request time, and every production
+    /// builder in this repository retains the nominal default of `1`
+    /// (`crates/fused-runtime/src/builder.rs`'s `cost_units` default;
+    /// `crates/multi-agent/src/child.rs` hardcodes `cost: 1`). No current
+    /// call site feeds the projected provider spend into `RequiredCaveats`,
+    /// so the caveat says nothing about real provider spend — a token
+    /// attenuated with `ReduceBudget(1)` permits a 9 000-credit ask and
+    /// then a 900-credit ask. (A caller that overrides `cost_units` would
+    /// change the comparison, but that is not any shipped wiring.) The real
+    /// admission-side budget control is the [`CostEnvelope`] reservation
+    /// (`ardur_cost_gate`) — itself a projected reservation: finalization
+    /// debits any provider-reported overage after the call. Making the
+    /// caveat bite against real spend is the behaviour half of gh#362.
+    ///
+    /// [`CostEnvelope`]: https://docs.rs/ardur-cost-gate
     ReduceBudget(u64),
     /// Shrink the tool allowlist to this subset.
     RestrictTools(Vec<String>),
