@@ -2383,18 +2383,19 @@ const LOCAL_OPERATOR_TOKEN_ID: &str = "cli-local";
 
 /// Mint a receipt for an approval decision made locally via `ardur
 /// approvals approve|deny`, chaining it onto the same receipt log a
-/// `FusedRuntime` over this data dir appends turn receipts to.
+/// `FusedRuntime` over this data dir appends turn receipts to. Returns the
+/// minted receipt's id so the decision card can be linked back to it.
 fn mint_approval_decision_receipt(
     dirs: &StateDirs,
     verb: &str,
     approval_id: &str,
-) -> Result<(), CliError> {
+) -> Result<String, CliError> {
     let receipt_key = dirs.load_or_create_receipt_key()?;
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
-    ardur_fused_runtime::mint_control_receipt(
+    let receipt = ardur_fused_runtime::mint_control_receipt(
         &dirs.receipt_log(),
         &receipt_key,
         ardur_receipt::VerbObject::new(verb).map_err(|e| CliError::State(e.to_string()))?,
@@ -2415,7 +2416,34 @@ fn mint_approval_decision_receipt(
         now_ms,
     )
     .map_err(|e| CliError::State(format!("approval receipt mint failed: {e}")))?;
-    Ok(())
+    Ok(receipt.receipt_id.to_string())
+}
+
+/// Settle (or durably record) the audit obligation a decision carries: the
+/// store's `decide` stamps `audit_pending` in the same locked write as the
+/// decision, so a CLI decide is only fully settled once its receipt mints
+/// and links. A mint failure leaves the decision durable and honestly marked
+/// — it is reported, never hidden.
+fn settle_decision_audit(
+    store: &ardur_approvals::ApprovalStore,
+    id: &str,
+    minted: Result<String, CliError>,
+) -> Result<(), CliError> {
+    match minted {
+        Ok(receipt_id) => {
+            if let Err(e) = store.record_audit_receipt(id, &receipt_id) {
+                let _ = store.mark_audit_pending(id, &format!("receipt-link: {e}"));
+                return Err(CliError::State(format!(
+                    "decision durable but its receipt link failed: {e}"
+                )));
+            }
+            Ok(())
+        }
+        Err(e) => {
+            let _ = store.mark_audit_pending(id, &format!("receipt: {e}"));
+            Err(e)
+        }
+    }
 }
 
 fn approval_store_err(id: &str, e: ardur_approvals::ApprovalStoreError) -> CliError {
@@ -2462,7 +2490,8 @@ fn run_approvals(args: ApprovalsArgs) -> Result<(), CliError> {
             store
                 .decide(&id, ardur_approvals::Decision::Approve, decided_at)
                 .map_err(|e| approval_store_err(&id, e))?;
-            mint_approval_decision_receipt(&dirs, "approval.approve.accepted.v1", &id)?;
+            let minted = mint_approval_decision_receipt(&dirs, "approval.approve.accepted.v1", &id);
+            settle_decision_audit(&store, &id, minted)?;
             println!("approved {id}");
         }
         ApprovalsAction::Deny { id, reason } => {
@@ -2479,7 +2508,8 @@ fn run_approvals(args: ApprovalsArgs) -> Result<(), CliError> {
                     decided_at,
                 )
                 .map_err(|e| approval_store_err(&id, e))?;
-            mint_approval_decision_receipt(&dirs, "approval.reject.accepted.v1", &id)?;
+            let minted = mint_approval_decision_receipt(&dirs, "approval.reject.accepted.v1", &id);
+            settle_decision_audit(&store, &id, minted)?;
             println!("denied {id}");
         }
     }

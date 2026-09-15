@@ -17,9 +17,7 @@ use std::convert::Infallible;
 use std::fmt::Write as _;
 use std::sync::Arc;
 
-use ardur_cap_token::{
-    BiscuitCapTokenVerifier, CapToken, CapTokenVerifier, HashSetDenyList, RequiredCaveats,
-};
+use ardur_cap_token::{BiscuitCapTokenVerifier, CapToken, CapTokenVerifier, RequiredCaveats};
 use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::extract::{DefaultBodyLimit, Path, Request, State};
@@ -566,13 +564,26 @@ fn parse_reject_reason(body: &Bytes) -> String {
         .to_string()
 }
 
-/// Shared decide path for approve/reject: validate the id, load the card, refuse
-/// an already-decided card, mutate + durably persist, then best-effort audit.
+/// Shared decide path for approve/reject: ONE locked store transaction (the
+/// same [`ardur_approvals::ApprovalStore::decide`] the CLI and the fused
+/// runtime's gate use — gh#497), then journal + receipt audit.
 ///
-/// Status codes: `400` for a malformed id, `404` for a missing card, `409` for a
-/// card that is already decided (which keeps repeated calls idempotent-safe — the
-/// mutation and the audit entry happen exactly once), `500` for a corrupt record
-/// or a failed write, `200` on success (body is the updated record).
+/// Status codes: `400` for a malformed id, `404` for a missing card, `409`
+/// for a card that is already decided — the explicit conflict a losing
+/// decider gets under concurrent decisions, which keeps repeated calls
+/// idempotent-safe: the mutation and the audit entry happen exactly once.
+/// `500` for a corrupt record or a failed write, `200` on success (body is
+/// the updated record).
+///
+/// Audit obligations (gh#417): the decision is durable in the approvals
+/// store BEFORE its journal/receipt audit lands; the two are not one
+/// transaction. When the audit half fails — a late revocation or expiry
+/// refusing the receipt mint, an unavailable worker, a journal persistence
+/// error — the decision stands (rolling it back would invent a different
+/// lie) and the unmet obligation is recorded ON the card
+/// (`audit_pending`/`audit_pending_reason`) and surfaced in the response, so
+/// it is observable and recoverable rather than a log line. The receipt
+/// verifier is never disabled to manufacture audit success.
 async fn apply_approval_decision(
     state: &Arc<AppState>,
     id: &str,
@@ -583,64 +594,58 @@ async fn apply_approval_decision(
         return bad_request("malformed approval id".to_string());
     }
 
-    let path = state.approvals_dir().join(format!("{id}.json"));
-    if !path.is_file() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(json!({ "error": "approval not found" })),
-        )
-            .into_response();
-    }
-
-    let raw = match std::fs::read_to_string(&path) {
-        Ok(raw) => raw,
-        Err(_) => return internal_error("failed to read approval record"),
+    let store = ardur_approvals::ApprovalStore::new(state.approvals_dir());
+    let store_decision = match &decision {
+        ApprovalDecision::Approve => ardur_approvals::Decision::Approve,
+        ApprovalDecision::Reject { reason } => ardur_approvals::Decision::Reject {
+            reason: reason.clone(),
+        },
     };
-    let mut card: serde_json::Value = match serde_json::from_str(&raw) {
+    let audit_verb = match &decision {
+        ApprovalDecision::Approve => "approved",
+        ApprovalDecision::Reject { .. } => "rejected",
+    };
+    let receipt_verb = match &decision {
+        ApprovalDecision::Approve => "approval.approve.accepted.v1",
+        ApprovalDecision::Reject { .. } => "approval.reject.accepted.v1",
+    };
+
+    use ardur_approvals::ApprovalStoreError as StoreError;
+    let decided = match store.decide(id, store_decision, now_unix_secs()) {
         Ok(card) => card,
-        Err(_) => return internal_error("approval record is corrupt"),
-    };
-
-    let current_status = card
-        .get("status")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("pending");
-    if current_status != "pending" {
-        return (
-            StatusCode::CONFLICT,
-            Json(json!({
-                "error": "approval already decided",
-                "status": current_status,
-            })),
-        )
-            .into_response();
-    }
-
-    let Some(object) = card.as_object_mut() else {
-        return internal_error("approval record is not an object");
-    };
-    let (new_status, audit_verb, receipt_verb) = match &decision {
-        ApprovalDecision::Approve => ("approved", "approved", "approval.approve.accepted.v1"),
-        ApprovalDecision::Reject { reason } => {
-            object.insert("deny_reason".to_string(), json!(reason));
-            ("denied", "rejected", "approval.reject.accepted.v1")
+        Err(StoreError::InvalidId) => return bad_request("malformed approval id".to_string()),
+        Err(StoreError::NotFound) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "approval not found" })),
+            )
+                .into_response();
         }
+        Err(StoreError::AlreadyDecided) => {
+            let current_status = store
+                .read(id)
+                .map(|card| card.status.as_str())
+                .unwrap_or("unknown");
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "error": "approval already decided",
+                    "status": current_status,
+                })),
+            )
+                .into_response();
+        }
+        Err(StoreError::Corrupt(_)) => return corrupt_or_misshapen_record(state, id),
+        Err(StoreError::Read(_)) => return internal_error("failed to read approval record"),
+        Err(_) => return internal_error("failed to persist approval decision"),
     };
-    object.insert("status".to_string(), json!(new_status));
-    object.insert("decided_at".to_string(), json!(now_unix_secs()));
 
-    let serialized = match serde_json::to_string_pretty(&card) {
-        Ok(serialized) => serialized,
-        Err(_) => return internal_error("failed to serialize approval record"),
-    };
-    if let Err(e) = write_atomically(&path, serialized.as_bytes()) {
-        tracing::error!(error = %e, approval_id = %id, "failed to persist approval decision");
-        return internal_error("failed to persist approval decision");
-    }
+    // Audit trail: append the decision to the session journal, then mint the
+    // signed receipt chained onto the turn receipt log. The decision is
+    // already durable above (the source of truth); each audit failure is
+    // collected and recorded as ONE durable pending obligation on the card.
+    let mut audit_failures: Vec<String> = Vec::new();
 
-    // Audit trail: append the decision to the session journal. The decision is
-    // already durable in the approvals store above (the source of truth), so a
-    // journal failure is logged but does not fail the request.
     let audit = JournalEntry::Checkpoint {
         checkpoint_id: uuid::Uuid::now_v7(),
         summary: format!("approval {id} {audit_verb} via HTTP admin endpoint"),
@@ -648,14 +653,15 @@ async fn apply_approval_decision(
     };
     if let Err(e) = state.journal().append(audit).await {
         tracing::error!(error = %e, approval_id = %id, "failed to append approval audit entry");
+        audit_failures.push(format!("journal: {e}"));
     }
 
     // ARD-139: mint a signed receipt for the decision, chained onto the same
-    // receipt log turns use. Like the journal audit above, the decision is
-    // already durable in the approvals store — a minting failure (the turn
-    // worker being unavailable, say) is logged but does not fail the request;
-    // the store, not the receipt, is this endpoint's source of truth.
-    match state
+    // receipt log turns use. A minting failure (a late revocation/expiry
+    // refusing the presented token at the runtime verifier, an unavailable
+    // turn worker) is an audit failure, never a reason to roll the decision
+    // back or to skip verification.
+    let minted_receipt_id = match state
         .mint_approval_receipt(
             id.to_string(),
             receipt_verb.to_string(),
@@ -664,39 +670,52 @@ async fn apply_approval_decision(
         .await
     {
         Ok(receipt_id) => {
-            if let Some(object) = card.as_object_mut() {
-                object.insert("receipt_id".to_string(), json!(receipt_id.0.to_string()));
+            let receipt_id = receipt_id.0.to_string();
+            // Link the card to its receipt; if THAT write fails the receipt
+            // exists but the card cannot show it — an obligation of its own.
+            if let Err(e) = store.record_audit_receipt(id, &receipt_id) {
+                tracing::error!(error = %e, approval_id = %id, "failed to link decision receipt on the card");
+                audit_failures.push(format!("receipt-link: {e}"));
             }
+            Some(receipt_id)
         }
         Err(e) => {
             tracing::error!(error = %e, approval_id = %id, "failed to mint approval decision receipt");
+            audit_failures.push(format!("receipt: {e}"));
+            None
+        }
+    };
+
+    if !audit_failures.is_empty() {
+        let reason = audit_failures.join("; ");
+        if let Err(e) = store.mark_audit_pending(id, &reason) {
+            // Storage is refusing the obligation record itself: the decision
+            // is durable but the obligation could not be persisted — the
+            // loudest signal available remains the log and the response body.
+            tracing::error!(error = %e, approval_id = %id, reason = %reason, "failed to persist the pending audit obligation");
         }
     }
 
+    // Respond with the final durable record (annotations included). If the
+    // final read fails, fall back to the post-decision snapshot — the
+    // decision is durable either way.
+    let mut card = serde_json::to_value(store.read(id).unwrap_or(decided))
+        .unwrap_or_else(|_| json!({ "status": "unknown" }));
+    if let Some(object) = card.as_object_mut() {
+        // Today's wire contract: receipt_id appears when (and only when) the
+        // receipt minted. The pending obligation is visible the same way.
+        if let Some(receipt_id) = minted_receipt_id {
+            object.insert("receipt_id".to_string(), json!(receipt_id));
+        }
+        if !audit_failures.is_empty() && object.get("audit_pending") != Some(&json!(true)) {
+            object.insert("audit_pending".to_string(), json!(true));
+            object.insert(
+                "audit_pending_reason".to_string(),
+                json!(audit_failures.join("; ")),
+            );
+        }
+    }
     (StatusCode::OK, Json(card)).into_response()
-}
-
-/// Write `bytes` to `path` atomically: write a sibling temp file, fsync, then
-/// rename over the target so a crash mid-write cannot leave a torn record.
-fn write_atomically(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::io::Write as _;
-    let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
-    let tmp = dir.join(format!(
-        ".approval-{}.tmp",
-        uuid::Uuid::now_v7().as_simple()
-    ));
-    {
-        let mut file = std::fs::File::create(&tmp)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-    }
-    match std::fs::rename(&tmp, path) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            let _ = std::fs::remove_file(&tmp);
-            Err(e)
-        }
-    }
 }
 
 /// A `500` with a JSON `{ "error": … }` body.
@@ -706,6 +725,20 @@ fn internal_error(message: &str) -> Response {
         Json(json!({ "error": message })),
     )
         .into_response()
+}
+
+/// The legacy 500 split for a card the typed store cannot load: a file that
+/// IS valid JSON but not an object reports "approval record is not an
+/// object" (the pre-store route's shape check); anything else is "approval
+/// record is corrupt". Preserves the established wire bodies for both
+/// filesystem-corruption classes.
+fn corrupt_or_misshapen_record(state: &Arc<AppState>, id: &str) -> Response {
+    let raw = std::fs::read_to_string(state.approvals_dir().join(format!("{id}.json")))
+        .unwrap_or_default();
+    match serde_json::from_str::<serde_json::Value>(&raw) {
+        Ok(value) if !value.is_object() => internal_error("approval record is not an object"),
+        _ => internal_error("approval record is corrupt"),
+    }
 }
 
 /// `GET /openapi/clients/python` — return generated Python client source.
@@ -1264,11 +1297,14 @@ fn authorize_admin_mutation(
         return Err(Box::new(cap_token_denied(verb)));
     };
 
-    // An EMPTY deny list. The server holds no revocation store today, so a
-    // minted admin token is valid until it expires — revocation is the reason
-    // to keep admin token lifetimes short. Documented as a limitation rather
-    // than implied away; wiring the runtime's deny list here is follow-up work.
-    let verifier = BiscuitCapTokenVerifier::new(HashSetDenyList::new());
+    // gh#417/E4.1: the CONFIGURED durable deny backend — the same
+    // `SharedDenyList` the fused runtime's verifier uses (Epic 3 wired it to
+    // `<data_dir>/security/deny.list`). A credential revoked before admission
+    // is refused HERE, before any mutation; the runtime verifier refuses it
+    // again at receipt time, so a late revocation still cannot mint a
+    // success receipt (the decision records the pending audit obligation
+    // instead — see `apply_approval_decision`).
+    let verifier = BiscuitCapTokenVerifier::new(state.deny_list().clone());
     let required = RequiredCaveats {
         now_unix: now_unix_secs(),
         audience: crate::state::AUDIENCE.to_string(),

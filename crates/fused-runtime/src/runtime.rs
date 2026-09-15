@@ -11,7 +11,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
-use ardur_approvals::{ApprovalStatus, ApprovalStore};
+use ardur_approvals::{
+    ApprovalStatus, ApprovalStore, ClaimBinding, ClaimOutcome, InvocationOutcome, InvocationResult,
+};
 use ardur_cap_token::{
     BiscuitCapTokenVerifier, CapToken, CapTokenError, CapTokenVerifier, PublicKey, RequiredCaveats,
     VerifiedClaims,
@@ -290,6 +292,16 @@ pub enum ControlVerifyCost {
     RuntimeDefault,
 }
 
+/// The single execution an `Approved` card authorises, won by THIS call
+/// (gh#497). Carried from the approval gate to the tool-invocation site so
+/// the invocation's outcome can be recorded on the spent card; the claim
+/// itself (consume-before-invoke) is what authorises the call.
+#[derive(Clone, Debug)]
+pub(crate) struct SpentApproval {
+    /// The claimed card's id.
+    approval_id: String,
+}
+
 impl FusedRuntime {
     /// The hook registry threaded through every turn.
     #[must_use]
@@ -329,10 +341,10 @@ impl FusedRuntime {
     /// cost 0 because admin mutations are not metered against a turn
     /// budget — so the approval-decision receipt path mirrors that COST
     /// (see [`ControlVerifyCost::ApprovalDecision`]). Cost equality is
-    /// what matters here; the two paths still differ deliberately in the
-    /// rest of their state (the gate uses a fresh empty deny list and an
-    /// earlier timestamp; the runtime uses its shared deny list and a
-    /// later clock reading).
+    /// what matters here; the two paths still differ deliberately in
+    /// their timestamps (the gate verifies at request time, the runtime
+    /// at receipt time), while both consult the SAME shared deny backend
+    /// since E4.1 — a revocation is honored at admission and again here.
     fn verify_cap_token_for_tool_at(
         &self,
         cap_token: &CapTokenRef,
@@ -1367,20 +1379,32 @@ impl FusedRuntime {
     /// for any call whose required capabilities intersect
     /// [`approval_gated_capabilities`](Self::approval_gated_capabilities).
     ///
-    /// Looks up an existing card by `(tool_name, arguments_digest,
-    /// session_id)` so a retried *identical* call is idempotent rather than
-    /// proposing a fresh card every time the model re-requests it:
+    /// The propose/find half is ONE locked store transaction
+    /// ([`ApprovalStore::propose_if_absent`]), so overlapping identical first
+    /// calls mint exactly one pending card:
     /// - no card exists: propose one, mint `approval.propose.created.v1`,
     ///   and deny with [`RuntimeError::ApprovalRequired`].
     /// - a `Pending` card exists: deny again with the *same* card id (no
     ///   second receipt — the propose already happened).
-    /// - an `Approved` card exists: allow the call to proceed.
+    /// - an `Approved` card exists: claim its single execution
+    ///   ([`ApprovalStore::claim_execution`], bound to this exact
+    ///   tool/arguments/session and stamped with the verified caller). Only
+    ///   [`ClaimOutcome::Won`] lets the call proceed; an
+    ///   [`ClaimOutcome::AlreadySpent`] observation — an overlapping call won
+    ///   the claim first — confers no authority, so this call loops back to
+    ///   propose its own pending card instead of riding the spent grant.
     /// - a `Denied` card exists: deny with [`RuntimeError::ApprovalRejected`].
     ///
-    /// A tool whose required capabilities do not intersect the gated set, or
-    /// a runtime with no [`approvals`](Self::approvals) store configured, is
-    /// unaffected — this stage is a no-op in both cases, matching every other
-    /// opt-in builder knob's "absent config behaves as before" contract.
+    /// Returns `Ok(Some(_))` with the won claim's card id when this call owns
+    /// the approval's single execution; the caller records the invocation's
+    /// outcome on the card once the tool resolves (see
+    /// [`Self::record_approval_invocation`]). `Ok(None)` when the gate is not
+    /// armed for this call. A tool whose required capabilities do not
+    /// intersect the gated set, or a runtime with no
+    /// [`approvals`](Self::approvals) store configured, is unaffected — this
+    /// stage is a no-op in both cases, matching every other opt-in builder
+    /// knob's "absent config behaves as before" contract.
+    #[allow(clippy::too_many_arguments)]
     async fn authorize_or_propose_approval(
         &self,
         cap_token: &CapTokenRef,
@@ -1389,77 +1413,45 @@ impl FusedRuntime {
         tool_name: &str,
         capabilities: &[Capability],
         arguments: &serde_json::Value,
-    ) -> Result<(), RuntimeError> {
+        claimed_by: &str,
+    ) -> Result<Option<SpentApproval>, RuntimeError> {
         let Some(store) = &self.approvals else {
-            return Ok(());
+            return Ok(None);
         };
         let Some(gated_capability) = capabilities
             .iter()
             .map(Capability::as_str)
             .find(|label| self.approval_gated_capabilities.contains(label.as_str()))
         else {
-            return Ok(());
+            return Ok(None);
         };
 
         let arguments_digest =
             Sha256Digest::of(&serde_json::to_vec(arguments).unwrap_or_default()).to_hex();
         let session_id_str = session_id.0.to_string();
 
-        let existing = store
-            .find_matching(tool_name, &arguments_digest, Some(&session_id_str))
-            .map_err(|e| {
-                RuntimeError::Internal(anyhow::anyhow!("approval store lookup failed: {e}"))
-            })?;
-
-        match existing {
-            // The approval is spent by this call: consume the card so the next
-            // identical call proposes a fresh one. Without this, one approval
-            // is a standing permission to repeat the call without limit, which
-            // is a materially larger grant than the operator gave.
-            //
-            // Consumed before the tool runs, not after: a card consumed on
-            // success only would let a failed-then-retried call reuse the same
-            // grant, and a crash between invoke and consume would leave the
-            // approval spendable again. Erring toward re-asking the operator is
-            // the safe direction for a human-in-the-loop control.
-            Some(card) if card.status == ApprovalStatus::Approved => {
-                if let Some(id) = card.id.as_deref() {
-                    store.consume(id).map_err(|e| {
-                        RuntimeError::Internal(anyhow::anyhow!(
-                            "approval card {id} could not be consumed: {e}"
-                        ))
-                    })?;
-                }
-                Ok(())
-            }
-            Some(card) if card.status == ApprovalStatus::Denied => {
-                Err(RuntimeError::ApprovalRejected {
-                    approval_id: card.id.unwrap_or_default(),
-                    tool: tool_name.to_string(),
-                    reason: card.deny_reason.unwrap_or_default(),
-                })
-            }
-            Some(card) => Err(RuntimeError::ApprovalRequired {
-                approval_id: card.id.unwrap_or_default(),
-                tool: tool_name.to_string(),
-                reason: card.reason,
-            }),
-            None => {
-                let reason = format!(
-                    "tool `{tool_name}` requires capability `{gated_capability}`, which is approval-gated"
-                );
-                let card = store
-                    .propose(
-                        tool_name,
-                        gated_capability.as_str(),
-                        &arguments_digest,
-                        Some(session_id_str),
-                        &reason,
-                        now_unix,
-                    )
-                    .map_err(|e| {
-                        RuntimeError::Internal(anyhow::anyhow!("approval propose failed: {e}"))
-                    })?;
+        // Bounded contention loop: an AlreadySpent observation means an
+        // overlapping call won the claim between our find and our claim, so
+        // loop back to propose this call its own pending card. Every other
+        // path exits on the first pass; the bound only guards pathological
+        // churn, and exhaustion fails closed rather than proceeding.
+        for _ in 0..3 {
+            let reason = format!(
+                "tool `{tool_name}` requires capability `{gated_capability}`, which is approval-gated"
+            );
+            let (card, created) = store
+                .propose_if_absent(
+                    tool_name,
+                    gated_capability.as_str(),
+                    &arguments_digest,
+                    Some(session_id_str.clone()),
+                    &reason,
+                    now_unix,
+                )
+                .map_err(|e| {
+                    RuntimeError::Internal(anyhow::anyhow!("approval store lookup failed: {e}"))
+                })?;
+            if created {
                 let approval_id = card.id.clone().unwrap_or_default();
                 self.commit_control_receipt(
                     session_id,
@@ -1477,12 +1469,101 @@ impl FusedRuntime {
                     ControlVerifyCost::RuntimeDefault,
                 )
                 .await?;
-                Err(RuntimeError::ApprovalRequired {
+                return Err(RuntimeError::ApprovalRequired {
                     approval_id,
                     tool: tool_name.to_string(),
                     reason,
-                })
+                });
             }
+            match card.status {
+                // The approval is spent by this call: claim the card so the
+                // next identical call proposes a fresh one. Without this, one
+                // approval is a standing permission to repeat the call without
+                // limit, which is a materially larger grant than the operator
+                // gave.
+                //
+                // Claimed before the tool runs, not after: a card claimed on
+                // success only would let a failed-then-retried call reuse the
+                // same grant, and a crash between invoke and claim would leave
+                // the approval spendable again. Erring toward re-asking the
+                // operator is the safe direction for a human-in-the-loop
+                // control.
+                ApprovalStatus::Approved => {
+                    let id = card.id.clone().unwrap_or_default();
+                    let binding = ClaimBinding {
+                        tool: tool_name,
+                        arguments_digest: &arguments_digest,
+                        session_id: Some(&session_id_str),
+                        claimed_by: Some(claimed_by),
+                    };
+                    match store.claim_execution(&id, &binding, now_unix) {
+                        Ok(ClaimOutcome::Won(_)) => {
+                            return Ok(Some(SpentApproval { approval_id: id }));
+                        }
+                        Ok(ClaimOutcome::AlreadySpent(_)) => {
+                            // An overlapping call won this card's single
+                            // execution. The observation grants US nothing:
+                            // loop to propose our own pending card.
+                            continue;
+                        }
+                        Err(e) => {
+                            return Err(RuntimeError::Internal(anyhow::anyhow!(
+                                "approval card {id} could not be claimed: {e}"
+                            )));
+                        }
+                        // ClaimOutcome is sealed (non_exhaustive): a future
+                        // variant must fail closed, never be read as a win.
+                        #[allow(unreachable_patterns)]
+                        _ => {
+                            return Err(RuntimeError::Internal(anyhow::anyhow!(
+                                "approval card {id} returned an unrecognized claim outcome"
+                            )));
+                        }
+                    }
+                }
+                ApprovalStatus::Denied => {
+                    return Err(RuntimeError::ApprovalRejected {
+                        approval_id: card.id.unwrap_or_default(),
+                        tool: tool_name.to_string(),
+                        reason: card.deny_reason.unwrap_or_default(),
+                    });
+                }
+                _ => {
+                    return Err(RuntimeError::ApprovalRequired {
+                        approval_id: card.id.unwrap_or_default(),
+                        tool: tool_name.to_string(),
+                        reason: card.reason,
+                    });
+                }
+            }
+        }
+        Err(RuntimeError::Internal(anyhow::anyhow!(
+            "approval claim contention for tool `{tool_name}`"
+        )))
+    }
+
+    /// Record a won claim's invocation outcome on its card. The card was
+    /// consumed before the invocation ran, so this is a post-hoc audit
+    /// annotation, never a re-authorization. A recording failure leaves the
+    /// card in the explicit ambiguous-effect state (consumed, no outcome) —
+    /// logged loudly, never silently remapped.
+    fn record_approval_invocation(&self, spent: &Option<SpentApproval>, result: InvocationResult) {
+        let (Some(store), Some(spent)) = (&self.approvals, spent) else {
+            return;
+        };
+        let finished_at = self.clock.now_ms().get() / 1000;
+        if let Err(e) = store.record_invocation_outcome(
+            &spent.approval_id,
+            InvocationOutcome {
+                result,
+                finished_at,
+            },
+        ) {
+            tracing::error!(
+                error = %e,
+                approval_id = %spent.approval_id,
+                "failed to record approval invocation outcome; the card reads as ambiguous-effect"
+            );
         }
     }
 
@@ -2445,8 +2526,10 @@ impl FusedRuntime {
                     }
                     // ARD-139: a call whose required capabilities include an
                     // approval-gated one needs human sign-off even though the
-                    // cap-token/cedar checks above already allow it.
-                    if let Err(err) = self
+                    // cap-token/cedar checks above already allow it. gh#497:
+                    // only a WON claim (bound to this exact call and stamped
+                    // with the verified caller) lets the invocation proceed.
+                    let spent_approval = match self
                         .authorize_or_propose_approval(
                             &req.cap_token,
                             session_id,
@@ -2454,14 +2537,18 @@ impl FusedRuntime {
                             &call.name,
                             tool.required_capabilities(),
                             &call.arguments,
+                            &claims.subject.0,
                         )
                         .await
                     {
-                        self.release(reservation).await;
-                        self.fire_error(session_id, LifecyclePhase::Submit, &err)
-                            .await;
-                        return Err(err);
-                    }
+                        Ok(spent) => spent,
+                        Err(err) => {
+                            self.release(reservation).await;
+                            self.fire_error(session_id, LifecyclePhase::Submit, &err)
+                                .await;
+                            return Err(err);
+                        }
+                    };
                     let ctx = self.tool_context(&req.cap_token, session_id);
                     let output = match tokio::time::timeout(
                         self.tool_timeout,
@@ -2469,8 +2556,20 @@ impl FusedRuntime {
                     )
                     .await
                     {
-                        Ok(Ok(output)) => output,
+                        Ok(Ok(output)) => {
+                            self.record_approval_invocation(
+                                &spent_approval,
+                                InvocationResult::Completed,
+                            );
+                            output
+                        }
                         Ok(Err(tool_err)) => {
+                            // Consume-before-invoke: the approval stays spent;
+                            // the card records the call resolved as failed.
+                            self.record_approval_invocation(
+                                &spent_approval,
+                                InvocationResult::Failed,
+                            );
                             self.release(reservation).await;
                             let err = map_tool_error(tool_err, &call.name);
                             self.fire_error(session_id, LifecyclePhase::Provider, &err)
@@ -2478,6 +2577,10 @@ impl FusedRuntime {
                             return Err(err);
                         }
                         Err(_elapsed) => {
+                            // Timed out with the invocation's effect unknown:
+                            // the spent card is deliberately left WITHOUT an
+                            // outcome record — the explicit ambiguous-effect
+                            // state.
                             self.release(reservation).await;
                             let err = RuntimeError::ToolTimeout {
                                 tool: call.name.clone(),
@@ -3133,8 +3236,10 @@ impl FusedRuntime {
                         // ARD-139: a call whose required capabilities include
                         // an approval-gated one needs human sign-off even
                         // though the cap-token/cedar checks above already
-                        // allow it.
-                        if let Err(err) = self
+                        // allow it. gh#497: only a WON claim (bound to this
+                        // exact call and stamped with the verified caller)
+                        // lets the invocation proceed.
+                        let spent_approval = match self
                             .authorize_or_propose_approval(
                                 &req.cap_token,
                                 session_id,
@@ -3142,15 +3247,19 @@ impl FusedRuntime {
                                 &call.name,
                                 tool.required_capabilities(),
                                 &call.arguments,
+                                &claims.subject.0,
                             )
                             .await
                         {
-                            self.release(reservation.take().expect("reservation held")).await;
-                            yield FusedEvent::StageEnd { stage: StageKind::ToolExec, ok: false };
-                            self.fire_error(session_id, LifecyclePhase::Submit, &err).await;
-                            Err(err)?;
-                            unreachable!()
-                        }
+                            Ok(spent) => spent,
+                            Err(err) => {
+                                self.release(reservation.take().expect("reservation held")).await;
+                                yield FusedEvent::StageEnd { stage: StageKind::ToolExec, ok: false };
+                                self.fire_error(session_id, LifecyclePhase::Submit, &err).await;
+                                Err(err)?;
+                                unreachable!()
+                            }
+                        };
                         let ctx = self.tool_context(&req.cap_token, session_id);
                         let output = match tokio::time::timeout(
                             self.tool_timeout,
@@ -3158,8 +3267,18 @@ impl FusedRuntime {
                         )
                         .await
                         {
-                            Ok(Ok(output)) => output,
+                            Ok(Ok(output)) => {
+                                self.record_approval_invocation(
+                                    &spent_approval,
+                                    InvocationResult::Completed,
+                                );
+                                output
+                            }
                             Ok(Err(tool_err)) => {
+                                // Consume-before-invoke: the approval stays
+                                // spent; the card records the call resolved
+                                // as failed.
+                                self.record_approval_invocation(&spent_approval, InvocationResult::Failed);
                                 self.release(reservation.take().expect("reservation held")).await;
                                 let err = map_tool_error(tool_err, &call.name);
                                 yield FusedEvent::StageEnd { stage: StageKind::ToolExec, ok: false };
@@ -3168,6 +3287,10 @@ impl FusedRuntime {
                                 unreachable!()
                             }
                             Err(_elapsed) => {
+                                // Timed out with the invocation's effect
+                                // unknown: the spent card is deliberately
+                                // left WITHOUT an outcome record — the
+                                // explicit ambiguous-effect state.
                                 self.release(reservation.take().expect("reservation held")).await;
                                 let err = RuntimeError::ToolTimeout {
                                     tool: call.name.clone(),
