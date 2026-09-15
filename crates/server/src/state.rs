@@ -380,6 +380,11 @@ pub struct AppState {
     admin_cap_token_gate: bool,
     /// The root key those cap-tokens are verified against.
     cap_issuer_public_key: PublicKey,
+    /// gh#417/E4.1: the configured revocation backend — the same
+    /// [`SharedDenyList`] handed to the fused runtime's verifier — so a
+    /// credential revoked before admission is refused at the admin gate too,
+    /// not only at turn time. Cloning the handle shares the backend.
+    deny_list: SharedDenyList,
     cors_origins: Vec<String>,
     tool_allowlist: Vec<String>,
     cost_budget_cents: u64,
@@ -602,7 +607,7 @@ impl AppState {
         // gh#361: the same durable deny list the delegate_task tool was
         // registered with (opened in main before the registry) — revoking a
         // caller's token here stops its live delegate_task children.
-        .deny_list(deny)
+        .deny_list(deny.clone())
         .action(ActionRef("Action::Submit".to_string()))
         .principal_entity_type("User")
         .projected_envelope(envelope)
@@ -739,6 +744,7 @@ impl AppState {
             admin_bearer_tokens: config.admin_bearer_tokens.clone(),
             admin_cap_token_gate: config.admin_cap_token_gate,
             cap_issuer_public_key: issuer_public_key(&config.data_dir)?,
+            deny_list: deny,
             cors_origins: config.cors_origins.clone(),
             tool_allowlist,
             cost_budget_cents: config.cost_budget_cents,
@@ -770,6 +776,14 @@ impl AppState {
     #[must_use]
     pub fn admin_cap_token_gate(&self) -> bool {
         self.admin_cap_token_gate
+    }
+
+    /// The configured revocation backend admin capability admission verifies
+    /// against — the same handle the fused runtime's verifier uses, so a
+    /// revocation is visible to both (gh#417).
+    #[must_use]
+    pub fn deny_list(&self) -> &SharedDenyList {
+        &self.deny_list
     }
 
     /// The root key admin cap-tokens are verified against — the same issuer
@@ -2234,6 +2248,7 @@ mod tests {
             admin_bearer_tokens: Vec::new(),
             admin_cap_token_gate: false,
             cap_issuer_public_key: KeyPair::new().public(),
+            deny_list: SharedDenyList::new(),
             cors_origins: Vec::new(),
             tool_allowlist: Vec::new(),
             cost_budget_cents: 0,
@@ -2323,6 +2338,7 @@ mod tests {
             admin_bearer_tokens: Vec::new(),
             admin_cap_token_gate: false,
             cap_issuer_public_key: KeyPair::new().public(),
+            deny_list: SharedDenyList::new(),
             cors_origins: Vec::new(),
             tool_allowlist: Vec::new(),
             cost_budget_cents: 0,

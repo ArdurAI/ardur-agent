@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use ardur_approvals::{ApprovalStatus, ApprovalStore, Decision};
+use ardur_approvals::{ApprovalStatus, ApprovalStore, ClaimBinding, ClaimOutcome, Decision};
 use ardur_fused_runtime::{load_persisted_chain, verify_persisted_chain};
 use ardur_provider_runtime::{
     CompletionRequest, CompletionResponse, FinishReason, Provider, ProviderError, RateCard, Usage,
@@ -493,8 +493,17 @@ async fn an_approved_card_authorises_one_call_and_is_then_spent() {
     assert_eq!(found.status, ApprovalStatus::Approved);
 
     // Spending it.
-    let consumed = store.consume(&id).expect("consume an approved card");
-    assert_eq!(consumed.status, ApprovalStatus::Consumed);
+    let binding = ClaimBinding {
+        tool: "echo",
+        arguments_digest: "digest-abc",
+        session_id: Some("session-1"),
+        claimed_by: Some("ardur:test"),
+    };
+    let claimed = store
+        .claim_execution(&id, &binding, 1_700_000_002)
+        .expect("claim an approved card");
+    assert!(claimed.is_won(), "the first claim grants the execution");
+    assert_eq!(claimed.into_card().status, ApprovalStatus::Consumed);
 
     // The next identical call must NOT find it — it has to ask again.
     assert!(
@@ -506,10 +515,13 @@ async fn an_approved_card_authorises_one_call_and_is_then_spent() {
          unlimited standing permission to repeat the call"
     );
 
-    // Consumption is idempotent, so a retry after a partial failure cannot error.
-    assert_eq!(
-        store.consume(&id).expect("idempotent").status,
-        ApprovalStatus::Consumed
+    // A repeated claim is an idempotent OBSERVATION, not a fresh grant.
+    let second = store
+        .claim_execution(&id, &binding, 1_700_000_003)
+        .expect("a repeated claim is observable");
+    assert!(
+        matches!(second, ClaimOutcome::AlreadySpent(_)),
+        "a retry observes the spent card without regaining authority"
     );
 
     // The record survives for audit: the receipt chain references this id.
@@ -519,9 +531,9 @@ async fn an_approved_card_authorises_one_call_and_is_then_spent() {
     );
 }
 
-/// Consuming a card that was never approved would invent an authorisation.
+/// Claiming a card that was never approved would invent an authorisation.
 #[tokio::test]
-async fn a_pending_or_denied_card_cannot_be_consumed() {
+async fn a_pending_or_denied_card_cannot_be_claimed() {
     let root = tempfile::tempdir().expect("tempdir");
     let store = ApprovalStore::new(root.path().join("approvals"));
 
@@ -536,9 +548,17 @@ async fn a_pending_or_denied_card_cannot_be_consumed() {
         )
         .expect("propose");
     let pending_id = pending.id.clone().expect("id");
+    let pending_binding = ClaimBinding {
+        tool: "echo",
+        arguments_digest: "digest-pending",
+        session_id: None,
+        claimed_by: Some("ardur:test"),
+    };
     assert!(
-        store.consume(&pending_id).is_err(),
-        "consuming a pending card would authorise a call no operator approved"
+        store
+            .claim_execution(&pending_id, &pending_binding, 1_700_000_001)
+            .is_err(),
+        "claiming a pending card would authorise a call no operator approved"
     );
 
     let denied = store
@@ -561,8 +581,398 @@ async fn a_pending_or_denied_card_cannot_be_consumed() {
             1_700_000_001,
         )
         .expect("reject");
+    let denied_binding = ClaimBinding {
+        tool: "echo",
+        arguments_digest: "digest-denied",
+        session_id: None,
+        claimed_by: Some("ardur:test"),
+    };
     assert!(
-        store.consume(&denied_id).is_err(),
-        "consuming a denied card would reverse the operator's rejection"
+        store
+            .claim_execution(&denied_id, &denied_binding, 1_700_000_002)
+            .is_err(),
+        "claiming a denied card would reverse the operator's rejection"
     );
+}
+
+// ---------------------------------------------------------------------------
+// gh#497 — claim-once at the authorization-to-effect boundary
+// ---------------------------------------------------------------------------
+
+/// A gated tool that blocks inside `invoke` until released, so a test can
+/// hold one admitted call open while a second identical call arrives. The
+/// invocation counter increments only AFTER release, so the provider below
+/// keeps offering the tool while the first call is still in flight.
+struct BlockingTool {
+    id: ToolId,
+    schema: ToolSchema,
+    invocations: Arc<AtomicUsize>,
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+impl BlockingTool {
+    fn new(
+        name: &str,
+        invocations: Arc<AtomicUsize>,
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    ) -> Self {
+        Self {
+            id: ToolId::new(name),
+            schema: ToolSchema {
+                description: "approval-gated blocking tool".to_string(),
+                input_schema: json!({ "type": "object" }),
+                output_schema: json!({ "type": "object" }),
+                examples: vec![],
+            },
+            invocations,
+            entered,
+            release,
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for BlockingTool {
+    fn id(&self) -> ToolId {
+        self.id.clone()
+    }
+    fn schema(&self) -> &ToolSchema {
+        &self.schema
+    }
+    async fn invoke(
+        &self,
+        _ctx: &ToolContext,
+        _args: serde_json::Value,
+    ) -> Result<ToolOutput, ToolError> {
+        self.entered.notify_one();
+        self.release.notified().await;
+        self.invocations.fetch_add(1, Ordering::SeqCst);
+        Ok(ToolOutput {
+            content: json!({ "ok": true }),
+            cost: CostTuple::default(),
+            receipt_data: json!({ "ok": true }),
+        })
+    }
+    fn required_capabilities(&self) -> &[Capability] {
+        const CAPS: &[Capability] = &[Capability::ShellExec];
+        CAPS
+    }
+}
+
+/// The exactly-one-effect proof: two overlapping admitted calls over the
+/// SAME approved card produce exactly one tool invocation. The winner runs;
+/// the loser is denied with a FRESH pending card (its own approval to wait
+/// for), never a ride on the spent grant.
+#[tokio::test]
+async fn overlapping_admitted_calls_have_exactly_one_effect() {
+    let invocations = Arc::new(AtomicUsize::new(0));
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let provider = Arc::new(AlwaysWantsToolProvider::new(
+        "gated.shell",
+        json!({"cmd": "ls"}),
+        invocations.clone(),
+    ));
+    let approvals_dir = tempfile::tempdir().expect("approvals dir");
+    let store = ApprovalStore::new(approvals_dir.path());
+    let receipt_log = tempfile::NamedTempFile::new().expect("receipt log");
+
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(Box::new(BlockingTool::new(
+            "gated.shell",
+            invocations.clone(),
+            entered.clone(),
+            release.clone(),
+        )))
+        .expect("gated id is unique");
+    let runtime = runtime_builder(provider)
+        .with_tools(Arc::new(registry))
+        .with_approvals(store.clone())
+        .with_approval_gated_capabilities(gated_caps())
+        .receipt_log(receipt_log.path())
+        // Enough budget for TWO concurrently open per-turn envelopes: call A
+        // holds its reservation while blocked in the tool, and call B's
+        // admission must not fail on budget before it can reach the gate.
+        .provision_budget(
+            support::gate_holder(),
+            ardur_cost_gate::CostTuple {
+                tokens_in: 1_000_000_000,
+                tokens_out: 1_000_000_000,
+                cents: 4_000_000,
+                wall_ms: 1_000_000_000,
+                attention_score: 1_000_000_000,
+            },
+        )
+        .build()
+        .expect("runtime builds");
+    let token = mint_token_as(HOLDER, AUDIENCE, &[TOOL, "gated.shell", "cap.shell_exec"]);
+    let session_id = SessionId::new();
+
+    // Propose + approve the card both calls will race over.
+    let approval_id = match runtime
+        .submit(request_for("run a command", &token, session_id))
+        .await
+        .expect_err("pending")
+    {
+        RuntimeError::ApprovalRequired { approval_id, .. } => approval_id,
+        other => panic!("expected ApprovalRequired, got {other:?}"),
+    };
+    store
+        .decide(&approval_id, Decision::Approve, 1)
+        .expect("approve succeeds");
+
+    // Call A enters the tool and blocks; call B then arrives over the same
+    // card. join! drives both cooperatively on this one runtime.
+    let call_a = runtime.submit(request_for("run a command", &token, session_id));
+    let controller = async {
+        entered.notified().await;
+        // A is now inside the tool, holding the spent card. B must NOT also
+        // invoke: it gets its own pending card instead.
+        let b_err = runtime
+            .submit(request_for("run a command", &token, session_id))
+            .await
+            .expect_err("the overlapping call must not proceed on a spent grant");
+        let b_approval_id = match b_err {
+            RuntimeError::ApprovalRequired { approval_id, .. } => approval_id,
+            other => panic!("expected ApprovalRequired for the loser, got {other:?}"),
+        };
+        assert_ne!(
+            b_approval_id, approval_id,
+            "the loser waits on its OWN card, not the spent one"
+        );
+        let b_card = store.read(&b_approval_id).expect("the loser's card exists");
+        assert_eq!(b_card.status, ApprovalStatus::Pending);
+        release.notify_one();
+    };
+    let (a_result, ()) = tokio::join!(call_a, controller);
+    a_result.expect("the winner's turn completes");
+
+    assert_eq!(
+        invocations.load(Ordering::SeqCst),
+        1,
+        "exactly one effect under overlapping admitted calls"
+    );
+
+    // The winner's claim is bound and recorded: caller identity + completed.
+    let won = store
+        .read(&approval_id)
+        .expect("the spent card is readable");
+    assert_eq!(won.status, ApprovalStatus::Consumed);
+    assert_eq!(
+        won.consumed_by.as_deref(),
+        Some(HOLDER),
+        "the claim records the verified caller, not an anonymous spender"
+    );
+    assert_eq!(
+        won.invocation_outcome.as_ref().map(|o| o.result),
+        Some(ardur_approvals::InvocationResult::Completed),
+        "the resolved invocation records its outcome"
+    );
+
+    // Every minted receipt — the first propose, the winner's turn, and the
+    // loser's fresh propose — chains and verifies.
+    let chain = load_persisted_chain(receipt_log.path()).expect("chain loads");
+    assert!(
+        chain.len() >= 2,
+        "propose + turn receipts are present, got {}",
+        chain.len()
+    );
+    verify_persisted_chain(&chain).expect("the chain verifies");
+}
+
+/// A failed gated invocation stays spent (consume-before-invoke) and records
+/// the failure — a failed tool is never recorded as a success, and the spent
+/// grant cannot be retried.
+#[tokio::test]
+async fn a_failed_gated_invocation_is_recorded_failed_and_stays_spent() {
+    struct FailingTool;
+    #[async_trait]
+    impl Tool for FailingTool {
+        fn id(&self) -> ToolId {
+            ToolId::new("gated.failing")
+        }
+        fn schema(&self) -> &ToolSchema {
+            static SCHEMA: std::sync::OnceLock<ToolSchema> = std::sync::OnceLock::new();
+            SCHEMA.get_or_init(|| ToolSchema {
+                description: "approval-gated failing tool".to_string(),
+                input_schema: json!({ "type": "object" }),
+                output_schema: json!({ "type": "object" }),
+                examples: vec![],
+            })
+        }
+        async fn invoke(
+            &self,
+            _ctx: &ToolContext,
+            _args: serde_json::Value,
+        ) -> Result<ToolOutput, ToolError> {
+            Err(ToolError::ExecutionFailed("boom".to_string()))
+        }
+        fn required_capabilities(&self) -> &[Capability] {
+            const CAPS: &[Capability] = &[Capability::ShellExec];
+            CAPS
+        }
+    }
+
+    /// Offers `gated.failing` once per submit so each attempt reaches the gate.
+    struct FailingProvider;
+    #[async_trait]
+    impl Provider for FailingProvider {
+        async fn complete(
+            &self,
+            _req: CompletionRequest,
+        ) -> Result<CompletionResponse, ProviderError> {
+            Ok(CompletionResponse {
+                content: String::new(),
+                finish_reason: FinishReason::ToolUse(vec![ToolCall {
+                    id: "call_1".to_string(),
+                    name: "gated.failing".to_string(),
+                    arguments: json!({"cmd": "ls"}),
+                }]),
+                usage: Usage::default(),
+                cost: CostTuple::default(),
+                raw_provider_response: None,
+            })
+        }
+        fn id(&self) -> ProviderId {
+            ProviderId("failing-provider".to_string())
+        }
+        fn supports_streaming(&self) -> bool {
+            false
+        }
+        fn rate_card(&self) -> &RateCard {
+            static RATE: std::sync::OnceLock<RateCard> = std::sync::OnceLock::new();
+            RATE.get_or_init(RateCard::anthropic_2026_q2_v1)
+        }
+    }
+
+    let approvals_dir = tempfile::tempdir().expect("approvals dir");
+    let store = ApprovalStore::new(approvals_dir.path());
+    let mut registry = ToolRegistry::new();
+    registry.register(Box::new(FailingTool)).expect("id unique");
+    let runtime = runtime_builder(Arc::new(FailingProvider))
+        .with_tools(Arc::new(registry))
+        .with_approvals(store.clone())
+        .with_approval_gated_capabilities(gated_caps())
+        .build()
+        .expect("runtime builds");
+    let token = mint_token_as(HOLDER, AUDIENCE, &[TOOL, "gated.failing", "cap.shell_exec"]);
+    let session_id = SessionId::new();
+
+    let approval_id = match runtime
+        .submit(request_for("run it", &token, session_id))
+        .await
+        .expect_err("pending")
+    {
+        RuntimeError::ApprovalRequired { approval_id, .. } => approval_id,
+        other => panic!("expected ApprovalRequired, got {other:?}"),
+    };
+    store
+        .decide(&approval_id, Decision::Approve, 1)
+        .expect("approve succeeds");
+
+    // The approved call runs the tool, which fails: the submit fails, the
+    // card stays spent, and the outcome records `failed`.
+    runtime
+        .submit(request_for("run it", &token, session_id))
+        .await
+        .expect_err("the failing tool fails the turn");
+    let card = store.read(&approval_id).expect("card readable");
+    assert_eq!(card.status, ApprovalStatus::Consumed);
+    assert_eq!(
+        card.invocation_outcome.as_ref().map(|o| o.result),
+        Some(ardur_approvals::InvocationResult::Failed),
+        "a failed tool is recorded as failed"
+    );
+
+    // The spent grant cannot be retried: the next identical call needs a
+    // fresh approval.
+    let next = runtime
+        .submit(request_for("run it", &token, session_id))
+        .await
+        .expect_err("a spent grant does not re-authorize");
+    match next {
+        RuntimeError::ApprovalRequired {
+            approval_id: fresh, ..
+        } => assert_ne!(fresh, approval_id, "a fresh pending card is proposed"),
+        other => panic!("expected ApprovalRequired, got {other:?}"),
+    }
+}
+
+/// A timed-out gated invocation leaves the spent card WITHOUT an outcome —
+/// the explicit ambiguous-effect state, never a fabricated resolution.
+#[tokio::test]
+async fn a_timed_out_gated_invocation_leaves_the_effect_ambiguous() {
+    let invocations = Arc::new(AtomicUsize::new(0));
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let provider = Arc::new(AlwaysWantsToolProvider::new(
+        "gated.shell",
+        json!({"cmd": "ls"}),
+        invocations.clone(),
+    ));
+    let approvals_dir = tempfile::tempdir().expect("approvals dir");
+    let store = ApprovalStore::new(approvals_dir.path());
+
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(Box::new(BlockingTool::new(
+            "gated.shell",
+            invocations.clone(),
+            entered.clone(),
+            release.clone(),
+        )))
+        .expect("gated id is unique");
+    let runtime = runtime_builder(provider)
+        .with_tools(Arc::new(registry))
+        .with_approvals(store.clone())
+        .with_approval_gated_capabilities(gated_caps())
+        .tool_timeout(std::time::Duration::from_millis(50))
+        .build()
+        .expect("runtime builds");
+    let token = mint_token_as(HOLDER, AUDIENCE, &[TOOL, "gated.shell", "cap.shell_exec"]);
+    let session_id = SessionId::new();
+
+    let approval_id = match runtime
+        .submit(request_for("run a command", &token, session_id))
+        .await
+        .expect_err("pending")
+    {
+        RuntimeError::ApprovalRequired { approval_id, .. } => approval_id,
+        other => panic!("expected ApprovalRequired, got {other:?}"),
+    };
+    store
+        .decide(&approval_id, Decision::Approve, 1)
+        .expect("approve succeeds");
+
+    // The tool blocks forever (never released); the 50ms timeout fires.
+    let err = runtime
+        .submit(request_for("run a command", &token, session_id))
+        .await
+        .expect_err("the hung tool times the call out");
+    assert!(
+        matches!(err, RuntimeError::ToolTimeout { .. }),
+        "expected ToolTimeout, got {err:?}"
+    );
+
+    let card = store.read(&approval_id).expect("card readable");
+    assert_eq!(
+        card.status,
+        ApprovalStatus::Consumed,
+        "the grant stays spent — consume-before-invoke"
+    );
+    assert!(
+        card.invocation_outcome.is_none(),
+        "no resolution is fabricated for an unresolved call: {:?}",
+        card.invocation_outcome
+    );
+    assert_eq!(
+        ApprovalStore::effect_state_of(&card),
+        ardur_approvals::EffectState::Ambiguous,
+        "the explicit ambiguous-effect state"
+    );
+    // Unblock the tool so the test runtime can drop cleanly.
+    release.notify_one();
 }

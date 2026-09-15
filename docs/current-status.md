@@ -185,10 +185,17 @@ must match registered capabilities exactly, with no wildcard expansion.
 
 The runtime matches a card on tool name, argument digest and session. A gated
 call proposes a pending card and attempts an `approval.propose.created.v1`
-receipt instead of running the tool. An approved card is consumed before the
-retried invocation, so even a failed tool does not make that approval reusable.
-See `authorize_or_propose_approval`, `crates/server/tests/approval_gate_boot.rs`
-and `crates/fused-runtime/tests/approval_gate.rs`.
+receipt instead of running the tool. An approved card's single execution is
+claimed — one winner across independent handles and processes, bound to the
+approved tool/arguments/session and stamped with the verified caller — before
+the retried invocation, so even a failed tool does not make that approval
+reusable, and an overlapping identical call gets its own pending card rather
+than a ride on the spent grant. A claimed card whose invocation never
+resolved (crash/timeout) reads as an explicit ambiguous-effect state, not as
+success. See `authorize_or_propose_approval`,
+`crates/server/tests/approval_gate_boot.rs`,
+`crates/fused-runtime/tests/approval_gate.rs` and
+`crates/approvals/tests/claim_once.rs`.
 
 Limits that remain:
 
@@ -203,17 +210,23 @@ Limits that remain:
   locations actually coincide; the CLI has no data-dir override yet (#366).
 - Card persistence and receipt/journal persistence are not one transaction.
   Proposal storage precedes receipt creation. HTTP decisions persist before
-  receipt minting; a mint/journal failure is logged and can still return 200.
-  A returned decision receipt ID is not written back into the persisted card.
+  receipt minting; a mint/journal failure no longer hides in a log line — the
+  decision card records a durable `audit_pending` obligation (visible in the
+  200 response and `GET /approvals`), cleared with the minted `receipt_id`
+  once the audit lands. The receipt verifier is never skipped to manufacture
+  audit success.
 
 The #417 slice adds `ARDUR_ADMIN_CAP_TOKEN_GATE=1`: approval decisions require
 both the existing admin bearer (401 on failure) and an
 `X-Ardur-Cap-Token` authorizing `approval.decide` (403 on failure). The token
 is checked before mutation and used for the attempted decision receipt; CORS
-allows the header. Verification uses the normal issuer key.
+allows the header. Verification uses the normal issuer key and, since E4.1,
+the **same durable deny backend the runtime verifier uses** — a capability
+revoked before admission is refused with 403 before any mutation, and a
+late revocation surfaces as a recorded pending audit obligation instead of a
+fabricated receipt.
 
-This is **approvals-only, opt-in, and without admin revocation**: the verifier
-uses an empty deny list. Keep token lifetimes short. Config/key/MCP/webhook/
+This is **approvals-only and opt-in**. Config/key/MCP/webhook/
 cron/skill write-admin endpoints and the broader dashboard are not delivered
 by this slice; #417 remains open.
 

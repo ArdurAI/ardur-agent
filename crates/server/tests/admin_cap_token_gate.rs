@@ -863,3 +863,122 @@ async fn reject_with_the_gate_a_presented_token_still_binds_the_receipt() {
         "a gated reject binds to the presented capability's holder"
     );
 }
+
+// ---------------------------------------------------------------------------
+// gh#417 admission/revocation parity (E4.1)
+// ---------------------------------------------------------------------------
+
+/// Boot a router wired like production: the SAME durable, file-backed deny
+/// list `AppState::boot_configured` opens at `<data_dir>/security/deny.list`.
+/// Returns the router and the deny-list path (a second handle revokes through
+/// the file, the way another process would).
+async fn boot_router_with_durable_deny(
+    config: &ardur_server::Config,
+) -> (axum::Router, std::path::PathBuf) {
+    use ardur_provider_runtime::{AnthropicProvider, ModelId, Provider};
+    use std::sync::Arc;
+
+    let deny_path = config.data_dir.join("security").join("deny.list");
+    let deny = ardur_fused_runtime::SharedDenyList::open_file(&deny_path)
+        .expect("durable deny list opens");
+    let provider: Arc<dyn Provider> =
+        Arc::new(AnthropicProvider::stub(ModelId::new(&config.model)));
+    let tools = Arc::new(ardur_server::example_registry("stub", "in-memory"));
+    let state = ardur_server::AppState::boot(config, provider, tools, deny)
+        .await
+        .expect("AppState boots");
+    (ardur_server::build_router(state), deny_path)
+}
+
+/// gh#417: a capability revoked in the configured durable deny store BEFORE
+/// admission must be refused at admission — 403, no mutation, no receipt.
+///
+/// RED on the reviewed baseline: `authorize_admin_mutation` verifies against
+/// an EMPTY in-memory deny list (`HashSetDenyList::new()`), so the revoked
+/// token below is admitted and the card is decided.
+#[tokio::test]
+async fn a_cap_token_revoked_before_admission_is_refused_and_nothing_mutates() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let id = "card-cap-revoked-before-admission";
+    let card_path = seed_pending(dir.path(), id);
+
+    let mut config = support::test_config_with_admin(&dir, None, vec![ADMIN_TOKEN.to_string()]);
+    config.admin_cap_token_gate = true;
+    let (router, deny_path) = boot_router_with_durable_deny(&config).await;
+    let keypair = server_issuer_keypair(&config.data_dir);
+    let public = keypair.public();
+    let serialized = mint(keypair, &[APPROVAL_DECIDE_VERB], far_future());
+
+    // Revoke the token BEFORE the request through a second, independent
+    // handle on the same durable file — the cross-process revocation shape
+    // Epic 3 delivered for the runtime verifier.
+    let token = ardur_cap_token::CapToken::from_base64(&serialized, &public)
+        .expect("the minted token parses");
+    let revoking_handle =
+        ardur_fused_runtime::SharedDenyList::open_file(&deny_path).expect("second handle opens");
+    revoking_handle
+        .revoke_token(&token)
+        .expect("the revocation persists");
+
+    let request = Request::builder()
+        .method("POST")
+        .uri(format!("/approvals/{id}/approve"))
+        .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+        .header("X-Ardur-Cap-Token", serialized)
+        .body(Body::empty())
+        .expect("request builds");
+    let (status, _) = support::oneshot(router, request).await;
+
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "a credential revoked before admission must not be admitted"
+    );
+    assert_eq!(
+        status_on_disk(&card_path),
+        "pending",
+        "a revoked-before-admission request must not mutate state"
+    );
+    let chain_path = dir.path().join("receipts").join("chain.jsonl");
+    if chain_path.exists() {
+        let chain = ardur_fused_runtime::load_persisted_chain(&chain_path).expect("chain loads");
+        assert!(
+            chain.is_empty(),
+            "a revoked-before-admission request must not mint a success receipt"
+        );
+    }
+}
+
+/// The allowed-token control: on the SAME durable backend, a token that was
+/// never revoked is still admitted — the fix must narrow denial to revoked
+/// credentials, not deny every token.
+#[tokio::test]
+async fn an_unrevoked_token_on_the_durable_backend_is_still_accepted() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let id = "card-cap-durable-allowed";
+    let card_path = seed_pending(dir.path(), id);
+
+    let mut config = support::test_config_with_admin(&dir, None, vec![ADMIN_TOKEN.to_string()]);
+    config.admin_cap_token_gate = true;
+    let (router, _deny_path) = boot_router_with_durable_deny(&config).await;
+    let keypair = server_issuer_keypair(&config.data_dir);
+
+    let request = Request::builder()
+        .method("POST")
+        .uri(format!("/approvals/{id}/approve"))
+        .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+        .header(
+            "X-Ardur-Cap-Token",
+            mint(keypair, &[APPROVAL_DECIDE_VERB], far_future()),
+        )
+        .body(Body::empty())
+        .expect("request builds");
+    let (status, _) = support::oneshot(router, request).await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "an unrevoked token on the durable backend is admitted"
+    );
+    assert_eq!(status_on_disk(&card_path), "approved");
+}
