@@ -37,7 +37,8 @@ async fn a_revoked_parent_token_denies_its_sub_agent() {
         .expect("an un-revoked sub-agent runs");
 
     // The parent pulls the kill switch.
-    deny.revoke_token(&parent_token);
+    deny.revoke_token(&parent_token)
+        .expect("revocation persists");
 
     let err = runtime
         .ask(&handle, ask("keep going after revocation", 25))
@@ -85,7 +86,8 @@ async fn revoking_a_parent_kills_delegations_already_minted_from_it() {
         .await
         .expect("the attenuated sub-agent runs");
 
-    deny.revoke_token(&parent_token);
+    deny.revoke_token(&parent_token)
+        .expect("revocation persists");
 
     let err = runtime
         .ask(&handle, ask("work after revocation", 25))
@@ -126,7 +128,7 @@ async fn revoking_one_parent_does_not_deny_an_unrelated_one() {
         .await
         .expect("spawn b");
 
-    deny_a.revoke_token(&token_a);
+    deny_a.revoke_token(&token_a).expect("revocation persists");
 
     runtime_a
         .ask(&handle_a, ask("should be denied", 25))

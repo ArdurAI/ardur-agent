@@ -878,7 +878,12 @@ impl FusedRuntime {
                 reason: format!("revoke: {e}"),
             }
         })?;
-        self.deny.revoke_token(&token);
+        self.deny.revoke_token(&token).map_err(|e| {
+            // Fail-closed (gh#361): with a durable backend an I/O failure means
+            // the revocation did NOT land on disk — the caller must not be told
+            // it succeeded.
+            RuntimeError::Internal(anyhow::anyhow!("persisting revocation failed: {e}"))
+        })?;
         let ctx = RevokeCtx {
             session_id,
             cap_token_id: &cap_token,

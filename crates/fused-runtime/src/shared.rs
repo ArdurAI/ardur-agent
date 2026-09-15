@@ -15,39 +15,93 @@
 //! [`revoke_cap_token`]: crate::FusedRuntime::revoke_cap_token
 //! [`remaining_budget`]: crate::FusedRuntime::remaining_budget
 
+use std::io;
+use std::path::Path;
 use std::sync::Arc;
 
-use ardur_cap_token::{DenyList, HashSetDenyList};
+use ardur_cap_token::{DenyList, FileDenyList, HashSetDenyList};
 use ardur_cost_gate::{
     BudgetStore, CostDelta, CostEnvelope, CostTuple, HolderId, ReservationHandle,
 };
 use async_trait::async_trait;
 use parking_lot::Mutex;
 
+/// The revocation backend behind a [`SharedDenyList`].
+enum DenyBackend {
+    /// Process-local: revocation lives only as long as the process.
+    Memory(HashSetDenyList),
+    /// Durable: every revocation is appended to (and synced into) a hex-line
+    /// file; lookups reload the file, so a revocation written by one process
+    /// is visible to any other process that opened the same path
+    /// ([`FileDenyList`]'s contract).
+    File(FileDenyList),
+}
+
 /// A revocation deny-list shared between the cap-token verifier and the
-/// runtime. Cloning shares the underlying set, so revoking through one handle is
-/// visible to every other.
-#[derive(Clone, Default)]
-pub struct SharedDenyList(Arc<Mutex<HashSetDenyList>>);
+/// runtime. Cloning shares the underlying backend, so revoking through one
+/// handle is visible to every other.
+///
+/// The default ([`new`](Self::new)) is in-memory: revocation lasts only for
+/// the life of the process. [`open_file`](Self::open_file) makes revocation
+/// durable across restarts and visible to other processes sharing the path
+/// (Epic 3, gh#361).
+#[derive(Clone)]
+pub struct SharedDenyList(Arc<Mutex<DenyBackend>>);
+
+impl Default for SharedDenyList {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl SharedDenyList {
-    /// An empty shared deny-list.
+    /// An empty in-memory shared deny-list (process-local revocation).
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self(Arc::new(Mutex::new(DenyBackend::Memory(
+            HashSetDenyList::new(),
+        ))))
+    }
+
+    /// Open (or create) a durable, file-backed shared deny-list at `path`.
+    ///
+    /// Every revocation through this handle is appended to the file and
+    /// synced; lookups reload the file, so revocations survive a restart and
+    /// are visible to any other process that opened the same path.
+    ///
+    /// # Errors
+    /// Returns an I/O error if the file cannot be created or read (see
+    /// [`FileDenyList::open`]).
+    pub fn open_file(path: impl AsRef<Path>) -> io::Result<Self> {
+        let backend = FileDenyList::open(path.as_ref().to_path_buf())?;
+        Ok(Self(Arc::new(Mutex::new(DenyBackend::File(backend)))))
     }
 
     /// Revoke every revocation id carried by `token`. Subsequent verifies that
     /// consult this list will reject the token with
     /// [`CapTokenError::Revoked`](ardur_cap_token::CapTokenError::Revoked).
-    pub fn revoke_token(&self, token: &ardur_cap_token::CapToken) {
-        self.0.lock().revoke_token(token);
+    ///
+    /// # Errors
+    /// With the durable backend this persists to disk; an I/O failure means
+    /// the revocation did NOT land and the caller must not report success.
+    /// The in-memory backend is infallible.
+    pub fn revoke_token(&self, token: &ardur_cap_token::CapToken) -> io::Result<()> {
+        match &mut *self.0.lock() {
+            DenyBackend::Memory(list) => {
+                list.revoke_token(token);
+                Ok(())
+            }
+            DenyBackend::File(list) => list.revoke_token(token),
+        }
     }
 }
 
 impl DenyList for SharedDenyList {
     fn is_revoked(&self, revocation_ids: &[Vec<u8>]) -> bool {
-        self.0.lock().is_revoked(revocation_ids)
+        match &*self.0.lock() {
+            DenyBackend::Memory(list) => list.is_revoked(revocation_ids),
+            DenyBackend::File(list) => list.is_revoked(revocation_ids),
+        }
     }
 }
 
