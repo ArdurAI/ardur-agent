@@ -35,6 +35,15 @@ uuid = { workspace = true, features = ["v4"] }
 hex = { workspace = true }
 # Non-poisoning lock around the file-backed deny-list cache.
 parking_lot = { workspace = true }
+# Proof-of-possession (#363) signs a per-request binding with the holder's key.
+# ed25519-dalek is ALREADY in the lock as biscuit-auth's own signature backend,
+# so naming it here adds no new supply-chain surface — it pins the same version
+# biscuit resolves rather than introducing a second crypto stack.
+ed25519-dalek = { version = "2.2.0", default-features = false, features = ["std"] }
+# Holder-key thumbprints are SHA-256 over the raw public key.
+sha2 = { workspace = true }
+# Signatures travel base64url-encoded, matching the receipt/JWS convention.
+base64 = { workspace = true }
 
 [dev-dependencies]
 # Throwaway deny-list files for persistence/propagation tests.
