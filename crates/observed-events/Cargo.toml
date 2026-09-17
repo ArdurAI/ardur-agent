@@ -1,0 +1,41 @@
+# ardur-observed-events — typed ObservedEvent emission for local tool steps.
+#
+# Gap G13 / finding A1 on ArdurAI/ardur-agent#502: the Ardur governance proxy
+# fronts MODEL traffic, so local tool steps (file.*, shell.run) never transit it.
+# Without this crate the "every action is governed" claim covers model rounds
+# only, while the tools that actually mutate the world stay outside the plane.
+#
+# The crate projects a tool execution into a verifier-contract v0.1 §6.2
+# ObservedEvent and applies the §9 fail-closed rules, so the runtime can report
+# each local step to the plane. It is deliberately standalone: no dependency on
+# the fused runtime, so it can be tested — and reviewed — on its own.
+
+[package]
+name = "ardur-observed-events"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Shared value types the projection speaks in (CostTuple for budget deltas).
+ardur-runtime = { workspace = true }
+# ObservedEvent serialization: the plane consumes JSON per the spec's field set.
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+# Stable event identifiers.
+uuid = { workspace = true, features = ["v4", "serde"] }
+# SHA-256 for the manifest digest and normalized-envelope hashing.
+sha2 = { workspace = true }
+# Structured warnings when an event is emitted with degraded visibility.
+tracing = { workspace = true }
+
+# NOTE: §6.2 requires an RFC 3339 `timestamp`, but neither `time` nor `chrono` is
+# a workspace dependency. Rather than add one for a single format call, the
+# formatting is done from `std::time` (see `rfc3339_from_unix_millis`), which is
+# exact for the civil-calendar arithmetic involved and is unit-tested against
+# known values including leap years and end-of-year boundaries.
+
+[dev-dependencies]
+serde_json = { workspace = true }
