@@ -236,6 +236,12 @@ async fn late_denial(streaming: bool) -> RuntimeError {
         "permit(principal, action, resource);".to_string(),
     ))
     .expect("test policy");
+    let storage = tempfile::tempdir().expect("owned settlement fixture");
+    let receipt_log = storage
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("receipts.jsonl");
     let runtime = FusedRuntimeBuilder::new(
         root,
         policy,
@@ -265,6 +271,7 @@ async fn late_denial(streaming: bool) -> RuntimeError {
     )
     .deny_list(deny)
     .with_tools(Arc::new(tools))
+    .receipt_log(receipt_log)
     .build()
     .expect("fused runtime");
 
