@@ -71,8 +71,8 @@ pub use grant::{GrantDescriptor, MissionRef};
 pub use mission::{
     BudgetPair, DelegationPolicy, EFFECT_CLASSES, EffectPolicy, FlowPolicy, GovernedMemoryStore,
     GrantRecord, LineageBudgets, MissionAuthoringError, MissionDeclaration, MissionIdentity,
-    ReceiptPolicy, ResourcePolicy, SUPPORTED_TELEMETRY, author_mission_declaration, mission_digest,
-    tool_manifest_digest,
+    ReceiptPolicy, ResourcePolicy, SUPPORTED_TELEMETRY, ToolManifestEntry,
+    author_mission_declaration, mission_digest, tool_manifest_digest, tool_manifest_digest_of,
 };
 pub use project::{
     AuthOutcome, StepContext, ToolInvocation, check_verdict_invariant, project_execution_receipt,

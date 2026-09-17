@@ -68,6 +68,25 @@ pub const SUPPORTED_TELEMETRY: [&str; 12] = [
 ];
 
 /// One operator grant, as recorded in `~/.ardur/grants.json`.
+///
+/// # This is a ledger record, not an activated grant
+///
+/// The runtime activates a record only when its `subject` matches the local
+/// subject AND its `receipt_id` resolves to a `tool.grant.allow.v1` receipt
+/// whose payload digest matches (see `GrantTooling::validate_records`). A
+/// record that fails either check grants nothing at runtime.
+///
+/// [`author_mission_declaration`] therefore takes **already-activated** records.
+/// Declaring a record the runtime would skip would state authority the runtime
+/// does not have — the precise failure this module exists to avoid. Callers
+/// reading the raw ledger must filter first; [`is_activatable`] covers the
+/// subject and receipt-presence half that does not require the chain.
+// NOTE: deliberately NOT `deny_unknown_fields`. §5.4's fail-closed rule governs
+// the Mission Declaration this module EMITS; `GrantRecord` is an INPUT parsed
+// from the operator's existing `~/.ardur/grants.json`, which carries fields this
+// module does not consume (`granted_at_ms`, and whatever the CLI adds next).
+// Rejecting those would break reading the real ledger without making any
+// declaration safer.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct GrantRecord {
     /// Built-in tool id (e.g. `file.read`).
@@ -81,6 +100,30 @@ pub struct GrantRecord {
     /// Operator subject that recorded the grant.
     #[serde(default)]
     pub subject: String,
+    /// The `tool.grant.allow.v1` receipt that authorized this grant.
+    ///
+    /// `None` means the record was never receipted, so the runtime skips it.
+    #[serde(default)]
+    pub receipt_id: Option<String>,
+}
+
+impl GrantRecord {
+    /// Whether this record could be activated for `local_subject`.
+    ///
+    /// Covers the two checks that need no receipt chain: the subject must match
+    /// this machine, and a receipt id must be present. Full activation also
+    /// requires the receipt to resolve in the chain with a matching payload
+    /// digest, which only the runtime can establish — so this is a necessary,
+    /// not sufficient, condition, and it is named accordingly.
+    #[must_use]
+    pub fn is_activatable(&self, local_subject: &str) -> bool {
+        !self.tool.trim().is_empty()
+            && self.subject == local_subject
+            && self
+                .receipt_id
+                .as_deref()
+                .is_some_and(|id| !id.trim().is_empty())
+    }
 }
 
 /// Why an MD could not be authored.
@@ -95,6 +138,14 @@ pub enum MissionAuthoringError {
     /// A required identity claim was blank.
     #[error("mission identity field `{0}` must not be empty")]
     EmptyIdentity(&'static str),
+    /// `exp` is at or before `iat`, so the MD is expired for its whole life.
+    #[error("mission lifetime is inverted: exp {exp} is not after iat {iat}")]
+    InvalidLifetime {
+        /// Issued-at, NumericDate seconds.
+        iat: u64,
+        /// Expiry, NumericDate seconds.
+        exp: u64,
+    },
     /// The declaration could not be canonicalized for hashing.
     #[error("canonicalizing the mission payload failed: {0}")]
     Canonicalization(String),
@@ -102,6 +153,7 @@ pub enum MissionAuthoringError {
 
 /// A resource policy: which family, which pattern, what sensitivity.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ResourcePolicy {
     /// Resource namespace used for policy matching (e.g. `fs`).
     pub family: String,
@@ -113,6 +165,7 @@ pub struct ResourcePolicy {
 
 /// A per-class effect ceiling.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EffectPolicy {
     /// One of [`EFFECT_CLASSES`].
     pub side_effect_class: String,
@@ -122,6 +175,7 @@ pub struct EffectPolicy {
 
 /// A budget ceiling and the share reservable by children.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BudgetPair {
     /// Mission-wide ceiling.
     pub ceiling: u64,
@@ -131,6 +185,7 @@ pub struct BudgetPair {
 
 /// Mission-wide escrow ceilings keyed by effect class.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LineageBudgets {
     /// One entry per class in [`EFFECT_CLASSES`]; all five are required.
     pub per_effect_class: BTreeMap<String, BudgetPair>,
@@ -138,6 +193,7 @@ pub struct LineageBudgets {
 
 /// How this mission may delegate.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DelegationPolicy {
     /// Maximum delegation depth. `0` forbids delegation entirely.
     pub max_depth: u64,
@@ -149,6 +205,7 @@ pub struct DelegationPolicy {
 
 /// An information-flow rule between content classes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FlowPolicy {
     /// Source content class.
     pub from_class: String,
@@ -160,6 +217,7 @@ pub struct FlowPolicy {
 
 /// Receipt assurance level required by the mission.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReceiptPolicy {
     /// `minimal`, `counter_signed`, or `transparency_logged`.
     pub level: String,
@@ -167,6 +225,7 @@ pub struct ReceiptPolicy {
 
 /// A memory store the mission governs.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GovernedMemoryStore {
     /// Stable store identifier.
     pub store_id: String,
@@ -180,6 +239,7 @@ pub struct GovernedMemoryStore {
 
 /// A v0.1 Mission Declaration claim set.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MissionDeclaration {
     /// Issuer identity.
     pub iss: String,
@@ -253,6 +313,41 @@ fn tool_class_uri(tool: &str) -> String {
     format!("ardur://tool/{tool}")
 }
 
+/// Render a grant scope into schema-legal resource patterns.
+///
+/// Scope syntax is **tool-specific**, and conflating the forms produces patterns
+/// that match nothing:
+///
+/// - `file.*` scopes are confinement ROOTS, so they govern the subtree
+///   (`glob:<root>/**`). An `exact:` root would fail to match the files actually
+///   touched beneath it.
+/// - `shell.run` scopes are `|`-separated command prefixes. `glob:git|cargo/**`
+///   is not a path and matches no command; each alternative becomes its own
+///   `exact:` policy.
+/// - `http.fetch` scopes are comma-separated hosts, for the same reason.
+///
+/// A scope already containing a glob metacharacter is passed through, since the
+/// operator wrote a pattern deliberately.
+fn scope_patterns(tool: &str, scope: &str) -> Vec<String> {
+    match tool {
+        "shell.run" => scope
+            .split('|')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|cmd| format!("exact:{cmd}"))
+            .collect(),
+        "http.fetch" => scope
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|host| format!("exact:{host}"))
+            .collect(),
+        _ if scope.contains('*') || scope.contains('?') => vec![format!("glob:{scope}")],
+        // Filesystem confinement root -> its subtree.
+        _ => vec![format!("glob:{}/**", scope.trim_end_matches('/'))],
+    }
+}
+
 /// The resource family a built-in tool operates in.
 fn resource_family(tool: &str) -> &'static str {
     match tool {
@@ -270,10 +365,49 @@ fn resource_family(tool: &str) -> &'static str {
 /// so `["ab","c"]` and `["a","bc"]` cannot collide.
 #[must_use]
 pub fn tool_manifest_digest(tool_ids: &[String]) -> String {
-    let unique: BTreeSet<&String> = tool_ids.iter().collect();
-    let joined: Vec<&str> = unique.iter().map(|s| s.as_str()).collect();
-    let payload = joined.join("\u{0}");
-    format!("sha-256:{}", sha256_hex(payload.as_bytes()))
+    let entries: Vec<ToolManifestEntry> = tool_ids
+        .iter()
+        .map(|id| ToolManifestEntry {
+            id: id.clone(),
+            descriptor_digest: None,
+        })
+        .collect();
+    tool_manifest_digest_of(&entries)
+}
+
+/// One tool as it is pinned by the manifest digest.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ToolManifestEntry {
+    /// The stable tool id.
+    pub id: String,
+    /// Digest over the tool's descriptor: input/output schema, required
+    /// capabilities, implementation identity.
+    ///
+    /// `None` means the caller could only supply the id. That is a WEAKER pin:
+    /// upgrading a tool in place — new schema, new capabilities, same id —
+    /// leaves an id-only digest unchanged, and that is the commonest form of
+    /// manifest drift. Callers with access to the registry should supply it.
+    pub descriptor_digest: Option<String>,
+}
+
+/// Digest a tool manifest, pinning each tool's descriptor when available.
+///
+/// Entries are sorted and de-duplicated so registry enumeration order cannot
+/// read as drift, and each field is **length-prefixed** rather than
+/// separator-joined: a separator collides as soon as an id can contain it
+/// (`["ab","c"]` vs `["a","bc"]`, or a NUL inside a remotely-registered id).
+#[must_use]
+pub fn tool_manifest_digest_of(entries: &[ToolManifestEntry]) -> String {
+    let unique: BTreeSet<&ToolManifestEntry> = entries.iter().collect();
+    let mut payload: Vec<u8> = Vec::new();
+    for entry in unique {
+        let descriptor = entry.descriptor_digest.as_deref().unwrap_or("");
+        for field in [entry.id.as_str(), descriptor] {
+            payload.extend_from_slice(&(field.len() as u64).to_be_bytes());
+            payload.extend_from_slice(field.as_bytes());
+        }
+    }
+    format!("sha-256:{}", sha256_hex(&payload))
 }
 
 /// Author a workspace-scoped Mission Declaration from the operator's real state.
@@ -294,6 +428,12 @@ pub fn author_mission_declaration(
         ("aud", &identity.aud),
         ("mission_id", &identity.mission_id),
         ("jti", &identity.jti),
+        // A blank revocation_ref gives the verifier no place to check whether
+        // this mission was revoked. §9 treats unavailable revocation state as
+        // fail-closed, so emitting one produces a signed artifact that can only
+        // ever be rejected — a caller error surfacing as an authorization
+        // failure much later.
+        ("revocation_ref", &identity.revocation_ref),
     ] {
         if value.trim().is_empty() {
             return Err(MissionAuthoringError::EmptyIdentity(match name {
@@ -301,9 +441,20 @@ pub fn author_mission_declaration(
                 "sub" => "sub",
                 "aud" => "aud",
                 "mission_id" => "mission_id",
+                "revocation_ref" => "revocation_ref",
                 _ => "jti",
             }));
         }
+    }
+
+    // An `exp` at or before `iat` is expired for its entire validity interval:
+    // a verifier can only ever reject it. Refuse rather than sign an artifact
+    // that is guaranteed useless.
+    if identity.exp <= identity.iat {
+        return Err(MissionAuthoringError::InvalidLifetime {
+            iat: identity.iat,
+            exp: identity.exp,
+        });
     }
 
     // Only grants that actually registered a tool contribute authority.
@@ -321,22 +472,15 @@ pub fn author_mission_declaration(
         // would declare authority the runtime does not actually grant.
         if let Some(scope) = grant.scope.as_deref().map(str::trim) {
             if !scope.is_empty() {
-                let pattern = if scope.contains('*') {
-                    format!("glob:{scope}")
-                } else {
-                    // A confinement ROOT governs everything beneath it, so the
-                    // declared pattern must be the subtree, not the bare path —
-                    // an `exact:` root would fail to match the files actually
-                    // touched under it.
-                    format!("glob:{}/**", scope.trim_end_matches('/'))
-                };
-                let policy = ResourcePolicy {
-                    family: resource_family(tool).to_string(),
-                    pattern,
-                    sensitivity: "internal".to_string(),
-                };
-                if !resource_policies.contains(&policy) {
-                    resource_policies.push(policy);
+                for pattern in scope_patterns(tool, scope) {
+                    let policy = ResourcePolicy {
+                        family: resource_family(tool).to_string(),
+                        pattern,
+                        sensitivity: "internal".to_string(),
+                    };
+                    if !resource_policies.contains(&policy) {
+                        resource_policies.push(policy);
+                    }
                 }
             }
         }
@@ -345,6 +489,13 @@ pub fn author_mission_declaration(
     if tools.is_empty() {
         return Err(MissionAuthoringError::NoGrantedTools);
     }
+
+    // JCS preserves array order, so ledger record order would otherwise change
+    // `mission_digest` for an unchanged workspace — and a digest that moves
+    // without a policy change cannot be used to detect one that matters.
+    resource_policies.sort_by(|a, b| {
+        (&a.family, &a.pattern, &a.sensitivity).cmp(&(&b.family, &b.pattern, &b.sensitivity))
+    });
 
     // The schema requires at least one resource policy. When every grant is
     // scope-less we still must not invent one, so declare a policy that matches
@@ -486,12 +637,14 @@ mod tests {
                 capabilities: vec!["cap.fs_read".into()],
                 scope: Some("/private/tmp/ardur-beta".into()),
                 subject: "cli://localhost".into(),
+                receipt_id: Some("receipt-1".into()),
             },
             GrantRecord {
                 tool: "file.write".into(),
                 capabilities: vec!["cap.fs_write".into()],
                 scope: Some("/private/tmp/ardur-beta".into()),
                 subject: "cli://localhost".into(),
+                receipt_id: Some("receipt-1".into()),
             },
         ]
     }
@@ -525,6 +678,7 @@ mod tests {
             capabilities: vec!["cap.fs_read".into()],
             scope: None,
             subject: "cli://localhost".into(),
+            receipt_id: Some("receipt-3".into()),
         }];
         let md = author_mission_declaration(&identity(), &grants, &budgets()).unwrap();
         // Exactly one policy, and it matches nothing — never a `glob:/**`.
@@ -641,6 +795,7 @@ mod tests {
             capabilities: vec!["cap.process_exec".into()],
             scope: Some("git|cargo".into()),
             subject: "cli://localhost".into(),
+            receipt_id: Some("receipt-4".into()),
         });
         let md2 = author_mission_declaration(&identity(), &more, &budgets()).unwrap();
         assert_ne!(md.tool_manifest_digest, md2.tool_manifest_digest);
@@ -662,6 +817,7 @@ mod tests {
             capabilities: vec!["cap.net_fetch".into()],
             scope: Some("example.com".into()),
             subject: "cli://localhost".into(),
+            receipt_id: Some("receipt-5".into()),
         });
         let b = author_mission_declaration(&identity(), &grants, &budgets()).unwrap();
         assert_ne!(mission_digest(&a).unwrap(), mission_digest(&b).unwrap());
@@ -690,6 +846,9 @@ mod tests {
 
     #[test]
     fn real_grant_ledger_records_deserialize() {
+        // Guards the input/output asymmetry: the ledger carries fields this
+        // module does not consume, so GrantRecord must stay tolerant even
+        // though the emitted MD is strict.
         // The shape actually written by `ardur grant allow`.
         let json = r#"[{"tool":"file.read","capabilities":["cap.fs_read"],
             "scope":"/private/tmp/ardur-beta","subject":"cli://localhost-502",
@@ -697,5 +856,159 @@ mod tests {
         let grants: Vec<GrantRecord> = serde_json::from_str(json).expect("ledger parses");
         assert_eq!(grants[0].tool, "file.read");
         assert_eq!(grants[0].scope.as_deref(), Some("/private/tmp/ardur-beta"));
+    }
+
+    #[test]
+    fn a_shell_scope_declares_commands_not_a_filesystem_subtree() {
+        // `glob:git|cargo/**` is not a path and matches no command, so the MD
+        // would declare unusable authority while looking complete.
+        let grants = vec![GrantRecord {
+            tool: "shell.run".into(),
+            capabilities: vec!["cap.process_exec".into()],
+            scope: Some("git|cargo".into()),
+            subject: "cli://localhost".into(),
+            receipt_id: Some("r".into()),
+        }];
+        let md = author_mission_declaration(&identity(), &grants, &budgets()).unwrap();
+        let patterns: BTreeSet<&str> = md
+            .resource_policies
+            .iter()
+            .map(|p| p.pattern.as_str())
+            .collect();
+        assert!(patterns.contains("exact:git"), "got {patterns:?}");
+        assert!(patterns.contains("exact:cargo"), "got {patterns:?}");
+        assert!(
+            !patterns.iter().any(|p| p.contains('|')),
+            "a shell prefix list must not become one pattern: {patterns:?}"
+        );
+    }
+
+    #[test]
+    fn an_http_scope_declares_hosts_not_a_filesystem_subtree() {
+        let grants = vec![GrantRecord {
+            tool: "http.fetch".into(),
+            capabilities: vec!["cap.net_fetch".into()],
+            scope: Some("example.com,api.example.com".into()),
+            subject: "cli://localhost".into(),
+            receipt_id: Some("r".into()),
+        }];
+        let md = author_mission_declaration(&identity(), &grants, &budgets()).unwrap();
+        let patterns: BTreeSet<&str> = md
+            .resource_policies
+            .iter()
+            .map(|p| p.pattern.as_str())
+            .collect();
+        assert!(patterns.contains("exact:example.com"), "got {patterns:?}");
+        assert!(
+            patterns.contains("exact:api.example.com"),
+            "got {patterns:?}"
+        );
+        assert!(
+            !patterns.iter().any(|p| p.contains(',')),
+            "a host list must not become one pattern: {patterns:?}"
+        );
+    }
+
+    #[test]
+    fn record_order_does_not_change_the_mission_digest() {
+        // JCS preserves array order, so an unsorted policy list would make an
+        // unchanged workspace look like it drifted.
+        let mut reversed = scoped_grants();
+        reversed.reverse();
+        let a = author_mission_declaration(&identity(), &scoped_grants(), &budgets()).unwrap();
+        let b = author_mission_declaration(&identity(), &reversed, &budgets()).unwrap();
+        assert_eq!(mission_digest(&a).unwrap(), mission_digest(&b).unwrap());
+    }
+
+    #[test]
+    fn a_blank_revocation_ref_is_refused() {
+        // Without it the verifier has nowhere to check revocation, and §9 fails
+        // closed — so the signed MD could only ever be rejected.
+        let mut id = identity();
+        id.revocation_ref = "  ".into();
+        assert_eq!(
+            author_mission_declaration(&id, &scoped_grants(), &budgets()),
+            Err(MissionAuthoringError::EmptyIdentity("revocation_ref"))
+        );
+    }
+
+    #[test]
+    fn an_inverted_lifetime_is_refused() {
+        let mut id = identity();
+        id.exp = id.iat;
+        assert!(matches!(
+            author_mission_declaration(&id, &scoped_grants(), &budgets()),
+            Err(MissionAuthoringError::InvalidLifetime { .. })
+        ));
+
+        let mut id2 = identity();
+        id2.exp = id2.iat - 1;
+        assert!(matches!(
+            author_mission_declaration(&id2, &scoped_grants(), &budgets()),
+            Err(MissionAuthoringError::InvalidLifetime { .. })
+        ));
+    }
+
+    #[test]
+    fn unknown_claims_are_rejected_when_parsing_a_declaration() {
+        // §5.4 fail-closed. Serde's default silently ignores unknown fields,
+        // which would let a verifier drop a claim the issuer believed enforced.
+        let md = author_mission_declaration(&identity(), &scoped_grants(), &budgets()).unwrap();
+        let mut json = serde_json::to_value(&md).unwrap();
+        json.as_object_mut()
+            .unwrap()
+            .insert("unexpected_claim".into(), serde_json::Value::Bool(true));
+        assert!(
+            serde_json::from_value::<MissionDeclaration>(json).is_err(),
+            "an unknown top-level claim must not deserialize"
+        );
+    }
+
+    #[test]
+    fn the_manifest_digest_changes_when_a_tool_descriptor_changes() {
+        // An id-only digest cannot detect an in-place upgrade (new schema or
+        // capabilities, same id) — the commonest form of manifest drift.
+        let a = tool_manifest_digest_of(&[ToolManifestEntry {
+            id: "file.read".into(),
+            descriptor_digest: Some("sha-256:aaa".into()),
+        }]);
+        let b = tool_manifest_digest_of(&[ToolManifestEntry {
+            id: "file.read".into(),
+            descriptor_digest: Some("sha-256:bbb".into()),
+        }]);
+        assert_ne!(a, b, "a changed descriptor must change the manifest digest");
+    }
+
+    #[test]
+    fn manifest_entries_are_length_prefixed_against_separator_collisions() {
+        let two = tool_manifest_digest(&["file.read".into(), "shell.run".into()]);
+        let one = tool_manifest_digest(&["file.read\u{0}shell.run".into()]);
+        assert_ne!(two, one);
+    }
+
+    #[test]
+    fn only_activatable_records_should_be_declared() {
+        // The runtime skips a record whose subject does not match or which has
+        // no grant receipt; declaring it would overstate authority.
+        let foreign = GrantRecord {
+            tool: "file.read".into(),
+            capabilities: vec!["cap.fs_read".into()],
+            scope: Some("/private/tmp/other".into()),
+            subject: "cli://another-machine".into(),
+            receipt_id: Some("r".into()),
+        };
+        assert!(!foreign.is_activatable("cli://localhost"));
+
+        let unreceipted = GrantRecord {
+            receipt_id: None,
+            ..foreign.clone()
+        };
+        assert!(!unreceipted.is_activatable("cli://another-machine"));
+
+        let ok = GrantRecord {
+            subject: "cli://localhost".into(),
+            ..foreign
+        };
+        assert!(ok.is_activatable("cli://localhost"));
     }
 }

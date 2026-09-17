@@ -33,7 +33,18 @@ fn schema_path() -> Option<PathBuf> {
 /// Load the schema, or skip **loudly** — a silent pass would certify nothing.
 fn schema() -> Option<Value> {
     match schema_path() {
-        Some(p) => Some(serde_json::from_str(&std::fs::read_to_string(&p).ok()?).ok()?),
+        Some(p) => {
+            // A schema that EXISTS but cannot be read or parsed is a broken
+            // schema, not an absent one. Returning None here would make every
+            // test pass with no validation and no diagnostic.
+            let text = std::fs::read_to_string(&p)
+                .unwrap_or_else(|e| panic!("MD schema at {} could not be read: {e}", p.display()));
+            Some(
+                serde_json::from_str(&text).unwrap_or_else(|e| {
+                    panic!("MD schema at {} is not valid JSON: {e}", p.display())
+                }),
+            )
+        }
         None => {
             eprintln!(
                 "SKIPPED: MD schema not found. Set ARDUR_MD_SCHEMA or clone the plane to \
@@ -79,12 +90,14 @@ fn grants() -> Vec<GrantRecord> {
             capabilities: vec!["cap.fs_read".into()],
             scope: Some("/private/tmp/ardur-beta".into()),
             subject: "cli://localhost".into(),
+            receipt_id: Some("receipt-a".into()),
         },
         GrantRecord {
             tool: "shell.run".into(),
             capabilities: vec!["cap.process_exec".into()],
             scope: Some("git|cargo".into()),
             subject: "cli://localhost".into(),
+            receipt_id: Some("receipt-a".into()),
         },
     ]
 }
@@ -206,11 +219,19 @@ fn validate(schema: &Value, md: &Value) -> Result<(), Vec<String>> {
     // 5. resource_policies patterns must be `exact:` or `glob:` prefixed.
     if let Some(list) = obj.get("resource_policies").and_then(|v| v.as_array()) {
         for p in list {
+            // No length escape hatch: an empty or short pattern such as "abc"
+            // has no prefix either, and letting it through made the validator
+            // report success for a malformed policy.
             let pat = p["pattern"].as_str().unwrap_or_default();
-            if !(pat.starts_with("exact:") || pat.starts_with("glob:")) && pat.len() > 6 {
-                errors.push(format!(
+            match pat
+                .strip_prefix("exact:")
+                .or_else(|| pat.strip_prefix("glob:"))
+            {
+                Some(rest) if !rest.is_empty() => {}
+                Some(_) => errors.push("resource pattern has an empty body".to_string()),
+                None => errors.push(format!(
                     "resource pattern `{pat}` lacks an exact:/glob: prefix"
-                ));
+                )),
             }
         }
     }
