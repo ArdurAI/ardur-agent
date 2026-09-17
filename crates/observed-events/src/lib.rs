@@ -219,10 +219,13 @@ impl DelegationEdge {
     /// step must yield `insufficient_evidence`, never `compliant`.
     #[must_use]
     pub fn is_hidden_hop(&self) -> bool {
-        let claims_delegation =
-            self.delegation_from.is_some() || !self.downstream_receipt_ids.is_empty();
+        // Only an INCOMING delegation needs a parent link. `downstream_receipt_ids`
+        // records children this event spawned — a root event that delegates
+        // outward legitimately has no parent, and counting it here would make
+        // every root delegation `insufficient_evidence`.
+        let claims_incoming_delegation = self.delegation_from.is_some();
         let linkable = self.parent_event_id.is_some() || self.parent_receipt_id.is_some();
-        claims_delegation && !linkable
+        claims_incoming_delegation && !linkable
     }
 }
 
@@ -314,10 +317,27 @@ impl ObservedEvent {
 
         // §9.6 — manifest drift. Applies even when the substituted tool looks
         // policy-safe.
-        if !ctx.declared_manifest_digest.is_empty()
-            && self.observed_manifest_digest != ctx.declared_manifest_digest
-        {
+        //
+        // An ABSENT declared digest is not a pass. Skipping the check when the
+        // MD was unavailable (or a caller took a derived default) would let an
+        // event with a valid envelope and full visibility read as `compliant`
+        // while nothing at all pinned the registry — the exact substitution
+        // §9.6 exists to catch. Not knowing what was declared is missing
+        // evidence, so it is reported as such.
+        if ctx.declared_manifest_digest.trim().is_empty() {
+            return Err((Verdict::InsufficientEvidence, AuditCode::TelemetryMissing));
+        }
+        if self.observed_manifest_digest != ctx.declared_manifest_digest {
             return Err((Verdict::Violation, AuditCode::ManifestDrift));
+        }
+
+        // §9.4 — a KNOWN budget overspend is checked BEFORE any telemetry gap.
+        // Ordering matters: an event with a proven overspend AND partial
+        // visibility would otherwise return `insufficient_evidence`, which
+        // understates a rule we can actually prove was broken. Missing evidence
+        // never outranks established fact.
+        if let Some(code) = self.known_budget_violation(ctx) {
+            return Err((Verdict::Violation, code));
         }
 
         // §9.1 — hidden hop.
@@ -338,20 +358,16 @@ impl ObservedEvent {
             }
         }
 
-        // §9.4 — budget over-reserve or overspend. Only an explicitly tracked
-        // bucket is enforced; an untracked bucket is a *telemetry* gap, not a
-        // free pass, so it fails closed as insufficient evidence rather than
-        // silently permitting an unbudgeted effect.
-        if self.budget_delta.amount > 0 {
-            match ctx.remaining_budget.get(&self.budget_delta.effect_class) {
-                Some(remaining) if self.budget_delta.amount > *remaining => {
-                    return Err((Verdict::Violation, AuditCode::BudgetExhausted));
-                }
-                Some(_) => {}
-                None => {
-                    return Err((Verdict::InsufficientEvidence, AuditCode::TelemetryMissing));
-                }
-            }
+        // §9.4 — an UNTRACKED budget bucket is a telemetry gap, not a free
+        // pass, so it fails closed rather than silently permitting an
+        // unbudgeted effect. (The proven-overspend case is handled earlier, so
+        // a known violation is never masked by a later evidence gap.)
+        if self.budget_delta.amount > 0
+            && !ctx
+                .remaining_budget
+                .contains_key(&self.budget_delta.effect_class)
+        {
+            return Err((Verdict::InsufficientEvidence, AuditCode::TelemetryMissing));
         }
 
         Ok(Verdict::Compliant)
@@ -363,6 +379,23 @@ impl ObservedEvent {
     /// empty string fails exactly like an absent field: a blank `target` cannot
     /// be matched against a policy, and treating it as present would let a
     /// placeholder rescue a compliant verdict.
+    /// A budget violation this event PROVES, independent of telemetry quality.
+    ///
+    /// Returns `Some` only when the bucket is explicitly tracked and the claimed
+    /// spend exceeds what remains. An untracked bucket proves nothing and is
+    /// handled as an evidence gap later.
+    fn known_budget_violation(&self, ctx: &LineageContext) -> Option<AuditCode> {
+        if self.budget_delta.amount == 0 {
+            return None;
+        }
+        match ctx.remaining_budget.get(&self.budget_delta.effect_class) {
+            Some(remaining) if self.budget_delta.amount > *remaining => {
+                Some(AuditCode::BudgetExhausted)
+            }
+            _ => None,
+        }
+    }
+
     fn has_usable_telemetry(&self, field: &str) -> bool {
         match field {
             "event_id" => !self.event_id.trim().is_empty(),
@@ -379,6 +412,20 @@ impl ObservedEvent {
             "sensitivity" => !self.sensitivity.trim().is_empty(),
             "observed_manifest_digest" => !self.observed_manifest_digest.trim().is_empty(),
             "budget_delta" => !self.budget_delta.effect_class.trim().is_empty(),
+            // Every remaining canonical §6.2 field. These are typed (enums,
+            // bools, option-linked ids) rather than free strings, so "usable"
+            // means the value is carried at all — reporting them missing while
+            // they sit in the serialized event would make an MD that names any
+            // of them permanently unsatisfiable.
+            "side_effect_class"
+            | "visibility"
+            | "instruction_bearing"
+            | "envelope_signature_valid"
+            | "content_provenance"
+            | "confidence_hint" => true,
+            "parent_event_id" => self.delegation.parent_event_id.is_some(),
+            "delegation_from" => self.delegation.delegation_from.is_some(),
+            "delegation_to" => !self.delegation.downstream_receipt_ids.is_empty(),
             // An unknown required field cannot be established, so it fails
             // closed rather than being ignored as "not my field".
             _ => false,
@@ -566,9 +613,14 @@ pub fn manifest_digest(tool_ids: &[String]) -> String {
     sorted.dedup();
     let mut hasher = Sha256::new();
     for id in sorted {
+        // LENGTH-PREFIX, not a separator. A NUL delimiter collides the moment an
+        // identifier can contain one: ["file.read", "shell.run"] and the single
+        // id "file.read\0shell.run" feed identical bytes to SHA-256, so a
+        // substituted registry would hash to the declared manifest and §9.6
+        // would never fire. Tool ids come from remote/skill registration, so
+        // that content is not fully under this crate's control.
+        hasher.update((id.len() as u64).to_be_bytes());
         hasher.update(id.as_bytes());
-        // A separator prevents ["ab","c"] and ["a","bc"] colliding.
-        hasher.update([0u8]);
     }
     // sha2 0.11's output array does not implement `LowerHex`, so hex-encode
     // explicitly — the same idiom the governance crate's `to_hex` uses.
@@ -946,5 +998,109 @@ mod tests {
         let json = serde_json::to_string(&event).expect("serializes");
         let back: ObservedEvent = serde_json::from_str(&json).expect("deserializes");
         assert_eq!(event, back);
+    }
+
+    #[test]
+    fn an_absent_declared_manifest_digest_is_missing_evidence_not_a_pass() {
+        // Skipping §9.6 when the MD was unavailable would let a fully-visible,
+        // validly-enveloped event read as compliant with NOTHING pinning the
+        // registry — the substitution the check exists to catch.
+        let event = builder().build();
+        let mut c = ctx();
+        c.declared_manifest_digest = String::new();
+        assert_eq!(
+            event.local_verdict(&c),
+            Err((Verdict::InsufficientEvidence, AuditCode::TelemetryMissing))
+        );
+
+        c.declared_manifest_digest = "   ".into();
+        assert_eq!(
+            event.local_verdict(&c),
+            Err((Verdict::InsufficientEvidence, AuditCode::TelemetryMissing)),
+            "whitespace is not a declared digest either"
+        );
+    }
+
+    #[test]
+    fn manifest_entries_are_length_prefixed_so_a_nul_cannot_forge_a_digest() {
+        // With a NUL separator these two hash identically, so a substituted
+        // registry would match the declared manifest and §9.6 never fires.
+        let two = manifest_digest(&["file.read".to_string(), "shell.run".to_string()]);
+        let one = manifest_digest(&["file.read\u{0}shell.run".to_string()]);
+        assert_ne!(
+            two, one,
+            "a NUL inside a tool id must not collide with a two-entry manifest"
+        );
+    }
+
+    #[test]
+    fn an_outgoing_delegation_is_not_a_hidden_incoming_hop() {
+        // A root event that spawns children legitimately has no parent link;
+        // counting it as a hidden hop makes every root delegation
+        // insufficient_evidence.
+        let event = builder()
+            .delegation(DelegationEdge {
+                delegation_from: None,
+                delegation_to: Some("child-grant".into()),
+                parent_event_id: None,
+                parent_receipt_id: None,
+                downstream_receipt_ids: vec!["child-receipt-1".into()],
+            })
+            .build();
+        assert_eq!(
+            event.local_verdict(&ctx()),
+            Ok(Verdict::Compliant),
+            "recording children must not read as a hidden incoming hop"
+        );
+    }
+
+    #[test]
+    fn a_proven_overspend_outranks_a_telemetry_gap() {
+        // Missing evidence must never mask a rule we can prove was broken.
+        let event = builder()
+            .budget("tool_exec", 1_000)
+            .visibility(Visibility::Partial)
+            .build();
+        assert_eq!(
+            event.local_verdict(&ctx()),
+            Err((Verdict::Violation, AuditCode::BudgetExhausted))
+        );
+    }
+
+    #[test]
+    fn an_untracked_budget_bucket_is_still_only_missing_evidence() {
+        // The reordering must not turn an UNPROVABLE overspend into a violation.
+        let event = builder().budget("network", 5).build();
+        assert_eq!(
+            event.local_verdict(&ctx()),
+            Err((Verdict::InsufficientEvidence, AuditCode::TelemetryMissing))
+        );
+    }
+
+    #[test]
+    fn canonical_typed_telemetry_fields_are_not_reported_missing() {
+        // An MD naming any of these would otherwise be permanently
+        // unsatisfiable even though the value is right there in the event.
+        let event = builder().build();
+        let mut c = ctx();
+        c.required_telemetry = vec![
+            "side_effect_class".into(),
+            "visibility".into(),
+            "instruction_bearing".into(),
+            "envelope_signature_valid".into(),
+        ];
+        assert_eq!(event.local_verdict(&c), Ok(Verdict::Compliant));
+    }
+
+    #[test]
+    fn a_delegation_field_required_but_absent_still_fails_closed() {
+        let event = builder().build();
+        let mut c = ctx();
+        c.required_telemetry = vec!["delegation_from".into()];
+        assert_eq!(
+            event.local_verdict(&c),
+            Err((Verdict::InsufficientEvidence, AuditCode::TelemetryMissing)),
+            "a required delegation field with no value must not pass"
+        );
     }
 }
