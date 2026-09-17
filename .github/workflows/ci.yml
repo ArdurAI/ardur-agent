@@ -150,6 +150,43 @@ jobs:
       - name: Gated dolt integration tests (--ignored)
         run: cargo test -p ardur-integration-dolthub --test dolthub_sql_gate -- --ignored
 
+  schema-conformance:
+    # The ER/MD schemas live in the governance-plane repo, so these tests are
+    # `#[ignore]`d in the default run. Plain `cargo test` therefore never
+    # executes them, which means a projection could drift out of conformance
+    # with CI fully green. This job fetches the schemas and runs them for real.
+    name: schema conformance (--ignored)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install pinned toolchain
+        run: rustup toolchain install 1.98.1 --profile minimal
+      - name: Fetch the governance-plane schemas
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/specs"
+          # The schemas are versioned artifacts of the plane repo; a checkout
+          # failure must FAIL this job rather than let the tests skip quietly.
+          git clone --depth 1 --filter=blob:none --sparse \
+            https://github.com/ArdurAI/ardur.git "$RUNNER_TEMP/plane"
+          git -C "$RUNNER_TEMP/plane" sparse-checkout set docs/specs
+          cp "$RUNNER_TEMP/plane"/docs/specs/*.schema.json "$RUNNER_TEMP/specs/"
+          ls -l "$RUNNER_TEMP/specs"
+      - name: ER + MD schema conformance
+        env:
+          ARDUR_ER_SCHEMA: ${{ runner.temp }}/specs/execution-receipt-v0.1.schema.json
+          ARDUR_MD_SCHEMA: ${{ runner.temp }}/specs/mission-declaration-v0.1.schema.json
+        run: |
+          set -euo pipefail
+          out="$(cargo test -p ardur-governance --test schema_conformance -- --ignored --nocapture 2>&1)"
+          echo "$out"
+          # A skip here would mean the schemas were not found and the job
+          # certified nothing — treat it as a failure, not a pass.
+          if grep -q "SKIPPED" <<<"$out"; then
+            echo "::error::schema tests skipped; the schema was not found"
+            exit 1
+          fi
+
   qdrant-integration:
     # §7.0 Phase 2: the durable/hybrid Qdrant memory backend needs a live Qdrant,
     # which the gauntlet lacks — so those scenarios are `#[ignore]`d there (they

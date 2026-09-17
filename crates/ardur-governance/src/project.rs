@@ -59,8 +59,15 @@ impl AuthOutcome {
         // verdict is `insufficient_evidence`. Reporting it as a violation would
         // claim knowledge the verifier does not have.
         if let CapTokenError::UnprojectableAttenuation(statement) = err {
+            // Log a DIGEST, never the statement. Attenuation literals are
+            // holder-controlled and may carry paths, identifiers or credential
+            // material; emitting them verbatim turns a verification warning into
+            // a data-exfiltration channel that survives in log aggregation. The
+            // digest still correlates repeat occurrences of the same offending
+            // block across runs, which is what the operator actually needs.
             tracing::warn!(
-                statement = %statement,
+                statement_digest = %sha256_hex(statement.as_bytes()),
+                statement_len = statement.len(),
                 "cap-token attenuation could not be projected; reporting insufficient_evidence"
             );
             return AuthOutcome::InsufficientEvidence {

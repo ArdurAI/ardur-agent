@@ -33,8 +33,15 @@ fn schema_path() -> Option<PathBuf> {
 
 fn load_schema() -> Option<Value> {
     let path = schema_path()?;
-    let text = std::fs::read_to_string(&path).ok()?;
-    serde_json::from_str(&text).ok()
+    // A read or parse failure must NOT look like "schema absent" — it is a
+    // broken schema, and returning None here would make every schema test pass
+    // silently with no validation and no diagnostic.
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("ER schema at {} could not be read: {e}", path.display()));
+    Some(
+        serde_json::from_str(&text)
+            .unwrap_or_else(|e| panic!("ER schema at {} is not valid JSON: {e}", path.display())),
+    )
 }
 
 /// A representative compliant receipt.
@@ -90,6 +97,15 @@ fn compliant_receipt() -> ExecutionReceipt {
 /// file**, so a schema change is picked up rather than re-encoded here.
 fn validate(schema: &Value, receipt: &ExecutionReceipt) -> Result<(), Vec<String>> {
     let json = serde_json::to_value(receipt).expect("receipt serializes");
+    validate_json(schema, &json)
+}
+
+/// The same rules applied to an already-serialized receipt.
+///
+/// Split out so tests can mutate the JSON directly: drift that matters (a
+/// dropped key, an extra field) happens in the serialized form, and a
+/// typed-only entry point cannot express it.
+fn validate_json(schema: &Value, json: &Value) -> Result<(), Vec<String>> {
     let mut errors = Vec::new();
 
     // 1. Required properties.
@@ -102,11 +118,37 @@ fn validate(schema: &Value, receipt: &ExecutionReceipt) -> Result<(), Vec<String
         "schema declares no required fields; the test would be vacuous"
     );
     for key in &required {
-        if json.get(key).is_none() || json[*key].is_null() && *key != "parent_receipt_id" {
-            // `parent_receipt_id` / `parent_receipt_hash` are nullable at the
-            // chain root, which the schema models as a union with `null`.
-            if !matches!(*key, "parent_receipt_id" | "parent_receipt_hash") {
-                errors.push(format!("missing required field `{key}`"));
+        // The KEY must always be present. `parent_receipt_id` /
+        // `parent_receipt_hash` may be null at the chain root (the schema models
+        // them as a union with `null`), but a null VALUE and an ABSENT KEY are
+        // different: exempting absence too would hide serialization drift that
+        // drops the field entirely, which is what chains the receipts.
+        if !json.as_object().is_some_and(|o| o.contains_key(*key)) {
+            errors.push(format!("missing required field `{key}`"));
+            continue;
+        }
+        let nullable_at_root = matches!(*key, "parent_receipt_id" | "parent_receipt_hash");
+        if json[*key].is_null() && !nullable_at_root {
+            errors.push(format!("required field `{key}` is null"));
+        }
+    }
+
+    // 1b. §additionalProperties:false — check the OPPOSITE direction too.
+    // Validating only the schema's declared properties can never notice a NEW
+    // serialized field, which is exactly how a conformant-looking receipt stops
+    // being conformant at an external verifier.
+    if schema["additionalProperties"] == Value::Bool(false) {
+        let declared: Vec<&str> = schema["properties"]
+            .as_object()
+            .map(|o| o.keys().map(String::as_str).collect())
+            .unwrap_or_default();
+        if let Some(obj) = json.as_object() {
+            for key in obj.keys() {
+                if !declared.contains(&key.as_str()) {
+                    errors.push(format!(
+                        "field `{key}` is not declared by the schema (additionalProperties: false)"
+                    ));
+                }
             }
         }
     }
@@ -290,5 +332,51 @@ fn the_native_chain_field_is_a_hex_sha256_of_the_previous_jwt() {
         hash.chars()
             .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()),
         "parent_receipt_hash must be lowercase hex"
+    );
+}
+
+#[test]
+#[ignore = "requires the governance-plane schema on disk"]
+fn an_absent_required_key_is_reported_even_for_nullable_parent_fields() {
+    // A null VALUE is legal at the chain root; an ABSENT KEY is not. Exempting
+    // absence too would hide serialization drift that drops the field which
+    // chains the receipts together.
+    let Some(schema) = load_schema() else { return };
+    let mut json = serde_json::to_value(compliant_receipt()).unwrap();
+    json.as_object_mut().unwrap().remove("parent_receipt_hash");
+
+    let errors = validate_json(&schema, &json).expect_err("an absent key must be reported");
+    assert!(
+        errors.iter().any(|e| e.contains("parent_receipt_hash")),
+        "expected a missing-field error, got {errors:#?}"
+    );
+}
+
+#[test]
+#[ignore = "requires the governance-plane schema on disk"]
+fn a_null_parent_field_is_still_accepted_at_the_chain_root() {
+    // The fix must not over-correct: null is legal for these two.
+    let Some(schema) = load_schema() else { return };
+    let json = serde_json::to_value(compliant_receipt()).unwrap();
+    assert!(json["parent_receipt_hash"].is_null());
+    validate_json(&schema, &json).expect("a root receipt with null parents is conformant");
+}
+
+#[test]
+#[ignore = "requires the governance-plane schema on disk"]
+fn an_undeclared_serialized_field_is_rejected() {
+    // additionalProperties:false means a NEW serialized field breaks
+    // conformance at an external verifier. Checking only the schema's declared
+    // properties can never notice that.
+    let Some(schema) = load_schema() else { return };
+    let mut json = serde_json::to_value(compliant_receipt()).unwrap();
+    json.as_object_mut()
+        .unwrap()
+        .insert("newly_added_field".into(), Value::Bool(true));
+
+    let errors = validate_json(&schema, &json).expect_err("an undeclared field must be rejected");
+    assert!(
+        errors.iter().any(|e| e.contains("newly_added_field")),
+        "expected an additionalProperties error, got {errors:#?}"
     );
 }
