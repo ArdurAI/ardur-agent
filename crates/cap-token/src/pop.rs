@@ -35,12 +35,15 @@
 //! explicitly, because silently accepting unbound tokens under a "PoP enabled"
 //! configuration is exactly the kind of fail-open this crate must not have.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
-use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
+// `verify_strict` is an inherent method on VerifyingKey, so the permissive
+// `Verifier` trait is deliberately NOT imported — importing it would make the
+// weaker `verify` reachable again by accident.
+use ed25519_dalek::{Signature, VerifyingKey};
 use sha2::{Digest, Sha256};
 
 use crate::error::CapTokenError;
@@ -76,8 +79,25 @@ pub enum PopRequirement {
 /// Stored as `sha-256:` + 64 lowercase hex over the raw Ed25519 public key.
 /// The thumbprint — not the key — travels in the token, so a token leak does
 /// not leak anything usable for impersonation.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
 pub struct KeyThumbprint(String);
+
+impl<'de> serde::Deserialize<'de> for KeyThumbprint {
+    /// Deserialize THROUGH [`KeyThumbprint::parse`].
+    ///
+    /// A derived impl writes the inner string directly, so `"jkt":"bad"` would
+    /// produce a `KeyThumbprint` that no real key can ever equal — a silent
+    /// permanent denial rather than a clear malformed-token error. Worse, it
+    /// makes the type's "always well-formed" invariant a lie for anything that
+    /// arrived over the wire, which is exactly the input that matters.
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Self::parse(&raw).map_err(serde::de::Error::custom)
+    }
+}
 
 impl KeyThumbprint {
     /// Compute the thumbprint of an Ed25519 verifying key.
@@ -147,6 +167,15 @@ pub struct RequestBinding {
     pub token_id: String,
     /// The tool the request will invoke.
     pub tool: String,
+    /// Digest over the canonical tool arguments for this request.
+    ///
+    /// Binding the tool NAME alone is not enough: the same tool called with
+    /// different arguments is a different request, so a captured proof for
+    /// `file.read("notes.txt")` would otherwise authorize
+    /// `file.read("/etc/shadow")` — same tool, same cost, entirely different
+    /// authority. Callers pass the digest of whatever canonical form the
+    /// invocation already uses (the ER projection's JCS bytes, for instance).
+    pub args_digest: String,
     /// The budget units the request will consume.
     pub cost: u64,
     /// The audience presenting the token.
@@ -171,6 +200,7 @@ impl RequestBinding {
         for field in [
             self.token_id.as_str(),
             self.tool.as_str(),
+            self.args_digest.as_str(),
             self.audience.as_str(),
             self.nonce.as_str(),
         ] {
@@ -243,10 +273,24 @@ impl PopProof {
 /// Entries older than the window are evicted on insert: a proof carrying such a
 /// nonce is rejected on age anyway, so retaining it buys nothing and lets an
 /// attacker grow the cache without bound.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ReplayCache {
     seen: BTreeMap<String, u64>,
+    /// `(seen_at, nonce)` ordered by time, so expiry visits only aged entries.
+    by_age: BTreeSet<(u64, String)>,
     max_age_secs: u64,
+}
+
+impl Default for ReplayCache {
+    /// A cache whose window matches the proof acceptance window.
+    ///
+    /// NOT `#[derive(Default)]`: that yields `max_age_secs = 0`, which evicts
+    /// every nonce on the next insert while `verify_pop` still accepts proofs
+    /// for [`DEFAULT_PROOF_MAX_AGE_SECS`]. The replay defence would silently do
+    /// nothing — the worst kind of default, since everything still passes.
+    fn default() -> Self {
+        Self::new(DEFAULT_PROOF_MAX_AGE_SECS)
+    }
 }
 
 impl ReplayCache {
@@ -255,18 +299,38 @@ impl ReplayCache {
     pub fn new(max_age_secs: u64) -> Self {
         Self {
             seen: BTreeMap::new(),
+            by_age: BTreeSet::new(),
             max_age_secs,
         }
     }
 
     /// Record a nonce, returning `false` when it was already used.
+    ///
+    /// Eviction is amortized rather than run on every insert: a full
+    /// `retain` per proof traverses every retained entry, so N proofs inside one
+    /// window cost O(N^2) — a throughput cliff an attacker can trigger just by
+    /// sending valid traffic. Expiry is driven by an ordered `(seen_at, nonce)`
+    /// index, so only entries that have actually aged out are visited.
     pub fn record(&mut self, nonce: &str, now_unix: u64) -> bool {
         let cutoff = now_unix.saturating_sub(self.max_age_secs);
-        self.seen.retain(|_, seen_at| *seen_at >= cutoff);
+        while let Some((seen_at, expired)) = self.by_age.first() {
+            if *seen_at >= cutoff {
+                break;
+            }
+            let seen_at = *seen_at;
+            let expired = expired.clone();
+            self.by_age.remove(&(seen_at, expired.clone()));
+            // Only drop it from `seen` if it has not since been re-recorded
+            // under a newer timestamp.
+            if self.seen.get(&expired) == Some(&seen_at) {
+                self.seen.remove(&expired);
+            }
+        }
         if self.seen.contains_key(nonce) {
             return false;
         }
         self.seen.insert(nonce.to_string(), now_unix);
+        self.by_age.insert((now_unix, nonce.to_string()));
         true
     }
 
@@ -349,6 +413,7 @@ pub fn verify_pop(
     //    authorization of this one.
     if proof.binding.token_id != request.token_id
         || proof.binding.tool != request.tool
+        || proof.binding.args_digest != request.args_digest
         || proof.binding.cost != request.cost
         || proof.binding.audience != request.audience
     {
@@ -371,10 +436,22 @@ pub fn verify_pop(
         )));
     }
 
-    // 4. The signature itself.
+    // 4. Reject weak (small-order) keys BEFORE verifying. ed25519-dalek flags
+    //    these because they can validate a forged signature for almost any
+    //    message — and the presented key is attacker-controlled, so accepting
+    //    one would let any signature pass.
+    if proof.public_key.is_weak() {
+        return Err(CapTokenError::PopInvalid(
+            "presented holder key is a weak (small-order) Ed25519 key".into(),
+        ));
+    }
+
+    // 5. The signature itself, with the STRICT verifier. `verify_strict`
+    //    additionally rejects signatures whose R component is small-order,
+    //    closing the malleability gap the permissive `verify` leaves open.
     proof
         .public_key
-        .verify(&proof.binding.signing_bytes(), &proof.signature)
+        .verify_strict(&proof.binding.signing_bytes(), &proof.signature)
         .map_err(|_| CapTokenError::PopInvalid("proof signature does not verify".into()))?;
 
     // 5. Replay. Recorded LAST so a rejected proof cannot burn a nonce — an
@@ -397,8 +474,6 @@ pub fn proof_acceptance_window() -> Duration {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
-
     use ed25519_dalek::SigningKey;
 
     use super::*;
@@ -423,6 +498,7 @@ mod tests {
         RequestBinding {
             token_id: "01a0adca-0000-4000-8000-00000000000e".into(),
             tool: "file.read".into(),
+            args_digest: "sha-256:args-fixture".into(),
             cost: 1,
             audience: "cli://localhost".into(),
             nonce: TEST_NONCE.with(Clone::clone),
@@ -802,6 +878,125 @@ mod tests {
         assert_ne!(
             KeyThumbprint::of(&key(1).verifying_key()),
             KeyThumbprint::of(&key(2).verifying_key())
+        );
+    }
+
+    #[test]
+    fn a_proof_for_different_arguments_does_not_authorize_this_request() {
+        // The exploit this closes: a captured proof for file.read("notes.txt")
+        // must not authorize file.read("/etc/shadow") — same tool, same cost,
+        // entirely different authority.
+        let k = key(1);
+        let signed = binding();
+        let proof = PopProof::create(&k, signed);
+
+        let mut requested = binding();
+        requested.args_digest = "sha-256:a-completely-different-target".into();
+
+        let mut cache = ReplayCache::new(DEFAULT_PROOF_MAX_AGE_SECS);
+        let err = verify_pop(
+            Some(&cnf(&k)),
+            Some(&proof),
+            &requested,
+            PopRequirement::Required,
+            1_789_621_940,
+            &mut cache,
+        )
+        .unwrap_err();
+        assert!(matches!(err, CapTokenError::PopInvalid(_)), "{err:?}");
+    }
+
+    #[test]
+    fn the_default_replay_cache_retains_for_the_whole_acceptance_window() {
+        // A derived Default gives max_age_secs = 0, which evicts every nonce on
+        // the next insert while verify_pop still accepts proofs for 300s — the
+        // replay defence would silently do nothing.
+        let mut cache = ReplayCache::default();
+        let n = fresh_nonce();
+        assert!(cache.record(&n, 1_000));
+        // Anywhere inside the acceptance window the nonce must still be known.
+        assert!(
+            !cache.record(&n, 1_000 + DEFAULT_PROOF_MAX_AGE_SECS - 1),
+            "default cache must retain nonces for the full acceptance window"
+        );
+    }
+
+    #[test]
+    fn a_weak_holder_key_is_rejected_before_the_signature_is_checked() {
+        // Small-order keys validate a forged signature for almost any message,
+        // and the presented key is attacker-controlled.
+        // The all-zero encoding is the identity point. Decode MUST succeed and
+        // the key MUST be weak — an early `return` here would make the whole
+        // guard vacuous, which is exactly how it first passed under mutation.
+        let weak = VerifyingKey::from_bytes(&[0u8; 32])
+            .expect("the identity point must decode, or this fixture is wrong");
+        assert!(weak.is_weak(), "fixture must actually be a weak key");
+
+        let k = key(1);
+        let mut proof = PopProof::create(&k, binding());
+        proof.public_key = weak;
+
+        let confirmation = Confirmation {
+            jkt: KeyThumbprint::of(&weak),
+        };
+        let mut cache = ReplayCache::new(DEFAULT_PROOF_MAX_AGE_SECS);
+        let err = verify_pop(
+            Some(&confirmation),
+            Some(&proof),
+            &binding(),
+            PopRequirement::Required,
+            1_789_621_940,
+            &mut cache,
+        )
+        .unwrap_err();
+        // Assert the SPECIFIC diagnostic: a signature failure also yields
+        // PopInvalid, so matching the variant alone cannot tell whether the
+        // weak-key check ran at all.
+        match err {
+            CapTokenError::PopInvalid(msg) => assert!(
+                msg.contains("weak"),
+                "expected the weak-key rejection, got: {msg}"
+            ),
+            other => panic!("expected PopInvalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_malformed_thumbprint_fails_to_deserialize() {
+        // A derived Deserialize would accept this and produce a thumbprint no
+        // real key can equal — a silent permanent denial instead of a clear
+        // malformed-token error.
+        assert!(serde_json::from_str::<Confirmation>(r#"{"jkt":"bad"}"#).is_err());
+        assert!(serde_json::from_str::<Confirmation>(r#"{"jkt":""}"#).is_err());
+
+        let k = key(1);
+        let good = serde_json::to_string(&cnf(&k)).unwrap();
+        let round: Confirmation =
+            serde_json::from_str(&good).expect("valid thumbprint round-trips");
+        assert_eq!(round.jkt, cnf(&k).jkt);
+    }
+
+    #[test]
+    fn expiry_visits_only_aged_entries_and_keeps_live_ones() {
+        // Amortized eviction must not drop nonces that are still inside the
+        // window — the correctness risk when replacing a full scan.
+        let mut cache = ReplayCache::new(100);
+        let old = fresh_nonce();
+        let live = fresh_nonce();
+        assert!(cache.record(&old, 1_000));
+        assert!(cache.record(&live, 1_050));
+
+        // At t=1_080 both are inside the window: neither may be reusable.
+        assert!(!cache.record(&old, 1_080));
+        assert!(!cache.record(&live, 1_080));
+
+        // At t=1_120 the cutoff is 1_020: `old` (1_000) has aged out, `live`
+        // (1_050) has not. Picking a time where BOTH expired would prove
+        // nothing about visiting only aged entries.
+        assert!(cache.record(&old, 1_120), "aged entry should be evictable");
+        assert!(
+            !cache.record(&live, 1_120),
+            "an entry still inside the window must not be dropped by eviction"
         );
     }
 }
