@@ -95,6 +95,10 @@ enter the exact requested test and report one passing test; zero-test success
 is rejected. Object-directory and common-directory cases run independently, so
 a failed read check cannot hide a write-isolation failure. Fixture writes use a
 local fake identity, DCO sign-off, disabled signing, and an empty hooks path.
+Automatic maintenance and garbage collection are disabled for fixture commands
+so detached maintenance cannot race the byte/directory inventory checks. A
+configuration control enables both in the temporary repository and verifies
+the fixture command overrides them; no lock files are excluded from comparison.
 
 Any `CI` environment variable forbids regeneration, even when the explicit flag
 is present. Never replace this fixture with post-refactor output to fix a drift.

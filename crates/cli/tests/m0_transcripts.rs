@@ -200,6 +200,10 @@ fn fixture_git(root: &Path, args: &[&str]) -> Output {
             "-c",
             "commit.gpgsign=false",
             "-c",
+            "maintenance.auto=false",
+            "-c",
+            "gc.auto=0",
+            "-c",
         ])
         .arg(format!(
             "core.hooksPath={}",
@@ -214,6 +218,37 @@ fn fixture_git(root: &Path, args: &[&str]) -> Output {
         String::from_utf8_lossy(&output.stderr)
     );
     output
+}
+
+#[test]
+fn fixture_git_disables_automatic_maintenance() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path();
+    std::fs::create_dir(root.join("empty-hooks")).unwrap();
+    fixture_git(root, &["init", "-q"]);
+    fixture_git(root, &["config", "--local", "maintenance.auto", "true"]);
+    fixture_git(root, &["config", "--local", "gc.auto", "1"]);
+    let values: Vec<_> = ["maintenance.auto", "gc.auto"]
+        .into_iter()
+        .map(|key| {
+            let stored = local_git(root)
+                .args(["config", "--local", "--get", key])
+                .output()
+                .unwrap();
+            assert!(stored.status.success());
+            (
+                stored.stdout,
+                fixture_git(root, &["config", "--get", key]).stdout,
+            )
+        })
+        .collect();
+    assert_eq!(values[0].0, b"true\n", "enabled maintenance control");
+    assert_eq!(values[1].0, b"1\n", "enabled auto-GC control");
+    assert_eq!(
+        [&values[0].1, &values[1].1],
+        [&b"false\n".to_vec(), &b"0\n".to_vec()],
+        "fixture commands must not leave background maintenance racing their snapshots"
+    );
 }
 
 #[test]
