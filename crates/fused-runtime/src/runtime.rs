@@ -25,7 +25,7 @@ use ardur_cedar_policy::{
 use ardur_cost_gate::{
     AdmissionError, AdmissionRequest, Clock, CostAdmissionGate, CostEnvelope,
     CostTuple as GateCostTuple, HolderId as GateHolderId, InMemoryCostAdmissionGate,
-    ModelId as GateModelId, ProviderId as GateProviderId, Reservation, Sha256Digest as GateSha256,
+    ModelId as GateModelId, ProviderId as GateProviderId, Sha256Digest as GateSha256,
     TokenId as GateTokenId,
 };
 use ardur_injection_defense::{ContentSource, FilterRegistry, ScannableContent, Verdict};
@@ -39,7 +39,8 @@ use ardur_provider_runtime::{
     StreamEvent, ToolDef, Usage,
 };
 use ardur_receipt::{
-    Es256SigningKey, ReceiptBody, ReceiptSigner, Sha256Digest, ToolCallReceipt, VerbObject,
+    Es256SigningKey, ReceiptBody, ReceiptSigner, Sha256Digest, SignedReceipt, ToolCallReceipt,
+    VerbObject,
 };
 use ardur_runtime::{
     CapTokenRef, ChatMessage, ChatRuntime, CostTuple as RuntimeCostTuple, ReceiptId, Role,
@@ -56,8 +57,16 @@ use crate::receipts::{
 use crate::reconcile::{
     ReconciliationAction, ReconciliationError, ReconciliationReport, ReconciliationStrategy,
 };
+use crate::settlement::{
+    Disposition, SettlementCoordinator, SettlementError, SettlementSupervisor, TurnIdentity,
+    TurnSettlementOwner,
+};
 use crate::shared::{SharedBudget, SharedDenyList};
 use crate::streaming::{FusedEvent, StageKind};
+use ardur_session_journals::settlement::{
+    CostProvenance, InfrastructureFailureClass, OutputAdmission, ProviderEvidence, ReceiptBinding,
+    ReceiptCandidate, RefusalClass, ToolEffect, ToolEvidence, ToolFailureClass, UsageSnapshot,
+};
 use futures::{Stream, StreamExt as _};
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -177,44 +186,25 @@ pub struct BackgroundTaskOutcome {
     pub error: Option<String>,
 }
 
-/// A [`ChatRuntime`] that fuses every Phase-1 substrate crate behind one
-/// ARD-488: releases a turn's cost reservation when the turn future is dropped
-/// before it settles (outer `tokio::time::timeout`, `select!` loss, client or
-/// stream disconnect). `take_reservation` is idempotent (returns `None` if
-/// `finalize`/`release` already removed the reservation), so this is a pure
-/// backstop — the in-band finalize/release paths are unchanged.
-struct ReservationCancelGuard {
-    gate: Arc<InMemoryCostAdmissionGate<SharedBudget>>,
-    budget: SharedBudget,
+// A round borrows the one supervised turn owner. It never contains a raw
+// Reservation, so legacy release/finalize cannot race claimed authority.
+struct RuntimeReservation<'a> {
+    owner: &'a mut TurnSettlementOwner,
     reservation_id: uuid::Uuid,
 }
 
-impl ReservationCancelGuard {
-    fn new(
-        gate: Arc<InMemoryCostAdmissionGate<SharedBudget>>,
-        budget: SharedBudget,
-        reservation_id: uuid::Uuid,
-    ) -> Self {
-        Self {
-            gate,
-            budget,
-            reservation_id,
+fn settlement_error(error: SettlementError) -> RuntimeError {
+    if let SettlementError::Budget(e) = &error {
+        if matches!(
+            e.as_ref(),
+            AdmissionError::BudgetExhausted { .. }
+                | AdmissionError::PolicyDenied(_)
+                | AdmissionError::ReservationExpired
+        ) {
+            return RuntimeError::CostCeilingExceeded;
         }
     }
-}
-
-impl Drop for ReservationCancelGuard {
-    fn drop(&mut self) {
-        if let Some(handle) = self.gate.take_reservation(self.reservation_id) {
-            let delta = ardur_cost_gate::CostDelta::full_credit(&handle.reserved);
-            let _ = self.budget.refund_sync(handle, delta);
-        }
-    }
-}
-
-enum DurableCommitError {
-    BeforeReceipt(RuntimeError),
-    AfterReceipt(RuntimeError),
+    RuntimeError::Internal(anyhow::anyhow!(error))
 }
 
 /// Runtime implementation that fuses authorization, provider execution, cost
@@ -237,6 +227,7 @@ pub struct FusedRuntime {
     pub(crate) receipt_key: Es256SigningKey,
     pub(crate) verb: VerbObject,
     pub(crate) gate: Arc<InMemoryCostAdmissionGate<SharedBudget>>,
+    pub(crate) settlements: Arc<SettlementCoordinator>,
     pub(crate) budget: SharedBudget,
     pub(crate) gate_provider_id: GateProviderId,
     pub(crate) gate_model_id: GateModelId,
@@ -919,16 +910,168 @@ impl FusedRuntime {
         let _ = self.registry.run_error(&ctx).await;
     }
 
-    /// Release a reservation on an error path — finalize it to zero actual cost
-    /// so the gate refunds the entire hold. Best-effort: a failure here cannot
-    /// be acted on (the turn is already aborting), and an un-refunded hold lapses
-    /// on the gate's TTL regardless.
-    async fn release(&self, reservation: Reservation) {
-        if let Ok(finalization) = self.gate.finalize(reservation, GateCostTuple::ZERO).await {
-            self.gate
-                .commit_finalization(finalization.reservation_id)
-                .await;
+    /// Retain this handle outside the runtime until pending work is drained or
+    /// explicitly quarantined. Dropping it does not spawn cleanup work.
+    pub fn settlement_supervisor(&self) -> SettlementSupervisor {
+        self.settlements.supervisor()
+    }
+
+    /// Bounded asynchronous projection boundary, including synchronous Drop's
+    /// operator expense. An ambiguous journal attempt remains fail-closed.
+    pub async fn drain_pending_settlements(&self) -> Result<usize, SettlementError> {
+        match &self.journal {
+            Some(journal) => {
+                self.settlement_supervisor()
+                    .drain_pending(journal.as_ref())
+                    .await
+            }
+            None => Ok(0),
         }
+    }
+
+    fn begin_settlement(
+        &self,
+        session_id: SessionId,
+        claims: &VerifiedClaims,
+        provisioning: &PerRequestProvisioning,
+    ) -> Result<TurnSettlementOwner, RuntimeError> {
+        self.settlements
+            .reserve_turn(TurnIdentity {
+                request_session: session_id,
+                journal_owner: self.journal.as_ref().map(|j| *j.session_id()),
+                verified_subject: GateHolderId(claims.subject.0.clone()),
+                budget_holder: provisioning
+                    .subject
+                    .clone()
+                    .unwrap_or_else(|| GateHolderId(claims.subject.0.clone())),
+                cap_token_id: GateTokenId(claims.token_id),
+                started_at: self.clock.now_ms(),
+            })
+            .map_err(settlement_error)
+    }
+
+    async fn admit_round<'a>(
+        &self,
+        owner: &'a mut TurnSettlementOwner,
+        request: AdmissionRequest,
+        provider_request_id: uuid::Uuid,
+    ) -> Result<RuntimeReservation<'a>, RuntimeError> {
+        owner
+            .admit_round(request, provider_request_id)
+            .await
+            .map_err(settlement_error)?;
+        let reservation_id = owner.reservation_id().map_err(settlement_error)?;
+        Ok(RuntimeReservation {
+            owner,
+            reservation_id,
+        })
+    }
+
+    async fn release(&self, reservation: RuntimeReservation<'_>) {
+        let result = reservation.owner.abandon_sync();
+        if let Err(error) = result {
+            tracing::error!(%error, "settlement cancellation retained for supervision");
+        }
+        if let Err(error) = self.drain_pending_settlements().await {
+            tracing::error!(%error, "settlement projection pending");
+        }
+    }
+
+    async fn release_failure(&self, reservation: RuntimeReservation<'_>) {
+        if let Err(error) = reservation
+            .owner
+            .refund_failure(InfrastructureFailureClass::Provider)
+        {
+            tracing::error!(%error, "settlement failure refund retained for supervision");
+        }
+        if let Err(error) = self.drain_pending_settlements().await {
+            tracing::error!(%error, "settlement failure projection pending");
+        }
+    }
+
+    async fn settle_refusal(
+        &self,
+        _session_id: SessionId,
+        reservation: RuntimeReservation<'_>,
+        known: RuntimeCostTuple,
+        reason: &str,
+    ) -> Result<(), RuntimeError> {
+        let decision = match reason {
+            UNKNOWN_TOOL_SETTLEMENT => Disposition::Refusal(RefusalClass::UnknownTool),
+            TOOL_AUTH_SETTLEMENT => Disposition::Refusal(RefusalClass::Authorization),
+            CAPABILITY_SETTLEMENT => Disposition::Refusal(RefusalClass::MissingCapability),
+            APPROVAL_SETTLEMENT => Disposition::Refusal(RefusalClass::ApprovalRequired),
+            APPROVAL_REJECTED_SETTLEMENT => Disposition::Refusal(RefusalClass::ApprovalRejected),
+            SCAN_SETTLEMENT => Disposition::Refusal(RefusalClass::OutputBlocked),
+            _ => Disposition::Infrastructure(InfrastructureFailureClass::Provider),
+        };
+        reservation
+            .owner
+            .prepare(decision, known)
+            .map_err(settlement_error)?;
+        reservation
+            .owner
+            .finalize_sync()
+            .map_err(settlement_error)?;
+        let projection = self.drain_pending_settlements().await;
+        if matches!(projection, Err(SettlementError::ProjectionNotApplied)) {
+            self.settlement_supervisor()
+                .compensate_definite_failure(reservation.owner.turn_id())
+                .map_err(settlement_error)?;
+            return Err(settlement_error(SettlementError::ProjectionNotApplied));
+        }
+        projection.map_err(settlement_error)?;
+        reservation
+            .owner
+            .commit_disposition()
+            .map_err(settlement_error)
+    }
+
+    fn observe_usage(
+        &self,
+        reservation: &mut RuntimeReservation<'_>,
+        usage: Usage,
+        finished: bool,
+    ) -> Result<(), RuntimeError> {
+        let rate = self.provider.rate_card();
+        let rate_bytes = serde_json::to_vec(rate).map_err(|e| RuntimeError::Internal(e.into()))?;
+        reservation
+            .owner
+            .observe_provider(ProviderEvidence::Observed {
+                usage: Some(UsageSnapshot {
+                    input_tokens: u64::from(usage.tokens_in),
+                    output_tokens: u64::from(usage.tokens_out),
+                }),
+                cost: rate.price(usage),
+                provenance: CostProvenance::PricedUsage(GateSha256::of(&rate_bytes)),
+                finished,
+                interrupted: false,
+            })
+            .map_err(settlement_error)
+    }
+
+    fn observe_tool(
+        &self,
+        reservation: &mut RuntimeReservation<'_>,
+        ordinal: usize,
+        call: &ToolCall,
+        effect: ToolEffect,
+        admission: OutputAdmission,
+    ) -> Result<(), RuntimeError> {
+        reservation
+            .owner
+            .observe_tool(ToolEvidence {
+                ordinal: ordinal as u32,
+                call_id: call.id.clone(),
+                name: call.name.clone(),
+                arguments_digest: GateSha256::of(
+                    &serde_json::to_vec(&call.arguments)
+                        .map_err(|e| RuntimeError::Internal(e.into()))?,
+                ),
+                effect,
+                output_admission: admission,
+            })
+            .map_err(settlement_error)
     }
 
     /// **Stage 4.5 (ARD-48).** Scan the outbound completion request's prompt
@@ -1707,78 +1850,122 @@ impl FusedRuntime {
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn commit_receipt_and_journal(
+    async fn commit_round(
         &self,
-        _session_id: SessionId,
+        reservation: &mut RuntimeReservation<'_>,
+        body: ReceiptBody,
+        final_answer: bool,
         iteration: u32,
         req: &SubmitRequest,
         response: &CompletionResponse,
-        signed: &ardur_receipt::SignedReceipt,
-        now_ms: u64,
         committed: Option<&Arc<TurnCommitHandshake>>,
-    ) -> Result<ReceiptBody, DurableCommitError> {
-        let receipt = signed.body().clone();
-
-        // Persist the signed receipt first: if the process crashes before the
-        // journal append, boot reconciliation sees a durable orphan receipt and
-        // can append a synthetic journal entry. The inverse (journal-only residue)
-        // is not reconstructable from the receipt chain.
-        let previously_committed = committed.is_some_and(|h| h.ever_committed());
-        if let Some(handshake) = committed {
-            if !handshake.begin_persist() {
-                return Err(DurableCommitError::BeforeReceipt(
-                    RuntimeError::TurnCancelled,
-                ));
+        cancel_probe: Option<&CancelProbe>,
+    ) -> Result<(SignedReceipt, ReceiptBody), RuntimeError> {
+        let signed = {
+            let _guard = self.commit_lock.lock().await;
+            if cancel_probe.is_some_and(|probe| probe()) {
+                reservation.owner.abandon_sync().map_err(settlement_error)?;
+                return Err(RuntimeError::TurnCancelled);
             }
-        }
-        if let Err(e) = self.persist_receipt(signed.jws_compact()) {
+            let mut body = body;
+            body.parent_hash = *self.chain_tail.lock();
+            let signed = ReceiptSigner::sign(body, &self.receipt_key)
+                .map_err(|e| RuntimeError::Internal(anyhow::anyhow!("receipt mint failed: {e}")))?;
+            let path = self
+                .receipt_log
+                .as_ref()
+                .expect("builder requires receipt storage");
+            let expected_log_end = crate::receipts::open_append_no_follow(path)
+                .and_then(|f| f.metadata())
+                .map_err(|e| RuntimeError::Internal(e.into()))?
+                .len();
             if let Some(handshake) = committed {
-                handshake.abort_persist(previously_committed);
+                if !handshake.begin_persist() {
+                    reservation.owner.abandon_sync().map_err(settlement_error)?;
+                    return Err(RuntimeError::TurnCancelled);
+                }
             }
-            return Err(DurableCommitError::BeforeReceipt(RuntimeError::Internal(
-                anyhow::anyhow!("receipt persist failed before journal append: {e}"),
-            )));
-        }
-        *self.chain_tail.lock() = Some(Sha256Digest::of(signed.jws_compact().as_bytes()));
-        if let Some(handshake) = committed {
-            handshake.finish_persist();
-        }
-
+            reservation
+                .owner
+                .prepare_receipt(
+                    ReceiptCandidate {
+                        receipt_id: ReceiptId(signed.body().receipt_id),
+                        expected_parent: signed.body().parent_hash,
+                        expected_log_end,
+                        jws_compact: signed.jws_compact().to_string(),
+                        jws_digest: GateSha256::of(signed.jws_compact().as_bytes()),
+                    },
+                    final_answer,
+                    signed.body().cost,
+                )
+                .map_err(settlement_error)?;
+            reservation
+                .owner
+                .finalize_sync()
+                .map_err(settlement_error)?;
+            // Any write error is ambiguous: keep exact candidate + actual debit.
+            // Never roll back merely because a receipt acknowledgement failed.
+            if let Err(e) = crate::receipts::append_at_expected_end(
+                path,
+                expected_log_end,
+                signed.jws_compact(),
+            ) {
+                self.settlements.stop_admission();
+                reservation
+                    .owner
+                    .receipt_unresolved()
+                    .map_err(settlement_error)?;
+                return Err(RuntimeError::Internal(anyhow::anyhow!(
+                    "settlement receipt unresolved: {e}"
+                )));
+            }
+            *self.chain_tail.lock() = Some(Sha256Digest::of(signed.jws_compact().as_bytes()));
+            reservation
+                .owner
+                .commit_receipt(ReceiptBinding {
+                    receipt_id: ReceiptId(signed.body().receipt_id),
+                    jws_digest: GateSha256::of(signed.jws_compact().as_bytes()),
+                })
+                .map_err(settlement_error)?;
+            if let Some(handshake) = committed {
+                handshake.finish_persist();
+            }
+            signed
+        }; // no commit lock across projection, hooks or outward yields
+        self.drain_pending_settlements()
+            .await
+            .map_err(settlement_error)?;
+        let receipt = signed.body().clone();
         if let Some(journal) = &self.journal {
             if iteration == 1 {
                 if let Some(prompt) = last_user_message(&req.messages) {
-                    if let Err(e) = journal
+                    journal
                         .append(JournalEntry::UserMessage {
-                            content: prompt.to_string(),
-                            at: ardur_cost_gate::UnixTsMillis(now_ms),
+                            content: prompt.into(),
+                            at: receipt.issued_at,
                         })
                         .await
-                    {
-                        return Err(DurableCommitError::AfterReceipt(RuntimeError::Internal(
-                            anyhow::anyhow!(
-                                "journal user append failed after receipt commit; boot reconciliation can heal the durable orphan receipt: {e}"
-                            ),
-                        )));
-                    }
+                        .map_err(|e| {
+                            RuntimeError::Internal(anyhow::anyhow!(
+                                "settlement user journal failed: {e}"
+                            ))
+                        })?;
                 }
             }
-            if let Err(e) = journal
+            journal
                 .append(JournalEntry::AssistantMessage {
                     content: response.content.clone(),
-                    at: ardur_cost_gate::UnixTsMillis(now_ms),
+                    at: receipt.issued_at,
                     receipt_id: ReceiptId(receipt.receipt_id),
                 })
                 .await
-            {
-                return Err(DurableCommitError::AfterReceipt(RuntimeError::Internal(
-                    anyhow::anyhow!(
-                        "journal assistant append failed after receipt commit; boot reconciliation can heal the durable orphan receipt: {e}"
-                    ),
-                )));
-            }
+                .map_err(|e| {
+                    RuntimeError::Internal(anyhow::anyhow!(
+                        "settlement assistant journal failed: {e}"
+                    ))
+                })?;
         }
-
-        Ok(receipt)
+        Ok((signed, receipt))
     }
 
     /// Append a signed receipt's compact JWS to the durable receipt log
@@ -1867,6 +2054,33 @@ impl FusedRuntime {
             })
             .collect();
 
+        let modern_receipts: HashSet<_> = self
+            .settlement_supervisor()
+            .durable_snapshots()
+            .map_err(|e| ReconciliationError::Undecidable {
+                reason: e.to_string(),
+            })?
+            .iter()
+            .flat_map(|s| s.turn().rounds.iter())
+            .filter_map(|r| match &r.phase {
+                ardur_session_journals::settlement::SettlementPhase::Settled {
+                    receipt: Some(binding),
+                    ..
+                } => Some(binding.receipt_id.0),
+                ardur_session_journals::settlement::SettlementPhase::Prepared {
+                    candidate: Some(c),
+                }
+                | ardur_session_journals::settlement::SettlementPhase::Finalized {
+                    candidate: Some(c),
+                    ..
+                }
+                | ardur_session_journals::settlement::SettlementPhase::Unresolved {
+                    candidate: Some(c),
+                    ..
+                } => Some(c.receipt_id.0),
+                _ => None,
+            })
+            .collect();
         let relevant_receipt_count = chain
             .iter()
             .filter(|receipt| receipt.body.session_id == Some(session_id.0))
@@ -1877,6 +2091,7 @@ impl FusedRuntime {
             .filter(|(_, receipt)| {
                 receipt.body.session_id == Some(session_id.0)
                     && !journaled.contains(&receipt.body.receipt_id)
+                    && !modern_receipts.contains(&receipt.body.receipt_id)
                     // A cancellation marker (#422) is intentionally
                     // journal-less: it records that a turn ended WITHOUT
                     // producing an assistant message, so there is no
@@ -2123,6 +2338,18 @@ impl TurnCommitHandshake {
 /// (#359).
 pub type CancelProbe = Arc<dyn Fn() -> bool + Send + Sync>;
 
+/// gh#452 settlement-record reasons — the refusal class each post-provider
+/// refusal settles its KNOWN incurred usage under. Distinct, stable strings so
+/// settlement aggregation can classify without parsing error text.
+const UNKNOWN_TOOL_SETTLEMENT: &str = "refusal:unknown_tool";
+const TOOL_AUTH_SETTLEMENT: &str = "refusal:tool_authorization";
+const CAPABILITY_SETTLEMENT: &str = "refusal:capability_denied";
+const APPROVAL_SETTLEMENT: &str = "refusal:approval_required";
+const APPROVAL_REJECTED_SETTLEMENT: &str = "refusal:approval_rejected";
+const TOOL_ERROR_SETTLEMENT: &str = "refusal:tool_error";
+const TOOL_TIMEOUT_SETTLEMENT: &str = "refusal:tool_timeout_uncertain_effect";
+const SCAN_SETTLEMENT: &str = "refusal:output_scan";
+
 #[async_trait::async_trait]
 impl ChatRuntime for FusedRuntime {
     async fn submit(&self, req: SubmitRequest) -> Result<SubmitResult, RuntimeError> {
@@ -2174,15 +2401,18 @@ impl FusedRuntime {
             .await
     }
 
-    /// #359 commit gate. If the caller is gone, release the reservation (the
-    /// `ReservationCancelGuard` then finds nothing to refund — `take_reservation`
-    /// is None after an explicit release) and abort with TurnCancelled.
-    async fn abort_if_caller_gone(
+    /// #359 commit gate. If the caller is gone, record the operator's known
+    /// expense (gh#452 — the provider round may already have run), release the
+    /// reservation (the `ReservationCancelGuard` then finds nothing to refund —
+    /// `take_reservation` is None after an explicit release) and abort with
+    /// TurnCancelled.
+    async fn abort_if_caller_gone<'a>(
         &self,
         session_id: SessionId,
-        reservation: Reservation,
+        reservation: RuntimeReservation<'a>,
+        _known_incurred: RuntimeCostTuple,
         cancel_probe: &Option<CancelProbe>,
-    ) -> Result<Reservation, RuntimeError> {
+    ) -> Result<RuntimeReservation<'a>, RuntimeError> {
         if cancel_probe.as_ref().is_some_and(|probe| probe()) {
             self.release(reservation).await;
             let err = RuntimeError::TurnCancelled;
@@ -2314,6 +2544,10 @@ impl FusedRuntime {
         // ---- 3. cost-gate setup (once): resolve the holder, top it up if the
         //         request carries a budget, and bind the token. The per-iteration
         //         `admit`/`finalize` happen inside the tool-call loop below.
+        if cancel_probe.as_ref().is_some_and(|probe| probe()) {
+            return Err(RuntimeError::TurnCancelled);
+        }
+        let mut owner = self.begin_settlement(session_id, &claims, &provisioning)?;
         let gate_token_id = match self.stage_cost_setup(&claims, &provisioning).await {
             Ok(gate_token_id) => gate_token_id,
             Err(err) => {
@@ -2368,6 +2602,17 @@ impl FusedRuntime {
         let mut committed_rounds: u32 = 0;
 
         let (receipt, final_content) = loop {
+            // There is no current-round hold or expense yet. In particular a
+            // cancelled later round must not become an admission refusal just
+            // because earlier committed rounds depleted the caller's budget.
+            if cancel_probe.as_ref().is_some_and(|probe| probe()) {
+                self.record_turn_cancellation(session_id, &claims, committed_rounds)
+                    .await;
+                let err = RuntimeError::TurnCancelled;
+                self.fire_error(session_id, LifecyclePhase::Provider, &err)
+                    .await;
+                return Err(err);
+            }
             iteration += 1;
             // ARD-480: expiry-sensitive re-verification happens throughout the
             // tool loop, so use the clock at this iteration, not turn start.
@@ -2387,6 +2632,17 @@ impl FusedRuntime {
             let iter_request = match self.scan_outbound_request(iter_request).await {
                 Ok(request) => request,
                 Err(err) => {
+                    // No current hold exists here. Preserve first-turn setup
+                    // refusals, but terminalize an abandoned committed loop.
+                    let err = if committed_rounds > 0
+                        && cancel_probe.as_ref().is_some_and(|probe| probe())
+                    {
+                        self.record_turn_cancellation(session_id, &claims, committed_rounds)
+                            .await;
+                        RuntimeError::TurnCancelled
+                    } else {
+                        err
+                    };
                     self.fire_error(session_id, LifecyclePhase::Submit, &err)
                         .await;
                     return Err(err);
@@ -2394,55 +2650,50 @@ impl FusedRuntime {
             };
 
             // 3'. cost-gate admit (per iteration).
-            let request_digest =
-                GateSha256::of(&serde_json::to_vec(&iter_request.messages).unwrap_or_default());
+            let request_digest = GateSha256::of(
+                &serde_json::to_vec(&iter_request).map_err(|e| RuntimeError::Internal(e.into()))?,
+            );
             let mut reservation = match self
-                .gate
-                .admit(AdmissionRequest {
-                    cap_token_id: gate_token_id,
-                    projected_envelope: self.envelope,
-                    provider_id: self.gate_provider_id.clone(),
-                    model_id: self.gate_model_id.clone(),
-                    request_digest,
-                })
+                .admit_round(
+                    &mut owner,
+                    AdmissionRequest {
+                        cap_token_id: gate_token_id,
+                        projected_envelope: self.envelope,
+                        provider_id: self.gate_provider_id.clone(),
+                        model_id: self.gate_model_id.clone(),
+                        request_digest,
+                    },
+                    iter_request.request_id.0,
+                )
                 .await
             {
                 Ok(reservation) => reservation,
                 Err(e) => {
-                    let err = map_admission_error(e);
+                    // Failed admission returned no reservation to release.
+                    let err = if committed_rounds > 0
+                        && cancel_probe.as_ref().is_some_and(|probe| probe())
+                    {
+                        self.record_turn_cancellation(session_id, &claims, committed_rounds)
+                            .await;
+                        RuntimeError::TurnCancelled
+                    } else {
+                        e
+                    };
                     self.fire_error(session_id, LifecyclePhase::Submit, &err)
                         .await;
                     return Err(err);
                 }
             };
 
-            // ARD-488: release the reservation if this turn is cancelled (future
-            // dropped / outer timeout) before it settles.
-            let _cancel_guard = ReservationCancelGuard::new(
-                Arc::clone(&self.gate),
-                self.budget.clone(),
-                reservation.reservation_id,
-            );
-
-            // 5. provider dispatch.
-            let response = match self.provider.complete(iter_request).await {
-                Ok(response) => response,
-                Err(provider_err) => {
-                    self.release(reservation).await;
-                    self.fire_error(session_id, LifecyclePhase::Provider, &provider_err)
-                        .await;
-                    return Err(map_provider_error(&provider_err));
-                }
-            };
-            // ARD-501: a slow completion can outlive the reservation TTL. Refresh
-            // the lease now the provider has returned so the finalize below (and
-            // the post-receipt hooks between here and it) does not discard a turn
-            // the caller has already received. No-op once finalized.
-            self.gate.touch_reservation(reservation.reservation_id);
-
-            // #359 commit gate after the provider round.
+            // A queued cancellation must not start a new provider round. This
+            // also covers abandonment during outbound scanning or admission.
             reservation = match self
-                .abort_if_caller_gone(session_id, reservation, &cancel_probe)
+                .abort_if_caller_gone(
+                    session_id,
+                    reservation,
+                    RuntimeCostTuple::ZERO,
+                    &cancel_probe,
+                )
                 .await
             {
                 Ok(reservation) => reservation,
@@ -2452,6 +2703,61 @@ impl FusedRuntime {
                     return Err(RuntimeError::TurnCancelled);
                 }
                 Err(err) => return Err(err),
+            };
+
+            // 5. provider dispatch.
+            reservation
+                .owner
+                .observe_provider(ProviderEvidence::DispatchIntent)
+                .map_err(settlement_error)?;
+            let response = self.provider.complete(iter_request).await;
+            if let Ok(response) = &response {
+                reservation
+                    .owner
+                    .observe_provider(ProviderEvidence::Observed {
+                        usage: Some(UsageSnapshot {
+                            input_tokens: u64::from(response.usage.tokens_in),
+                            output_tokens: u64::from(response.usage.tokens_out),
+                        }),
+                        cost: response.cost,
+                        provenance: CostProvenance::ResponseCost,
+                        finished: true,
+                        interrupted: false,
+                    })
+                    .map_err(settlement_error)?;
+            }
+            // ARD-501: a slow completion can outlive the reservation TTL. Refresh
+            // the lease now the provider has returned so the finalize below (and
+            // the post-receipt hooks between here and it) does not discard a turn
+            // the caller has already received. No-op once finalized.
+            if response.is_ok() {
+                self.gate.touch_reservation(reservation.reservation_id);
+            }
+
+            // A failed provider await can also abandon the caller. ProviderError
+            // has no usage, so only a returned response supplies known expense.
+            let known = response.as_ref().map_or(RuntimeCostTuple::ZERO, |r| r.cost);
+            reservation = match self
+                .abort_if_caller_gone(session_id, reservation, known, &cancel_probe)
+                .await
+            {
+                Ok(reservation) => reservation,
+                Err(RuntimeError::TurnCancelled) => {
+                    self.record_turn_cancellation(session_id, &claims, committed_rounds)
+                        .await;
+                    return Err(RuntimeError::TurnCancelled);
+                }
+                Err(err) => return Err(err),
+            };
+
+            let response = match response {
+                Ok(response) => response,
+                Err(provider_err) => {
+                    self.release_failure(reservation).await;
+                    self.fire_error(session_id, LifecyclePhase::Provider, &provider_err)
+                        .await;
+                    return Err(map_provider_error(&provider_err));
+                }
             };
 
             // The tool calls (if any) the model requested this round.
@@ -2472,12 +2778,18 @@ impl FusedRuntime {
             let mut tool_messages: Vec<ChatMessage> = Vec::new();
             let mut tool_cost = RuntimeCostTuple::default();
             if wants_tools && !exhausted {
-                for call in &requested {
+                for (tool_ordinal, call) in requested.iter().enumerate() {
                     // #359: do not authorize or invoke further tools once the
                     // caller is gone — later tools would otherwise run with no
                     // receipt attesting their effects.
+                    let known_incurred = response.cost.saturating_add(&tool_cost);
                     reservation = match self
-                        .abort_if_caller_gone(session_id, reservation, &cancel_probe)
+                        .abort_if_caller_gone(
+                            session_id,
+                            reservation,
+                            known_incurred,
+                            &cancel_probe,
+                        )
                         .await
                     {
                         Ok(reservation) => reservation,
@@ -2489,13 +2801,19 @@ impl FusedRuntime {
                         Err(err) => return Err(err),
                     };
                     let Some(tool) = self.tools.get(&ToolId::new(&call.name)) else {
-                        self.release(reservation).await;
                         let err = RuntimeError::UnknownTool {
                             tool: call.name.clone(),
                         };
+                        let known = response.cost.saturating_add(&tool_cost);
+                        let settlement = self
+                            .settle_refusal(session_id, reservation, known, UNKNOWN_TOOL_SETTLEMENT)
+                            .await;
                         self.fire_error(session_id, LifecyclePhase::Provider, &err)
                             .await;
-                        return Err(err);
+                        return match settlement {
+                            Ok(()) => Err(err),
+                            Err(settle_err) => Err(settle_err),
+                        };
                     };
                     let tool_auth_now_unix = self.clock.now_ms().get() / 1000;
                     if let Err(err) = self.authorize_tool_invocation(
@@ -2505,10 +2823,16 @@ impl FusedRuntime {
                         tool_auth_now_unix,
                         &call.name,
                     ) {
-                        self.release(reservation).await;
+                        let known = response.cost.saturating_add(&tool_cost);
+                        let settlement = self
+                            .settle_refusal(session_id, reservation, known, TOOL_AUTH_SETTLEMENT)
+                            .await;
                         self.fire_error(session_id, LifecyclePhase::Submit, &err)
                             .await;
-                        return Err(err);
+                        return match settlement {
+                            Ok(()) => Err(err),
+                            Err(settle_err) => Err(settle_err),
+                        };
                     }
                     // ARD-420: enforce required_capabilities() against the
                     // cap-token's tool allowlist before the tool body runs.
@@ -2519,17 +2843,23 @@ impl FusedRuntime {
                         &call.name,
                         tool.required_capabilities(),
                     ) {
-                        self.release(reservation).await;
+                        let known = response.cost.saturating_add(&tool_cost);
+                        let settlement = self
+                            .settle_refusal(session_id, reservation, known, CAPABILITY_SETTLEMENT)
+                            .await;
                         self.fire_error(session_id, LifecyclePhase::Submit, &err)
                             .await;
-                        return Err(err);
+                        return match settlement {
+                            Ok(()) => Err(err),
+                            Err(settle_err) => Err(settle_err),
+                        };
                     }
                     // ARD-139: a call whose required capabilities include an
                     // approval-gated one needs human sign-off even though the
                     // cap-token/cedar checks above already allow it. gh#497:
                     // only a WON claim (bound to this exact call and stamped
                     // with the verified caller) lets the invocation proceed.
-                    let spent_approval = match self
+                    let approval_result = self
                         .authorize_or_propose_approval(
                             &req.cap_token,
                             session_id,
@@ -2539,64 +2869,213 @@ impl FusedRuntime {
                             &call.arguments,
                             &claims.subject.0,
                         )
+                        .await;
+                    reservation = match self
+                        .abort_if_caller_gone(
+                            session_id,
+                            reservation,
+                            response.cost.saturating_add(&tool_cost),
+                            &cancel_probe,
+                        )
                         .await
                     {
+                        Ok(reservation) => reservation,
+                        Err(RuntimeError::TurnCancelled) => {
+                            self.record_turn_cancellation(session_id, &claims, committed_rounds)
+                                .await;
+                            return Err(RuntimeError::TurnCancelled);
+                        }
+                        Err(err) => return Err(err),
+                    };
+                    let spent_approval = match approval_result {
                         Ok(spent) => spent,
                         Err(err) => {
-                            self.release(reservation).await;
+                            let known = response.cost.saturating_add(&tool_cost);
+                            let reason = if matches!(err, RuntimeError::ApprovalRequired { .. }) {
+                                APPROVAL_SETTLEMENT
+                            } else {
+                                APPROVAL_REJECTED_SETTLEMENT
+                            };
+                            let settlement = self
+                                .settle_refusal(session_id, reservation, known, reason)
+                                .await;
                             self.fire_error(session_id, LifecyclePhase::Submit, &err)
                                 .await;
-                            return Err(err);
+                            return match settlement {
+                                Ok(()) => Err(err),
+                                Err(settle_err) => Err(settle_err),
+                            };
                         }
                     };
                     let ctx = self.tool_context(&req.cap_token, session_id);
-                    let output = match tokio::time::timeout(
+                    self.observe_tool(
+                        &mut reservation,
+                        tool_ordinal,
+                        call,
+                        ToolEffect::DispatchIntent,
+                        OutputAdmission::NotScanned,
+                    )?;
+                    let tool_result = tokio::time::timeout(
                         self.tool_timeout,
                         tool.invoke(&ctx, call.arguments.clone()),
                     )
-                    .await
-                    {
+                    .await;
+                    // Preserve the verified invocation outcome even if caller
+                    // cancellation wins. A timeout has no verified outcome.
+                    let mut known = response.cost.saturating_add(&tool_cost);
+                    match &tool_result {
                         Ok(Ok(output)) => {
+                            self.observe_tool(
+                                &mut reservation,
+                                tool_ordinal,
+                                call,
+                                ToolEffect::Completed {
+                                    output_digest: GateSha256::of(
+                                        &serde_json::to_vec(&output.content)
+                                            .map_err(|e| RuntimeError::Internal(e.into()))?,
+                                    ),
+                                    cost: output.cost,
+                                },
+                                OutputAdmission::NotScanned,
+                            )?;
                             self.record_approval_invocation(
                                 &spent_approval,
                                 InvocationResult::Completed,
                             );
-                            output
+                            known = known.saturating_add(&output.cost);
                         }
-                        Ok(Err(tool_err)) => {
-                            // Consume-before-invoke: the approval stays spent;
-                            // the card records the call resolved as failed.
+                        Ok(Err(_)) => {
+                            self.observe_tool(
+                                &mut reservation,
+                                tool_ordinal,
+                                call,
+                                ToolEffect::Failed {
+                                    class: ToolFailureClass::Execution,
+                                    effect_unknown: true,
+                                },
+                                OutputAdmission::NotScanned,
+                            )?;
                             self.record_approval_invocation(
                                 &spent_approval,
                                 InvocationResult::Failed,
                             );
-                            self.release(reservation).await;
+                        }
+                        Err(_) => {
+                            self.observe_tool(
+                                &mut reservation,
+                                tool_ordinal,
+                                call,
+                                ToolEffect::InterruptedUnknown,
+                                OutputAdmission::NotScanned,
+                            )?;
+                        }
+                    }
+                    // Failed awaits and timeouts obey the same cancellation
+                    // economics as successful returns, before any error hook.
+                    reservation = match self
+                        .abort_if_caller_gone(session_id, reservation, known, &cancel_probe)
+                        .await
+                    {
+                        Ok(reservation) => reservation,
+                        Err(RuntimeError::TurnCancelled) => {
+                            self.record_turn_cancellation(session_id, &claims, committed_rounds)
+                                .await;
+                            return Err(RuntimeError::TurnCancelled);
+                        }
+                        Err(err) => return Err(err),
+                    };
+                    let output = match tool_result {
+                        Ok(Ok(output)) => output,
+                        Ok(Err(tool_err)) => {
                             let err = map_tool_error(tool_err, &call.name);
+                            let known = response.cost.saturating_add(&tool_cost);
+                            let settlement = self
+                                .settle_refusal(
+                                    session_id,
+                                    reservation,
+                                    known,
+                                    TOOL_ERROR_SETTLEMENT,
+                                )
+                                .await;
                             self.fire_error(session_id, LifecyclePhase::Provider, &err)
                                 .await;
-                            return Err(err);
+                            return match settlement {
+                                Ok(()) => Err(err),
+                                Err(settle_err) => Err(settle_err),
+                            };
                         }
                         Err(_elapsed) => {
                             // Timed out with the invocation's effect unknown:
                             // the spent card is deliberately left WITHOUT an
                             // outcome record — the explicit ambiguous-effect
-                            // state.
-                            self.release(reservation).await;
+                            // state. The provider round is KNOWN and debited;
+                            // the tool's cost is not (gh#452).
+                            let known = response.cost.saturating_add(&tool_cost);
+                            let settlement = self
+                                .settle_refusal(
+                                    session_id,
+                                    reservation,
+                                    known,
+                                    TOOL_TIMEOUT_SETTLEMENT,
+                                )
+                                .await;
                             let err = RuntimeError::ToolTimeout {
                                 tool: call.name.clone(),
                             };
                             self.fire_error(session_id, LifecyclePhase::Provider, &err)
                                 .await;
-                            return Err(err);
+                            return match settlement {
+                                Ok(()) => Err(err),
+                                Err(settle_err) => Err(settle_err),
+                            };
                         }
                     };
 
                     // Scan the tool output before it re-enters the context.
-                    if let Err(err) = self.scan_tool_output(&call.name, &output.content).await {
-                        self.release(reservation).await;
+                    let scan_result = self.scan_tool_output(&call.name, &output.content).await;
+                    self.observe_tool(
+                        &mut reservation,
+                        tool_ordinal,
+                        call,
+                        ToolEffect::Completed {
+                            output_digest: GateSha256::of(
+                                &serde_json::to_vec(&output.content)
+                                    .map_err(|e| RuntimeError::Internal(e.into()))?,
+                            ),
+                            cost: output.cost,
+                        },
+                        if scan_result.is_ok() {
+                            OutputAdmission::Allowed
+                        } else {
+                            OutputAdmission::Blocked
+                        },
+                    )?;
+                    reservation = match self
+                        .abort_if_caller_gone(session_id, reservation, known, &cancel_probe)
+                        .await
+                    {
+                        Ok(reservation) => reservation,
+                        Err(RuntimeError::TurnCancelled) => {
+                            self.record_turn_cancellation(session_id, &claims, committed_rounds)
+                                .await;
+                            return Err(RuntimeError::TurnCancelled);
+                        }
+                        Err(err) => return Err(err),
+                    };
+                    if let Err(err) = scan_result {
+                        let known = response
+                            .cost
+                            .saturating_add(&tool_cost)
+                            .saturating_add(&output.cost);
+                        let settlement = self
+                            .settle_refusal(session_id, reservation, known, SCAN_SETTLEMENT)
+                            .await;
                         self.fire_error(session_id, LifecyclePhase::Submit, &err)
                             .await;
-                        return Err(err);
+                        return match settlement {
+                            Ok(()) => Err(err),
+                            Err(settle_err) => Err(settle_err),
+                        };
                     }
 
                     tool_cost = tool_cost.saturating_add(&output.cost);
@@ -2635,8 +3114,9 @@ impl FusedRuntime {
 
             // #359: recheck after tool.invoke awaits — a timeout during tool
             // execution would otherwise fall through to cost finalize + commit.
+            let known_incurred = response.cost.saturating_add(&tool_cost);
             reservation = match self
-                .abort_if_caller_gone(session_id, reservation, &cancel_probe)
+                .abort_if_caller_gone(session_id, reservation, known_incurred, &cancel_probe)
                 .await
             {
                 Ok(reservation) => reservation,
@@ -2655,126 +3135,42 @@ impl FusedRuntime {
             //    and tail update; this prevents concurrent turns from forking the
             //    receipt chain or rolling back each other's journals.
             let combined_cost = response.cost.saturating_add(&tool_cost);
-            let (signed, receipt) = {
-                let commit_guard = self.commit_lock.lock().await;
-                // #359: final probe INSIDE the lock, immediately before
-                // finalize/persist. A disconnect while waiting for the lock
-                // would otherwise pass the post-tool probe and still commit.
-                if cancel_probe.as_ref().is_some_and(|probe| probe()) {
-                    drop(commit_guard);
-                    self.release(reservation).await;
-                    let err = RuntimeError::TurnCancelled;
-                    self.fire_error(session_id, LifecyclePhase::Provider, &err)
+            let body = ReceiptBody {
+                receipt_id: uuid::Uuid::new_v4(),
+                parent_hash: None,
+                verb: self.verb.clone(),
+                issued_at: ardur_receipt::UnixTsMillis(iteration_now_ms),
+                subject: ardur_receipt::HolderId(claims.subject.0.clone()),
+                cap_token_id: ardur_receipt::TokenId(claims.token_id),
+                payload_digest: Sha256Digest::of(response.content.as_bytes()),
+                session_id: Some(session_id.0),
+                cost: combined_cost,
+                tool_calls: tool_receipts,
+                provider: Some(self.provider.name()),
+            };
+            let (signed, receipt) = match self
+                .commit_round(
+                    &mut reservation,
+                    body,
+                    !wants_tools,
+                    iteration,
+                    &req,
+                    &response,
+                    committed.as_ref(),
+                    cancel_probe.as_ref(),
+                )
+                .await
+            {
+                Ok(result) => result,
+                Err(err) => {
+                    self.fire_error(session_id, LifecyclePhase::Receipt, &err)
                         .await;
-                    self.record_turn_cancellation(session_id, &claims, committed_rounds)
-                        .await;
+                    if matches!(err, RuntimeError::TurnCancelled) {
+                        self.record_turn_cancellation(session_id, &claims, committed_rounds)
+                            .await;
+                    }
                     return Err(err);
                 }
-                let parent_hash = *self.chain_tail.lock();
-                let body = ReceiptBody {
-                    receipt_id: uuid::Uuid::new_v4(),
-                    parent_hash,
-                    verb: self.verb.clone(),
-                    issued_at: ardur_receipt::UnixTsMillis(iteration_now_ms),
-                    subject: ardur_receipt::HolderId(claims.subject.0.clone()),
-                    cap_token_id: ardur_receipt::TokenId(claims.token_id),
-                    payload_digest: Sha256Digest::of(response.content.as_bytes()),
-                    session_id: Some(session_id.0),
-                    cost: combined_cost,
-                    tool_calls: tool_receipts,
-                    provider: Some(self.provider.name()),
-                };
-                let signed = match ReceiptSigner::sign(body, &self.receipt_key) {
-                    Ok(signed) => signed,
-                    Err(e) => {
-                        self.release(reservation).await;
-                        self.fire_error(session_id, LifecyclePhase::Receipt, &e)
-                            .await;
-                        return Err(RuntimeError::Internal(anyhow::anyhow!(
-                            "receipt mint failed: {e}"
-                        )));
-                    }
-                };
-
-                // 7. cost-gate finalize: settle this iteration against the
-                //    combined actual (provider + tools) before making the turn
-                //    durable. If the reservation expired, no receipt/journal entry
-                //    is committed for a turn the cost gate rejected.
-                let actual = combined_cost;
-                let finalization = match self.gate.finalize(reservation, actual).await {
-                    Ok(finalization) => finalization,
-                    Err(e) => {
-                        let err = map_admission_error(e);
-                        self.fire_error(session_id, LifecyclePhase::CostGate, &err)
-                            .await;
-                        return Err(err);
-                    }
-                };
-
-                let receipt = match self
-                    .commit_receipt_and_journal(
-                        session_id,
-                        iteration,
-                        &req,
-                        &response,
-                        &signed,
-                        iteration_now_ms,
-                        committed.as_ref(),
-                    )
-                    .await
-                {
-                    Ok(receipt) => {
-                        self.gate
-                            .commit_finalization(finalization.reservation_id)
-                            .await;
-                        receipt
-                    }
-                    Err(DurableCommitError::BeforeReceipt(err)) => {
-                        if let Err(rollback) =
-                            self.gate.rollback_finalization(finalization.clone()).await
-                        {
-                            return Err(RuntimeError::Internal(anyhow::anyhow!(
-                                "receipt commit failed ({err}); cost rollback also failed: {rollback}"
-                            )));
-                        }
-                        self.fire_error(session_id, LifecyclePhase::Receipt, &err)
-                            .await;
-                        if matches!(err, RuntimeError::TurnCancelled) {
-                            // Release the commit guard BEFORE recording.
-                            // `record_turn_cancellation` takes `commit_lock`,
-                            // which is not reentrant, and this branch still
-                            // holds it — same reason the probe path above
-                            // drops the guard before returning.
-                            //
-                            // Unreachable today with `committed_rounds > 0`:
-                            // `begin_persist` only refuses from Cancelled,
-                            // `request_cancel` only wins against Live, and any
-                            // committed round has already moved the handshake
-                            // to Committed — where `record_turn_cancellation`
-                            // early-returns anyway. So this is a latent
-                            // hazard, not a live deadlock. Made structurally
-                            // safe rather than left to that coincidence: a
-                            // future state-machine change allowing a committed
-                            // turn to be cancelled would otherwise park the
-                            // single turn worker on a lock it already holds,
-                            // stalling every subsequent turn.
-                            drop(commit_guard);
-                            self.record_turn_cancellation(session_id, &claims, committed_rounds)
-                                .await;
-                            return Err(err);
-                        }
-                        return Err(err);
-                    }
-                    Err(DurableCommitError::AfterReceipt(err)) => {
-                        self.gate
-                            .commit_finalization(finalization.reservation_id)
-                            .await;
-                        self.fire_error(session_id, LifecyclePhase::Receipt, &err)
-                            .await;
-                        return Err(err);
-                    }
-                };
-                (signed, receipt)
             };
 
             // 8. post-receipt hooks (observational; the call already happened).
@@ -2862,7 +3258,11 @@ impl FusedRuntime {
             //     post-receipt hooks/finalize/memory, so no separate journal append
             //     runs here.
 
-            total_cost = total_cost.saturating_add(&combined_cost);
+            total_cost = total_cost.checked_add(&combined_cost).ok_or_else(|| {
+                RuntimeError::Internal(anyhow::anyhow!(
+                    "settlement cumulative turn cost overflow; paid rounds retained"
+                ))
+            })?;
             committed_rounds += 1;
 
             // Termination: a response with no tool calls is the final answer; a
@@ -2873,6 +3273,10 @@ impl FusedRuntime {
                 break (receipt, response.content);
             }
             if exhausted {
+                reservation
+                    .owner
+                    .finish_refused(RefusalClass::IterationLimit)
+                    .map_err(settlement_error)?;
                 let err = RuntimeError::ToolLoopExhausted {
                     iterations: iteration,
                 };
@@ -2915,12 +3319,12 @@ impl FusedRuntime {
     /// then a terminal `Err`, after which the stream ends (the
     /// [`ProviderStream`](ardur_provider_runtime::ProviderStream) convention).
     ///
-    /// **Cancellation.** The whole pipeline runs inside the returned stream's
-    /// generator, so dropping the stream cancels the in-flight provider round at
-    /// its next `.await`. Because the receipt is minted only *after* a round
-    /// completes, a turn cancelled mid-generation mints **no** receipt, appends
-    /// **no** journal entry, and records **no** memory — the held reservation
-    /// lapses on the gate's TTL. See [`crate::streaming`] for the full contract.
+    /// **Cancellation.** Owning Drop synchronously refunds an undecided round
+    /// and retains known provider/tool expense in the authoritative settlement
+    /// snapshot (or visible supervised uncertainty on storage failure). It never
+    /// runs an executor. Retain [`Self::settlement_supervisor`] and explicitly
+    /// drive its bounded journal drain before reopening journal projections.
+    /// Earlier paid tool rounds remain paid; cancellation is not a final answer.
     pub fn stream(
         &self,
         req: SubmitRequest,
@@ -2981,7 +3385,8 @@ impl FusedRuntime {
             // ---- 3. cost-gate setup (provision + bind; no per-round admission
             //         yet — that happens inside the loop). No stage event: the
             //         CostGateAdmit event brackets the per-round `admit`.
-            let gate_token_id = match self.stage_cost_setup(&claims, &provisioning).await {
+            let mut owner = self.begin_settlement(session_id, &claims, &provisioning)?;
+        let gate_token_id = match self.stage_cost_setup(&claims, &provisioning).await {
                 Ok(gate_token_id) => gate_token_id,
                 Err(err) => {
                     self.fire_error(session_id, LifecyclePhase::Submit, &err).await;
@@ -3045,24 +3450,20 @@ impl FusedRuntime {
                 // 3'. cost-gate admit (per iteration).
                 yield FusedEvent::StageStart { stage: StageKind::CostGateAdmit };
                 let request_digest =
-                    GateSha256::of(&serde_json::to_vec(&iter_request.messages).unwrap_or_default());
+                    GateSha256::of(&serde_json::to_vec(&iter_request).map_err(|e| RuntimeError::Internal(e.into()))?);
                 let reservation_handle = match self
-                    .gate
-                    .admit(AdmissionRequest {
+                    .admit_round(&mut owner, AdmissionRequest {
                         cap_token_id: gate_token_id,
                         projected_envelope: self.envelope,
                         provider_id: self.gate_provider_id.clone(),
                         model_id: self.gate_model_id.clone(),
                         request_digest,
-                    })
+                    }, iter_request.request_id.0)
                     .await
                 {
-                    Ok(reservation) => {
-                        yield FusedEvent::StageEnd { stage: StageKind::CostGateAdmit, ok: true };
-                        reservation
-                    }
+                    Ok(reservation) => reservation,
                     Err(e) => {
-                        let err = map_admission_error(e);
+                        let err = e;
                         yield FusedEvent::StageEnd { stage: StageKind::CostGateAdmit, ok: false };
                         self.fire_error(session_id, LifecyclePhase::Submit, &err).await;
                         Err(err)?
@@ -3077,19 +3478,19 @@ impl FusedRuntime {
                 // ARD-488: release the reservation if this streaming round is
                 // cancelled (stream dropped / outer timeout) before it settles.
                 let reservation_id = reservation_handle.reservation_id;
-                let _cancel_guard = ReservationCancelGuard::new(
-                    Arc::clone(&self.gate),
-                    self.budget.clone(),
-                    reservation_id,
-                );
                 let mut reservation = Some(reservation_handle);
+                // A yield can drop the owning generator immediately. Install
+                // reservation cleanup before acknowledging admission, including
+                // the no-provider-work boundary.
+                yield FusedEvent::StageEnd { stage: StageKind::CostGateAdmit, ok: true };
 
                 // 5. provider stream: forward each delta as it arrives.
                 yield FusedEvent::StageStart { stage: StageKind::ProviderStream };
+                reservation.as_mut().expect("held").owner.observe_provider(ProviderEvidence::DispatchIntent).map_err(settlement_error)?;
                 let mut provider_stream = match self.provider.stream(iter_request).await {
                     Ok(provider_stream) => provider_stream,
                     Err(provider_err) => {
-                        self.release(reservation.take().expect("reservation held")).await;
+                        self.release_failure(reservation.take().expect("reservation held")).await;
                         yield FusedEvent::StageEnd { stage: StageKind::ProviderStream, ok: false };
                         self.fire_error(session_id, LifecyclePhase::Provider, &provider_err)
                             .await;
@@ -3098,6 +3499,7 @@ impl FusedRuntime {
                 };
                 let mut content = String::new();
                 let mut usage = Usage::default();
+                let mut saw_usage = false;
                 let mut finish_reason = FinishReason::Stop;
                 let mut stream_err: Option<ProviderError> = None;
                 while let Some(item) = provider_stream.next().await {
@@ -3117,7 +3519,7 @@ impl FusedRuntime {
                             // unbounded size. Fail closed: abort the turn, no
                             // partial response enters the auditable chain.
                             if content.len() > self.stream_content_max_bytes {
-                                self.release(
+                                self.release_failure(
                                     reservation.take().expect("reservation held"),
                                 )
                                 .await;
@@ -3144,7 +3546,11 @@ impl FusedRuntime {
                         Ok(StreamEvent::ToolCallDelta { id, delta }) => {
                             yield FusedEvent::ToolCallDelta { id, delta };
                         }
-                        Ok(StreamEvent::Usage(reported)) => usage = reported,
+                        Ok(StreamEvent::Usage(reported)) => {
+                            self.observe_usage(reservation.as_mut().expect("held"), reported, false)?;
+                            usage = reported;
+                            saw_usage = true;
+                        },
                         Ok(StreamEvent::Finish(reason)) => finish_reason = reason,
                         Ok(StreamEvent::ServedModel(model)) => {
                             // Record the actual model served (ARD-454).
@@ -3161,12 +3567,17 @@ impl FusedRuntime {
                 // Free the provider stream before the post-provider stages run.
                 drop(provider_stream);
                 if let Some(provider_err) = stream_err {
-                    self.release(reservation.take().expect("reservation held")).await;
+                    self.release_failure(reservation.take().expect("reservation held")).await;
                     yield FusedEvent::StageEnd { stage: StageKind::ProviderStream, ok: false };
                     self.fire_error(session_id, LifecyclePhase::Provider, &provider_err)
                         .await;
                     Err(map_provider_error(&provider_err))?;
                 }
+                if !saw_usage {
+                    self.release_failure(reservation.take().expect("held")).await;
+                    Err(RuntimeError::ProviderUnavailable)?;
+                }
+                self.observe_usage(reservation.as_mut().expect("held"), usage, true)?;
                 yield FusedEvent::Usage(usage);
                 yield FusedEvent::StageEnd { stage: StageKind::ProviderStream, ok: true };
 
@@ -3193,14 +3604,25 @@ impl FusedRuntime {
                 let mut tool_cost = RuntimeCostTuple::default();
                 if wants_tools && !exhausted {
                     yield FusedEvent::StageStart { stage: StageKind::ToolExec };
-                    for call in &requested {
+                    for (tool_ordinal, call) in requested.iter().enumerate() {
                         let Some(tool) = self.tools.get(&ToolId::new(&call.name)) else {
-                            self.release(reservation.take().expect("reservation held")).await;
                             let err = RuntimeError::UnknownTool {
                                 tool: call.name.clone(),
                             };
                             yield FusedEvent::StageEnd { stage: StageKind::ToolExec, ok: false };
+                            let known = response.cost.saturating_add(&tool_cost);
+                            let settlement = self
+                                .settle_refusal(
+                                    session_id,
+                                    reservation.take().expect("reservation held"),
+                                    known,
+                                    UNKNOWN_TOOL_SETTLEMENT,
+                                )
+                                .await;
+                            // Observe the original refusal even if accounting failed;
+                            // the settlement error still takes precedence for callers.
                             self.fire_error(session_id, LifecyclePhase::Provider, &err).await;
+                            settlement?;
                             Err(err)?;
                             unreachable!()
                         };
@@ -3212,12 +3634,22 @@ impl FusedRuntime {
                             invocation_now_unix,
                             &call.name,
                         ) {
-                            self.release(reservation.take().expect("reservation held")).await;
                             yield FusedEvent::StageEnd { stage: StageKind::ToolExec, ok: false };
+                            let known = response.cost.saturating_add(&tool_cost);
+                            let settlement = self
+                                .settle_refusal(
+                                    session_id,
+                                    reservation.take().expect("reservation held"),
+                                    known,
+                                    TOOL_AUTH_SETTLEMENT,
+                                )
+                                .await;
                             self.fire_error(session_id, LifecyclePhase::Submit, &err).await;
+                            settlement?;
                             Err(err)?;
                             unreachable!()
                         }
+
                         // ARD-420: enforce required_capabilities() against the
                         // cap-token's tool allowlist before the tool body runs.
                         if let Err(err) = self.authorize_tool_capabilities(
@@ -3227,12 +3659,22 @@ impl FusedRuntime {
                             &call.name,
                             tool.required_capabilities(),
                         ) {
-                            self.release(reservation.take().expect("reservation held")).await;
                             yield FusedEvent::StageEnd { stage: StageKind::ToolExec, ok: false };
+                            let known = response.cost.saturating_add(&tool_cost);
+                            let settlement = self
+                                .settle_refusal(
+                                    session_id,
+                                    reservation.take().expect("reservation held"),
+                                    known,
+                                    CAPABILITY_SETTLEMENT,
+                                )
+                                .await;
                             self.fire_error(session_id, LifecyclePhase::Submit, &err).await;
+                            settlement?;
                             Err(err)?;
                             unreachable!()
                         }
+
                         // ARD-139: a call whose required capabilities include
                         // an approval-gated one needs human sign-off even
                         // though the cap-token/cedar checks above already
@@ -3253,14 +3695,29 @@ impl FusedRuntime {
                         {
                             Ok(spent) => spent,
                             Err(err) => {
-                                self.release(reservation.take().expect("reservation held")).await;
                                 yield FusedEvent::StageEnd { stage: StageKind::ToolExec, ok: false };
+                                let known = response.cost.saturating_add(&tool_cost);
+                                let reason = if matches!(err, RuntimeError::ApprovalRequired { .. }) {
+                                    APPROVAL_SETTLEMENT
+                                } else {
+                                    APPROVAL_REJECTED_SETTLEMENT
+                                };
+                                let settlement = self
+                                    .settle_refusal(
+                                        session_id,
+                                        reservation.take().expect("reservation held"),
+                                        known,
+                                        reason,
+                                    )
+                                    .await;
                                 self.fire_error(session_id, LifecyclePhase::Submit, &err).await;
+                                settlement?;
                                 Err(err)?;
                                 unreachable!()
                             }
                         };
                         let ctx = self.tool_context(&req.cap_token, session_id);
+                        self.observe_tool(reservation.as_mut().expect("held"), tool_ordinal, call, ToolEffect::DispatchIntent, OutputAdmission::NotScanned)?;
                         let output = match tokio::time::timeout(
                             self.tool_timeout,
                             tool.invoke(&ctx, call.arguments.clone()),
@@ -3268,6 +3725,10 @@ impl FusedRuntime {
                         .await
                         {
                             Ok(Ok(output)) => {
+                                self.observe_tool(reservation.as_mut().expect("held"), tool_ordinal, call, ToolEffect::Completed {
+                                    output_digest: GateSha256::of(&serde_json::to_vec(&output.content).map_err(|e| RuntimeError::Internal(e.into()))?),
+                                    cost: output.cost,
+                                }, OutputAdmission::NotScanned)?;
                                 self.record_approval_invocation(
                                     &spent_approval,
                                     InvocationResult::Completed,
@@ -3275,38 +3736,77 @@ impl FusedRuntime {
                                 output
                             }
                             Ok(Err(tool_err)) => {
+                                self.observe_tool(reservation.as_mut().expect("held"), tool_ordinal, call, ToolEffect::Failed { class: ToolFailureClass::Execution, effect_unknown: true }, OutputAdmission::NotScanned)?;
                                 // Consume-before-invoke: the approval stays
                                 // spent; the card records the call resolved
                                 // as failed.
                                 self.record_approval_invocation(&spent_approval, InvocationResult::Failed);
-                                self.release(reservation.take().expect("reservation held")).await;
                                 let err = map_tool_error(tool_err, &call.name);
                                 yield FusedEvent::StageEnd { stage: StageKind::ToolExec, ok: false };
+                                let known = response.cost.saturating_add(&tool_cost);
+                                let settlement = self
+                                    .settle_refusal(
+                                        session_id,
+                                        reservation.take().expect("reservation held"),
+                                        known,
+                                        TOOL_ERROR_SETTLEMENT,
+                                    )
+                                    .await;
                                 self.fire_error(session_id, LifecyclePhase::Provider, &err).await;
+                                settlement?;
                                 Err(err)?;
                                 unreachable!()
                             }
                             Err(_elapsed) => {
+                                self.observe_tool(reservation.as_mut().expect("held"), tool_ordinal, call, ToolEffect::InterruptedUnknown, OutputAdmission::NotScanned)?;
                                 // Timed out with the invocation's effect
                                 // unknown: the spent card is deliberately
                                 // left WITHOUT an outcome record — the
-                                // explicit ambiguous-effect state.
-                                self.release(reservation.take().expect("reservation held")).await;
+                                // explicit ambiguous-effect state. The
+                                // provider round is KNOWN and debited; the
+                                // timed-out tool's cost is not (gh#452).
+                                let known = response.cost.saturating_add(&tool_cost);
+                                let reservation = reservation.take().expect("reservation held");
+                                let settlement = self
+                                    .settle_refusal(
+                                        session_id,
+                                        reservation,
+                                        known,
+                                        TOOL_TIMEOUT_SETTLEMENT,
+                                    )
+                                    .await;
                                 let err = RuntimeError::ToolTimeout {
                                     tool: call.name.clone(),
                                 };
                                 yield FusedEvent::StageEnd { stage: StageKind::ToolExec, ok: false };
                                 self.fire_error(session_id, LifecyclePhase::Provider, &err).await;
+                                settlement?;
                                 Err(err)?;
                                 unreachable!()
                             }
                         };
 
                         // Scan the tool output before it re-enters the context.
-                        if let Err(err) = self.scan_tool_output(&call.name, &output.content).await {
-                            self.release(reservation.take().expect("reservation held")).await;
+                        let scan_result = self.scan_tool_output(&call.name, &output.content).await;
+                        self.observe_tool(reservation.as_mut().expect("held"), tool_ordinal, call, ToolEffect::Completed {
+                            output_digest: GateSha256::of(&serde_json::to_vec(&output.content).map_err(|e| RuntimeError::Internal(e.into()))?), cost: output.cost,
+                        }, if scan_result.is_ok() { OutputAdmission::Allowed } else { OutputAdmission::Blocked })?;
+                        if let Err(err) = scan_result {
                             yield FusedEvent::StageEnd { stage: StageKind::ToolExec, ok: false };
+                            let known = response
+                                .cost
+                                .saturating_add(&tool_cost)
+                                .saturating_add(&output.cost);
+                            let settlement = self
+                                .settle_refusal(
+                                    session_id,
+                                    reservation.take().expect("reservation held"),
+                                    known,
+                                    SCAN_SETTLEMENT,
+                                )
+                                .await;
                             self.fire_error(session_id, LifecyclePhase::Submit, &err).await;
+                            settlement?;
                             Err(err)?;
                         }
 
@@ -3352,105 +3852,39 @@ impl FusedRuntime {
                 // 7. receipt mint + chain.
                 yield FusedEvent::StageStart { stage: StageKind::ReceiptMint };
                 let combined_cost = response.cost.saturating_add(&tool_cost);
-                // Match the non-streaming atomicity contract: serialize parent-tail
-                // selection, cost settlement, receipt persistence, and journal append.
-                let _commit_guard = self.commit_lock.lock().await;
-                let parent_hash = *self.chain_tail.lock();
-                let body = ReceiptBody {
-                    receipt_id: uuid::Uuid::new_v4(),
-                    parent_hash,
-                    verb: self.verb.clone(),
-                    issued_at: ardur_receipt::UnixTsMillis(now_ms),
-                    subject: ardur_receipt::HolderId(claims.subject.0.clone()),
-                    cap_token_id: ardur_receipt::TokenId(claims.token_id),
-                    payload_digest: Sha256Digest::of(response.content.as_bytes()),
-                    session_id: Some(session_id.0),
-                    cost: combined_cost,
-                    tool_calls: tool_receipts,
-                    provider: Some(self.provider.name()),
-                };
-                let signed = match ReceiptSigner::sign(body, &self.receipt_key) {
-                    Ok(signed) => signed,
-                    Err(e) => {
-                        self.release(reservation.take().expect("reservation held")).await;
-                        yield FusedEvent::StageEnd { stage: StageKind::ReceiptMint, ok: false };
-                        self.fire_error(session_id, LifecyclePhase::Receipt, &e).await;
-                        Err(RuntimeError::Internal(anyhow::anyhow!(
-                            "receipt mint failed: {e}"
-                        )))?;
-                        unreachable!()
-                    }
-                };
-
                 // Settle the provider-plus-tool actual before any receipt or
                 // journal state becomes durable. A rejected/expired reservation
                 // therefore cannot produce authoritative spend evidence.
                 yield FusedEvent::StageStart { stage: StageKind::CostGateFinalize };
-                let actual = combined_cost;
-                let finalization = match self
-                    .gate
-                    .finalize(reservation.take().expect("reservation held"), actual)
-                    .await
-                {
-                    Ok(finalization) => {
-                        yield FusedEvent::StageEnd { stage: StageKind::CostGateFinalize, ok: true };
-                        finalization
-                    }
-                    Err(e) => {
-                        let err = map_admission_error(e);
-                        self.fire_error(session_id, LifecyclePhase::CostGate, &err).await;
+                // gh#498: match the non-streaming atomicity contract —
+                // serialize parent-tail selection, cost settlement, receipt
+                // persistence, and journal append — WITHOUT holding the commit
+                // lock across a consumer-visible yield. Every yield below the
+                // lock used to park ALL other turns' commits for as long as
+                // this stream's consumer stayed parked; the guarded block is
+                // now yield-free and the stage events are emitted after the
+                // guard drops, in the same consumer-visible order.
+                let body = ReceiptBody {
+                    receipt_id: uuid::Uuid::new_v4(), parent_hash: None, verb: self.verb.clone(),
+                    issued_at: ardur_receipt::UnixTsMillis(now_ms),
+                    subject: ardur_receipt::HolderId(claims.subject.0.clone()),
+                    cap_token_id: ardur_receipt::TokenId(claims.token_id),
+                    payload_digest: Sha256Digest::of(response.content.as_bytes()),
+                    session_id: Some(session_id.0), cost: combined_cost,
+                    tool_calls: tool_receipts, provider: Some(self.provider.name()),
+                };
+                let (signed, receipt) = match self.commit_round(reservation.as_mut().expect("held"), body,
+                    !wants_tools, iteration, &req, &response, None, None).await {
+                    Ok(result) => result,
+                    Err(err) => {
+                        self.fire_error(session_id, LifecyclePhase::Receipt, &err).await;
                         yield FusedEvent::StageEnd { stage: StageKind::CostGateFinalize, ok: false };
                         yield FusedEvent::StageEnd { stage: StageKind::ReceiptMint, ok: false };
                         Err(err)?;
                         unreachable!()
                     }
                 };
-
-                let receipt = match self
-                    .commit_receipt_and_journal(
-                        session_id,
-                        iteration,
-                        &req,
-                        &response,
-                        &signed,
-                        now_ms,
-                        None,
-                    )
-                    .await
-                {
-                    Ok(receipt) => {
-                        self.gate
-                            .commit_finalization(finalization.reservation_id)
-                            .await;
-                        receipt
-                    }
-                    Err(DurableCommitError::BeforeReceipt(err)) => {
-                        if let Err(rollback) = self
-                            .gate
-                            .rollback_finalization(finalization.clone())
-                            .await
-                        {
-                            yield FusedEvent::StageEnd { stage: StageKind::ReceiptMint, ok: false };
-                            Err(RuntimeError::Internal(anyhow::anyhow!(
-                                "receipt commit failed ({err}); cost rollback also failed: {rollback}"
-                            )))?;
-                            unreachable!()
-                        }
-                        self.fire_error(session_id, LifecyclePhase::Receipt, &err).await;
-                        yield FusedEvent::StageEnd { stage: StageKind::ReceiptMint, ok: false };
-                        Err(err)?;
-                        unreachable!()
-                    }
-                    Err(DurableCommitError::AfterReceipt(err)) => {
-                        self.gate
-                            .commit_finalization(finalization.reservation_id)
-                            .await;
-                        self.fire_error(session_id, LifecyclePhase::Receipt, &err).await;
-                        yield FusedEvent::StageEnd { stage: StageKind::ReceiptMint, ok: false };
-                        Err(err)?;
-                        unreachable!()
-                    }
-                };
+                yield FusedEvent::StageEnd { stage: StageKind::CostGateFinalize, ok: true };
                 let chain_hash = Sha256Digest::of(signed.jws_compact().as_bytes());
                 yield FusedEvent::Receipt {
                     receipt_id: ReceiptId(receipt.receipt_id),
@@ -3551,6 +3985,7 @@ impl FusedRuntime {
                     break finish_reason;
                 }
                 if exhausted {
+                    reservation.as_mut().expect("held").owner.finish_refused(RefusalClass::IterationLimit).map_err(settlement_error)?;
                     let err = RuntimeError::ToolLoopExhausted {
                         iterations: iteration,
                     };
@@ -3567,24 +4002,6 @@ impl FusedRuntime {
 
             yield FusedEvent::Finish(final_finish);
         }
-    }
-}
-
-/// Map a cost-gate admission failure onto the runtime's error surface. Every
-/// budget/ceiling rejection is a cost-ceiling outcome; a malformed binding or an
-/// internal fault degrade to their nearest runtime variant.
-fn map_admission_error(err: AdmissionError) -> RuntimeError {
-    match err {
-        AdmissionError::BudgetExhausted { .. }
-        | AdmissionError::PolicyDenied(_)
-        | AdmissionError::ReservationExpired => RuntimeError::CostCeilingExceeded,
-        AdmissionError::CapTokenInvalid => RuntimeError::CapDenied {
-            reason: "cost-gate could not resolve the cap-token to a holder".to_string(),
-        },
-        AdmissionError::ProviderNotAllowed(provider) => {
-            RuntimeError::Internal(anyhow::anyhow!("provider not allowed: {provider:?}"))
-        }
-        AdmissionError::Internal(inner) => RuntimeError::Internal(inner),
     }
 }
 

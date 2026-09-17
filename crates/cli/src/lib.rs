@@ -408,6 +408,7 @@ pub(crate) fn journal_entries_to_history(entries: &[JournalEntry]) -> Vec<ChatMe
             }
             JournalEntry::ToolInvocation { .. }
             | JournalEntry::CostFinalized { .. }
+            | JournalEntry::OperatorExpense { .. }
             | JournalEntry::Checkpoint { .. }
             | JournalEntry::Invalidation { .. }
             | JournalEntry::Rollback { .. } => {}

@@ -33,6 +33,12 @@ use async_trait::async_trait;
 use biscuit_auth::{Algorithm, PrivateKey};
 use parking_lot::Mutex;
 
+/// Own fixture storage under the actual canonical OS temp directory. The
+/// production settlement store deliberately refuses symlinked ancestors.
+pub fn tempdir() -> std::io::Result<tempfile::TempDir> {
+    tempfile::tempdir_in(std::env::temp_dir().canonicalize()?)
+}
+
 /// The audience every test cap-token is scoped to (and the runtime requires).
 pub const AUDIENCE: &str = "ardur-cli";
 /// The tool/capability name the turn exercises.
@@ -186,6 +192,7 @@ pub fn runtime_builder_with_policy(
         receipt_key(),
         ModelId::new(TEST_MODEL),
     )
+    .test_settlement_storage()
     .audience(AUDIENCE)
     .tool(TOOL)
     .clock(manual_clock())

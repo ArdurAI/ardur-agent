@@ -694,7 +694,7 @@ async fn injection_blocks() {
 
 #[tokio::test]
 async fn receipt_audit() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = support::tempdir().expect("tempdir");
     let receipt_log = dir.path().join("chain.jsonl");
     let provider = Arc::new(ScriptedProvider::new(
         vec![

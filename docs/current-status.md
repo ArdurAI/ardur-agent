@@ -9,6 +9,35 @@ implementation inventory for `v0.2.0`, not a claim that the open follow-ups
 below have shipped. “Available” distinguishes shipped binary wiring from
 library-only surfaces; a partial slice does not close its larger feature.
 
+## Unreleased E4.2 runtime settlement integration
+
+The fused library now uses the real owned budget capability and bounded file
+settlement store for submit and streaming turns. A configured receipt log is
+required by default; its sibling settlement directory is bound to the actual
+absolute log path and full public signing identity. The explicit `test-support`
+fixture mode owns its temporary directory; product builders force durable mode
+regardless of feature unification or setter order.
+
+Owning stream Drop synchronously preserves known expense and actual refund in
+an authoritative snapshot, **not an asynchronous journal append**. Embedders must
+retain `settlement_supervisor()` outside the runtime and drive `drain_pending`
+with the configured journal before treating that secondary projection as current.
+Generic append errors remain ambiguous and close admission; only a typed,
+backend-proven nonapplication permits compensation. Receipt ambiguity retains the
+exact signed candidate and actual application. Legacy reconciliation excludes
+modern settlement receipts rather than synthesizing assistant output for them.
+
+Limits: four live/backlog slots, one economic execution, 64 retained snapshots,
+five rounds, eight tools per round, 256 KiB snapshots and 16 KiB receipt candidates.
+There is no pruning or eviction. Snapshot bounds are not disk preallocation or
+an RSS guarantee. Prior-epoch unresolved applications/projections are quarantined;
+budgets remain process-local and are never replayed. This is not full E4.2: generic
+ambiguous-ack repair, arbitrary process-death losslessness, complete HTTP/all-yield
+and restart/consumer coverage, and product-owned shutdown drain wiring remain
+follow-ups in the same work. Last-supervisor destruction with unresolved work is
+not safe shutdown. This section is an unreleased source limitation, not a release
+or CI-parity claim.
+
 ## Repository and Verification Status
 
 The previous main promotion, `663cd1b` (`v0.1.0-beta.2`), has the same tree as

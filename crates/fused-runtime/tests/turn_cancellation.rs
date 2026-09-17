@@ -19,7 +19,7 @@ use support::{EchoProvider, request_for, runtime_builder, valid_token};
 
 #[tokio::test]
 async fn a_caller_gone_at_the_commit_gate_gets_no_receipt() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = support::tempdir().expect("tempdir");
     let receipt_log = root.path().join("receipts.jsonl");
     let session_id = ardur_runtime::SessionId::new();
     let provider = Arc::new(EchoProvider::new());
@@ -60,7 +60,7 @@ async fn a_caller_gone_at_the_commit_gate_gets_no_receipt() {
 
 #[tokio::test]
 async fn a_present_caller_commits_normally() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = support::tempdir().expect("tempdir");
     let receipt_log = root.path().join("receipts.jsonl");
     let session_id = ardur_runtime::SessionId::new();
     let provider = Arc::new(EchoProvider::new());
@@ -106,7 +106,7 @@ async fn the_probe_is_consulted_after_the_provider_round_not_before() {
         inner: EchoProvider::new(),
     });
 
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = support::tempdir().expect("tempdir");
     let receipt_log = root.path().join("receipts.jsonl");
     let session_id = ardur_runtime::SessionId::new();
 
@@ -241,7 +241,7 @@ async fn persist_flag_is_set_before_journal_append_returns() {
     let unpark = &journal.unpark;
     let unpark_notify = &journal.unpark_notify;
 
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = support::tempdir().expect("tempdir");
     let receipt_log = root.path().join("receipts.jsonl");
     let runtime = runtime_builder(Arc::new(EchoProvider::new()))
         .with_journal(Arc::clone(&journal) as Arc<dyn ardur_session_journals::SessionJournal>)

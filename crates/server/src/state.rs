@@ -602,6 +602,7 @@ impl AppState {
             receipt_key,
             ModelId::new(&config.model),
         )
+        .require_durable_settlements()
         .audience(AUDIENCE)
         .tool(TOOL)
         // gh#361: the same durable deny list the delegate_task tool was

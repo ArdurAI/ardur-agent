@@ -79,6 +79,7 @@ pub fn redact_entries(entries: &[JournalEntry], patterns: &[regex::Regex]) -> Ve
             }
             JournalEntry::ToolInvocation { .. }
             | JournalEntry::CostFinalized { .. }
+            | JournalEntry::OperatorExpense { .. }
             | JournalEntry::Rollback { .. } => {}
         }
     }
@@ -198,6 +199,7 @@ mod tests {
                 actual: zero_cost(),
                 refunded: zero_delta(),
                 at: UnixTsMillis::from(6u64),
+                reason: None,
             },
         ];
         let redacted = redact_entries(&entries, &patterns);

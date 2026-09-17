@@ -82,7 +82,7 @@ fn legacy_signed_jws(key: &Es256SigningKey, body: &ReceiptBody, attention_share:
 /// log holds a single legacy float-attention receipt must succeed, not abort.
 #[tokio::test]
 async fn boot_tolerates_legacy_float_attention_receipt() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = support::tempdir().expect("tempdir");
     let receipt_dir = root.path().join("receipts");
     std::fs::create_dir_all(&receipt_dir).expect("receipts dir");
     let receipt_log = receipt_dir.join("chain.jsonl");
@@ -126,7 +126,7 @@ async fn boot_tolerates_legacy_float_attention_receipt() {
 /// migrates to `0` and loads cleanly.
 #[tokio::test]
 async fn legacy_zero_float_attention_loads() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = support::tempdir().expect("tempdir");
     let receipt_dir = root.path().join("receipts");
     std::fs::create_dir_all(&receipt_dir).expect("receipts dir");
     let receipt_log = receipt_dir.join("chain.jsonl");

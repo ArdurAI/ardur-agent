@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use ardur_cap_token::{DenyList, FileDenyList, HashSetDenyList};
 use ardur_cost_gate::{
-    BudgetStore, CostDelta, CostEnvelope, CostTuple, HolderId, ReservationHandle,
+    BudgetStore, CostDelta, CostEnvelope, CostTuple, HolderId, ReservationHandle, SyncBudgetStore,
 };
 use async_trait::async_trait;
 use parking_lot::Mutex;
@@ -135,6 +135,16 @@ impl SharedBudget {
     }
 }
 
+impl SyncBudgetStore for SharedBudget {
+    fn refund_sync_with_balances(
+        &self,
+        handle: ReservationHandle,
+        delta: CostDelta,
+    ) -> Result<(CostTuple, CostTuple), ardur_cost_gate::BudgetError> {
+        self.0.refund_sync_with_balances(handle, delta)
+    }
+}
+
 #[async_trait]
 impl BudgetStore for SharedBudget {
     async fn current_balance(
@@ -167,5 +177,38 @@ impl BudgetStore for SharedBudget {
         cap: Option<&CostTuple>,
     ) -> Result<CostTuple, ardur_cost_gate::BudgetError> {
         self.0.provision_merge(holder, add, cap).await
+    }
+}
+
+#[cfg(test)]
+mod owned_budget_tests {
+    use super::*;
+    use ardur_cost_gate::SyncBudgetStore;
+
+    #[tokio::test]
+    async fn sync_budget_extension_reports_actual_balances() {
+        let store = SharedBudget::new();
+        let holder = HolderId("shared-budget-fixture".into());
+        store.set_balance(holder.clone(), CostTuple::cents(15));
+        let observer = store.clone();
+        let handle = store
+            .try_reserve(
+                &holder,
+                &CostEnvelope {
+                    cents_max: 10,
+                    ..CostEnvelope::default()
+                },
+            )
+            .await
+            .unwrap();
+        let (before, after) = store
+            .refund_sync_with_balances(
+                handle,
+                CostDelta::between(&CostTuple::cents(10), &CostTuple::cents(20)),
+            )
+            .unwrap();
+        assert_eq!(before, CostTuple::cents(5));
+        assert_eq!(after, CostTuple::ZERO);
+        assert_eq!(observer.current_balance(&holder).await.unwrap(), after);
     }
 }

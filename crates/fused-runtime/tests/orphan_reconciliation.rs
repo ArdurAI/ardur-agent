@@ -110,7 +110,7 @@ fn restart_over(
 
 #[tokio::test]
 async fn reconcile_no_orphans_is_noop() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = support::tempdir().expect("tempdir");
     let receipt_log = root.path().join("receipts.jsonl");
     let session_id = SessionId::new();
 
@@ -139,7 +139,7 @@ async fn reconcile_no_orphans_is_noop() {
 
 #[tokio::test]
 async fn reconciliation_ignores_receipts_owned_by_other_session_journals() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = support::tempdir().expect("tempdir");
     let receipt_log = root.path().join("receipts.jsonl");
     let first_session = SessionId::new();
     let second_session = SessionId::new();
@@ -170,7 +170,7 @@ async fn reconciliation_ignores_receipts_owned_by_other_session_journals() {
 
 #[tokio::test]
 async fn reconcile_one_orphan_appends_synthetic_journal_entry() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = support::tempdir().expect("tempdir");
     let receipt_log = root.path().join("receipts.jsonl");
     let session_id = SessionId::new();
 
@@ -244,7 +244,7 @@ async fn reconcile_one_orphan_appends_synthetic_journal_entry() {
 
 #[tokio::test]
 async fn reconcile_one_orphan_truncate_strategy_removes_receipt() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = support::tempdir().expect("tempdir");
     let receipt_log = root.path().join("receipts.jsonl");
     let session_id = SessionId::new();
 
@@ -304,7 +304,7 @@ async fn reconcile_one_orphan_truncate_strategy_removes_receipt() {
 async fn reconcile_truncate_unique_temp_avoids_symlink_collision() {
     use std::os::unix::fs::symlink;
 
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = support::tempdir().expect("tempdir");
     let receipt_log = root.path().join("receipts.jsonl");
     let session_id = SessionId::new();
     run_clean_turns(root.path(), &receipt_log, session_id, &["one", "two"]).await;
@@ -339,7 +339,7 @@ async fn reconcile_truncate_unique_temp_avoids_symlink_collision() {
 
 #[tokio::test]
 async fn reconcile_truncate_non_suffix_orphan_is_undecidable() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = support::tempdir().expect("tempdir");
     let receipt_log = root.path().join("receipts.jsonl");
     let session_id = SessionId::new();
 
@@ -393,7 +393,7 @@ async fn reconcile_truncate_non_suffix_orphan_is_undecidable() {
 
 #[tokio::test]
 async fn reconcile_dry_run_reports_but_does_not_modify() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = support::tempdir().expect("tempdir");
     let receipt_log = root.path().join("receipts.jsonl");
     let session_id = SessionId::new();
 
@@ -432,7 +432,7 @@ async fn reconcile_dry_run_reports_but_does_not_modify() {
 
 #[tokio::test]
 async fn reconcile_idempotent_on_repeat_runs() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = support::tempdir().expect("tempdir");
     let receipt_log = root.path().join("receipts.jsonl");
     let session_id = SessionId::new();
 
@@ -499,7 +499,7 @@ fn drop_assistant_entries_for_receipts(path: &Path, ids: &[uuid::Uuid]) {
 
 #[tokio::test]
 async fn reconcile_mixed_committed_and_orphaned_receipts_appends_recovery_entries() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = support::tempdir().expect("tempdir");
     let receipt_log = root.path().join("receipts.jsonl");
     let session_id = SessionId::new();
 
@@ -579,7 +579,7 @@ async fn reconcile_mixed_committed_and_orphaned_receipts_appends_recovery_entrie
 #[tokio::test]
 async fn reconcile_one_hundred_tail_orphan_iterations_leave_zero_orphans() {
     for iteration in 0..100 {
-        let root = tempfile::tempdir().expect("tempdir");
+        let root = support::tempdir().expect("tempdir");
         let receipt_log = root.path().join("receipts.jsonl");
         let session_id = SessionId::new();
 

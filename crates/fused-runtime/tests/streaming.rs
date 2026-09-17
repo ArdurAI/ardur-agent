@@ -481,7 +481,8 @@ async fn fused_stream_executes_tools_mid_stream() {
         ],
         stop("default"),
     ));
-    let receipt_log = tempfile::NamedTempFile::new().expect("receipt log");
+    let receipt_dir = support::tempdir().expect("receipt directory");
+    let receipt_log = tempfile::NamedTempFile::new_in(receipt_dir.path()).expect("receipt log");
     let runtime = runtime_builder(provider.clone())
         .with_tools(echo_registry())
         .receipt_log(receipt_log.path())
@@ -575,7 +576,8 @@ async fn fused_stream_post_receipt_hook_cost_matches_combined_receipt_cost_for_t
     ));
     let mut hooks = HookRegistry::new();
     hooks.register(capture.clone());
-    let receipt_log = tempfile::NamedTempFile::new().expect("receipt log");
+    let receipt_dir = support::tempdir().expect("receipt directory");
+    let receipt_log = tempfile::NamedTempFile::new_in(receipt_dir.path()).expect("receipt log");
     let runtime = runtime_builder(provider.clone())
         .with_tools(paid_registry(tool_name, tool_cost))
         .registry(Arc::new(hooks))
@@ -645,7 +647,8 @@ fn has_stage_executed(events: &[Result<FusedEvent, RuntimeError>], stage: StageK
 #[tokio::test]
 async fn fused_stream_mints_receipt_at_end() {
     let provider = Arc::new(EchoProvider::new());
-    let receipt_log = tempfile::NamedTempFile::new().expect("receipt log");
+    let receipt_dir = support::tempdir().expect("receipt directory");
+    let receipt_log = tempfile::NamedTempFile::new_in(receipt_dir.path()).expect("receipt log");
     let runtime = runtime_builder(provider)
         .receipt_log(receipt_log.path())
         .build()
@@ -682,7 +685,8 @@ async fn fused_stream_mints_receipt_at_end() {
 #[tokio::test]
 async fn fused_stream_receipts_provider_reported_cost_cents() {
     let provider = Arc::new(ReportedCostStreamProvider::new(7));
-    let receipt_log = tempfile::NamedTempFile::new().expect("receipt log");
+    let receipt_dir = support::tempdir().expect("receipt directory");
+    let receipt_log = tempfile::NamedTempFile::new_in(receipt_dir.path()).expect("receipt log");
     let runtime = runtime_builder(provider.clone())
         .projected_envelope(cents_envelope(1))
         .provision_budget(gate_holder(), GateCostTuple::cents(10))
@@ -778,7 +782,7 @@ async fn fused_stream_finalize_failure_commits_neither_receipt_nor_journal() {
         clock: clock.clone(),
         rate_card: RateCard::anthropic_2026_q2_v1(),
     });
-    let root = tempfile::tempdir().expect("temp dir");
+    let root = support::tempdir().expect("temp dir");
     let session_id = SessionId::new();
     let journal =
         Arc::new(FileSessionJournal::new(root.path(), session_id).expect("journal opens"));
@@ -865,7 +869,7 @@ async fn fused_stream_reported_cost_depletes_budget_and_blocks_next_turn() {
 #[tokio::test]
 async fn fused_stream_journal_persisted_after_turn() {
     let provider = Arc::new(EchoProvider::new());
-    let journal_dir = tempfile::tempdir().expect("temp dir");
+    let journal_dir = support::tempdir().expect("temp dir");
     let session_id = SessionId::new();
     let journal =
         Arc::new(FileSessionJournal::new(journal_dir.path(), session_id).expect("journal opens"));
@@ -893,11 +897,12 @@ async fn fused_stream_journal_persisted_after_turn() {
 #[tokio::test]
 async fn fused_stream_dropped_does_not_mint_receipt() {
     let provider = Arc::new(EchoProvider::new());
-    let journal_dir = tempfile::tempdir().expect("temp dir");
+    let journal_dir = support::tempdir().expect("temp dir");
     let session_id = SessionId::new();
     let journal =
         Arc::new(FileSessionJournal::new(journal_dir.path(), session_id).expect("journal opens"));
-    let receipt_log = tempfile::NamedTempFile::new().expect("receipt log");
+    let receipt_dir = support::tempdir().expect("receipt directory");
+    let receipt_log = tempfile::NamedTempFile::new_in(receipt_dir.path()).expect("receipt log");
     let runtime = runtime_builder(provider)
         .with_journal(journal.clone())
         .receipt_log(receipt_log.path())

@@ -9,7 +9,7 @@ use ardur_runtime::{CapTokenRef, RuntimeError, SessionId};
 
 #[tokio::test]
 async fn runtime_does_not_acknowledge_failed_revocation_persistence() {
-    let dir = tempfile::tempdir().expect("fixture");
+    let dir = support::tempdir().expect("fixture");
     let path = dir.path().join("deny.list");
     let deny = SharedDenyList::open_file(&path).expect("open durable list");
     let runtime = support::runtime_builder(Arc::new(support::EchoProvider::new()))

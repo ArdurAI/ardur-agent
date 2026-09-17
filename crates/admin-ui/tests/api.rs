@@ -57,6 +57,7 @@ fn cost_entry(cents: u64, at: UnixTsMillis) -> JournalEntry {
             attention_score: 0,
         },
         at,
+        reason: None,
     }
 }
 

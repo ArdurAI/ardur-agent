@@ -150,6 +150,9 @@ pub struct FusedRuntimeBuilder {
     memory_recall_threshold: f32,
     journal: Option<Arc<dyn SessionJournal>>,
     receipt_log: Option<PathBuf>,
+    require_durable: bool,
+    #[cfg(feature = "test-support")]
+    test_storage: bool,
     reconciliation_strategy: ReconciliationStrategy,
     tools: Arc<ToolRegistry>,
     max_tool_iterations: u32,
@@ -198,6 +201,9 @@ impl FusedRuntimeBuilder {
             memory_recall_threshold: default_memory_recall_threshold(),
             journal: None,
             receipt_log: None,
+            require_durable: false,
+            #[cfg(feature = "test-support")]
+            test_storage: false,
             reconciliation_strategy: ReconciliationStrategy::default(),
             tools: Arc::new(ToolRegistry::new()),
             max_tool_iterations: default_max_tool_iterations(),
@@ -511,6 +517,22 @@ impl FusedRuntimeBuilder {
         self
     }
 
+    /// Enforce production storage, even under Cargo feature unification and
+    /// regardless of test-support setter order. There is no disabling setter.
+    #[must_use]
+    pub fn require_durable_settlements(mut self) -> Self {
+        self.require_durable = true;
+        self
+    }
+
+    /// Explicit fixture-only owned temporary storage. Never a production fallback.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn test_settlement_storage(mut self) -> Self {
+        self.test_storage = true;
+        self
+    }
+
     /// The strategy [`FusedRuntime::reconcile_receipts`] applies to orphan
     /// receipts at boot (ARD-17). Defaults to
     /// [`AppendSyntheticJournal`](ReconciliationStrategy::AppendSyntheticJournal)
@@ -528,7 +550,34 @@ impl FusedRuntimeBuilder {
     /// but cannot be read back to resume the chain.
     ///
     /// [`receipt_log`]: FusedRuntimeBuilder::receipt_log
-    pub fn build(self) -> Result<FusedRuntime, ReceiptChainError> {
+    pub fn build(mut self) -> Result<FusedRuntime, ReceiptChainError> {
+        #[cfg(feature = "test-support")]
+        let temporary = if self.receipt_log.is_none() && self.test_storage && !self.require_durable
+        {
+            let dir = tempfile::tempdir()?;
+            self.receipt_log = Some(dir.path().canonicalize()?.join("receipts.jsonl"));
+            Some(dir)
+        } else {
+            None
+        };
+        let path = self
+            .receipt_log
+            .as_ref()
+            .ok_or(ReceiptChainError::SettlementLogRequired)?;
+        let path = if path.is_absolute() {
+            path.clone()
+        } else {
+            std::env::current_dir()?.join(path)
+        };
+        // Validate the configured path without following symlinks. No fallback.
+        let file = crate::receipts::open_append_no_follow(&path)?;
+        file.sync_all()?;
+        std::fs::File::open(
+            path.parent()
+                .ok_or(ReceiptChainError::SettlementLogRequired)?,
+        )?
+        .sync_all()?;
+        self.receipt_log = Some(path.clone());
         // Seed the chain tail from the persisted log, if any, so a restart
         // continues the chain rather than starting a fresh genesis.
         let chain_tail = match &self.receipt_log {
@@ -558,6 +607,33 @@ impl FusedRuntimeBuilder {
         // release-on-drop guards, so a cancelled turn can refund its hold from
         // `Drop` without an await point.
         let gate = Arc::new(gate);
+        let signer = ardur_cost_gate::Sha256Digest::of(
+            &serde_json::to_vec(&ardur_receipt::Jwks::from_public_key(
+                &self.receipt_key.public_key(),
+            ))
+            .map_err(|e| ReceiptChainError::Malformed(e.to_string()))?,
+        );
+        let mut root_name = path
+            .file_name()
+            .ok_or(ReceiptChainError::SettlementLogRequired)?
+            .to_os_string();
+        root_name.push(".settlements");
+        let settlements = crate::settlement::SettlementCoordinator::open(
+            gate.clone(),
+            &path.with_file_name(root_name),
+            ardur_session_journals::settlement::ReceiptIdentity {
+                receipt_log: path,
+                signer,
+            },
+        )?;
+        #[cfg(feature = "test-support")]
+        let settlements = {
+            let mut settlements = settlements;
+            Arc::get_mut(&mut settlements)
+                .expect("unshared builder")
+                .test_storage = temporary;
+            settlements
+        };
 
         let gate_provider_id = ardur_cost_gate::ProviderId(self.provider.id().0);
         let gate_model_id = ardur_cost_gate::ModelId(self.model.0.clone());
@@ -580,6 +656,7 @@ impl FusedRuntimeBuilder {
             receipt_key: self.receipt_key,
             verb: self.verb,
             gate,
+            settlements,
             budget: self.budget,
             gate_provider_id,
             gate_model_id,
@@ -595,7 +672,9 @@ impl FusedRuntimeBuilder {
             receipt_log: self.receipt_log,
             reconciliation_strategy: self.reconciliation_strategy,
             tools: self.tools,
-            max_tool_iterations: self.max_tool_iterations,
+            max_tool_iterations: self
+                .max_tool_iterations
+                .min(crate::settlement::LIMITS.max_rounds as u32),
             tool_timeout: self.tool_timeout,
             stream_content_max_bytes: self.stream_content_max_bytes,
             approvals: self.approvals,

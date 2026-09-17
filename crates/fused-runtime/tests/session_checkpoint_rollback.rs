@@ -42,7 +42,7 @@ async fn build_runtime_with_journal(
 /// given.
 #[tokio::test]
 async fn checkpoint_records_a_journal_entry_and_receipt() {
-    let dir = tempfile::tempdir().expect("journal dir");
+    let dir = support::tempdir().expect("journal dir");
     let session_id = SessionId::new();
     let journal = Arc::new(FileSessionJournal::new(dir.path(), session_id).expect("journal opens"));
     let runtime = build_runtime_with_journal(journal.clone()).await;
@@ -72,7 +72,7 @@ async fn checkpoint_records_a_journal_entry_and_receipt() {
 /// A caller-supplied label is used verbatim as the checkpoint summary.
 #[tokio::test]
 async fn checkpoint_uses_the_caller_supplied_label() {
-    let dir = tempfile::tempdir().expect("journal dir");
+    let dir = support::tempdir().expect("journal dir");
     let session_id = SessionId::new();
     let journal = Arc::new(FileSessionJournal::new(dir.path(), session_id).expect("journal opens"));
     let runtime = build_runtime_with_journal(journal).await;
@@ -95,7 +95,7 @@ async fn checkpoint_uses_the_caller_supplied_label() {
 /// and does not mint a receipt for the (read-only) query.
 #[tokio::test]
 async fn list_checkpoints_returns_them_in_order() {
-    let dir = tempfile::tempdir().expect("journal dir");
+    let dir = support::tempdir().expect("journal dir");
     let session_id = SessionId::new();
     let journal = Arc::new(FileSessionJournal::new(dir.path(), session_id).expect("journal opens"));
     let runtime = build_runtime_with_journal(journal).await;
@@ -137,7 +137,7 @@ async fn list_checkpoints_returns_them_in_order() {
 /// underlying (still-replayable) journal.
 #[tokio::test]
 async fn rollback_appends_a_marker_and_returns_retained_entries() {
-    let dir = tempfile::tempdir().expect("journal dir");
+    let dir = support::tempdir().expect("journal dir");
     let session_id = SessionId::new();
     let journal = Arc::new(FileSessionJournal::new(dir.path(), session_id).expect("journal opens"));
     let runtime = build_runtime_with_journal(journal.clone()).await;
@@ -193,7 +193,7 @@ async fn rollback_appends_a_marker_and_returns_retained_entries() {
 /// journal entry.
 #[tokio::test]
 async fn rollback_to_unknown_checkpoint_is_rejected() {
-    let dir = tempfile::tempdir().expect("journal dir");
+    let dir = support::tempdir().expect("journal dir");
     let session_id = SessionId::new();
     let journal = Arc::new(FileSessionJournal::new(dir.path(), session_id).expect("journal opens"));
     let runtime = build_runtime_with_journal(journal.clone()).await;
@@ -220,7 +220,7 @@ async fn rollback_to_unknown_checkpoint_is_rejected() {
 /// verification stage — checkpoint and rollback are distinct capabilities.
 #[tokio::test]
 async fn rollback_is_denied_without_the_rollback_capability() {
-    let dir = tempfile::tempdir().expect("journal dir");
+    let dir = support::tempdir().expect("journal dir");
     let session_id = SessionId::new();
     let journal = Arc::new(FileSessionJournal::new(dir.path(), session_id).expect("journal opens"));
     let runtime = build_runtime_with_journal(journal.clone()).await;
@@ -251,10 +251,11 @@ async fn rollback_is_denied_without_the_rollback_capability() {
 /// would use — the control-plane receipt chain is not a parallel, weaker one.
 #[tokio::test]
 async fn checkpoint_and_rollback_receipts_chain_together() {
-    let dir = tempfile::tempdir().expect("journal dir");
+    let dir = support::tempdir().expect("journal dir");
     let session_id = SessionId::new();
     let journal = Arc::new(FileSessionJournal::new(dir.path(), session_id).expect("journal opens"));
-    let receipt_log = tempfile::NamedTempFile::new().expect("receipt log");
+    let receipt_dir = support::tempdir().expect("receipt directory");
+    let receipt_log = tempfile::NamedTempFile::new_in(receipt_dir.path()).expect("receipt log");
     let provider = Arc::new(support::EchoProvider::new());
     let runtime = support::runtime_builder_with_policy(provider, permissive_policy())
         .with_journal(journal)
@@ -327,7 +328,7 @@ fn checkpoint_token_with_budget(budget: u64) -> String {
 /// verification stays at `cost_units`.
 #[tokio::test]
 async fn a_zero_budget_token_cannot_checkpoint_a_session() {
-    let dir = tempfile::tempdir().expect("journal dir");
+    let dir = support::tempdir().expect("journal dir");
     let session_id = SessionId::new();
     let journal = Arc::new(FileSessionJournal::new(dir.path(), session_id).expect("journal opens"));
     let runtime = build_runtime_with_journal(journal.clone()).await;

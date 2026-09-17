@@ -45,6 +45,21 @@
 //! turn (the receipt is the source of truth). A failure at stages 1→5 returns
 //! the error and never reaches the provider's billing.
 //!
+//! # Durable settlement ownership
+//!
+//! The builder requires a configured receipt log; its private sibling settlement
+//! store is bound to the actual absolute path and full public signer JWKS. One
+//! supervised economic execution owns admission, cumulative work, exact prepared
+//! receipt bytes, actual debit/refund and capability retirement. Drop refunds
+//! precommit cancellation synchronously without erasing known expense. Keep
+//! [`FusedRuntime::settlement_supervisor`] externally and call its explicit async
+//! `drain_pending` with the configured journal to project cancellation evidence.
+//! Ambiguous journal/receipt acknowledgements fail closed, not blind rollback.
+//! Prior-epoch uncertainty blocks dispatch; it never replays process-local money.
+//! Bounds are four live/backlog slots, one executing turn, 64 retained snapshots,
+//! five rounds, eight tools per round, 256 KiB records and 16 KiB receipt candidates.
+//! There is no eviction, background worker or persistent budget database.
+//!
 //! # Streaming (§6.0c)
 //!
 //! [`FusedRuntime::stream`](FusedRuntime::stream) is the progressive sibling of
@@ -90,6 +105,7 @@ mod receipt_cache;
 mod receipts;
 mod reconcile;
 mod runtime;
+pub mod settlement;
 mod shared;
 pub mod streaming;
 

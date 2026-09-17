@@ -459,6 +459,7 @@ async fn build_scheduler_runtime(
 
     let (runtime, _reconciliation) =
         FusedRuntimeBuilder::new(cap_root, policies, provider, receipt_key, model)
+            .require_durable_settlements()
             .audience(SCHEDULE_AUDIENCE)
             .tool(SCHEDULE_TOOL)
             .provision_budget(

@@ -294,6 +294,7 @@ async fn single_turn_through_full_substrate() {
             actual: refund.actual,
             refunded: refund.refunded,
             at: ardur_cost_gate::UnixTsMillis(NOW_MS + 2),
+            reason: None,
         })
         .await
         .expect("the cost settlement is journaled");

@@ -30,8 +30,10 @@ pub enum AdmissionError {
     #[error("policy denied: {0}")]
     PolicyDenied(String),
 
-    /// [`finalize`](crate::CostAdmissionGate::finalize) was called after the
-    /// reservation's expiry; the hold has already been released.
+    /// The reservation expired before finalization or an owned claim.
+    /// [`finalize`](crate::CostAdmissionGate::finalize) refunds the hold before
+    /// returning this error; [`claim_owned`](crate::InMemoryCostAdmissionGate::claim_owned)
+    /// leaves the unclaimed hold in place for ordinary expiry/refund cleanup.
     #[error("reservation expired")]
     ReservationExpired,
 
@@ -43,6 +45,16 @@ pub enum AdmissionError {
     /// in normal operation).
     #[error("internal cost-gate error: {0}")]
     Internal(anyhow::Error),
+}
+
+/// Typed cause carried by [`AdmissionError::Internal`] for an owned nominal
+/// debit above `i64::MAX`. The limit ensures application and full rollback both
+/// fit the signed store primitive. The owner retains attempted cost evidence.
+#[derive(Debug, thiserror::Error)]
+#[error("owned debit is not representable on `{dimension}`")]
+pub struct OwnedDebitUnrepresentable {
+    /// The rejected cost axis.
+    pub dimension: &'static str,
 }
 
 /// Why provisioning a holder's budget (request-time top-up) failed.

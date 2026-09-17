@@ -50,6 +50,7 @@ fn every_variant_roundtrips() {
                 attention_score: 0,
             },
             at: UnixTsMillis(4),
+            reason: None,
         },
         JournalEntry::Checkpoint {
             checkpoint_id: Uuid::new_v4(),

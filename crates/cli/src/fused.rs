@@ -491,6 +491,7 @@ impl FusedEngine {
             receipt_key,
             model.clone(),
         )
+        .require_durable_settlements()
         .audience(AUDIENCE)
         .tool(TOOL)
         .provision_budget(

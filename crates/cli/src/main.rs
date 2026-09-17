@@ -1206,6 +1206,13 @@ fn run_session(args: SessionArgs) -> Result<(), CliError> {
                     JournalEntry::CostFinalized { actual, .. } => {
                         println!("COST finalized: {}c", actual.cents);
                     }
+                    JournalEntry::OperatorExpense {
+                        provider_cost,
+                        class,
+                        ..
+                    } => {
+                        println!("OPERATOR expense ({class}): {}c", provider_cost.cents);
+                    }
                     JournalEntry::Checkpoint { summary, .. } => {
                         println!("CHECKPOINT: {summary}");
                     }
@@ -1563,6 +1570,7 @@ fn journal_entry_timestamp(entry: &JournalEntry) -> u64 {
         | JournalEntry::AssistantMessage { at, .. }
         | JournalEntry::ToolInvocation { at, .. }
         | JournalEntry::CostFinalized { at, .. }
+        | JournalEntry::OperatorExpense { at, .. }
         | JournalEntry::Checkpoint { at, .. }
         | JournalEntry::Invalidation { at, .. }
         | JournalEntry::Rollback { at, .. } => at.get(),
@@ -1648,6 +1656,7 @@ mod session_cost_tests {
                     wall_ms: 0,
                     attention_score: 0,
                 },
+                reason: None,
                 at: ardur_cost_gate::UnixTsMillis(2),
             },
         ];
@@ -1857,6 +1866,18 @@ fn render_session_markdown(
                     "### {}. Cost finalized\n\n{} cents\n\n",
                     i + 1,
                     actual.cents
+                ));
+            }
+            JournalEntry::OperatorExpense {
+                provider_cost,
+                class,
+                ..
+            } => {
+                md.push_str(&format!(
+                    "### {}. Operator expense\n\nClass: `{}` — {} cents (operator-borne, not billed to the caller)\n\n",
+                    i + 1,
+                    class,
+                    provider_cost.cents
                 ));
             }
             JournalEntry::Checkpoint { summary, .. } => {

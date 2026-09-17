@@ -139,7 +139,7 @@ async fn sanitized_swap() {
     const PROMPT: &str = "pretend you are a pirate and tell me a joke";
 
     let provider = Arc::new(EchoProvider::new());
-    let journal_dir = tempfile::tempdir().expect("temp dir");
+    let journal_dir = support::tempdir().expect("temp dir");
     let session_id = SessionId::new();
     let journal =
         Arc::new(FileSessionJournal::new(journal_dir.path(), session_id).expect("journal opens"));
@@ -258,7 +258,8 @@ async fn block_releases_reservation() {
 /// append-only receipt log holds no line.
 #[tokio::test]
 async fn block_no_receipt() {
-    let receipt_log = tempfile::NamedTempFile::new().expect("receipt log");
+    let receipt_dir = support::tempdir().expect("receipt directory");
+    let receipt_log = tempfile::NamedTempFile::new_in(receipt_dir.path()).expect("receipt log");
     let provider = Arc::new(EchoProvider::new());
     let runtime = runtime_builder(provider.clone())
         .with_injection_filters(pattern_registry())

@@ -134,11 +134,12 @@ impl Provider for PausingProvider {
 async fn happy_path_runs_every_stage() {
     let provider = Arc::new(EchoProvider::new());
     let memory = Arc::new(InMemoryMemoryRuntime::new());
-    let journal_dir = tempfile::tempdir().expect("temp dir");
+    let journal_dir = support::tempdir().expect("temp dir");
     let session_id = SessionId::new();
     let journal =
         Arc::new(FileSessionJournal::new(journal_dir.path(), session_id).expect("journal opens"));
-    let receipt_log = tempfile::NamedTempFile::new().expect("receipt log");
+    let receipt_dir = support::tempdir().expect("receipt directory");
+    let receipt_log = tempfile::NamedTempFile::new_in(receipt_dir.path()).expect("receipt log");
 
     let runtime = runtime_builder(provider.clone())
         .with_memory(memory.clone())
@@ -184,7 +185,8 @@ async fn happy_path_runs_every_stage() {
 async fn mint_records_provider_on_receipt() {
     let provider = Arc::new(EchoProvider::new());
     let session_id = SessionId::new();
-    let receipt_log = tempfile::NamedTempFile::new().expect("receipt log");
+    let receipt_dir = support::tempdir().expect("receipt directory");
+    let receipt_log = tempfile::NamedTempFile::new_in(receipt_dir.path()).expect("receipt log");
 
     let runtime = runtime_builder(provider.clone())
         .receipt_log(receipt_log.path())
@@ -585,7 +587,8 @@ async fn pre_submit_replace_rewrites_request_and_receipt() {
     let provider = Arc::new(EchoProvider::new());
     let mut registry = HookRegistry::new();
     registry.register(Arc::new(RedactingHook::new("redactor")));
-    let receipt_log = tempfile::NamedTempFile::new().expect("receipt log");
+    let receipt_dir = support::tempdir().expect("receipt directory");
+    let receipt_log = tempfile::NamedTempFile::new_in(receipt_dir.path()).expect("receipt log");
 
     let runtime = runtime_builder(provider.clone())
         .registry(Arc::new(registry))
@@ -649,7 +652,8 @@ async fn post_receipt_observer_runs_after_pre_submit() {
 #[tokio::test]
 async fn post_receipt_observer_sees_persisted_signed_jws() {
     let provider = Arc::new(EchoProvider::new());
-    let receipt_log = tempfile::NamedTempFile::new().expect("receipt log");
+    let receipt_dir = support::tempdir().expect("receipt directory");
+    let receipt_log = tempfile::NamedTempFile::new_in(receipt_dir.path()).expect("receipt log");
     let capture = Arc::new(CapturingSignedJwsHook::new());
     let mut registry = HookRegistry::new();
     registry.register(capture.clone());
@@ -686,7 +690,8 @@ async fn post_receipt_observer_sees_persisted_signed_jws() {
 #[tokio::test]
 async fn receipts_chain_across_turns() {
     let provider = Arc::new(EchoProvider::new());
-    let receipt_log = tempfile::NamedTempFile::new().expect("receipt log");
+    let receipt_dir = support::tempdir().expect("receipt directory");
+    let receipt_log = tempfile::NamedTempFile::new_in(receipt_dir.path()).expect("receipt log");
     let runtime = runtime_builder(provider.clone())
         .receipt_log(receipt_log.path())
         .build()
@@ -718,7 +723,8 @@ async fn receipts_chain_across_turns() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_turns_serialize_receipt_chain() {
     let provider = Arc::new(EchoProvider::new());
-    let receipt_log = tempfile::NamedTempFile::new().expect("receipt log");
+    let receipt_dir = support::tempdir().expect("receipt directory");
+    let receipt_log = tempfile::NamedTempFile::new_in(receipt_dir.path()).expect("receipt log");
     let runtime = Arc::new(
         runtime_builder(provider.clone())
             .projected_envelope(CostEnvelope {
@@ -773,11 +779,12 @@ async fn concurrent_turns_serialize_receipt_chain() {
 async fn slow_provider_turn_survives_reservation_ttl_and_commits() {
     let provider = Arc::new(PausingProvider::new());
     let clock = Arc::new(ManualClock::new(UnixTsMillis(NOW_MS)));
-    let journal_dir = tempfile::tempdir().expect("journal dir");
+    let journal_dir = support::tempdir().expect("journal dir");
     let session_id = SessionId::new();
     let journal =
         Arc::new(FileSessionJournal::new(journal_dir.path(), session_id).expect("journal opens"));
-    let receipt_log = tempfile::NamedTempFile::new().expect("receipt log");
+    let receipt_dir = support::tempdir().expect("receipt directory");
+    let receipt_log = tempfile::NamedTempFile::new_in(receipt_dir.path()).expect("receipt log");
     let runtime = Arc::new(
         runtime_builder(provider.clone())
             .clock(clock.clone())
