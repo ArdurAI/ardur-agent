@@ -1116,6 +1116,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ardur-provider-prime"
+version = "0.0.1"
+dependencies = [
+ "ardur-provider-runtime",
+ "ardur-runtime",
+ "async-trait",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "ardur-provider-runtime"
 version = "0.0.1"
 dependencies = [
@@ -1149,6 +1161,7 @@ dependencies = [
  "ardur-provider-ollama",
  "ardur-provider-openai-compat",
  "ardur-provider-openrouter",
+ "ardur-provider-prime",
  "ardur-provider-runtime",
  "serial_test",
 ]

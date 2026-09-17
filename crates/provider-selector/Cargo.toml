@@ -41,6 +41,10 @@ ardur-provider-codex = { workspace = true }
 # The Claude Code CLI subscription backend (§3.3c) — selected by
 # `ARDUR_PROVIDER=claude-cli` (alias `claude-subscription`).
 ardur-provider-claude-cli = { workspace = true }
+# The Prime Agent CLI backend (#501 Tier 0) — selected by
+# `ARDUR_PROVIDER=prime` (alias `prime-agent`). Driven over prime-agent's RPC
+# mode; credentials live inside prime-agent, not here.
+ardur-provider-prime = { workspace = true }
 
 [dev-dependencies]
 # Serial test execution for env-mutating integration tests (selector_env) —
