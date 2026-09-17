@@ -407,21 +407,25 @@ mod tests {
         SigningKey::from_bytes(&[seed; 32])
     }
 
-    /// A FIXED test nonce.
-    ///
-    /// Deliberately constant, not a template for callers: the replay guards must
-    /// present the same nonce twice, which `fresh_nonce()` cannot do by design.
-    /// Production paths mint nonces with `fresh_nonce()`; that contract is
-    /// pinned by `fresh_nonces_are_unique_and_high_entropy`.
-    const TEST_FIXED_NONCE: &str = "test-fixture-nonce-not-for-production";
+    thread_local! {
+        /// One generated nonce per test thread.
+        ///
+        /// The replay guards need the *same* nonce presented twice, but "same"
+        /// does not require "hard-coded". Rust runs each `#[test]` on its own
+        /// thread, so this is stable within a test and distinct across tests —
+        /// repeated `binding()` calls agree, and no literal nonce exists for a
+        /// reader to copy into production.
+        static TEST_NONCE: String = fresh_nonce();
+    }
 
+    /// A request binding carrying this test thread's nonce.
     fn binding() -> RequestBinding {
         RequestBinding {
             token_id: "01a0adca-0000-4000-8000-00000000000e".into(),
             tool: "file.read".into(),
             cost: 1,
             audience: "cli://localhost".into(),
-            nonce: TEST_FIXED_NONCE.into(),
+            nonce: TEST_NONCE.with(Clone::clone),
             issued_at: 1_789_621_936,
         }
     }
@@ -722,18 +726,23 @@ mod tests {
 
     #[test]
     fn the_replay_cache_evicts_entries_older_than_its_window() {
-        // Fixed labels, not cryptographic nonces: this test exercises the
-        // cache's eviction policy, so the values must be stable and comparable.
+        // Real generated nonces, held by handle. This test is about the
+        // EVICTION POLICY, so it needs the same value twice — but using
+        // literals here would both trip the hard-coded-nonce lint and model a
+        // cache keyed on something a caller should never hand-pick.
+        let first = fresh_nonce();
+        let second = fresh_nonce();
+
         let mut cache = ReplayCache::new(60);
-        assert!(cache.record("n1", 1_000));
+        assert!(cache.record(&first, 1_000));
         assert_eq!(cache.len(), 1);
-        // Far beyond the window: the old nonce is evicted, so the cache cannot
+        // Far beyond the window: the old entry is evicted, so the cache cannot
         // grow without bound.
-        assert!(cache.record("n2", 5_000));
+        assert!(cache.record(&second, 5_000));
         assert_eq!(cache.len(), 1);
-        // And the evicted nonce is reusable, which is safe: a proof carrying it
-        // would fail the age check first.
-        assert!(cache.record("n1", 5_000));
+        // And the evicted nonce is accepted again, which is safe: a proof
+        // carrying it would fail the age check first.
+        assert!(cache.record(&first, 5_000));
     }
 
     #[test]
