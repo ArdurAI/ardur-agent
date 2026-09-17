@@ -232,6 +232,10 @@ jobs:
         env:
           QDRANT_INTEGRATION_TEST: "1"
           QDRANT_URL: http://localhost:6334
+          # Parallel collection provisioning can exceed the production 5s
+          # per-RPC deadline. Keep this bounded functional-test budget local
+          # to this step; these tests do not prove five-second RPC latency.
+          QDRANT_TIMEOUT_SECS: "30"
         run: |
           # Crate-level: durable backend (incl. the async-drop restart path) and
           # hybrid dense+sparse recall over Mock embeddings. The `--skip`ped
