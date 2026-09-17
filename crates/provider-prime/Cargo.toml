@@ -1,0 +1,48 @@
+# ardur-provider-prime — the Prime Agent CLI backend driven over its RPC mode.
+#
+# Unlike the HTTP backends (Anthropic, OpenRouter, openai-compat), this provider
+# does not POST to a REST endpoint with an API key. It spawns the locally
+# installed `prime-agent` binary in its line-delimited JSON RPC mode
+# (`prime-agent --mode rpc`) and drives one turn over stdin/stdout, inheriting
+# whatever provider credentials prime-agent itself is configured with.
+#
+# It implements the same `Provider` trait as every other backend, so it slots
+# into the generic `ProviderRegistry` with no catalog change and runs behind the
+# full fused pipeline (cap-token, Cedar, cost gate, receipt, journal).
+#
+# Upstream: Prime Agent (MIT) — see README.md for attribution.
+
+[package]
+name = "ardur-provider-prime"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The provider abstraction this backend implements — the `Provider` trait, the
+# request/response/usage envelopes, the `RateCard`, and the typed
+# `ProviderError`. One-directional dep; the registry stays generic.
+ardur-provider-runtime = { workspace = true }
+# Shared value types the provider call speaks in — `CostTuple` (zeroed here: the
+# turn is paid by prime-agent's own configured provider, not metered by us),
+# `ProviderId` (the registry key), and `Role` (the prompt turn kind).
+ardur-runtime = { workspace = true }
+# Object-safe async `Provider::complete`.
+async-trait = { workspace = true }
+# Async subprocess (`tokio::process::Command`), the buffered line reader that
+# consumes the RPC event stream, and the wall-clock `timeout` bounding a turn.
+tokio = { workspace = true }
+# Encoding RPC commands and decoding the newline-delimited event/response
+# stream prime-agent writes to stdout.
+serde_json = { workspace = true }
+
+[dev-dependencies]
+# The async `complete` calls need a runtime to poll them.
+tokio = { workspace = true }
+# The RPC tests write an executable shim standing in for the real `prime-agent`
+# binary (replaying a recorded event stream, or failing on purpose), so the
+# spawn + protocol round-trip is asserted with no prime-agent install and no
+# model spend.
+tempfile = { workspace = true }

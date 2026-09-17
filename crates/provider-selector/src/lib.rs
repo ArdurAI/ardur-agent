@@ -14,6 +14,7 @@
 //! | `ollama`         | `OllamaProvider` (local **or** cloud)| `ardur-provider-ollama`     |
 //! | `codex`          | `CodexProvider` (subprocess wrap)    | `ardur-provider-codex`      |
 //! | `claude-cli`     | `ClaudeCliProvider` (subprocess wrap)| `ardur-provider-claude-cli` |
+//! | `prime`          | `PrimeProvider` (RPC subprocess wrap)| `ardur-provider-prime`      |
 //!
 //! (`claude-cli` also answers to the alias `claude-subscription`.)
 //!
@@ -47,6 +48,7 @@ use ardur_provider_codex::CodexProvider;
 use ardur_provider_ollama::OllamaProvider;
 use ardur_provider_openai_compat::OpenAiCompatProvider;
 use ardur_provider_openrouter::OpenRouterProvider;
+use ardur_provider_prime::PrimeProvider;
 use ardur_provider_runtime::AnthropicProvider;
 
 // Re-exported so callers can name the `from_env`/`select` argument and return
@@ -76,6 +78,8 @@ pub enum ProviderKind {
     /// Claude Code CLI subscription, wrapped as a subprocess (§3.3c). Also
     /// selected by the alias `claude-subscription`.
     ClaudeCli,
+    /// Prime Agent CLI, wrapped as a subprocess over its RPC mode (#501 Tier 0).
+    Prime,
 }
 
 impl ProviderKind {
@@ -84,13 +88,14 @@ impl ProviderKind {
 
     /// Every recognized selector spelling, in selection order — the canonical
     /// list surfaced in the unknown-value error.
-    pub const ALL: [ProviderKind; 7] = [
+    pub const ALL: [ProviderKind; 8] = [
         ProviderKind::Anthropic,
         ProviderKind::OpenRouter,
         ProviderKind::OpenAiCompat,
         ProviderKind::Ollama,
         ProviderKind::Codex,
         ProviderKind::ClaudeCli,
+        ProviderKind::Prime,
         ProviderKind::OpenAiCompat, // openai alias
     ];
 
@@ -104,6 +109,7 @@ impl ProviderKind {
             ProviderKind::Ollama => "ollama",
             ProviderKind::Codex => "codex",
             ProviderKind::ClaudeCli => "claude-cli",
+            ProviderKind::Prime => "prime",
         }
     }
 
@@ -122,6 +128,7 @@ impl ProviderKind {
             "ollama" => Ok(ProviderKind::Ollama),
             "codex" => Ok(ProviderKind::Codex),
             "claude-cli" | "claude-subscription" => Ok(ProviderKind::ClaudeCli),
+            "prime" | "prime-agent" => Ok(ProviderKind::Prime),
             _ => Err(UnknownProvider(raw.to_string())),
         }
     }
@@ -152,7 +159,7 @@ impl ProviderKind {
     /// [`ProviderKind::OpenAiCompat`] → [`ProviderError::Unauthorized`]).
     /// The credential-free backends
     /// ([`ProviderKind::Ollama`] / [`ProviderKind::Codex`] /
-    /// [`ProviderKind::ClaudeCli`]) never fail.
+    /// [`ProviderKind::ClaudeCli`] / [`ProviderKind::Prime`]) never fail.
     pub fn build(self, model: ModelId) -> Result<Arc<dyn Provider>, ProviderError> {
         let provider: Arc<dyn Provider> = match self {
             ProviderKind::Anthropic => Arc::new(AnthropicProvider::from_env(model)?),
@@ -161,6 +168,7 @@ impl ProviderKind {
             ProviderKind::Ollama => Arc::new(OllamaProvider::from_env()),
             ProviderKind::Codex => Arc::new(CodexProvider::from_env(model)),
             ProviderKind::ClaudeCli => Arc::new(ClaudeCliProvider::from_env(model)),
+            ProviderKind::Prime => Arc::new(PrimeProvider::from_env()),
         };
         Ok(provider)
     }
@@ -184,7 +192,7 @@ impl fmt::Display for UnknownProvider {
         write!(
             f,
             "unknown {SELECTOR_ENV} value {:?}: supported values are \
-             anthropic (default), openrouter, openai-compat, ollama, codex, claude-cli",
+             anthropic (default), openrouter, openai-compat, ollama, codex, claude-cli, prime",
             self.0
         )
     }
@@ -305,6 +313,22 @@ mod tests {
         // probe the binary until a turn runs), so selection always succeeds.
         let provider = select(Some("codex"), model()).expect("codex is infallible");
         assert_eq!(provider.id().0, "codex");
+    }
+
+    #[test]
+    fn prime_selects_prime_under_both_spellings() {
+        // The Prime backend wraps the local `prime-agent` binary over its RPC
+        // mode; from_env is infallible (no API key here, no probe until a turn
+        // runs). Both the canonical spelling and the `prime-agent` alias resolve.
+        for v in ["prime", "Prime", "PRIME", "prime-agent", "  prime-agent  "] {
+            assert_eq!(
+                ProviderKind::resolve(Some(v)).unwrap(),
+                ProviderKind::Prime,
+                "{v:?} should select prime"
+            );
+        }
+        let provider = select(Some("prime"), model()).expect("prime is infallible");
+        assert_eq!(provider.id().0, "prime");
     }
 
     #[test]

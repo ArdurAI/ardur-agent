@@ -100,7 +100,7 @@ Evidence for the reviewed implementation SHA:
   clippy/check, all-feature workspace tests, security analysis, and separate
   live Qdrant and Dolt jobs. DCO runs on PRs. Branch protection and optional
   analysis annotations are distinct gates; inspect the current check set.
-- Cargo metadata reports 62 workspace packages.
+- Cargo metadata reports 63 workspace packages.
 - `.github/workflows/docker.yml` publishes the scanned and healthchecked image
   as `ghcr.io/ardurai/ardur-agent:<tag>` on eligible `v*` tags, with provenance;
   it does not publish `:latest`. The package remains **private**.

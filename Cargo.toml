@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = [ "crates/acp", "crates/approvals", "crates/core-types", "crates/cap-token", "crates/embeddings", "crates/bm25-index", "crates/fusion", "crates/receipt", "crates/lifecycle-hooks", "crates/hooks-openclaw-compat", "crates/cedar-policy", "crates/memory", "crates/memory-qdrant", "crates/runtime", "crates/automation", "crates/cron", "crates/cron-ui", "crates/standing-goals", "crates/cost-gate", "crates/provider-runtime", "crates/media-decode", "crates/media-audio", "crates/media-video", "crates/provider-openrouter", "crates/provider-openai-compat", "crates/provider-ollama", "crates/provider-codex", "crates/provider-claude-cli", "crates/provider-selector", "crates/cli", "crates/messaging-gateway", "crates/tool-registry", "crates/session-journals", "crates/multi-agent", "crates/delegate-tool", "crates/injection-defense", "crates/plugin-runtime", "crates/fused-runtime", "crates/slack-adapter", "crates/channel-matrix", "crates/channel-discord", "crates/channel-telegram", "crates/server", "crates/admin-ui", "crates/e2e-tests", "crates/eval-harness", "crates/memory-eval", "crates/browser", "crates/terminal", "crates/web", "crates/webhook", "crates/config", "crates/integrations", "crates/integration-beads", "crates/integration-obsidian", "crates/integration-dolthub", "crates/health", "crates/logs", "crates/resilience", "crates/durability", "crates/benches", "crates/code-execution",]
+members = [ "crates/acp", "crates/approvals", "crates/core-types", "crates/cap-token", "crates/embeddings", "crates/bm25-index", "crates/fusion", "crates/receipt", "crates/lifecycle-hooks", "crates/hooks-openclaw-compat", "crates/cedar-policy", "crates/memory", "crates/memory-qdrant", "crates/runtime", "crates/automation", "crates/cron", "crates/cron-ui", "crates/standing-goals", "crates/cost-gate", "crates/provider-runtime", "crates/media-decode", "crates/media-audio", "crates/media-video", "crates/provider-openrouter", "crates/provider-openai-compat", "crates/provider-ollama", "crates/provider-codex", "crates/provider-claude-cli", "crates/provider-prime", "crates/provider-selector", "crates/cli", "crates/messaging-gateway", "crates/tool-registry", "crates/session-journals", "crates/multi-agent", "crates/delegate-tool", "crates/injection-defense", "crates/plugin-runtime", "crates/fused-runtime", "crates/slack-adapter", "crates/channel-matrix", "crates/channel-discord", "crates/channel-telegram", "crates/server", "crates/admin-ui", "crates/e2e-tests", "crates/eval-harness", "crates/memory-eval", "crates/browser", "crates/terminal", "crates/web", "crates/webhook", "crates/config", "crates/integrations", "crates/integration-beads", "crates/integration-obsidian", "crates/integration-dolthub", "crates/health", "crates/logs", "crates/resilience", "crates/durability", "crates/benches", "crates/code-execution",]
 
 [workspace.package]
 edition = "2024"
@@ -216,6 +216,9 @@ path = "crates/provider-codex"
 
 [workspace.dependencies.ardur-provider-claude-cli]
 path = "crates/provider-claude-cli"
+
+[workspace.dependencies.ardur-provider-prime]
+path = "crates/provider-prime"
 
 [workspace.dependencies.ardur-provider-selector]
 path = "crates/provider-selector"
