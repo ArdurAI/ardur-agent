@@ -1001,6 +1001,7 @@ impl FusedRuntime {
     ) -> Result<(), RuntimeError> {
         let decision = match reason {
             UNKNOWN_TOOL_SETTLEMENT => Disposition::Refusal(RefusalClass::UnknownTool),
+            TOOL_CAPACITY_SETTLEMENT => Disposition::Refusal(RefusalClass::Capacity),
             TOOL_AUTH_SETTLEMENT => Disposition::Refusal(RefusalClass::Authorization),
             CAPABILITY_SETTLEMENT => Disposition::Refusal(RefusalClass::MissingCapability),
             APPROVAL_SETTLEMENT => Disposition::Refusal(RefusalClass::ApprovalRequired),
@@ -2345,6 +2346,7 @@ pub type CancelProbe = Arc<dyn Fn() -> bool + Send + Sync>;
 /// refusal settles its KNOWN incurred usage under. Distinct, stable strings so
 /// settlement aggregation can classify without parsing error text.
 const UNKNOWN_TOOL_SETTLEMENT: &str = "refusal:unknown_tool";
+const TOOL_CAPACITY_SETTLEMENT: &str = "refusal:capacity";
 const TOOL_AUTH_SETTLEMENT: &str = "refusal:tool_authorization";
 const CAPABILITY_SETTLEMENT: &str = "refusal:capability_denied";
 const APPROVAL_SETTLEMENT: &str = "refusal:approval_required";
@@ -2774,6 +2776,28 @@ impl FusedRuntime {
                 FinishReason::ToolUse(calls) => calls.clone(),
                 _ => Vec::new(),
             };
+            // Refuse the entire batch before any effect or bounded observation.
+            if requested.len() > crate::settlement::LIMITS.max_tools_per_round {
+                let err = RuntimeError::Internal(anyhow::anyhow!(
+                    "tool batch exceeds settlement capacity: {} > {}",
+                    requested.len(),
+                    crate::settlement::LIMITS.max_tools_per_round
+                ));
+                let settlement = self
+                    .settle_refusal(
+                        session_id,
+                        reservation,
+                        response.cost,
+                        TOOL_CAPACITY_SETTLEMENT,
+                    )
+                    .await;
+                self.fire_error(session_id, LifecyclePhase::Provider, &err)
+                    .await;
+                return match settlement {
+                    Ok(()) => Err(err),
+                    Err(error) => Err(error),
+                };
+            }
             let wants_tools = !requested.is_empty();
             // The loop is bounded: once we have made `max_tool_iterations`
             // provider calls and the model still wants tools, we abort rather
@@ -3611,6 +3635,20 @@ impl FusedRuntime {
                     FinishReason::ToolUse(calls) => calls.clone(),
                     _ => Vec::new(),
                 };
+                if requested.len() > crate::settlement::LIMITS.max_tools_per_round {
+                    let err = RuntimeError::Internal(anyhow::anyhow!(
+                        "tool batch exceeds settlement capacity: {} > {}",
+                        requested.len(), crate::settlement::LIMITS.max_tools_per_round
+                    ));
+                    let settlement = self.settle_refusal(
+                        session_id, reservation.take().expect("reservation held"),
+                        response.cost, TOOL_CAPACITY_SETTLEMENT
+                    ).await;
+                    self.fire_error(session_id, LifecyclePhase::Provider, &err).await;
+                    settlement?;
+                    Err(err)?;
+                    unreachable!()
+                }
                 let wants_tools = !requested.is_empty();
                 let exhausted = wants_tools && iteration >= self.max_tool_iterations;
 
