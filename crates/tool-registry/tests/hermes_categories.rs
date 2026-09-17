@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use ardur_tool_registry::SkillLoader;
+use ardur_tool_registry::{EchoTool, HealthCheckTool, SkillLoader, SkillTool, ToolRegistry};
 
 fn skills_root() -> PathBuf {
     std::env::var("HERMES_SKILLS_DIR")
@@ -71,8 +71,7 @@ fn category_dirs_load_real_skills_through_the_unmodified_loader() {
         "a loaded skill had an empty name"
     );
 
-    // Duplicate names across categories would collide on tool registration —
-    // report rather than assume uniqueness.
+    // Corpus-internal duplicates are only half the story.
     let mut sorted = names.clone();
     sorted.sort();
     let unique = {
@@ -88,6 +87,46 @@ fn category_dirs_load_real_skills_through_the_unmodified_loader() {
                 dupes.push(&w[0]);
             }
         }
-        println!("DUPLICATE names (would collide on registration): {dupes:?}");
+        println!("DUPLICATE names (corpus-internal): {dupes:?}");
     }
+
+    // The collision that actually matters is against the ids a registry ALREADY
+    // holds. `register_skills` skips a skill whose id conflicts with a
+    // previously registered tool (logging a warning), and the server registers
+    // its built-ins BEFORE the skills — so a skill named `echo` or
+    // `health_check` is silently dropped at boot. Checking only for
+    // corpus-internal duplicates would report "all unique" while that happened.
+    //
+    // Register into a genuinely prepopulated registry and count what survives.
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(Box::new(EchoTool::new()))
+        .expect("echo registers");
+    registry
+        .register(Box::new(HealthCheckTool::new("stub", "in_memory")))
+        .expect("health_check registers");
+    let builtin_ids: Vec<String> = registry.list().iter().map(|t| t.id().0).collect();
+
+    let mut registered = 0usize;
+    let mut rejected: Vec<String> = Vec::new();
+    for cat in &cats {
+        for skill in SkillLoader::load_directory(cat).expect("loads") {
+            let name = skill.frontmatter.name.clone();
+            match registry.register(Box::new(SkillTool::new(skill))) {
+                Ok(()) => registered += 1,
+                Err(_) => rejected.push(name),
+            }
+        }
+    }
+
+    println!("prepopulated ids     : {builtin_ids:?}");
+    println!("skills registered    : {registered} of {loaded}");
+    if !rejected.is_empty() {
+        println!("REJECTED (id already taken, silently skipped at boot): {rejected:?}");
+    }
+
+    assert_eq!(
+        registered, loaded,
+        "every loaded skill should register; these were dropped on id conflict: {rejected:?}"
+    );
 }

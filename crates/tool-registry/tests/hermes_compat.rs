@@ -9,14 +9,29 @@ use std::path::{Path, PathBuf};
 use ardur_tool_registry::{Skill, SkillLoader};
 
 /// Every `SKILL.md` under `root`, at any depth.
-fn find_all_manifests(root: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(root) else {
-        return;
+///
+/// Traversal errors are collected rather than swallowed. An unreadable subtree
+/// would otherwise shrink the corpus silently, and a probe that certifies
+/// compatibility over a corpus it failed to read is worse than no probe at all.
+fn find_all_manifests(root: &Path, out: &mut Vec<PathBuf>, errors: &mut Vec<(PathBuf, String)>) {
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(e) => {
+            errors.push((root.to_path_buf(), e.to_string()));
+            return;
+        }
     };
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) => {
+                errors.push((root.to_path_buf(), e.to_string()));
+                continue;
+            }
+        };
         let path = entry.path();
         if path.is_dir() {
-            find_all_manifests(&path, out);
+            find_all_manifests(&path, out, errors);
         } else if path.file_name().and_then(|n| n.to_str()) == Some("SKILL.md") {
             out.push(path);
         }
@@ -39,8 +54,23 @@ fn hermes_skill_corpus_parses_and_reports_a_compat_matrix() {
 
     // 1. What the CONTENT parser accepts, independent of discovery.
     let mut manifests = Vec::new();
-    find_all_manifests(&root, &mut manifests);
+    let mut traversal_errors = Vec::new();
+    find_all_manifests(&root, &mut manifests, &mut traversal_errors);
     manifests.sort();
+
+    // Fail BEFORE certifying anything. An empty or partially-unreadable corpus
+    // must never pass as "100% compatible" — that is precisely the misconfigured
+    // or inaccessible library this probe exists to detect.
+    assert!(
+        traversal_errors.is_empty(),
+        "could not fully traverse {}: {traversal_errors:?}",
+        root.display()
+    );
+    assert!(
+        !manifests.is_empty(),
+        "no SKILL.md found under {} — refusing to certify compatibility over an empty corpus",
+        root.display()
+    );
 
     let mut parsed_ok = 0usize;
     let mut failures: Vec<(PathBuf, String)> = Vec::new();
@@ -96,5 +126,12 @@ fn hermes_skill_corpus_parses_and_reports_a_compat_matrix() {
         failures.is_empty(),
         "{} Hermes SKILL.md files failed Ardur's parser",
         failures.len()
+    );
+    // Every manifest found must be accounted for, so the success line cannot be
+    // produced by a corpus that was silently truncated mid-walk.
+    assert_eq!(
+        parsed_ok,
+        manifests.len(),
+        "parsed count must cover the whole corpus"
     );
 }
