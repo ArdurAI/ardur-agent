@@ -1,0 +1,1002 @@
+//! Proof-of-possession binding for cap-tokens (#363, AAT invariant I6).
+//!
+//! # The problem
+//!
+//! A cap-token is a pure bearer credential: verification checks the signature,
+//! the deny-list and the time/audience/tool/cost caveats, and nothing binds the
+//! token to *who is presenting it*. Anyone who captures one becomes its subject
+//! for every authorization decision until it expires. A captured request can be
+//! replayed verbatim.
+//!
+//! # What this adds
+//!
+//! A `cnf` (confirmation) claim naming the holder's public key by thumbprint,
+//! and a per-request proof the holder signs with the matching private key. The
+//! verifier recomputes the thumbprint from the presented key, checks it equals
+//! the bound one, then checks the signature over a canonical binding string.
+//!
+//! Stealing the token is then not enough: the thief also needs the private key,
+//! which never travels with the token.
+//!
+//! # Replay
+//!
+//! The proof covers a caller-supplied nonce and an issued-at timestamp, so the
+//! same signature cannot be replayed against a different request. Nonce reuse is
+//! rejected within the acceptance window by [`ReplayCache`]; a proof outside the
+//! window is rejected on age alone, which bounds how much state the cache needs
+//! to hold.
+//!
+//! # What this deliberately does NOT do
+//!
+//! It does not weaken anything for tokens without a `cnf` claim. Legacy tokens
+//! keep their current (bearer) semantics, and a caller that wants PoP enforced
+//! sets [`PopRequirement::Required`] — at which point a token with no binding is
+//! **rejected**, not waved through. That choice is the caller's to make
+//! explicitly, because silently accepting unbound tokens under a "PoP enabled"
+//! configuration is exactly the kind of fail-open this crate must not have.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::time::Duration;
+
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
+// `verify_strict` is an inherent method on VerifyingKey, so the permissive
+// `Verifier` trait is deliberately NOT imported — importing it would make the
+// weaker `verify` reachable again by accident.
+use ed25519_dalek::{Signature, VerifyingKey};
+use sha2::{Digest, Sha256};
+
+use crate::error::CapTokenError;
+
+/// Maximum age of a PoP proof, in seconds.
+///
+/// A proof older than this is rejected regardless of its signature. This is what
+/// bounds the replay cache: nonces older than the window can be evicted, because
+/// a proof carrying them would fail the age check anyway.
+pub const DEFAULT_PROOF_MAX_AGE_SECS: u64 = 300;
+
+/// Maximum clock skew tolerated on a proof's `issued_at`, in seconds.
+///
+/// Without this a holder whose clock runs marginally fast produces proofs that
+/// look like they come from the future and are rejected. Kept deliberately small
+/// — a wide skew window extends the effective replay window by the same amount.
+pub const DEFAULT_MAX_CLOCK_SKEW_SECS: u64 = 30;
+
+/// Whether the verifier insists on proof-of-possession.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PopRequirement {
+    /// Accept tokens without a `cnf` binding (legacy bearer semantics).
+    ///
+    /// A token that *does* carry a binding is still checked: opting out of
+    /// requiring PoP must never mean ignoring a proof that was supplied.
+    Optional,
+    /// Reject any token that does not carry a `cnf` binding AND a valid proof.
+    Required,
+}
+
+/// A holder's public key thumbprint, as bound into a token's `cnf` claim.
+///
+/// Stored as `sha-256:` + 64 lowercase hex over the raw Ed25519 public key.
+/// The thumbprint — not the key — travels in the token, so a token leak does
+/// not leak anything usable for impersonation.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+pub struct KeyThumbprint(String);
+
+impl<'de> serde::Deserialize<'de> for KeyThumbprint {
+    /// Deserialize THROUGH [`KeyThumbprint::parse`].
+    ///
+    /// A derived impl writes the inner string directly, so `"jkt":"bad"` would
+    /// produce a `KeyThumbprint` that no real key can ever equal — a silent
+    /// permanent denial rather than a clear malformed-token error. Worse, it
+    /// makes the type's "always well-formed" invariant a lie for anything that
+    /// arrived over the wire, which is exactly the input that matters.
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Self::parse(&raw).map_err(serde::de::Error::custom)
+    }
+}
+
+impl KeyThumbprint {
+    /// Compute the thumbprint of an Ed25519 verifying key.
+    #[must_use]
+    pub fn of(key: &VerifyingKey) -> Self {
+        let digest = Sha256::digest(key.as_bytes());
+        let hex = digest.iter().fold(String::with_capacity(64), |mut acc, b| {
+            use std::fmt::Write as _;
+            let _ = write!(acc, "{b:02x}");
+            acc
+        });
+        Self(format!("sha-256:{hex}"))
+    }
+
+    /// The thumbprint string, `sha-256:<64 hex>`.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Parse a thumbprint, rejecting anything that is not the exact shape.
+    ///
+    /// # Errors
+    ///
+    /// [`CapTokenError::Malformed`] when the prefix, length or alphabet is
+    /// wrong. Strict parsing matters: a permissive parser that accepted an
+    /// empty or truncated thumbprint would make binding comparisons trivially
+    /// satisfiable.
+    pub fn parse(s: &str) -> Result<Self, CapTokenError> {
+        let hex = s.strip_prefix("sha-256:").ok_or_else(|| {
+            CapTokenError::Malformed("thumbprint must carry the sha-256: prefix".into())
+        })?;
+        if hex.len() != 64 {
+            return Err(CapTokenError::Malformed(format!(
+                "thumbprint must be 64 hex characters, got {}",
+                hex.len()
+            )));
+        }
+        if !hex
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        {
+            return Err(CapTokenError::Malformed(
+                "thumbprint must be lowercase hex".into(),
+            ));
+        }
+        Ok(Self(s.to_string()))
+    }
+}
+
+/// The confirmation claim bound into a token at issuance.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Confirmation {
+    /// The holder key's thumbprint (`jkt`, per RFC 9449's naming).
+    pub jkt: KeyThumbprint,
+}
+
+/// What a proof commits to.
+///
+/// Every field that distinguishes one request from another belongs here. A field
+/// omitted from the binding is a field an attacker may vary freely while
+/// replaying a captured signature — which is why the tool and cost are included
+/// and not just the token id.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RequestBinding {
+    /// The token this proof accompanies.
+    pub token_id: String,
+    /// The tool the request will invoke.
+    pub tool: String,
+    /// Digest over the canonical tool arguments for this request.
+    ///
+    /// Binding the tool NAME alone is not enough: the same tool called with
+    /// different arguments is a different request, so a captured proof for
+    /// `file.read("notes.txt")` would otherwise authorize
+    /// `file.read("/etc/shadow")` — same tool, same cost, entirely different
+    /// authority. Callers pass the digest of whatever canonical form the
+    /// invocation already uses (the ER projection's JCS bytes, for instance).
+    pub args_digest: String,
+    /// The budget units the request will consume.
+    pub cost: u64,
+    /// The audience presenting the token.
+    pub audience: String,
+    /// A caller-chosen value that must not repeat within the acceptance window.
+    pub nonce: String,
+    /// When the proof was created, Unix seconds.
+    pub issued_at: u64,
+}
+
+impl RequestBinding {
+    /// The exact bytes a holder signs.
+    ///
+    /// Length-prefixed rather than delimiter-joined: with a plain separator a
+    /// caller could move characters between adjacent fields (`tool="a", nonce="b:c"`
+    /// vs `tool="a:b", nonce="c"`) and produce the same signing input, so one
+    /// signature would authorize two different requests.
+    #[must_use]
+    pub fn signing_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(b"ardur-cap-pop-v1");
+        for field in [
+            self.token_id.as_str(),
+            self.tool.as_str(),
+            self.args_digest.as_str(),
+            self.audience.as_str(),
+            self.nonce.as_str(),
+        ] {
+            out.extend_from_slice(&(field.len() as u64).to_be_bytes());
+            out.extend_from_slice(field.as_bytes());
+        }
+        out.extend_from_slice(&self.cost.to_be_bytes());
+        out.extend_from_slice(&self.issued_at.to_be_bytes());
+        out
+    }
+}
+
+/// Generate a fresh, unpredictable nonce for a [`RequestBinding`].
+///
+/// Callers MUST NOT hand-pick nonces. Predictability is not a theoretical
+/// concern here: an attacker who can guess the next nonce can pre-burn it in the
+/// verifier's [`ReplayCache`] and lock the legitimate holder out — a denial of
+/// service built out of the replay defence. 128 bits from the OS CSPRNG makes
+/// collision or prediction infeasible.
+///
+/// Test fixtures use literal nonces deliberately (a replay test must reuse one),
+/// which is why this helper exists: production paths have no reason to.
+#[must_use]
+pub fn fresh_nonce() -> String {
+    use rand::Rng as _;
+    let mut bytes = [0u8; 16];
+    rand::rng().fill_bytes(&mut bytes);
+    B64URL.encode(bytes)
+}
+
+/// A holder's proof that it possesses the bound private key.
+#[derive(Clone, Debug)]
+pub struct PopProof {
+    /// The holder's public key, presented alongside the proof.
+    pub public_key: VerifyingKey,
+    /// Ed25519 signature over [`RequestBinding::signing_bytes`].
+    pub signature: Signature,
+    /// The binding the signature covers.
+    pub binding: RequestBinding,
+}
+
+impl PopProof {
+    /// Sign a binding with a holder's key.
+    #[must_use]
+    pub fn create(signing_key: &ed25519_dalek::SigningKey, binding: RequestBinding) -> Self {
+        use ed25519_dalek::Signer as _;
+        let signature = signing_key.sign(&binding.signing_bytes());
+        Self {
+            public_key: signing_key.verifying_key(),
+            signature,
+            binding,
+        }
+    }
+
+    /// The presented key's thumbprint.
+    #[must_use]
+    pub fn thumbprint(&self) -> KeyThumbprint {
+        KeyThumbprint::of(&self.public_key)
+    }
+
+    /// Base64url of the signature, for transport.
+    #[must_use]
+    pub fn signature_b64(&self) -> String {
+        B64URL.encode(self.signature.to_bytes())
+    }
+}
+
+/// Bounded nonce cache rejecting replays inside the acceptance window.
+///
+/// Entries older than the window are evicted on insert: a proof carrying such a
+/// nonce is rejected on age anyway, so retaining it buys nothing and lets an
+/// attacker grow the cache without bound.
+#[derive(Debug)]
+pub struct ReplayCache {
+    seen: BTreeMap<String, u64>,
+    /// `(seen_at, nonce)` ordered by time, so expiry visits only aged entries.
+    by_age: BTreeSet<(u64, String)>,
+    max_age_secs: u64,
+}
+
+impl Default for ReplayCache {
+    /// A cache whose window matches the proof acceptance window.
+    ///
+    /// NOT `#[derive(Default)]`: that yields `max_age_secs = 0`, which evicts
+    /// every nonce on the next insert while `verify_pop` still accepts proofs
+    /// for [`DEFAULT_PROOF_MAX_AGE_SECS`]. The replay defence would silently do
+    /// nothing — the worst kind of default, since everything still passes.
+    fn default() -> Self {
+        Self::new(DEFAULT_PROOF_MAX_AGE_SECS)
+    }
+}
+
+impl ReplayCache {
+    /// A cache holding nonces for `max_age_secs`.
+    #[must_use]
+    pub fn new(max_age_secs: u64) -> Self {
+        Self {
+            seen: BTreeMap::new(),
+            by_age: BTreeSet::new(),
+            max_age_secs,
+        }
+    }
+
+    /// Record a nonce, returning `false` when it was already used.
+    ///
+    /// Eviction is amortized rather than run on every insert: a full
+    /// `retain` per proof traverses every retained entry, so N proofs inside one
+    /// window cost O(N^2) — a throughput cliff an attacker can trigger just by
+    /// sending valid traffic. Expiry is driven by an ordered `(seen_at, nonce)`
+    /// index, so only entries that have actually aged out are visited.
+    pub fn record(&mut self, nonce: &str, now_unix: u64) -> bool {
+        let cutoff = now_unix.saturating_sub(self.max_age_secs);
+        while let Some((seen_at, expired)) = self.by_age.first() {
+            if *seen_at >= cutoff {
+                break;
+            }
+            let seen_at = *seen_at;
+            let expired = expired.clone();
+            self.by_age.remove(&(seen_at, expired.clone()));
+            // Only drop it from `seen` if it has not since been re-recorded
+            // under a newer timestamp.
+            if self.seen.get(&expired) == Some(&seen_at) {
+                self.seen.remove(&expired);
+            }
+        }
+        if self.seen.contains_key(nonce) {
+            return false;
+        }
+        self.seen.insert(nonce.to_string(), now_unix);
+        self.by_age.insert((now_unix, nonce.to_string()));
+        true
+    }
+
+    /// How many nonces are currently retained.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.seen.len()
+    }
+
+    /// Whether the cache is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.seen.is_empty()
+    }
+}
+
+/// Verify a proof against a token's binding and the concrete request.
+///
+/// # Errors
+///
+/// - [`CapTokenError::PopRequired`] — PoP is required but the token carries no
+///   `cnf`, or no proof was presented.
+/// - [`CapTokenError::PopKeyMismatch`] — the presented key is not the bound one.
+/// - [`CapTokenError::PopInvalid`] — bad signature, stale/future proof, a
+///   binding that does not describe this request, or a replayed nonce.
+pub fn verify_pop(
+    confirmation: Option<&Confirmation>,
+    proof: Option<&PopProof>,
+    request: &RequestBinding,
+    requirement: PopRequirement,
+    now_unix: u64,
+    replay: &mut ReplayCache,
+) -> Result<(), CapTokenError> {
+    let (confirmation, proof) = match (confirmation, proof, requirement) {
+        // Bound token + proof: always verified, even when PoP is Optional.
+        // Ignoring a supplied proof would silently discard the one signal that
+        // distinguishes the holder from a thief.
+        (Some(c), Some(p), _) => (c, p),
+
+        // A bound token presented with no proof is a failure in BOTH modes: the
+        // issuer already decided this token needs possession, and honouring the
+        // binding only when the caller opts in would let the mode downgrade it.
+        (Some(_), None, _) => {
+            return Err(CapTokenError::PopRequired(
+                "token carries a cnf binding but no proof was presented".into(),
+            ));
+        }
+
+        // Unbound token under Required: reject. Accepting it would make the
+        // "required" setting a lie.
+        (None, _, PopRequirement::Required) => {
+            return Err(CapTokenError::PopRequired(
+                "proof-of-possession is required but the token carries no cnf binding".into(),
+            ));
+        }
+
+        // A proof for an unbound token proves nothing — there is no bound key to
+        // compare against, so any key would satisfy it.
+        (None, Some(_), PopRequirement::Optional) => {
+            return Err(CapTokenError::PopInvalid(
+                "a proof was presented for a token with no cnf binding".into(),
+            ));
+        }
+
+        // Legacy bearer token, PoP not required.
+        (None, None, PopRequirement::Optional) => return Ok(()),
+    };
+
+    // 1. The presented key must be the bound key.
+    let presented = proof.thumbprint();
+    if presented != confirmation.jkt {
+        return Err(CapTokenError::PopKeyMismatch {
+            expected: confirmation.jkt.as_str().to_string(),
+            presented: presented.as_str().to_string(),
+        });
+    }
+
+    // 2. The binding must describe THIS request. Checked before the signature so
+    //    a valid signature over someone else's request cannot be mistaken for
+    //    authorization of this one.
+    if proof.binding.token_id != request.token_id
+        || proof.binding.tool != request.tool
+        || proof.binding.args_digest != request.args_digest
+        || proof.binding.cost != request.cost
+        || proof.binding.audience != request.audience
+    {
+        return Err(CapTokenError::PopInvalid(
+            "proof binding does not describe this request".into(),
+        ));
+    }
+
+    // 3. Freshness. A future-dated proof is rejected beyond the skew allowance;
+    //    otherwise a holder could mint long-lived proofs in advance.
+    if proof.binding.issued_at > now_unix.saturating_add(DEFAULT_MAX_CLOCK_SKEW_SECS) {
+        return Err(CapTokenError::PopInvalid(
+            "proof is dated in the future".into(),
+        ));
+    }
+    let age = now_unix.saturating_sub(proof.binding.issued_at);
+    if age > DEFAULT_PROOF_MAX_AGE_SECS {
+        return Err(CapTokenError::PopInvalid(format!(
+            "proof is {age}s old, limit is {DEFAULT_PROOF_MAX_AGE_SECS}s"
+        )));
+    }
+
+    // 4. Reject weak (small-order) keys BEFORE verifying. ed25519-dalek flags
+    //    these because they can validate a forged signature for almost any
+    //    message — and the presented key is attacker-controlled, so accepting
+    //    one would let any signature pass.
+    if proof.public_key.is_weak() {
+        return Err(CapTokenError::PopInvalid(
+            "presented holder key is a weak (small-order) Ed25519 key".into(),
+        ));
+    }
+
+    // 5. The signature itself, with the STRICT verifier. `verify_strict`
+    //    additionally rejects signatures whose R component is small-order,
+    //    closing the malleability gap the permissive `verify` leaves open.
+    proof
+        .public_key
+        .verify_strict(&proof.binding.signing_bytes(), &proof.signature)
+        .map_err(|_| CapTokenError::PopInvalid("proof signature does not verify".into()))?;
+
+    // 5. Replay. Recorded LAST so a rejected proof cannot burn a nonce — an
+    //    attacker replaying garbage would otherwise lock out the legitimate
+    //    holder's next use of that nonce.
+    if !replay.record(&proof.binding.nonce, now_unix) {
+        return Err(CapTokenError::PopInvalid(
+            "proof nonce has already been used".into(),
+        ));
+    }
+
+    Ok(())
+}
+
+/// How long a proof stays acceptable.
+#[must_use]
+pub fn proof_acceptance_window() -> Duration {
+    Duration::from_secs(DEFAULT_PROOF_MAX_AGE_SECS)
+}
+
+#[cfg(test)]
+mod tests {
+    use ed25519_dalek::SigningKey;
+
+    use super::*;
+
+    fn key(seed: u8) -> SigningKey {
+        SigningKey::from_bytes(&[seed; 32])
+    }
+
+    thread_local! {
+        /// One generated nonce per test thread.
+        ///
+        /// The replay guards need the *same* nonce presented twice, but "same"
+        /// does not require "hard-coded". Rust runs each `#[test]` on its own
+        /// thread, so this is stable within a test and distinct across tests —
+        /// repeated `binding()` calls agree, and no literal nonce exists for a
+        /// reader to copy into production.
+        static TEST_NONCE: String = fresh_nonce();
+    }
+
+    /// A request binding carrying this test thread's nonce.
+    fn binding() -> RequestBinding {
+        RequestBinding {
+            token_id: "01a0adca-0000-4000-8000-00000000000e".into(),
+            tool: "file.read".into(),
+            args_digest: "sha-256:args-fixture".into(),
+            cost: 1,
+            audience: "cli://localhost".into(),
+            nonce: TEST_NONCE.with(Clone::clone),
+            issued_at: 1_789_621_936,
+        }
+    }
+
+    fn cnf(k: &SigningKey) -> Confirmation {
+        Confirmation {
+            jkt: KeyThumbprint::of(&k.verifying_key()),
+        }
+    }
+
+    #[test]
+    fn a_valid_proof_from_the_bound_key_is_accepted() {
+        let k = key(1);
+        let proof = PopProof::create(&k, binding());
+        let mut cache = ReplayCache::new(DEFAULT_PROOF_MAX_AGE_SECS);
+        assert!(
+            verify_pop(
+                Some(&cnf(&k)),
+                Some(&proof),
+                &binding(),
+                PopRequirement::Required,
+                1_789_621_940,
+                &mut cache,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_stolen_token_with_a_different_key_is_rejected() {
+        // The whole point: possessing the token is not enough.
+        let bound = key(1);
+        let thief = key(2);
+        let proof = PopProof::create(&thief, binding());
+        let mut cache = ReplayCache::new(DEFAULT_PROOF_MAX_AGE_SECS);
+        let err = verify_pop(
+            Some(&cnf(&bound)),
+            Some(&proof),
+            &binding(),
+            PopRequirement::Required,
+            1_789_621_940,
+            &mut cache,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, CapTokenError::PopKeyMismatch { .. }),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn a_bound_token_without_a_proof_is_rejected_even_when_pop_is_optional() {
+        // The issuer already decided this token needs possession; the verifier's
+        // mode must not be able to downgrade that.
+        let k = key(1);
+        let mut cache = ReplayCache::new(DEFAULT_PROOF_MAX_AGE_SECS);
+        let err = verify_pop(
+            Some(&cnf(&k)),
+            None,
+            &binding(),
+            PopRequirement::Optional,
+            1_789_621_940,
+            &mut cache,
+        )
+        .unwrap_err();
+        assert!(matches!(err, CapTokenError::PopRequired(_)), "{err:?}");
+    }
+
+    #[test]
+    fn an_unbound_token_is_rejected_when_pop_is_required() {
+        let mut cache = ReplayCache::new(DEFAULT_PROOF_MAX_AGE_SECS);
+        let err = verify_pop(
+            None,
+            None,
+            &binding(),
+            PopRequirement::Required,
+            1_789_621_940,
+            &mut cache,
+        )
+        .unwrap_err();
+        assert!(matches!(err, CapTokenError::PopRequired(_)), "{err:?}");
+    }
+
+    #[test]
+    fn a_legacy_bearer_token_still_works_when_pop_is_optional() {
+        let mut cache = ReplayCache::new(DEFAULT_PROOF_MAX_AGE_SECS);
+        assert!(
+            verify_pop(
+                None,
+                None,
+                &binding(),
+                PopRequirement::Optional,
+                1_789_621_940,
+                &mut cache,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_proof_for_an_unbound_token_is_rejected() {
+        // There is no bound key to compare against, so accepting it would let
+        // ANY key satisfy the check.
+        let k = key(1);
+        let proof = PopProof::create(&k, binding());
+        let mut cache = ReplayCache::new(DEFAULT_PROOF_MAX_AGE_SECS);
+        let err = verify_pop(
+            None,
+            Some(&proof),
+            &binding(),
+            PopRequirement::Optional,
+            1_789_621_940,
+            &mut cache,
+        )
+        .unwrap_err();
+        assert!(matches!(err, CapTokenError::PopInvalid(_)), "{err:?}");
+    }
+
+    #[test]
+    fn a_replayed_proof_is_rejected_the_second_time() {
+        let k = key(1);
+        let proof = PopProof::create(&k, binding());
+        let mut cache = ReplayCache::new(DEFAULT_PROOF_MAX_AGE_SECS);
+        assert!(
+            verify_pop(
+                Some(&cnf(&k)),
+                Some(&proof),
+                &binding(),
+                PopRequirement::Required,
+                1_789_621_940,
+                &mut cache,
+            )
+            .is_ok()
+        );
+        let err = verify_pop(
+            Some(&cnf(&k)),
+            Some(&proof),
+            &binding(),
+            PopRequirement::Required,
+            1_789_621_941,
+            &mut cache,
+        )
+        .unwrap_err();
+        assert!(matches!(err, CapTokenError::PopInvalid(_)), "{err:?}");
+    }
+
+    #[test]
+    fn a_proof_for_a_different_tool_does_not_authorize_this_request() {
+        // Capturing a proof for a cheap read must not authorize a write.
+        let k = key(1);
+        let mut signed = binding();
+        signed.tool = "file.read".into();
+        let proof = PopProof::create(&k, signed);
+
+        let mut requested = binding();
+        requested.tool = "file.write".into();
+
+        let mut cache = ReplayCache::new(DEFAULT_PROOF_MAX_AGE_SECS);
+        let err = verify_pop(
+            Some(&cnf(&k)),
+            Some(&proof),
+            &requested,
+            PopRequirement::Required,
+            1_789_621_940,
+            &mut cache,
+        )
+        .unwrap_err();
+        assert!(matches!(err, CapTokenError::PopInvalid(_)), "{err:?}");
+    }
+
+    #[test]
+    fn a_proof_for_a_smaller_cost_does_not_authorize_a_larger_spend() {
+        let k = key(1);
+        let proof = PopProof::create(&k, binding());
+        let mut requested = binding();
+        requested.cost = 1_000;
+        let mut cache = ReplayCache::new(DEFAULT_PROOF_MAX_AGE_SECS);
+        let err = verify_pop(
+            Some(&cnf(&k)),
+            Some(&proof),
+            &requested,
+            PopRequirement::Required,
+            1_789_621_940,
+            &mut cache,
+        )
+        .unwrap_err();
+        assert!(matches!(err, CapTokenError::PopInvalid(_)), "{err:?}");
+    }
+
+    #[test]
+    fn a_stale_proof_is_rejected() {
+        let k = key(1);
+        let proof = PopProof::create(&k, binding());
+        let mut cache = ReplayCache::new(DEFAULT_PROOF_MAX_AGE_SECS);
+        let err = verify_pop(
+            Some(&cnf(&k)),
+            Some(&proof),
+            &binding(),
+            PopRequirement::Required,
+            1_789_621_936 + DEFAULT_PROOF_MAX_AGE_SECS + 1,
+            &mut cache,
+        )
+        .unwrap_err();
+        assert!(matches!(err, CapTokenError::PopInvalid(_)), "{err:?}");
+    }
+
+    #[test]
+    fn a_future_dated_proof_is_rejected_beyond_the_skew_allowance() {
+        let k = key(1);
+        let mut b = binding();
+        b.issued_at = 1_789_621_936 + DEFAULT_MAX_CLOCK_SKEW_SECS + 60;
+        let proof = PopProof::create(&k, b);
+        let mut cache = ReplayCache::new(DEFAULT_PROOF_MAX_AGE_SECS);
+        let err = verify_pop(
+            Some(&cnf(&k)),
+            Some(&proof),
+            &binding(),
+            PopRequirement::Required,
+            1_789_621_936,
+            &mut cache,
+        )
+        .unwrap_err();
+        assert!(matches!(err, CapTokenError::PopInvalid(_)), "{err:?}");
+    }
+
+    #[test]
+    fn a_tampered_signature_is_rejected() {
+        let k = key(1);
+        let mut proof = PopProof::create(&k, binding());
+        let mut bytes = proof.signature.to_bytes();
+        bytes[0] ^= 0xff;
+        proof.signature = Signature::from_bytes(&bytes);
+        let mut cache = ReplayCache::new(DEFAULT_PROOF_MAX_AGE_SECS);
+        let err = verify_pop(
+            Some(&cnf(&k)),
+            Some(&proof),
+            &binding(),
+            PopRequirement::Required,
+            1_789_621_940,
+            &mut cache,
+        )
+        .unwrap_err();
+        assert!(matches!(err, CapTokenError::PopInvalid(_)), "{err:?}");
+    }
+
+    #[test]
+    fn a_rejected_proof_does_not_burn_the_nonce() {
+        // Otherwise an attacker replaying garbage locks out the legitimate
+        // holder's next use of that nonce.
+        let k = key(1);
+        let thief = key(2);
+        let bad = PopProof::create(&thief, binding());
+        let mut cache = ReplayCache::new(DEFAULT_PROOF_MAX_AGE_SECS);
+        let _ = verify_pop(
+            Some(&cnf(&k)),
+            Some(&bad),
+            &binding(),
+            PopRequirement::Required,
+            1_789_621_940,
+            &mut cache,
+        );
+        assert!(cache.is_empty(), "a failed proof must not record its nonce");
+
+        let good = PopProof::create(&k, binding());
+        assert!(
+            verify_pop(
+                Some(&cnf(&k)),
+                Some(&good),
+                &binding(),
+                PopRequirement::Required,
+                1_789_621_940,
+                &mut cache,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn field_boundaries_cannot_be_shifted_between_adjacent_fields() {
+        // With delimiter-joined signing input these two would hash identically,
+        // so one signature would authorize both requests.
+        // The fields must be ADJACENT in the signing order
+        // (token_id, tool, audience, nonce) for the shift to be constructible;
+        // a non-adjacent pair is separated by an intervening field and would
+        // make this test vacuous.
+        let mut a = binding();
+        a.tool = "a".into();
+        a.audience = "b:c".into();
+        let mut b = binding();
+        b.tool = "a:b".into();
+        b.audience = "c".into();
+        assert_ne!(
+            a.signing_bytes(),
+            b.signing_bytes(),
+            "length prefixes must stop a character moving between adjacent fields"
+        );
+    }
+
+    #[test]
+    fn the_replay_cache_evicts_entries_older_than_its_window() {
+        // Real generated nonces, held by handle. This test is about the
+        // EVICTION POLICY, so it needs the same value twice — but using
+        // literals here would both trip the hard-coded-nonce lint and model a
+        // cache keyed on something a caller should never hand-pick.
+        let first = fresh_nonce();
+        let second = fresh_nonce();
+
+        let mut cache = ReplayCache::new(60);
+        assert!(cache.record(&first, 1_000));
+        assert_eq!(cache.len(), 1);
+        // Far beyond the window: the old entry is evicted, so the cache cannot
+        // grow without bound.
+        assert!(cache.record(&second, 5_000));
+        assert_eq!(cache.len(), 1);
+        // And the evicted nonce is accepted again, which is safe: a proof
+        // carrying it would fail the age check first.
+        assert!(cache.record(&first, 5_000));
+    }
+
+    #[test]
+    fn thumbprints_are_strictly_parsed() {
+        let k = key(1);
+        let t = KeyThumbprint::of(&k.verifying_key());
+        assert!(KeyThumbprint::parse(t.as_str()).is_ok());
+        for bad in [
+            "",
+            "sha-256:",
+            "deadbeef",
+            "sha-256:DEADBEEF",
+            "sha-1:0000000000000000000000000000000000000000000000000000000000000000",
+        ] {
+            assert!(
+                KeyThumbprint::parse(bad).is_err(),
+                "must reject malformed thumbprint {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn fresh_nonces_are_unique_and_high_entropy() {
+        // A predictable nonce lets an attacker pre-burn it in the verifier's
+        // replay cache and lock the legitimate holder out, so this is a
+        // security property, not a hygiene one.
+        let nonces: BTreeSet<String> = (0..256).map(|_| fresh_nonce()).collect();
+        assert_eq!(nonces.len(), 256, "fresh_nonce must not repeat");
+        for n in &nonces {
+            // 16 bytes base64url-encoded, unpadded.
+            assert_eq!(n.len(), 22, "expected 128 bits of nonce, got {n:?}");
+        }
+    }
+
+    #[test]
+    fn a_freshly_minted_nonce_passes_verification() {
+        let k = key(1);
+        let mut b = binding();
+        b.nonce = fresh_nonce();
+        let proof = PopProof::create(&k, b.clone());
+        let mut cache = ReplayCache::new(DEFAULT_PROOF_MAX_AGE_SECS);
+        assert!(
+            verify_pop(
+                Some(&cnf(&k)),
+                Some(&proof),
+                &b,
+                PopRequirement::Required,
+                1_789_621_940,
+                &mut cache,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn distinct_keys_have_distinct_thumbprints() {
+        assert_ne!(
+            KeyThumbprint::of(&key(1).verifying_key()),
+            KeyThumbprint::of(&key(2).verifying_key())
+        );
+    }
+
+    #[test]
+    fn a_proof_for_different_arguments_does_not_authorize_this_request() {
+        // The exploit this closes: a captured proof for file.read("notes.txt")
+        // must not authorize file.read("/etc/shadow") — same tool, same cost,
+        // entirely different authority.
+        let k = key(1);
+        let signed = binding();
+        let proof = PopProof::create(&k, signed);
+
+        let mut requested = binding();
+        requested.args_digest = "sha-256:a-completely-different-target".into();
+
+        let mut cache = ReplayCache::new(DEFAULT_PROOF_MAX_AGE_SECS);
+        let err = verify_pop(
+            Some(&cnf(&k)),
+            Some(&proof),
+            &requested,
+            PopRequirement::Required,
+            1_789_621_940,
+            &mut cache,
+        )
+        .unwrap_err();
+        assert!(matches!(err, CapTokenError::PopInvalid(_)), "{err:?}");
+    }
+
+    #[test]
+    fn the_default_replay_cache_retains_for_the_whole_acceptance_window() {
+        // A derived Default gives max_age_secs = 0, which evicts every nonce on
+        // the next insert while verify_pop still accepts proofs for 300s — the
+        // replay defence would silently do nothing.
+        let mut cache = ReplayCache::default();
+        let n = fresh_nonce();
+        assert!(cache.record(&n, 1_000));
+        // Anywhere inside the acceptance window the nonce must still be known.
+        assert!(
+            !cache.record(&n, 1_000 + DEFAULT_PROOF_MAX_AGE_SECS - 1),
+            "default cache must retain nonces for the full acceptance window"
+        );
+    }
+
+    #[test]
+    fn a_weak_holder_key_is_rejected_before_the_signature_is_checked() {
+        // Small-order keys validate a forged signature for almost any message,
+        // and the presented key is attacker-controlled.
+        // The all-zero encoding is the identity point. Decode MUST succeed and
+        // the key MUST be weak — an early `return` here would make the whole
+        // guard vacuous, which is exactly how it first passed under mutation.
+        let weak = VerifyingKey::from_bytes(&[0u8; 32])
+            .expect("the identity point must decode, or this fixture is wrong");
+        assert!(weak.is_weak(), "fixture must actually be a weak key");
+
+        let k = key(1);
+        let mut proof = PopProof::create(&k, binding());
+        proof.public_key = weak;
+
+        let confirmation = Confirmation {
+            jkt: KeyThumbprint::of(&weak),
+        };
+        let mut cache = ReplayCache::new(DEFAULT_PROOF_MAX_AGE_SECS);
+        let err = verify_pop(
+            Some(&confirmation),
+            Some(&proof),
+            &binding(),
+            PopRequirement::Required,
+            1_789_621_940,
+            &mut cache,
+        )
+        .unwrap_err();
+        // Assert the SPECIFIC diagnostic: a signature failure also yields
+        // PopInvalid, so matching the variant alone cannot tell whether the
+        // weak-key check ran at all.
+        match err {
+            CapTokenError::PopInvalid(msg) => assert!(
+                msg.contains("weak"),
+                "expected the weak-key rejection, got: {msg}"
+            ),
+            other => panic!("expected PopInvalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_malformed_thumbprint_fails_to_deserialize() {
+        // A derived Deserialize would accept this and produce a thumbprint no
+        // real key can equal — a silent permanent denial instead of a clear
+        // malformed-token error.
+        assert!(serde_json::from_str::<Confirmation>(r#"{"jkt":"bad"}"#).is_err());
+        assert!(serde_json::from_str::<Confirmation>(r#"{"jkt":""}"#).is_err());
+
+        let k = key(1);
+        let good = serde_json::to_string(&cnf(&k)).unwrap();
+        let round: Confirmation =
+            serde_json::from_str(&good).expect("valid thumbprint round-trips");
+        assert_eq!(round.jkt, cnf(&k).jkt);
+    }
+
+    #[test]
+    fn expiry_visits_only_aged_entries_and_keeps_live_ones() {
+        // Amortized eviction must not drop nonces that are still inside the
+        // window — the correctness risk when replacing a full scan.
+        let mut cache = ReplayCache::new(100);
+        let old = fresh_nonce();
+        let live = fresh_nonce();
+        assert!(cache.record(&old, 1_000));
+        assert!(cache.record(&live, 1_050));
+
+        // At t=1_080 both are inside the window: neither may be reusable.
+        assert!(!cache.record(&old, 1_080));
+        assert!(!cache.record(&live, 1_080));
+
+        // At t=1_120 the cutoff is 1_020: `old` (1_000) has aged out, `live`
+        // (1_050) has not. Picking a time where BOTH expired would prove
+        // nothing about visiting only aged entries.
+        assert!(cache.record(&old, 1_120), "aged entry should be evictable");
+        assert!(
+            !cache.record(&live, 1_120),
+            "an entry still inside the window must not be dropped by eviction"
+        );
+    }
+}

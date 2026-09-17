@@ -24,6 +24,34 @@ pub enum CapTokenError {
     #[error("cap-token budget exhausted")]
     BudgetExhausted,
 
+    /// Proof-of-possession was required but absent.
+    ///
+    /// Distinct from [`CapTokenError::PopInvalid`] on purpose: "you did not
+    /// prove possession" and "your proof is wrong" are different operational
+    /// conditions, and collapsing them hides a misconfigured client behind what
+    /// looks like an attack (or vice versa).
+    #[error("proof-of-possession required: {0}")]
+    PopRequired(String),
+
+    /// The presented key is not the key bound into the token's `cnf` claim.
+    ///
+    /// This is the signal that a token is being presented by someone other than
+    /// its holder — the case #363 exists to catch.
+    #[error(
+        "proof-of-possession key mismatch: token is bound to {expected}, presented {presented}"
+    )]
+    PopKeyMismatch {
+        /// The thumbprint bound into the token.
+        expected: String,
+        /// The thumbprint of the key actually presented.
+        presented: String,
+    },
+
+    /// A proof was presented but did not verify: bad signature, stale or
+    /// future-dated, bound to a different request, or a replayed nonce.
+    #[error("proof-of-possession invalid: {0}")]
+    PopInvalid(String),
+
     /// The requested tool was not in the allowlist (issued or narrowed by
     /// attenuation).
     #[error("tool not in cap-token allowlist")]

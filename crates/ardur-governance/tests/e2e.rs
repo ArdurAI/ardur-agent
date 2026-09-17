@@ -400,3 +400,49 @@ fn attenuated_grant_narrows_the_receipt_and_enforcement_authority() {
     .unwrap();
     assert_eq!(er.budget_remaining, expect_budget);
 }
+
+#[test]
+fn pop_failures_are_policy_denials_not_chain_failures() {
+    // A PoP failure means the PRESENTER could not prove possession — the token
+    // itself may be well-formed and correctly signed. Classifying it as
+    // ChainInvalid would misdirect an operator toward the issuer when the real
+    // problem is the caller.
+    for err in [
+        CapTokenError::PopRequired("no proof".into()),
+        CapTokenError::PopKeyMismatch {
+            expected: "sha-256:aa".into(),
+            presented: "sha-256:bb".into(),
+        },
+        CapTokenError::PopInvalid("bad signature".into()),
+    ] {
+        match AuthOutcome::from_cap_token_error(&err) {
+            AuthOutcome::Violation { public, .. } => assert_eq!(
+                public,
+                PublicDenialReason::PolicyDenied,
+                "{err:?} must be a policy denial"
+            ),
+            other => panic!("{err:?} must be a violation, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn a_missing_proof_and_a_wrong_key_stay_distinguishable() {
+    // Publicly both are PolicyDenied, but internally "the client never sent a
+    // proof" (a misconfiguration) and "the key does not match" (a stolen token
+    // being presented) demand different operator responses.
+    let missing = AuthOutcome::from_cap_token_error(&CapTokenError::PopRequired("x".into()));
+    let wrong = AuthOutcome::from_cap_token_error(&CapTokenError::PopKeyMismatch {
+        expected: "sha-256:aa".into(),
+        presented: "sha-256:bb".into(),
+    });
+    let code = |o: &AuthOutcome| match o {
+        AuthOutcome::Violation { internal, .. } => internal.clone(),
+        other => panic!("expected a violation, got {other:?}"),
+    };
+    assert_ne!(
+        code(&missing),
+        code(&wrong),
+        "collapsing these hides a stolen-token signal behind a config error"
+    );
+}

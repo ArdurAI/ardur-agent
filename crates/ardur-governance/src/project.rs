@@ -89,6 +89,21 @@ impl AuthOutcome {
                 (PublicDenialReason::ChainInvalid, "signature_invalid")
             }
             CapTokenError::Malformed(_) => (PublicDenialReason::ChainInvalid, "malformed_token"),
+            // Proof-of-possession (#363). These are POLICY denials, not chain
+            // failures: the token itself may be perfectly well-formed and
+            // correctly signed — what failed is the presenter's binding to it.
+            // Mapping them to `ChainInvalid` would misdirect an operator toward
+            // the issuer when the real problem is the caller.
+            //
+            // Missing proof and wrong proof stay distinct internally, because
+            // "the client never sent one" (a misconfiguration) and "the key does
+            // not match" (a stolen token being presented) demand different
+            // responses, even though both are `PolicyDenied` publicly.
+            CapTokenError::PopRequired(_) => (PublicDenialReason::PolicyDenied, "pop_required"),
+            CapTokenError::PopKeyMismatch { .. } => {
+                (PublicDenialReason::PolicyDenied, "pop_key_mismatch")
+            }
+            CapTokenError::PopInvalid(_) => (PublicDenialReason::PolicyDenied, "pop_invalid"),
             // Handled above as `insufficient_evidence`; repeated here so the
             // match stays exhaustive without a wildcard.
             CapTokenError::UnprojectableAttenuation(_) => {

@@ -60,6 +60,7 @@ mod attenuate;
 mod denylist;
 mod error;
 mod issue;
+pub mod pop;
 mod types;
 mod verify;
 
@@ -72,6 +73,9 @@ pub use attenuate::{BiscuitCapTokenAttenuator, CapTokenAttenuator};
 pub use denylist::{DenyList, FileDenyList, HashSetDenyList};
 pub use error::CapTokenError;
 pub use issue::{BiscuitCapTokenIssuer, CapTokenIssuer};
+pub use pop::{
+    Confirmation, KeyThumbprint, PopProof, PopRequirement, ReplayCache, RequestBinding, verify_pop,
+};
 pub use types::{
     AttenuationRule, CapScope, CapToken, Caveat, HolderId, RequiredCaveats, VerifiedClaims,
 };
