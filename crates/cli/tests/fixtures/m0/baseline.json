@@ -1,0 +1,498 @@
+{
+  "dawn/approval_rejected": {
+    "transcript": "\r\u001b[2K\u001b[38;5;160merror: tool `file.write` approval `card-1` was rejected: fixture rejection\u001b[0m\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [],\n    error: Some(\n        \"tool `file.write` approval `card-1` was rejected: fixture rejection\",\n    ),\n}"
+  },
+  "dawn/approval_required": {
+    "transcript": "\r\u001b[2Kproposed\n\u001b[38;5;160merror: tool `file.write` requires approval: card `card-1` is pending (fixture approval)\u001b[0m\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"proposed\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [],\n    error: Some(\n        \"tool `file.write` requires approval: card `card-1` is pending (fixture approval)\",\n    ),\n}"
+  },
+  "dawn/cap_denied": {
+    "transcript": "\r\u001b[2K\u001b[38;5;160merror: capability token denied: fixture verifier\u001b[0m\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [],\n    error: Some(\n        \"capability token denied: fixture verifier\",\n    ),\n}"
+  },
+  "dawn/chunks": {
+    "transcript": "\r\u001b[2KHello, stream!\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"Hello, stream!\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: Some(\n        Stop,\n    ),\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "dawn/duplicate_tool": {
+    "transcript": "\r\u001b[2K\u001b[38;5;244m┌─ tool · replacement ─────────────────────────────────────────────────────────┐\u001b[0m\n\u001b[38;5;244m│ \u001b[0m\u001b[38;5;235mnot JSON\u001b[0m                                                                    \u001b[38;5;244m │\u001b[0m\n\u001b[38;5;244m│ \u001b[0m\u001b[38;5;235msecond line\u001b[0m                                                                 \u001b[38;5;244m │\u001b[0m\n\u001b[38;5;244m└──────────────────────────────────────────────────────────────────────────────┘\u001b[0m\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [\n        \"old\",\n        \"replacement\",\n    ],\n    error: None,\n}"
+  },
+  "dawn/empty_clears_newline": {
+    "transcript": "\r\u001b[2Kone\u001b[38;5;244m[finish: max tokens]\u001b[0m\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"one\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: Some(\n        MaxTokens,\n    ),\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "dawn/empty_eof": {
+    "transcript": "",
+    "outcome_debug": "StreamOutcome {\n    content: \"\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "dawn/empty_first": {
+    "transcript": "\r\u001b[2Kafter empty\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"after empty\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "dawn/empty_last_eof": {
+    "transcript": "\r\u001b[2Kno final newline",
+    "outcome_debug": "StreamOutcome {\n    content: \"no final newline\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "dawn/empty_tool_args": {
+    "transcript": "\r\u001b[2K\u001b[38;5;244m┌─ tool · empty ───────────────────────────────────────────────────────────────┐\u001b[0m\n\u001b[38;5;244m│ \u001b[0m\u001b[38;5;235m{}\u001b[0m                                                                          \u001b[38;5;244m │\u001b[0m\n\u001b[38;5;244m└──────────────────────────────────────────────────────────────────────────────┘\u001b[0m\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [\n        \"empty\",\n    ],\n    error: None,\n}"
+  },
+  "dawn/error_after_receipt": {
+    "transcript": "\r\u001b[2Kcommittedpartial\n\u001b[38;5;160merror: cost ceiling exceeded\u001b[0m\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"committedpartial\",\n    committed_assistant_messages: [\n        \"committed\",\n    ],\n    usage: None,\n    cost_cents: Some(\n        7,\n    ),\n    receipt_ids: [\n        ReceiptId(\n            00000000-0000-0000-0000-000000000001,\n        ),\n    ],\n    finish_reason: None,\n    tool_calls: [],\n    error: Some(\n        \"cost ceiling exceeded\",\n    ),\n}"
+  },
+  "dawn/error_before_receipt": {
+    "transcript": "\r\u001b[2Kpartial\n\u001b[38;5;160merror: provider unavailable\u001b[0m\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"partial\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [],\n    error: Some(\n        \"provider unavailable\",\n    ),\n}"
+  },
+  "dawn/finish_error_is_not_stream_error": {
+    "transcript": "\r\u001b[2Ktext\nstill consumed\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"textstill consumed\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: Some(\n        Error(\n            \"finish detail\",\n        ),\n    ),\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "dawn/finish_max_tokens": {
+    "transcript": "\r\u001b[2Klimited\n\u001b[38;5;244m[finish: max tokens]\u001b[0m\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"limited\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: Some(\n        MaxTokens,\n    ),\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "dawn/finish_stop_sequence": {
+    "transcript": "\r\u001b[2Ksequence\n\u001b[38;5;244m[finish: stop sequence \"END\\n\"]\u001b[0m\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"sequence\\n\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: Some(\n        StopSequence(\n            \"END\\n\",\n        ),\n    ),\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "dawn/finish_tool_use": {
+    "transcript": "\r\u001b[2K",
+    "outcome_debug": "StreamOutcome {\n    content: \"\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: Some(\n        ToolUse(\n            [],\n        ),\n    ),\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "dawn/fixed_cost_long": {
+    "transcript": "\u001b[38;5;244m──────────────────\u001b[0m\u001b[38;5;244m 421 tokens in · 187 out · $2.3400 · 123.4s \u001b[0m\u001b[38;5;244m──────────────────\u001b[0m\n",
+    "outcome_debug": null
+  },
+  "dawn/fixed_cost_paid": {
+    "transcript": "\u001b[38;5;244m───────────────────\u001b[0m\u001b[38;5;244m 421 tokens in · 187 out · $0.3100 · 1.4s \u001b[0m\u001b[38;5;244m───────────────────\u001b[0m\n",
+    "outcome_debug": null
+  },
+  "dawn/fixed_cost_zero": {
+    "transcript": "\u001b[38;5;244m───────────────────\u001b[0m\u001b[38;5;244m 421 tokens in · 187 out · $0.0000 · 0.0s \u001b[0m\u001b[38;5;244m───────────────────\u001b[0m\n",
+    "outcome_debug": null
+  },
+  "dawn/multi_tool": {
+    "transcript": "\r\u001b[2Kplan\n\u001b[38;5;244m┌─ tool · search ──────────────────────────────────────────────────────────────┐\u001b[0m\n\u001b[38;5;244m│ \u001b[0m\u001b[38;5;235m{\u001b[0m                                                                           \u001b[38;5;244m │\u001b[0m\n\u001b[38;5;244m│ \u001b[0m\u001b[38;5;235m  \"query\": \"rust\"\u001b[0m                                                           \u001b[38;5;244m │\u001b[0m\n\u001b[38;5;244m│ \u001b[0m\u001b[38;5;235m}\u001b[0m                                                                           \u001b[38;5;244m │\u001b[0m\n\u001b[38;5;244m└──────────────────────────────────────────────────────────────────────────────┘\u001b[0m\n\nnext\n\u001b[38;5;244m┌─ tool · file.read ───────────────────────────────────────────────────────────┐\u001b[0m\n\u001b[38;5;244m│ \u001b[0m\u001b[38;5;235m{\u001b[0m                                                                           \u001b[38;5;244m │\u001b[0m\n\u001b[38;5;244m│ \u001b[0m\u001b[38;5;235m  \"path\": \"src/lib.rs\"\u001b[0m                                                      \u001b[38;5;244m │\u001b[0m\n\u001b[38;5;244m│ \u001b[0m\u001b[38;5;235m}\u001b[0m                                                                           \u001b[38;5;244m │\u001b[0m\n\u001b[38;5;244m└──────────────────────────────────────────────────────────────────────────────┘\u001b[0m\ndone\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"plan\\nnextdone\\n\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [\n        \"file.read\",\n        \"search\",\n    ],\n    error: None,\n}"
+  },
+  "dawn/newlines": {
+    "transcript": "\r\u001b[2Kone\n\ntwo\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"one\\n\\ntwo\\n\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: Some(\n        Stop,\n    ),\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "dawn/partial_eof": {
+    "transcript": "\r\u001b[2Kunfinished\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"unfinished\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "dawn/pending_tool_eof": {
+    "transcript": "",
+    "outcome_debug": "StreamOutcome {\n    content: \"\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [\n        \"pending\",\n    ],\n    error: None,\n}"
+  },
+  "dawn/policy_denied": {
+    "transcript": "\r\u001b[2K\u001b[38;5;160merror: policy denied: fixture policy\u001b[0m\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [],\n    error: Some(\n        \"policy denied: fixture policy\",\n    ),\n}"
+  },
+  "dawn/round_boundaries": {
+    "transcript": "\r\u001b[2Kfirstsecond\nuncommitted\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"firstsecond\\nuncommitted\",\n    committed_assistant_messages: [\n        \"first\",\n        \"second\\n\",\n        \"\",\n    ],\n    usage: None,\n    cost_cents: Some(\n        8,\n    ),\n    receipt_ids: [\n        ReceiptId(\n            00000000-0000-0000-0000-000000000001,\n        ),\n        ReceiptId(\n            00000000-0000-0000-0000-000000000002,\n        ),\n        ReceiptId(\n            00000000-0000-0000-0000-000000000003,\n        ),\n    ],\n    finish_reason: None,\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "dawn/stages": {
+    "transcript": "",
+    "outcome_debug": "StreamOutcome {\n    content: \"\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "dawn/unknown_tool": {
+    "transcript": "\r\u001b[2Kbefore\nafter\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"beforeafter\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "dawn/usage_after_receipt_error": {
+    "transcript": "\r\u001b[2K\u001b[38;5;160merror: internal runtime error: fixture internal\u001b[0m\n\u001b[38;5;244m─────────────────────\u001b[0m\u001b[38;5;244m 2 tokens in · 3 out · $0.0000 · <elapsed>s \u001b[0m\u001b[38;5;244m─────────────────────\u001b[0m\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"\",\n    committed_assistant_messages: [\n        \"\",\n    ],\n    usage: Some(\n        Usage {\n            tokens_in: 2,\n            tokens_out: 3,\n            cost_cents: Some(\n                90,\n            ),\n        },\n    ),\n    cost_cents: Some(\n        0,\n    ),\n    receipt_ids: [\n        ReceiptId(\n            00000000-0000-0000-0000-000000000001,\n        ),\n    ],\n    finish_reason: None,\n    tool_calls: [],\n    error: Some(\n        \"internal runtime error: fixture internal\",\n    ),\n}"
+  },
+  "dawn/usage_no_receipt": {
+    "transcript": "\r\u001b[2Kpartial\n\u001b[38;5;160merror: provider unavailable\u001b[0m\n\u001b[38;5;244m────────────────────\u001b[0m\u001b[38;5;244m 12 tokens in · 7 out · $0.0000 · <elapsed>s \u001b[0m\u001b[38;5;244m─────────────────────\u001b[0m\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"partial\",\n    committed_assistant_messages: [],\n    usage: Some(\n        Usage {\n            tokens_in: 12,\n            tokens_out: 7,\n            cost_cents: Some(\n                99,\n            ),\n        },\n    ),\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [],\n    error: Some(\n        \"provider unavailable\",\n    ),\n}"
+  },
+  "dawn/usage_saturates": {
+    "transcript": "\u001b[38;5;244m───\u001b[0m\u001b[38;5;244m 4294967295 tokens in · 4294967295 out · $184467440737095520.0000 · <elapsed>s \u001b[0m\u001b[38;5;244m────\u001b[0m\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"\",\n    committed_assistant_messages: [\n        \"\",\n        \"\",\n    ],\n    usage: Some(\n        Usage {\n            tokens_in: 4294967295,\n            tokens_out: 4294967295,\n            cost_cents: Some(\n                18446744073709551615,\n            ),\n        },\n    ),\n    cost_cents: Some(\n        18446744073709551615,\n    ),\n    receipt_ids: [\n        ReceiptId(\n            00000000-0000-0000-0000-000000000001,\n        ),\n        ReceiptId(\n            00000000-0000-0000-0000-000000000002,\n        ),\n    ],\n    finish_reason: None,\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "dawn/usage_with_receipts": {
+    "transcript": "\r\u001b[2Kfirstsecond\n\u001b[38;5;244m────────────────────\u001b[0m\u001b[38;5;244m 7 tokens in · 10 out · $0.3100 · <elapsed>s \u001b[0m\u001b[38;5;244m─────────────────────\u001b[0m\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"firstsecond\",\n    committed_assistant_messages: [\n        \"first\",\n        \"second\",\n    ],\n    usage: Some(\n        Usage {\n            tokens_in: 7,\n            tokens_out: 10,\n            cost_cents: None,\n        },\n    ),\n    cost_cents: Some(\n        31,\n    ),\n    receipt_ids: [\n        ReceiptId(\n            00000000-0000-0000-0000-000000000001,\n        ),\n        ReceiptId(\n            00000000-0000-0000-0000-000000000002,\n        ),\n    ],\n    finish_reason: Some(\n        Stop,\n    ),\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "night/approval_rejected": {
+    "transcript": "\r\u001b[2K\u001b[38;5;173merror: tool `file.write` approval `card-1` was rejected: fixture rejection\u001b[0m\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [],\n    error: Some(\n        \"tool `file.write` approval `card-1` was rejected: fixture rejection\",\n    ),\n}"
+  },
+  "night/approval_required": {
+    "transcript": "\r\u001b[2Kproposed\n\u001b[38;5;173merror: tool `file.write` requires approval: card `card-1` is pending (fixture approval)\u001b[0m\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"proposed\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [],\n    error: Some(\n        \"tool `file.write` requires approval: card `card-1` is pending (fixture approval)\",\n    ),\n}"
+  },
+  "night/cap_denied": {
+    "transcript": "\r\u001b[2K\u001b[38;5;173merror: capability token denied: fixture verifier\u001b[0m\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [],\n    error: Some(\n        \"capability token denied: fixture verifier\",\n    ),\n}"
+  },
+  "night/chunks": {
+    "transcript": "\r\u001b[2KHello, stream!\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"Hello, stream!\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: Some(\n        Stop,\n    ),\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "night/duplicate_tool": {
+    "transcript": "\r\u001b[2K\u001b[38;5;242m┌─ tool · replacement ─────────────────────────────────────────────────────────┐\u001b[0m\n\u001b[38;5;242m│ \u001b[0m\u001b[38;5;254mnot JSON\u001b[0m                                                                    \u001b[38;5;242m │\u001b[0m\n\u001b[38;5;242m│ \u001b[0m\u001b[38;5;254msecond line\u001b[0m                                                                 \u001b[38;5;242m │\u001b[0m\n\u001b[38;5;242m└──────────────────────────────────────────────────────────────────────────────┘\u001b[0m\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [\n        \"old\",\n        \"replacement\",\n    ],\n    error: None,\n}"
+  },
+  "night/empty_clears_newline": {
+    "transcript": "\r\u001b[2Kone\u001b[38;5;242m[finish: max tokens]\u001b[0m\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"one\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: Some(\n        MaxTokens,\n    ),\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "night/empty_eof": {
+    "transcript": "",
+    "outcome_debug": "StreamOutcome {\n    content: \"\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "night/empty_first": {
+    "transcript": "\r\u001b[2Kafter empty\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"after empty\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "night/empty_last_eof": {
+    "transcript": "\r\u001b[2Kno final newline",
+    "outcome_debug": "StreamOutcome {\n    content: \"no final newline\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "night/empty_tool_args": {
+    "transcript": "\r\u001b[2K\u001b[38;5;242m┌─ tool · empty ───────────────────────────────────────────────────────────────┐\u001b[0m\n\u001b[38;5;242m│ \u001b[0m\u001b[38;5;254m{}\u001b[0m                                                                          \u001b[38;5;242m │\u001b[0m\n\u001b[38;5;242m└──────────────────────────────────────────────────────────────────────────────┘\u001b[0m\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [\n        \"empty\",\n    ],\n    error: None,\n}"
+  },
+  "night/error_after_receipt": {
+    "transcript": "\r\u001b[2Kcommittedpartial\n\u001b[38;5;173merror: cost ceiling exceeded\u001b[0m\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"committedpartial\",\n    committed_assistant_messages: [\n        \"committed\",\n    ],\n    usage: None,\n    cost_cents: Some(\n        7,\n    ),\n    receipt_ids: [\n        ReceiptId(\n            00000000-0000-0000-0000-000000000001,\n        ),\n    ],\n    finish_reason: None,\n    tool_calls: [],\n    error: Some(\n        \"cost ceiling exceeded\",\n    ),\n}"
+  },
+  "night/error_before_receipt": {
+    "transcript": "\r\u001b[2Kpartial\n\u001b[38;5;173merror: provider unavailable\u001b[0m\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"partial\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [],\n    error: Some(\n        \"provider unavailable\",\n    ),\n}"
+  },
+  "night/finish_error_is_not_stream_error": {
+    "transcript": "\r\u001b[2Ktext\nstill consumed\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"textstill consumed\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: Some(\n        Error(\n            \"finish detail\",\n        ),\n    ),\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "night/finish_max_tokens": {
+    "transcript": "\r\u001b[2Klimited\n\u001b[38;5;242m[finish: max tokens]\u001b[0m\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"limited\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: Some(\n        MaxTokens,\n    ),\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "night/finish_stop_sequence": {
+    "transcript": "\r\u001b[2Ksequence\n\u001b[38;5;242m[finish: stop sequence \"END\\n\"]\u001b[0m\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"sequence\\n\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: Some(\n        StopSequence(\n            \"END\\n\",\n        ),\n    ),\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "night/finish_tool_use": {
+    "transcript": "\r\u001b[2K",
+    "outcome_debug": "StreamOutcome {\n    content: \"\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: Some(\n        ToolUse(\n            [],\n        ),\n    ),\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "night/fixed_cost_long": {
+    "transcript": "\u001b[38;5;242m──────────────────\u001b[0m\u001b[38;5;242m 421 tokens in · 187 out · $2.3400 · 123.4s \u001b[0m\u001b[38;5;242m──────────────────\u001b[0m\n",
+    "outcome_debug": null
+  },
+  "night/fixed_cost_paid": {
+    "transcript": "\u001b[38;5;242m───────────────────\u001b[0m\u001b[38;5;242m 421 tokens in · 187 out · $0.3100 · 1.4s \u001b[0m\u001b[38;5;242m───────────────────\u001b[0m\n",
+    "outcome_debug": null
+  },
+  "night/fixed_cost_zero": {
+    "transcript": "\u001b[38;5;242m───────────────────\u001b[0m\u001b[38;5;242m 421 tokens in · 187 out · $0.0000 · 0.0s \u001b[0m\u001b[38;5;242m───────────────────\u001b[0m\n",
+    "outcome_debug": null
+  },
+  "night/multi_tool": {
+    "transcript": "\r\u001b[2Kplan\n\u001b[38;5;242m┌─ tool · search ──────────────────────────────────────────────────────────────┐\u001b[0m\n\u001b[38;5;242m│ \u001b[0m\u001b[38;5;254m{\u001b[0m                                                                           \u001b[38;5;242m │\u001b[0m\n\u001b[38;5;242m│ \u001b[0m\u001b[38;5;254m  \"query\": \"rust\"\u001b[0m                                                           \u001b[38;5;242m │\u001b[0m\n\u001b[38;5;242m│ \u001b[0m\u001b[38;5;254m}\u001b[0m                                                                           \u001b[38;5;242m │\u001b[0m\n\u001b[38;5;242m└──────────────────────────────────────────────────────────────────────────────┘\u001b[0m\n\nnext\n\u001b[38;5;242m┌─ tool · file.read ───────────────────────────────────────────────────────────┐\u001b[0m\n\u001b[38;5;242m│ \u001b[0m\u001b[38;5;254m{\u001b[0m                                                                           \u001b[38;5;242m │\u001b[0m\n\u001b[38;5;242m│ \u001b[0m\u001b[38;5;254m  \"path\": \"src/lib.rs\"\u001b[0m                                                      \u001b[38;5;242m │\u001b[0m\n\u001b[38;5;242m│ \u001b[0m\u001b[38;5;254m}\u001b[0m                                                                           \u001b[38;5;242m │\u001b[0m\n\u001b[38;5;242m└──────────────────────────────────────────────────────────────────────────────┘\u001b[0m\ndone\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"plan\\nnextdone\\n\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [\n        \"file.read\",\n        \"search\",\n    ],\n    error: None,\n}"
+  },
+  "night/newlines": {
+    "transcript": "\r\u001b[2Kone\n\ntwo\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"one\\n\\ntwo\\n\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: Some(\n        Stop,\n    ),\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "night/partial_eof": {
+    "transcript": "\r\u001b[2Kunfinished\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"unfinished\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "night/pending_tool_eof": {
+    "transcript": "",
+    "outcome_debug": "StreamOutcome {\n    content: \"\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [\n        \"pending\",\n    ],\n    error: None,\n}"
+  },
+  "night/policy_denied": {
+    "transcript": "\r\u001b[2K\u001b[38;5;173merror: policy denied: fixture policy\u001b[0m\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [],\n    error: Some(\n        \"policy denied: fixture policy\",\n    ),\n}"
+  },
+  "night/round_boundaries": {
+    "transcript": "\r\u001b[2Kfirstsecond\nuncommitted\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"firstsecond\\nuncommitted\",\n    committed_assistant_messages: [\n        \"first\",\n        \"second\\n\",\n        \"\",\n    ],\n    usage: None,\n    cost_cents: Some(\n        8,\n    ),\n    receipt_ids: [\n        ReceiptId(\n            00000000-0000-0000-0000-000000000001,\n        ),\n        ReceiptId(\n            00000000-0000-0000-0000-000000000002,\n        ),\n        ReceiptId(\n            00000000-0000-0000-0000-000000000003,\n        ),\n    ],\n    finish_reason: None,\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "night/stages": {
+    "transcript": "",
+    "outcome_debug": "StreamOutcome {\n    content: \"\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "night/unknown_tool": {
+    "transcript": "\r\u001b[2Kbefore\nafter\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"beforeafter\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "night/usage_after_receipt_error": {
+    "transcript": "\r\u001b[2K\u001b[38;5;173merror: internal runtime error: fixture internal\u001b[0m\n\u001b[38;5;242m─────────────────────\u001b[0m\u001b[38;5;242m 2 tokens in · 3 out · $0.0000 · <elapsed>s \u001b[0m\u001b[38;5;242m─────────────────────\u001b[0m\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"\",\n    committed_assistant_messages: [\n        \"\",\n    ],\n    usage: Some(\n        Usage {\n            tokens_in: 2,\n            tokens_out: 3,\n            cost_cents: Some(\n                90,\n            ),\n        },\n    ),\n    cost_cents: Some(\n        0,\n    ),\n    receipt_ids: [\n        ReceiptId(\n            00000000-0000-0000-0000-000000000001,\n        ),\n    ],\n    finish_reason: None,\n    tool_calls: [],\n    error: Some(\n        \"internal runtime error: fixture internal\",\n    ),\n}"
+  },
+  "night/usage_no_receipt": {
+    "transcript": "\r\u001b[2Kpartial\n\u001b[38;5;173merror: provider unavailable\u001b[0m\n\u001b[38;5;242m────────────────────\u001b[0m\u001b[38;5;242m 12 tokens in · 7 out · $0.0000 · <elapsed>s \u001b[0m\u001b[38;5;242m─────────────────────\u001b[0m\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"partial\",\n    committed_assistant_messages: [],\n    usage: Some(\n        Usage {\n            tokens_in: 12,\n            tokens_out: 7,\n            cost_cents: Some(\n                99,\n            ),\n        },\n    ),\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [],\n    error: Some(\n        \"provider unavailable\",\n    ),\n}"
+  },
+  "night/usage_saturates": {
+    "transcript": "\u001b[38;5;242m───\u001b[0m\u001b[38;5;242m 4294967295 tokens in · 4294967295 out · $184467440737095520.0000 · <elapsed>s \u001b[0m\u001b[38;5;242m────\u001b[0m\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"\",\n    committed_assistant_messages: [\n        \"\",\n        \"\",\n    ],\n    usage: Some(\n        Usage {\n            tokens_in: 4294967295,\n            tokens_out: 4294967295,\n            cost_cents: Some(\n                18446744073709551615,\n            ),\n        },\n    ),\n    cost_cents: Some(\n        18446744073709551615,\n    ),\n    receipt_ids: [\n        ReceiptId(\n            00000000-0000-0000-0000-000000000001,\n        ),\n        ReceiptId(\n            00000000-0000-0000-0000-000000000002,\n        ),\n    ],\n    finish_reason: None,\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "night/usage_with_receipts": {
+    "transcript": "\r\u001b[2Kfirstsecond\n\u001b[38;5;242m────────────────────\u001b[0m\u001b[38;5;242m 7 tokens in · 10 out · $0.3100 · <elapsed>s \u001b[0m\u001b[38;5;242m─────────────────────\u001b[0m\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"firstsecond\",\n    committed_assistant_messages: [\n        \"first\",\n        \"second\",\n    ],\n    usage: Some(\n        Usage {\n            tokens_in: 7,\n            tokens_out: 10,\n            cost_cents: None,\n        },\n    ),\n    cost_cents: Some(\n        31,\n    ),\n    receipt_ids: [\n        ReceiptId(\n            00000000-0000-0000-0000-000000000001,\n        ),\n        ReceiptId(\n            00000000-0000-0000-0000-000000000002,\n        ),\n    ],\n    finish_reason: Some(\n        Stop,\n    ),\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "plain/approval_rejected": {
+    "transcript": "error: tool `file.write` approval `card-1` was rejected: fixture rejection\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [],\n    error: Some(\n        \"tool `file.write` approval `card-1` was rejected: fixture rejection\",\n    ),\n}"
+  },
+  "plain/approval_required": {
+    "transcript": "proposed\nerror: tool `file.write` requires approval: card `card-1` is pending (fixture approval)\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"proposed\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [],\n    error: Some(\n        \"tool `file.write` requires approval: card `card-1` is pending (fixture approval)\",\n    ),\n}"
+  },
+  "plain/cap_denied": {
+    "transcript": "error: capability token denied: fixture verifier\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [],\n    error: Some(\n        \"capability token denied: fixture verifier\",\n    ),\n}"
+  },
+  "plain/chunks": {
+    "transcript": "Hello, stream!\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"Hello, stream!\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: Some(\n        Stop,\n    ),\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "plain/duplicate_tool": {
+    "transcript": "┌─ tool · replacement ─────────────────────────────────────────────────────────┐\n│ not JSON                                                                     │\n│ second line                                                                  │\n└──────────────────────────────────────────────────────────────────────────────┘\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [\n        \"old\",\n        \"replacement\",\n    ],\n    error: None,\n}"
+  },
+  "plain/empty_clears_newline": {
+    "transcript": "one[finish: max tokens]\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"one\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: Some(\n        MaxTokens,\n    ),\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "plain/empty_eof": {
+    "transcript": "",
+    "outcome_debug": "StreamOutcome {\n    content: \"\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "plain/empty_first": {
+    "transcript": "after empty\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"after empty\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "plain/empty_last_eof": {
+    "transcript": "no final newline",
+    "outcome_debug": "StreamOutcome {\n    content: \"no final newline\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "plain/empty_tool_args": {
+    "transcript": "┌─ tool · empty ───────────────────────────────────────────────────────────────┐\n│ {}                                                                           │\n└──────────────────────────────────────────────────────────────────────────────┘\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [\n        \"empty\",\n    ],\n    error: None,\n}"
+  },
+  "plain/error_after_receipt": {
+    "transcript": "committedpartial\nerror: cost ceiling exceeded\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"committedpartial\",\n    committed_assistant_messages: [\n        \"committed\",\n    ],\n    usage: None,\n    cost_cents: Some(\n        7,\n    ),\n    receipt_ids: [\n        ReceiptId(\n            00000000-0000-0000-0000-000000000001,\n        ),\n    ],\n    finish_reason: None,\n    tool_calls: [],\n    error: Some(\n        \"cost ceiling exceeded\",\n    ),\n}"
+  },
+  "plain/error_before_receipt": {
+    "transcript": "partial\nerror: provider unavailable\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"partial\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [],\n    error: Some(\n        \"provider unavailable\",\n    ),\n}"
+  },
+  "plain/finish_error_is_not_stream_error": {
+    "transcript": "text\nstill consumed\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"textstill consumed\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: Some(\n        Error(\n            \"finish detail\",\n        ),\n    ),\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "plain/finish_max_tokens": {
+    "transcript": "limited\n[finish: max tokens]\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"limited\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: Some(\n        MaxTokens,\n    ),\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "plain/finish_stop_sequence": {
+    "transcript": "sequence\n[finish: stop sequence \"END\\n\"]\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"sequence\\n\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: Some(\n        StopSequence(\n            \"END\\n\",\n        ),\n    ),\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "plain/finish_tool_use": {
+    "transcript": "",
+    "outcome_debug": "StreamOutcome {\n    content: \"\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: Some(\n        ToolUse(\n            [],\n        ),\n    ),\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "plain/fixed_cost_long": {
+    "transcript": "────────────────── 421 tokens in · 187 out · $2.3400 · 123.4s ──────────────────\n",
+    "outcome_debug": null
+  },
+  "plain/fixed_cost_paid": {
+    "transcript": "─────────────────── 421 tokens in · 187 out · $0.3100 · 1.4s ───────────────────\n",
+    "outcome_debug": null
+  },
+  "plain/fixed_cost_zero": {
+    "transcript": "─────────────────── 421 tokens in · 187 out · $0.0000 · 0.0s ───────────────────\n",
+    "outcome_debug": null
+  },
+  "plain/multi_tool": {
+    "transcript": "plan\n┌─ tool · search ──────────────────────────────────────────────────────────────┐\n│ {                                                                            │\n│   \"query\": \"rust\"                                                            │\n│ }                                                                            │\n└──────────────────────────────────────────────────────────────────────────────┘\n\nnext\n┌─ tool · file.read ───────────────────────────────────────────────────────────┐\n│ {                                                                            │\n│   \"path\": \"src/lib.rs\"                                                       │\n│ }                                                                            │\n└──────────────────────────────────────────────────────────────────────────────┘\ndone\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"plan\\nnextdone\\n\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [\n        \"file.read\",\n        \"search\",\n    ],\n    error: None,\n}"
+  },
+  "plain/newlines": {
+    "transcript": "one\n\ntwo\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"one\\n\\ntwo\\n\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: Some(\n        Stop,\n    ),\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "plain/partial_eof": {
+    "transcript": "unfinished\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"unfinished\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "plain/pending_tool_eof": {
+    "transcript": "",
+    "outcome_debug": "StreamOutcome {\n    content: \"\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [\n        \"pending\",\n    ],\n    error: None,\n}"
+  },
+  "plain/policy_denied": {
+    "transcript": "error: policy denied: fixture policy\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [],\n    error: Some(\n        \"policy denied: fixture policy\",\n    ),\n}"
+  },
+  "plain/round_boundaries": {
+    "transcript": "firstsecond\nuncommitted\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"firstsecond\\nuncommitted\",\n    committed_assistant_messages: [\n        \"first\",\n        \"second\\n\",\n        \"\",\n    ],\n    usage: None,\n    cost_cents: Some(\n        8,\n    ),\n    receipt_ids: [\n        ReceiptId(\n            00000000-0000-0000-0000-000000000001,\n        ),\n        ReceiptId(\n            00000000-0000-0000-0000-000000000002,\n        ),\n        ReceiptId(\n            00000000-0000-0000-0000-000000000003,\n        ),\n    ],\n    finish_reason: None,\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "plain/stages": {
+    "transcript": "",
+    "outcome_debug": "StreamOutcome {\n    content: \"\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "plain/unknown_tool": {
+    "transcript": "before\nafter\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"beforeafter\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "plain/usage_after_receipt_error": {
+    "transcript": "error: internal runtime error: fixture internal\n───────────────────── 2 tokens in · 3 out · $0.0000 · <elapsed>s ─────────────────────\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"\",\n    committed_assistant_messages: [\n        \"\",\n    ],\n    usage: Some(\n        Usage {\n            tokens_in: 2,\n            tokens_out: 3,\n            cost_cents: Some(\n                90,\n            ),\n        },\n    ),\n    cost_cents: Some(\n        0,\n    ),\n    receipt_ids: [\n        ReceiptId(\n            00000000-0000-0000-0000-000000000001,\n        ),\n    ],\n    finish_reason: None,\n    tool_calls: [],\n    error: Some(\n        \"internal runtime error: fixture internal\",\n    ),\n}"
+  },
+  "plain/usage_no_receipt": {
+    "transcript": "partial\nerror: provider unavailable\n──────────────────── 12 tokens in · 7 out · $0.0000 · <elapsed>s ─────────────────────\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"partial\",\n    committed_assistant_messages: [],\n    usage: Some(\n        Usage {\n            tokens_in: 12,\n            tokens_out: 7,\n            cost_cents: Some(\n                99,\n            ),\n        },\n    ),\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [],\n    error: Some(\n        \"provider unavailable\",\n    ),\n}"
+  },
+  "plain/usage_saturates": {
+    "transcript": "─── 4294967295 tokens in · 4294967295 out · $184467440737095520.0000 · <elapsed>s ────\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"\",\n    committed_assistant_messages: [\n        \"\",\n        \"\",\n    ],\n    usage: Some(\n        Usage {\n            tokens_in: 4294967295,\n            tokens_out: 4294967295,\n            cost_cents: Some(\n                18446744073709551615,\n            ),\n        },\n    ),\n    cost_cents: Some(\n        18446744073709551615,\n    ),\n    receipt_ids: [\n        ReceiptId(\n            00000000-0000-0000-0000-000000000001,\n        ),\n        ReceiptId(\n            00000000-0000-0000-0000-000000000002,\n        ),\n    ],\n    finish_reason: None,\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "plain/usage_with_receipts": {
+    "transcript": "firstsecond\n──────────────────── 7 tokens in · 10 out · $0.3100 · <elapsed>s ─────────────────────\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"firstsecond\",\n    committed_assistant_messages: [\n        \"first\",\n        \"second\",\n    ],\n    usage: Some(\n        Usage {\n            tokens_in: 7,\n            tokens_out: 10,\n            cost_cents: None,\n        },\n    ),\n    cost_cents: Some(\n        31,\n    ),\n    receipt_ids: [\n        ReceiptId(\n            00000000-0000-0000-0000-000000000001,\n        ),\n        ReceiptId(\n            00000000-0000-0000-0000-000000000002,\n        ),\n    ],\n    finish_reason: Some(\n        Stop,\n    ),\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "terminal/approval_rejected": {
+    "transcript": "\r\u001b[2K\u001b[31merror: tool `file.write` approval `card-1` was rejected: fixture rejection\u001b[0m\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [],\n    error: Some(\n        \"tool `file.write` approval `card-1` was rejected: fixture rejection\",\n    ),\n}"
+  },
+  "terminal/approval_required": {
+    "transcript": "\r\u001b[2Kproposed\n\u001b[31merror: tool `file.write` requires approval: card `card-1` is pending (fixture approval)\u001b[0m\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"proposed\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [],\n    error: Some(\n        \"tool `file.write` requires approval: card `card-1` is pending (fixture approval)\",\n    ),\n}"
+  },
+  "terminal/cap_denied": {
+    "transcript": "\r\u001b[2K\u001b[31merror: capability token denied: fixture verifier\u001b[0m\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [],\n    error: Some(\n        \"capability token denied: fixture verifier\",\n    ),\n}"
+  },
+  "terminal/chunks": {
+    "transcript": "\r\u001b[2KHello, stream!\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"Hello, stream!\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: Some(\n        Stop,\n    ),\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "terminal/duplicate_tool": {
+    "transcript": "\r\u001b[2K\u001b[90m┌─ tool · replacement ─────────────────────────────────────────────────────────┐\u001b[0m\n\u001b[90m│ \u001b[0mnot JSON                                                                    \u001b[90m │\u001b[0m\n\u001b[90m│ \u001b[0msecond line                                                                 \u001b[90m │\u001b[0m\n\u001b[90m└──────────────────────────────────────────────────────────────────────────────┘\u001b[0m\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [\n        \"old\",\n        \"replacement\",\n    ],\n    error: None,\n}"
+  },
+  "terminal/empty_clears_newline": {
+    "transcript": "\r\u001b[2Kone\u001b[90m[finish: max tokens]\u001b[0m\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"one\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: Some(\n        MaxTokens,\n    ),\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "terminal/empty_eof": {
+    "transcript": "",
+    "outcome_debug": "StreamOutcome {\n    content: \"\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "terminal/empty_first": {
+    "transcript": "\r\u001b[2Kafter empty\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"after empty\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "terminal/empty_last_eof": {
+    "transcript": "\r\u001b[2Kno final newline",
+    "outcome_debug": "StreamOutcome {\n    content: \"no final newline\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "terminal/empty_tool_args": {
+    "transcript": "\r\u001b[2K\u001b[90m┌─ tool · empty ───────────────────────────────────────────────────────────────┐\u001b[0m\n\u001b[90m│ \u001b[0m{}                                                                          \u001b[90m │\u001b[0m\n\u001b[90m└──────────────────────────────────────────────────────────────────────────────┘\u001b[0m\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [\n        \"empty\",\n    ],\n    error: None,\n}"
+  },
+  "terminal/error_after_receipt": {
+    "transcript": "\r\u001b[2Kcommittedpartial\n\u001b[31merror: cost ceiling exceeded\u001b[0m\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"committedpartial\",\n    committed_assistant_messages: [\n        \"committed\",\n    ],\n    usage: None,\n    cost_cents: Some(\n        7,\n    ),\n    receipt_ids: [\n        ReceiptId(\n            00000000-0000-0000-0000-000000000001,\n        ),\n    ],\n    finish_reason: None,\n    tool_calls: [],\n    error: Some(\n        \"cost ceiling exceeded\",\n    ),\n}"
+  },
+  "terminal/error_before_receipt": {
+    "transcript": "\r\u001b[2Kpartial\n\u001b[31merror: provider unavailable\u001b[0m\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"partial\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [],\n    error: Some(\n        \"provider unavailable\",\n    ),\n}"
+  },
+  "terminal/finish_error_is_not_stream_error": {
+    "transcript": "\r\u001b[2Ktext\nstill consumed\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"textstill consumed\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: Some(\n        Error(\n            \"finish detail\",\n        ),\n    ),\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "terminal/finish_max_tokens": {
+    "transcript": "\r\u001b[2Klimited\n\u001b[90m[finish: max tokens]\u001b[0m\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"limited\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: Some(\n        MaxTokens,\n    ),\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "terminal/finish_stop_sequence": {
+    "transcript": "\r\u001b[2Ksequence\n\u001b[90m[finish: stop sequence \"END\\n\"]\u001b[0m\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"sequence\\n\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: Some(\n        StopSequence(\n            \"END\\n\",\n        ),\n    ),\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "terminal/finish_tool_use": {
+    "transcript": "\r\u001b[2K",
+    "outcome_debug": "StreamOutcome {\n    content: \"\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: Some(\n        ToolUse(\n            [],\n        ),\n    ),\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "terminal/fixed_cost_long": {
+    "transcript": "\u001b[90m──────────────────\u001b[0m\u001b[90m 421 tokens in · 187 out · $2.3400 · 123.4s \u001b[0m\u001b[90m──────────────────\u001b[0m\n",
+    "outcome_debug": null
+  },
+  "terminal/fixed_cost_paid": {
+    "transcript": "\u001b[90m───────────────────\u001b[0m\u001b[90m 421 tokens in · 187 out · $0.3100 · 1.4s \u001b[0m\u001b[90m───────────────────\u001b[0m\n",
+    "outcome_debug": null
+  },
+  "terminal/fixed_cost_zero": {
+    "transcript": "\u001b[90m───────────────────\u001b[0m\u001b[90m 421 tokens in · 187 out · $0.0000 · 0.0s \u001b[0m\u001b[90m───────────────────\u001b[0m\n",
+    "outcome_debug": null
+  },
+  "terminal/multi_tool": {
+    "transcript": "\r\u001b[2Kplan\n\u001b[90m┌─ tool · search ──────────────────────────────────────────────────────────────┐\u001b[0m\n\u001b[90m│ \u001b[0m{                                                                           \u001b[90m │\u001b[0m\n\u001b[90m│ \u001b[0m  \"query\": \"rust\"                                                           \u001b[90m │\u001b[0m\n\u001b[90m│ \u001b[0m}                                                                           \u001b[90m │\u001b[0m\n\u001b[90m└──────────────────────────────────────────────────────────────────────────────┘\u001b[0m\n\nnext\n\u001b[90m┌─ tool · file.read ───────────────────────────────────────────────────────────┐\u001b[0m\n\u001b[90m│ \u001b[0m{                                                                           \u001b[90m │\u001b[0m\n\u001b[90m│ \u001b[0m  \"path\": \"src/lib.rs\"                                                      \u001b[90m │\u001b[0m\n\u001b[90m│ \u001b[0m}                                                                           \u001b[90m │\u001b[0m\n\u001b[90m└──────────────────────────────────────────────────────────────────────────────┘\u001b[0m\ndone\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"plan\\nnextdone\\n\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [\n        \"file.read\",\n        \"search\",\n    ],\n    error: None,\n}"
+  },
+  "terminal/newlines": {
+    "transcript": "\r\u001b[2Kone\n\ntwo\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"one\\n\\ntwo\\n\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: Some(\n        Stop,\n    ),\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "terminal/partial_eof": {
+    "transcript": "\r\u001b[2Kunfinished\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"unfinished\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "terminal/pending_tool_eof": {
+    "transcript": "",
+    "outcome_debug": "StreamOutcome {\n    content: \"\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [\n        \"pending\",\n    ],\n    error: None,\n}"
+  },
+  "terminal/policy_denied": {
+    "transcript": "\r\u001b[2K\u001b[31merror: policy denied: fixture policy\u001b[0m\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [],\n    error: Some(\n        \"policy denied: fixture policy\",\n    ),\n}"
+  },
+  "terminal/round_boundaries": {
+    "transcript": "\r\u001b[2Kfirstsecond\nuncommitted\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"firstsecond\\nuncommitted\",\n    committed_assistant_messages: [\n        \"first\",\n        \"second\\n\",\n        \"\",\n    ],\n    usage: None,\n    cost_cents: Some(\n        8,\n    ),\n    receipt_ids: [\n        ReceiptId(\n            00000000-0000-0000-0000-000000000001,\n        ),\n        ReceiptId(\n            00000000-0000-0000-0000-000000000002,\n        ),\n        ReceiptId(\n            00000000-0000-0000-0000-000000000003,\n        ),\n    ],\n    finish_reason: None,\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "terminal/stages": {
+    "transcript": "",
+    "outcome_debug": "StreamOutcome {\n    content: \"\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "terminal/unknown_tool": {
+    "transcript": "\r\u001b[2Kbefore\nafter\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"beforeafter\",\n    committed_assistant_messages: [],\n    usage: None,\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "terminal/usage_after_receipt_error": {
+    "transcript": "\r\u001b[2K\u001b[31merror: internal runtime error: fixture internal\u001b[0m\n\u001b[90m─────────────────────\u001b[0m\u001b[90m 2 tokens in · 3 out · $0.0000 · <elapsed>s \u001b[0m\u001b[90m─────────────────────\u001b[0m\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"\",\n    committed_assistant_messages: [\n        \"\",\n    ],\n    usage: Some(\n        Usage {\n            tokens_in: 2,\n            tokens_out: 3,\n            cost_cents: Some(\n                90,\n            ),\n        },\n    ),\n    cost_cents: Some(\n        0,\n    ),\n    receipt_ids: [\n        ReceiptId(\n            00000000-0000-0000-0000-000000000001,\n        ),\n    ],\n    finish_reason: None,\n    tool_calls: [],\n    error: Some(\n        \"internal runtime error: fixture internal\",\n    ),\n}"
+  },
+  "terminal/usage_no_receipt": {
+    "transcript": "\r\u001b[2Kpartial\n\u001b[31merror: provider unavailable\u001b[0m\n\u001b[90m────────────────────\u001b[0m\u001b[90m 12 tokens in · 7 out · $0.0000 · <elapsed>s \u001b[0m\u001b[90m─────────────────────\u001b[0m\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"partial\",\n    committed_assistant_messages: [],\n    usage: Some(\n        Usage {\n            tokens_in: 12,\n            tokens_out: 7,\n            cost_cents: Some(\n                99,\n            ),\n        },\n    ),\n    cost_cents: None,\n    receipt_ids: [],\n    finish_reason: None,\n    tool_calls: [],\n    error: Some(\n        \"provider unavailable\",\n    ),\n}"
+  },
+  "terminal/usage_saturates": {
+    "transcript": "\u001b[90m───\u001b[0m\u001b[90m 4294967295 tokens in · 4294967295 out · $184467440737095520.0000 · <elapsed>s \u001b[0m\u001b[90m────\u001b[0m\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"\",\n    committed_assistant_messages: [\n        \"\",\n        \"\",\n    ],\n    usage: Some(\n        Usage {\n            tokens_in: 4294967295,\n            tokens_out: 4294967295,\n            cost_cents: Some(\n                18446744073709551615,\n            ),\n        },\n    ),\n    cost_cents: Some(\n        18446744073709551615,\n    ),\n    receipt_ids: [\n        ReceiptId(\n            00000000-0000-0000-0000-000000000001,\n        ),\n        ReceiptId(\n            00000000-0000-0000-0000-000000000002,\n        ),\n    ],\n    finish_reason: None,\n    tool_calls: [],\n    error: None,\n}"
+  },
+  "terminal/usage_with_receipts": {
+    "transcript": "\r\u001b[2Kfirstsecond\n\u001b[90m────────────────────\u001b[0m\u001b[90m 7 tokens in · 10 out · $0.3100 · <elapsed>s \u001b[0m\u001b[90m─────────────────────\u001b[0m\n",
+    "outcome_debug": "StreamOutcome {\n    content: \"firstsecond\",\n    committed_assistant_messages: [\n        \"first\",\n        \"second\",\n    ],\n    usage: Some(\n        Usage {\n            tokens_in: 7,\n            tokens_out: 10,\n            cost_cents: None,\n        },\n    ),\n    cost_cents: Some(\n        31,\n    ),\n    receipt_ids: [\n        ReceiptId(\n            00000000-0000-0000-0000-000000000001,\n        ),\n        ReceiptId(\n            00000000-0000-0000-0000-000000000002,\n        ),\n    ],\n    finish_reason: Some(\n        Stop,\n    ),\n    tool_calls: [],\n    error: None,\n}"
+  }
+}

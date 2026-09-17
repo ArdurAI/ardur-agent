@@ -1,7 +1,7 @@
 //! Progressive streaming display for a chat turn (§2.1b + §2.X polish).
 //!
 //! [`drive_fused_turn`] is the default CLI renderer. It consumes
-//! [`FusedEvent`] values from the full ten-stage runtime pipeline, so progressive
+//! [`FusedEvent`] values through the shared [`UpdateStream`] reducer, so progressive
 //! output keeps capability, Cedar, budget, receipt, memory, and durable-journal
 //! guarantees. [`drive_turn`] remains the provider-level compatibility renderer
 //! used by focused rendering tests and non-fused callers.
@@ -11,7 +11,6 @@
 //! through a [`RenderCtx`] (theme, width, and OSC-8 capability), so colour and
 //! `NO_COLOR`/`--plain` behavior remain centralized.
 
-use std::collections::HashMap;
 use std::io::Write;
 use std::time::{Duration, Instant};
 
@@ -19,13 +18,15 @@ use ardur_fused_runtime::FusedEvent;
 use ardur_provider_runtime::{
     CompletionRequest, FinishReason, Provider, RateCard, StreamEvent, Usage,
 };
-use ardur_runtime::{ReceiptId, RuntimeError};
+use ardur_runtime::RuntimeError;
 use futures::{Stream, StreamExt as _};
 
 use crate::anim::{CLEAR_LINE, TYPING_DOTS_TICK, TypingDots};
 use crate::markdown::render_markdown_with;
 use crate::theme::{Role, Theme};
 use crate::toolbox::{TurnStats, render_cost_line, render_tool_call_box};
+pub use crate::update::StreamOutcome;
+use crate::update::{Update, UpdateStream};
 
 /// The presentation context every turn renders through: the active theme, the
 /// column budget boxes/tables lay out against, and whether OSC-8 hyperlinks are
@@ -50,34 +51,6 @@ impl<'a> RenderCtx<'a> {
             osc8: false,
         }
     }
-}
-
-/// The accumulated result of rendering one turn — the assembled text (so the REPL
-/// can append it to history), the final token ledger, why generation stopped, the
-/// names of any tool calls the model requested, and any error that aborted the
-/// stream (the partial output was still shown).
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct StreamOutcome {
-    /// The full assistant text, concatenated from every content delta for display.
-    pub content: String,
-    /// Per-round assistant responses that crossed the receipt commit boundary, in
-    /// journal order. Live history uses these instead of collapsing tool loops.
-    pub committed_assistant_messages: Vec<String>,
-    /// The final token ledger, when the turn reported usage.
-    pub usage: Option<Usage>,
-    /// The turn's committed provider-plus-tool cost in US cents, when at least
-    /// one receipt was minted — fed into the session `/cost` tally.
-    pub cost_cents: Option<u64>,
-    /// Receipt ids committed by completed fused rounds, in event order. A
-    /// non-empty vector means durable history exists even if a later stage failed.
-    pub receipt_ids: Vec<ReceiptId>,
-    /// The terminal finish reason, when the turn finished cleanly.
-    pub finish_reason: Option<FinishReason>,
-    /// Names of the tools the model requested this turn (in arrival order).
-    pub tool_calls: Vec<String>,
-    /// The error that aborted the turn, if any — the partial `content` above was
-    /// still rendered before this was set.
-    pub error: Option<String>,
 }
 
 /// Drive one chat turn through `provider`, rendering it to `out` via `ctx`.
@@ -133,11 +106,8 @@ where
 {
     let started = Instant::now();
     futures::pin_mut!(stream);
-    let mut outcome = StreamOutcome::default();
-    let mut current_round_content = String::new();
-    let mut total_cost_cents = 0_u64;
+    let mut stream = UpdateStream::new(stream);
     let mut newline_pending = false;
-    let mut pending_tools: HashMap<String, (String, String)> = HashMap::new();
 
     let mut waiting = ctx.theme.is_styled();
     let mut dots = TypingDots::new();
@@ -162,8 +132,10 @@ where
 
         let visible = matches!(
             &item,
-            Ok(FusedEvent::Content(_) | FusedEvent::ToolCallResult { .. } | FusedEvent::Finish(_))
-                | Err(_)
+            Update::ContentDelta(_)
+                | Update::ToolCallResult { .. }
+                | Update::Finish(_)
+                | Update::Error(_)
         );
         if waiting && visible {
             write!(out, "{CLEAR_LINE}")?;
@@ -172,78 +144,56 @@ where
         }
 
         match item {
-            Ok(FusedEvent::StageStart { .. } | FusedEvent::StageEnd { .. }) => {}
-            Ok(FusedEvent::Receipt {
-                receipt_id,
-                cost_cents,
-                ..
-            }) => {
-                outcome
-                    .committed_assistant_messages
-                    .push(std::mem::take(&mut current_round_content));
-                outcome.receipt_ids.push(receipt_id);
-                total_cost_cents = total_cost_cents.saturating_add(cost_cents);
-            }
-            Ok(FusedEvent::Content(text)) => {
+            Update::StageStart { .. }
+            | Update::StageEnd { .. }
+            | Update::ReceiptMinted { .. }
+            | Update::ToolCallStart { .. }
+            | Update::ToolCallDelta { .. }
+            | Update::Usage { .. }
+            | Update::Verdict(_) => {}
+            Update::ContentDelta(text) => {
                 newline_pending = !text.is_empty() && !text.ends_with('\n');
-                current_round_content.push_str(&text);
-                outcome.content.push_str(&text);
                 write!(out, "{text}")?;
                 out.flush()?;
             }
-            Ok(FusedEvent::ToolCallStart { id, name }) => {
-                outcome.tool_calls.push(name.clone());
-                pending_tools.insert(id, (name, String::new()));
-            }
-            Ok(FusedEvent::ToolCallDelta { id, delta }) => {
-                if let Some((_, arguments)) = pending_tools.get_mut(&id) {
-                    arguments.push_str(&delta);
-                }
-            }
-            Ok(FusedEvent::ToolCallResult { id, .. }) => {
+            Update::ToolCallResult { call, .. } => {
                 if newline_pending {
                     writeln!(out)?;
                     newline_pending = false;
                 }
-                if let Some((name, arguments)) = pending_tools.remove(&id) {
-                    let arguments = serde_json::from_str::<serde_json::Value>(&arguments)
+                if let Some(call) = call {
+                    let arguments = serde_json::from_str::<serde_json::Value>(&call.arguments)
                         .ok()
                         .and_then(|value| serde_json::to_string_pretty(&value).ok())
-                        .unwrap_or(arguments);
+                        .unwrap_or(call.arguments);
                     writeln!(
                         out,
                         "{}",
-                        render_tool_call_box(&name, &arguments, ctx.theme, ctx.width)
+                        render_tool_call_box(&call.name, &arguments, ctx.theme, ctx.width)
                     )?;
                 }
             }
-            Ok(FusedEvent::Usage(usage)) => match &mut outcome.usage {
-                Some(total) => {
-                    total.tokens_in = total.tokens_in.saturating_add(usage.tokens_in);
-                    total.tokens_out = total.tokens_out.saturating_add(usage.tokens_out);
-                    total.cost_cents = match (total.cost_cents, usage.cost_cents) {
-                        (Some(lhs), Some(rhs)) => Some(lhs.saturating_add(rhs)),
-                        _ => None,
-                    };
-                }
-                None => outcome.usage = Some(usage),
-            },
-            Ok(FusedEvent::Finish(reason)) => {
+            Update::Finish(reason) => {
                 if newline_pending {
                     writeln!(out)?;
                     newline_pending = false;
                 }
                 write_finish_note(out, &reason, ctx.theme)?;
-                outcome.finish_reason = Some(reason);
             }
-            Err(error) => {
+            Update::Error(_) => {
                 if newline_pending {
                     writeln!(out)?;
                     newline_pending = false;
                 }
-                let message = error.to_string();
-                write_error(out, &message, ctx.theme)?;
-                outcome.error = Some(message);
+                // The reducer formats the legacy diagnostic once; new UIs use
+                // the typed error instead of treating this as safe public text.
+                let message = stream
+                    .reducer()
+                    .outcome()
+                    .error
+                    .as_deref()
+                    .expect("error update records the diagnostic");
+                write_error(out, message, ctx.theme)?;
                 break;
             }
         }
@@ -252,13 +202,17 @@ where
     if newline_pending {
         writeln!(out)?;
     }
-    if !outcome.receipt_ids.is_empty() {
-        outcome.cost_cents = Some(total_cost_cents);
-    }
+    let outcome = stream.into_outcome();
     if let Some(usage) = outcome.usage {
         // A pre-commit failure released its reservation, so a token-bearing
         // partial stream with no receipt correctly displays a zero committed cost.
-        write_cost_line_with_cents(out, usage, total_cost_cents, started.elapsed(), ctx)?;
+        write_cost_line_with_cents(
+            out,
+            usage,
+            outcome.cost_cents.unwrap_or(0),
+            started.elapsed(),
+            ctx,
+        )?;
     }
     Ok(outcome)
 }

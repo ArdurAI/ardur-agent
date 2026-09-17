@@ -48,6 +48,7 @@ mod state;
 mod stream;
 mod theme;
 mod toolbox;
+mod update;
 mod util;
 mod welcome;
 
@@ -86,9 +87,10 @@ pub use state::{
     GrantRecord, SessionMetadata, StateDirs, dev_permissive_policy_enabled, grants_path,
     read_grant_records,
 };
-pub use stream::{RenderCtx, StreamOutcome, drive_fused_turn, drive_turn};
+pub use stream::{RenderCtx, drive_fused_turn, drive_turn};
 pub use theme::{Attr, Role, Theme, ThemeName};
 pub use toolbox::{MAX_BOX_COLS, SessionCost, TurnStats, render_cost_line, render_tool_call_box};
+pub use update::{StreamOutcome, ToolCallInfo, TurnReducer, Update, UpdateStream, Verdict};
 pub use util::{display_width, layout_width};
 pub use welcome::{default_state_path, is_first_launch, show_welcome_if_first, splash};
 
