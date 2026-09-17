@@ -48,14 +48,16 @@ async fn second_boot_reuses_persisted_keys() {
     let dir = tempfile::tempdir().expect("tempdir");
     let config = support::test_config(&dir, None);
 
-    let _first = support::boot_stub(&config).await;
+    let first = support::boot_stub(&config).await;
     let issuer_key = std::fs::read_to_string(dir.path().join("keys/issuer.key")).expect("read key");
     let journal_root = dir.path().join("journals/sessions");
     let first_journals = std::fs::read_dir(&journal_root)
         .expect("first boot journal directory")
         .count();
 
-    let _second = support::boot_stub(&config).await;
+    first.finish_shutdown().await.expect("first worker settles");
+    drop(first); // Release the exclusive settlement writer lease before restart.
+    let second = support::boot_stub(&config).await;
     let reread = std::fs::read_to_string(dir.path().join("keys/issuer.key")).expect("read key");
     let second_journals = std::fs::read_dir(&journal_root)
         .expect("second boot journal directory")
@@ -67,6 +69,10 @@ async fn second_boot_reuses_persisted_keys() {
         second_journals, 1,
         "restart reuses the stable audit journal needed for receipt reconciliation"
     );
+    second
+        .finish_shutdown()
+        .await
+        .expect("second worker settles");
 }
 
 /// The HTTP-only boot mode: with Slack disabled, `AppState::boot` still lays down

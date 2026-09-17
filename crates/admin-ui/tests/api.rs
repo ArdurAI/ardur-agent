@@ -21,6 +21,54 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use serde_json::Value;
 use tempfile::TempDir;
 
+#[test]
+fn settlement_journal_costs_ignore_expense_and_repeated_projection() {
+    let fixture = Fixture::new();
+    let completed = cost_entry(17, UnixTsMillis(1));
+    let mut legacy = serde_json::to_value(completed).unwrap();
+    legacy.as_object_mut().unwrap().remove("reason");
+    let completed: JournalEntry = serde_json::from_value(legacy).unwrap();
+    let mut refused = cost_entry(2, UnixTsMillis(2));
+    if let JournalEntry::CostFinalized { reason, .. } = &mut refused {
+        *reason = Some("refusal:tool_policy".into());
+    }
+    let expense = JournalEntry::OperatorExpense {
+        session_id: ardur_session_journals::SessionId::new(),
+        reservation_id: ReservationId::new(),
+        provider_cost: CostTuple::cents(9),
+        class: "cancelled_precommit".into(),
+        reason: "local cancellation".into(),
+        at: UnixTsMillis(3),
+    };
+    write_journal(
+        &fixture.journal_dir,
+        "settlement",
+        &[completed, refused.clone(), refused, expense],
+    );
+    // Existing synthetic receipt fixture tests the admin consumer, not signing.
+    append_receipt(
+        &fixture.receipt_store,
+        &uuid::Uuid::new_v4().to_string(),
+        "llm.completion.minted.v1",
+        1,
+        17,
+        0,
+        0,
+        &[],
+    );
+    let report =
+        ardur_admin::costs::report(&fixture.receipt_store, &fixture.journal_dir, 5).unwrap();
+    assert_eq!(
+        report.total_cents, 17,
+        "receipt rollup does not add journal expense/cost again"
+    );
+    assert_eq!(report.top_sessions[0].cents, 19, "unique caller costs only");
+    assert_eq!(
+        ardur_admin::journal::list_sessions(&fixture.journal_dir).unwrap()[0].message_count,
+        0
+    );
+}
+
 // ---- fixtures -------------------------------------------------------------
 
 fn user_msg(content: &str, at: UnixTsMillis) -> JournalEntry {

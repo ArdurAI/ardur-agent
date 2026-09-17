@@ -63,7 +63,10 @@ oMz32N5zmQUNlJpyLV/9oTufQKsNFzSjxvrwjMZiTc1twZT9s+aGKBnA\n\
 /// for the lifetime of the scenario.
 #[must_use]
 pub fn temp_session_root() -> TempDir {
-    tempfile::tempdir().expect("a temp session root can be created")
+    let parent = std::env::temp_dir()
+        .canonicalize()
+        .expect("the temporary parent resolves without symlink aliases");
+    tempfile::tempdir_in(parent).expect("a temp session root can be created")
 }
 
 /// The deterministic Ed25519 cap-token *root* key pair.
@@ -192,6 +195,9 @@ pub fn fused_builder_with_policies(
         dev_receipt_key(),
         ModelId::new(TEST_MODEL),
     )
+    // Explicit fixture-only storage; configured receipt logs still use their
+    // durable namespace and product builders cannot opt out of durability.
+    .test_settlement_storage()
     .audience(AUDIENCE)
     .tool(TOOL)
     .clock(dev_clock())

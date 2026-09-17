@@ -887,11 +887,15 @@ async fn fused_stream_journal_persisted_after_turn() {
     // The turn finished and the atomically committed journal is replayable.
     assert!(matches!(events.last(), Some(Ok(FusedEvent::Finish(_)))));
 
-    // The user + assistant messages are durably replayable.
+    // Settlement projection precedes the separately persisted transcript.
     let replayed = journal.replay(session_id).await.expect("journal replays");
-    assert_eq!(replayed.len(), 2);
-    assert!(matches!(replayed[0], JournalEntry::UserMessage { .. }));
-    assert!(matches!(replayed[1], JournalEntry::AssistantMessage { .. }));
+    assert_eq!(replayed.len(), 3);
+    assert!(matches!(
+        replayed[0],
+        JournalEntry::CostFinalized { reason: None, .. }
+    ));
+    assert!(matches!(replayed[1], JournalEntry::UserMessage { .. }));
+    assert!(matches!(replayed[2], JournalEntry::AssistantMessage { .. }));
 }
 
 #[tokio::test]

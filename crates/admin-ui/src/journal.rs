@@ -239,14 +239,32 @@ pub fn page(
     })
 }
 
-/// Aggregate cents settled per session (summing every `CostFinalized`), for the
+/// Aggregate caller cents per session (one `CostFinalized` per reservation), for the
 /// "top expensive sessions" cost view. Sessions with no settled cost are
 /// omitted. A single enumeration pass reads each journal exactly once.
 pub fn cents_by_session(journal_dir: &Path) -> anyhow::Result<Vec<(String, u64)>> {
     let mut out = Vec::new();
     for (id, path) in enumerate_sessions(journal_dir)? {
         let entries = read_entries_at(&path)?;
-        let cents: u64 = entries.iter().filter_map(cost_cents).sum();
+        let mut seen = std::collections::HashMap::new();
+        let mut cents = 0_u64;
+        for entry in &entries {
+            if let JournalEntry::CostFinalized {
+                reservation_id,
+                actual,
+                ..
+            } = entry
+            {
+                if let Some(previous) = seen.insert(reservation_id, entry) {
+                    anyhow::ensure!(
+                        previous == entry,
+                        "conflicting cost projection in session {id}"
+                    );
+                    continue;
+                }
+                cents = cents.saturating_add(actual.cents);
+            }
+        }
         if cents > 0 {
             out.push((id, cents));
         }

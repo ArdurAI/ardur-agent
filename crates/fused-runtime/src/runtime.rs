@@ -228,6 +228,9 @@ pub struct FusedRuntime {
     pub(crate) verb: VerbObject,
     pub(crate) gate: Arc<InMemoryCostAdmissionGate<SharedBudget>>,
     pub(crate) settlements: Arc<SettlementCoordinator>,
+    /// Cooperatively serialize economic admission without allocating waiting
+    /// settlement slots. Held through projection, never through final delivery.
+    pub(crate) economic_admission: AsyncMutex<()>,
     pub(crate) budget: SharedBudget,
     pub(crate) gate_provider_id: GateProviderId,
     pub(crate) gate_model_id: GateModelId,
@@ -2547,6 +2550,12 @@ impl FusedRuntime {
         if cancel_probe.as_ref().is_some_and(|probe| probe()) {
             return Err(RuntimeError::TurnCancelled);
         }
+        // Waiting callers own no settlement capacity or budget. Declare the
+        // permit before the owner so cancellation drops the owner first.
+        let mut economic_permit = Some(self.economic_admission.lock().await);
+        if cancel_probe.as_ref().is_some_and(|probe| probe()) {
+            return Err(RuntimeError::TurnCancelled);
+        }
         let mut owner = self.begin_settlement(session_id, &claims, &provisioning)?;
         let gate_token_id = match self.stage_cost_setup(&claims, &provisioning).await {
             Ok(gate_token_id) => gate_token_id,
@@ -3173,6 +3182,12 @@ impl FusedRuntime {
                 }
             };
 
+            // Final economics and projections are closed. A parked observer
+            // must not prevent a queued healthy turn from being admitted.
+            if !wants_tools {
+                economic_permit.take();
+            }
+
             // 8. post-receipt hooks (observational; the call already happened).
             let post_ctx = PostReceiptCtx {
                 session_id,
@@ -3385,8 +3400,9 @@ impl FusedRuntime {
             // ---- 3. cost-gate setup (provision + bind; no per-round admission
             //         yet — that happens inside the loop). No stage event: the
             //         CostGateAdmit event brackets the per-round `admit`.
+            let mut economic_permit = Some(self.economic_admission.lock().await);
             let mut owner = self.begin_settlement(session_id, &claims, &provisioning)?;
-        let gate_token_id = match self.stage_cost_setup(&claims, &provisioning).await {
+            let gate_token_id = match self.stage_cost_setup(&claims, &provisioning).await {
                 Ok(gate_token_id) => gate_token_id,
                 Err(err) => {
                     self.fire_error(session_id, LifecyclePhase::Submit, &err).await;
@@ -3884,6 +3900,10 @@ impl FusedRuntime {
                         unreachable!()
                     }
                 };
+                // No economic capacity retained at the final Receipt yield.
+                if !wants_tools {
+                    economic_permit.take();
+                }
                 yield FusedEvent::StageEnd { stage: StageKind::CostGateFinalize, ok: true };
                 let chain_hash = Sha256Digest::of(signed.jws_compact().as_bytes());
                 yield FusedEvent::Receipt {

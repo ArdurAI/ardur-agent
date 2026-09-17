@@ -4,7 +4,9 @@ use assert_cmd::Command;
 
 #[test]
 fn schedule_create_list_next_delete_lifecycle() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    // The durable settlement store requires a canonical trusted path; macOS
+    // tempdir's /var alias is outside that contract.
+    let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).expect("tempdir");
 
     // Create a daily schedule.
     let create = Command::cargo_bin("ardur")
@@ -74,6 +76,9 @@ fn schedule_create_list_next_delete_lifecycle() {
         .env_remove("ANTHROPIC_API_KEY")
         .env_remove("OPENROUTER_API_KEY")
         .env_remove("OPENAI_API_KEY")
+        .env_remove("OPENAI_COMPAT_API_KEY")
+        .env_remove("ARDUR_PROVIDER")
+        .env_remove("ARDUR_MODEL")
         .args(["schedule", "fire", &id])
         .assert()
         .success()

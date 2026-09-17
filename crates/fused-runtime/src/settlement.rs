@@ -1616,8 +1616,26 @@ impl TurnSettlementOwner {
             provider_request_id,
         });
         let reservation = self.coordinator.gate.admit(request).await.map_err(|e| {
+            // These concrete gate verdicts precede successful reserve. In
+            // SharedBudget, RaceLost also leaves the account unchanged. Only
+            // this admission boundary can discharge the unused attempt; a
+            // failed claim below already owns a real returned reservation.
+            let unused = matches!(
+                e,
+                AdmissionError::BudgetExhausted { .. }
+                    | AdmissionError::CapTokenInvalid
+                    | AdmissionError::ProviderNotAllowed(_)
+                    | AdmissionError::PolicyDenied(_)
+            );
             let error = SettlementError::Budget(Arc::new(e));
-            slot.error = Some(error.clone());
+            if unused {
+                slot.admission_attempt = None;
+                // The coordinator's next_ordinal remains advanced: never reuse
+                // an identity even when admission definitely did no work.
+                slot.projection_ordinal = None;
+            } else {
+                slot.error = Some(error.clone());
+            }
             error
         })?;
         slot.unclaimed = Some(reservation);
@@ -2956,6 +2974,55 @@ mod owner_spec_tests {
         assert_eq!(f.saved(id).turn().terminal, TurnTerminal::Cancelled);
         assert!(supervisor.try_close().is_err());
     }
+    #[tokio::test]
+    async fn refused_admission_closes_unused_capacity_without_reusing_ordinal() {
+        let f = Fixture::new();
+        f.budget.set_balance(f.holder.clone(), CostTuple::cents(5));
+        let mut owner = f.coordinator.reserve_turn(f.attribution(false)).unwrap();
+        let refused_id = owner.turn_id();
+        assert!(matches!(
+            owner.admit_round(f.request(), Uuid::new_v4()).await,
+            Err(SettlementError::Budget(ref e))
+                if matches!(e.as_ref(), AdmissionError::BudgetExhausted { .. })
+        ));
+        assert_eq!(
+            f.budget.current_balance(&f.holder).await.unwrap(),
+            CostTuple::cents(5)
+        );
+        let status = f.coordinator.status();
+        assert!(status.turns[0].admission_attempt.is_none());
+        assert!(status.turns[0].unclaimed_reservation.is_none());
+        assert!(status.turns[0].error.is_none());
+        owner.close_empty().unwrap();
+        assert!(f.coordinator.status().turns.is_empty());
+        assert_eq!(f.coordinator.status().inventory_count, 0);
+        assert_eq!(
+            f.budget.current_balance(&f.holder).await.unwrap(),
+            CostTuple::cents(5)
+        );
+        assert!(
+            load_settlement_snapshot(&f.root, &f.receipt, &LIMITS)
+                .unwrap()
+                .snapshots
+                .is_empty()
+        );
+
+        f.budget.set_balance(f.holder.clone(), CostTuple::cents(30));
+        let mut funded = f.owner(false).await;
+        assert_ne!(funded.turn_id(), refused_id);
+        funded.abandon_sync().unwrap();
+        assert_eq!(
+            f.saved(funded.turn_id()).turn().rounds[0].commit_ordinal,
+            Some(1)
+        );
+        assert_eq!(
+            f.budget.current_balance(&f.holder).await.unwrap(),
+            CostTuple::cents(30)
+        );
+        drop(funded);
+        assert!(f.coordinator.supervisor().try_close().is_ok());
+    }
+
     struct AdmissionPanicClock;
     impl ardur_cost_gate::Clock for AdmissionPanicClock {
         fn now_ms(&self) -> UnixTsMillis {

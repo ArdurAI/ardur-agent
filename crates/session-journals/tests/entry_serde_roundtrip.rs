@@ -74,6 +74,32 @@ fn every_variant_roundtrips() {
 }
 
 #[test]
+fn settlement_records_and_legacy_cost_without_reason_roundtrip() {
+    let finalized = JournalEntry::CostFinalized {
+        reservation_id: ReservationId::new(),
+        actual: CostTuple::cents(2),
+        refunded: CostDelta::full_credit(&CostTuple::cents(8)),
+        at: UnixTsMillis(4),
+        reason: Some("refusal:tool_policy".into()),
+    };
+    assert_roundtrips(&finalized);
+    let mut legacy = serde_json::to_value(&finalized).unwrap();
+    legacy.as_object_mut().unwrap().remove("reason");
+    let decoded: JournalEntry = serde_json::from_value(legacy).unwrap();
+    assert!(
+        matches!(decoded, JournalEntry::CostFinalized { reason: None, actual, .. } if actual.cents == 2)
+    );
+    assert_roundtrips(&JournalEntry::OperatorExpense {
+        session_id: ardur_session_journals::SessionId::new(),
+        reservation_id: ReservationId::new(),
+        provider_cost: CostTuple::cents(9),
+        class: "cancelled_precommit".into(),
+        reason: "known usage, caller refunded".into(),
+        at: UnixTsMillis(5),
+    });
+}
+
+#[test]
 fn sha256_digest_validates_hex() {
     let good = Sha256Digest::of(b"x");
     assert_eq!(good.to_hex().len(), 64);

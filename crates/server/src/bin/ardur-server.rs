@@ -111,17 +111,20 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!(addr = %config.bind_addr, "listening for HTTP requests (Slack disabled)");
     }
 
-    axum::serve(listener, app)
+    let serving = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await
-        .map_err(|e| anyhow::anyhow!("server error: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("server error: {e}"));
 
     // Graceful shutdown: signal the worker, then fsync + close the durable
     // journal before exit.
-    state.shutdown();
-    if let Err(e) = state.journal().close().await {
-        tracing::warn!(error = %e, "journal close failed during shutdown");
+    let settled = async {
+        state.finish_shutdown().await?;
+        state.journal().close().await?;
+        Ok::<(), anyhow::Error>(())
     }
+    .await;
+    serving.and(settled)?;
     // Flush any buffered OpenTelemetry spans before exit (a no-op when telemetry
     // was never initialized).
     shutdown_genai_tracing();

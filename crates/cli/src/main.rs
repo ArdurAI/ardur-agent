@@ -1583,22 +1583,39 @@ fn session_cost_cents(
     inventory: &SessionReceiptInventory,
     session_id: &str,
 ) -> Option<u64> {
+    // A completion has both a CostFinalized projection and a signed receipt.
+    // Non-completions carry a reason and have no billable completion receipt.
+    // Never charge OperatorExpense, and never add a repeated projection twice.
+    let mut seen = std::collections::HashMap::new();
+    let mut journal_total = 0_u64;
+    let mut unreceipted_total = 0_u64;
+    for entry in entries {
+        if let JournalEntry::CostFinalized {
+            reservation_id,
+            actual,
+            reason,
+            ..
+        } = entry
+        {
+            if let Some(previous) = seen.insert(reservation_id, entry) {
+                if previous != entry {
+                    return None;
+                } // conflicting accounting is unknown
+                continue;
+            }
+            journal_total = journal_total.saturating_add(actual.cents);
+            if reason.is_some() {
+                unreceipted_total = unreceipted_total.saturating_add(actual.cents);
+            }
+        }
+    }
     if let Some(receipt_total) = inventory.cost_cents_for(receipt_ids, session_id) {
-        return Some(receipt_total);
+        return Some(receipt_total.saturating_add(unreceipted_total));
     }
     if !receipt_ids.is_empty() {
         return None;
     }
-
-    let mut saw_legacy_cost = false;
-    let legacy_total = entries.iter().fold(0_u64, |total, entry| match entry {
-        JournalEntry::CostFinalized { actual, .. } => {
-            saw_legacy_cost = true;
-            total.saturating_add(actual.cents)
-        }
-        _ => total,
-    });
-    saw_legacy_cost.then_some(legacy_total)
+    (!seen.is_empty()).then_some(journal_total)
 }
 
 #[cfg(test)]
@@ -1631,6 +1648,52 @@ mod session_cost_tests {
                 "00000000-0000-0000-0000-000000000000"
             ),
             Some(17)
+        );
+    }
+
+    #[test]
+    fn settlement_costs_separate_refusal_from_completion_and_operator_expense() {
+        use ardur_session_journals::{
+            CostDelta, CostTuple, ReservationId, SessionId, UnixTsMillis,
+        };
+        let session = uuid::Uuid::new_v4();
+        let receipt = uuid::Uuid::new_v4().to_string();
+        let mut inventory = SessionReceiptInventory::default();
+        inventory.cost_cents_by_receipt.insert(receipt.clone(), 17);
+        inventory
+            .session_id_by_receipt
+            .insert(receipt.clone(), Some(session));
+        let cost = |cents, reason| JournalEntry::CostFinalized {
+            reservation_id: ReservationId::new(),
+            actual: CostTuple::cents(cents),
+            refunded: CostDelta::full_credit(&CostTuple::ZERO),
+            at: UnixTsMillis(1),
+            reason,
+        };
+        let completion = cost(17, None);
+        // Historical JSON has no reason field; both shapes must remain readable.
+        let mut legacy = serde_json::to_value(&completion).unwrap();
+        legacy.as_object_mut().unwrap().remove("reason");
+        let legacy: JournalEntry = serde_json::from_value(legacy).unwrap();
+        let refusal = cost(2, Some("refusal:tool_policy".into()));
+        let expense = JournalEntry::OperatorExpense {
+            session_id: SessionId(session),
+            reservation_id: ReservationId::new(),
+            provider_cost: CostTuple::cents(9),
+            class: "cancelled_precommit".into(),
+            reason: "local cancellation".into(),
+            at: UnixTsMillis(2),
+        };
+        let entries = vec![legacy, refusal.clone(), refusal, expense];
+        assert_eq!(
+            session_cost_cents(&entries, &[receipt], &inventory, &session.to_string()),
+            Some(19),
+            "receipt completion + unique refusal, never operator expense"
+        );
+        assert_eq!(
+            session_cost_cents(&entries, &[], &inventory, &session.to_string()),
+            Some(19),
+            "legacy journal-only fallback deduplicates projections"
         );
     }
 
