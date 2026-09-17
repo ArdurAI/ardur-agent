@@ -40,9 +40,20 @@ against **prime-agent 0.9.5**.
 | `PRIME_AGENT_DEFAULT_MODEL` | Model when the request names none | prime-agent's default |
 | `PRIME_AGENT_WORKING_DIR` | Child working directory (`--cwd`) | inherited |
 | `PRIME_AGENT_TIMEOUT_SECS` | Wall-clock ceiling for one turn | `300` |
+| `PRIME_AGENT_MAX_TOKENS_FLOOR` | Smallest per-request `max_tokens` accepted | `4096` |
 
 An unparseable or zero timeout keeps the default rather than producing a turn
 that can never finish.
+
+### Why there is a max-tokens floor
+
+prime-agent has no per-completion output cap (`--autonomous-max-tokens` bounds a
+whole autonomous run, not one turn). A caller's `max_tokens` therefore cannot be
+enforced by this backend. Silently discarding it would let the runtime authorize
+N output tokens, be billed for more, and still see a clean `FinishReason::Stop`
+— so a ceiling below the floor is **refused** with `InvalidRequest` instead.
+Above the floor, enforcement is knowingly delegated to prime-agent's own limits.
+Set the floor to `0` to accept every ceiling and delegate unconditionally.
 
 ## Protocol
 
@@ -71,14 +82,27 @@ streaming-chunk shape.
   retained event body is capped.
 - **Typed auth failures.** A login/credential failure maps to
   `ProviderError::Unauthorized`, not a generic upstream error, so callers can
-  distinguish "fix your credentials" from "the model failed".
+  distinguish "fix your credentials" from "the model failed". Rate-limit and
+  quota diagnostics that merely *mention* a key are deliberately excluded —
+  classifying those as `Unauthorized` would turn a retryable failure into a
+  permanent one.
+- **A turn needs an acknowledged prompt.** `agent_end` alone does not complete a
+  turn: without a successful `prompt` response the turn fails, so a child that
+  ignored or rejected the prompt cannot look successful just because the session
+  still holds text from an earlier turn.
+- **Reads are bounded before buffering.** Both stdout and stderr are read
+  through a byte budget rather than accumulating a whole line first, so a child
+  emitting a newline-free flood is refused instead of exhausting memory.
 
 ## Billing
 
 Turns are paid by prime-agent's own configured provider, so the rate card is
 zeroed (`prime-delegated-v1`) and every completion is priced at zero cents. Token
-counts reported by the child are passed through to `Usage`; when the child reports
-none, the counts stay zero rather than being invented.
+counts reported by the child are **accumulated across every assistant message in
+the turn** — with child tools enabled a single prompt can drive several model
+calls, and keeping only the last record would under-report the run in the signed
+receipt. When the child reports no usage at all, the counts stay zero rather than
+being invented.
 
 ## Not in this phase
 
@@ -90,8 +114,15 @@ none, the counts stay zero rather than being invented.
 
 ## Tests
 
-`cargo test -p ardur-provider-prime` runs 8 unit tests plus 8 RPC tests driven
+`cargo test -p ardur-provider-prime` runs 12 unit tests plus 14 RPC tests driven
 against an executable shim that speaks the real protocol — no prime-agent install
-and no model spend required. `vacuity_proof.sh` mutates each protected behavior in
-turn and asserts the matching guard actually fails, so the suite cannot go
+and no model spend required. Every guard has been mutation-proven: reverting the
+behavior it protects makes exactly that test fail, so the suite cannot go
 vacuous.
+
+A live round-trip against the real binary is available but `#[ignore]`d so CI
+never spends money:
+
+```sh
+cargo test -p ardur-provider-prime --test live -- --ignored --nocapture
+```

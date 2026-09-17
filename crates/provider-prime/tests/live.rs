@@ -41,7 +41,7 @@ async fn live_round_trip_returns_the_requested_token() {
             tool_call_id: None,
         }],
         model: ModelId(String::new()),
-        max_tokens: 64,
+        max_tokens: 8_192,
         temperature: 0.0,
         stop_sequences: Vec::new(),
         requested_cost_envelope: CostEnvelope::default(),

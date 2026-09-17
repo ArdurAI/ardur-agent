@@ -86,7 +86,7 @@ use ardur_provider_runtime::{
 };
 use ardur_runtime::{CostTuple, ProviderId, Role};
 use async_trait::async_trait;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
 /// The registry key this backend answers to.
 const PROVIDER_ID: &str = "prime";
@@ -95,6 +95,11 @@ pub const DEFAULT_BINARY: &str = "prime-agent";
 /// Default per-turn timeout. A Prime Agent turn can involve several model
 /// round-trips, so this is generous.
 const DEFAULT_TIMEOUT_SECS: u64 = 300;
+/// Default [`PrimeConfig::max_tokens_floor`]. A request asking for fewer output
+/// tokens than this is refused, because prime-agent cannot enforce a
+/// per-completion ceiling and silently overshooting the caller's authorized
+/// budget is worse than failing the request.
+const DEFAULT_MAX_TOKENS_FLOOR: u32 = 4_096;
 /// Upper bound on retained event lines, so a chatty turn cannot grow the audit
 /// body without limit.
 const MAX_RETAINED_EVENTS: usize = 2_000;
@@ -115,6 +120,8 @@ pub const DEFAULT_MODEL_ENV: &str = "PRIME_AGENT_DEFAULT_MODEL";
 pub const WORKING_DIR_ENV: &str = "PRIME_AGENT_WORKING_DIR";
 /// Env var [`PrimeConfig::from_env`] reads the per-turn timeout from.
 pub const TIMEOUT_SECS_ENV: &str = "PRIME_AGENT_TIMEOUT_SECS";
+/// Env var [`PrimeConfig::from_env`] reads the max-tokens floor from.
+pub const MAX_TOKENS_FLOOR_ENV: &str = "PRIME_AGENT_MAX_TOKENS_FLOOR";
 
 /// How this backend locates and runs the `prime-agent` binary.
 #[derive(Clone, Debug)]
@@ -130,6 +137,13 @@ pub struct PrimeConfig {
     pub working_directory: Option<PathBuf>,
     /// Wall-clock ceiling for one turn.
     pub request_timeout: Duration,
+    /// The smallest per-request `max_tokens` this backend will accept.
+    ///
+    /// prime-agent has no per-completion output cap, so any ceiling below this
+    /// is refused rather than silently ignored (see [`Provider::complete`]).
+    /// Above it, enforcement is knowingly delegated to prime-agent's own limits.
+    /// Set to `0` to accept every ceiling and delegate unconditionally.
+    pub max_tokens_floor: u32,
     /// Whether the child may run its own tools. `false` (the default) passes
     /// `--no-tools`: as a *completion* backend we want the model's answer, not
     /// an agent editing the filesystem outside Ardur's grant ledger. Turning
@@ -146,6 +160,7 @@ impl Default for PrimeConfig {
             default_model: None,
             working_directory: None,
             request_timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+            max_tokens_floor: DEFAULT_MAX_TOKENS_FLOOR,
             allow_child_tools: false,
         }
     }
@@ -171,6 +186,13 @@ impl PrimeConfig {
             .filter(|secs| *secs > 0)
         {
             config.request_timeout = Duration::from_secs(secs);
+        }
+        // `0` is meaningful here (delegate unconditionally), so unlike the
+        // timeout this accepts zero; only an unparseable value keeps the default.
+        if let Some(floor) =
+            non_empty_env(MAX_TOKENS_FLOOR_ENV).and_then(|raw| raw.parse::<u32>().ok())
+        {
+            config.max_tokens_floor = floor;
         }
         config
     }
@@ -236,6 +258,24 @@ impl Provider for PrimeProvider {
             return Err(ProviderError::InvalidRequest(
                 "prime-agent requires a non-empty prompt".into(),
             ));
+        }
+
+        // The caller's output-token ceiling must not be silently discarded.
+        // prime-agent exposes no per-request output cap (`--autonomous-max-tokens`
+        // bounds a whole autonomous run, not one completion), so a ceiling this
+        // backend cannot enforce is refused rather than ignored: the fused
+        // runtime would otherwise authorize N tokens, be billed for more, and
+        // still see a clean `FinishReason::Stop`.
+        //
+        // `max_tokens_floor` is the ceiling at or above which the operator
+        // accepts that enforcement is delegated to prime-agent's own limits.
+        if req.max_tokens > 0 && req.max_tokens < self.config.max_tokens_floor {
+            return Err(ProviderError::InvalidRequest(format!(
+                "prime-agent cannot enforce a per-request output ceiling of {} tokens \
+                 (it has no per-completion cap); raise max_tokens to at least {} or use \
+                 a provider that enforces it",
+                req.max_tokens, self.config.max_tokens_floor
+            )));
         }
 
         let model = self.chosen_model(&req.model);
@@ -342,23 +382,27 @@ impl PrimeProvider {
         // stderr pipe while we block reading stdout would deadlock, and an
         // unbounded sink would let a noisy child grow memory without limit.
         let stderr_task = tokio::spawn(async move {
-            let mut reader = BufReader::new(stderr);
-            let mut captured = String::new();
-            let mut line = String::new();
+            // Read into a fixed-size byte budget. Like the stdout reader, this
+            // must bound the read itself: a child writing one enormous
+            // newline-free diagnostic would otherwise grow the buffer without
+            // limit before any cap was consulted. Draining continues past the
+            // budget (a full pipe would deadlock the turn) but nothing further
+            // is retained.
+            let mut reader = stderr;
+            let mut captured: Vec<u8> = Vec::new();
+            let mut chunk = [0u8; 4096];
             loop {
-                line.clear();
-                match reader.read_line(&mut line).await {
+                match reader.read(&mut chunk).await {
                     Ok(0) | Err(_) => break,
-                    Ok(_) => {
+                    Ok(n) => {
                         if captured.len() < MAX_STDERR_BYTES {
                             let room = MAX_STDERR_BYTES - captured.len();
-                            let take = line.len().min(room);
-                            captured.push_str(&line[..take]);
+                            captured.extend_from_slice(&chunk[..n.min(room)]);
                         }
                     }
                 }
             }
-            captured
+            String::from_utf8_lossy(&captured).into_owned()
         });
 
         let mut reader = BufReader::new(stdout);
@@ -375,6 +419,10 @@ impl PrimeProvider {
         write_command(&mut stdin, &prompt_cmd).await?;
 
         let mut events: Vec<serde_json::Value> = Vec::new();
+        // Accumulated across every assistant message in the turn. With child
+        // tools enabled one prompt can drive several model calls before
+        // `agent_end`; keeping only the last record would under-report the run's
+        // real token cost in the signed receipt.
         let mut usage = Usage {
             tokens_in: 0,
             tokens_out: 0,
@@ -387,7 +435,7 @@ impl PrimeProvider {
         while let Some(value) = read_line_value(&mut reader).await? {
             let kind = value.get("type").and_then(serde_json::Value::as_str);
             if let Some(found) = extract_usage(&value) {
-                usage = found;
+                accumulate_usage(&mut usage, found);
             }
             match kind {
                 Some("response") => {
@@ -409,16 +457,20 @@ impl PrimeProvider {
             }
         }
 
-        if !saw_agent_end {
+        // Fail closed on BOTH conditions, independently. A child that emits
+        // `agent_end` without ever acknowledging the prompt must not be treated
+        // as a completed turn: otherwise an ignored or rejected prompt looks
+        // successful as soon as the session holds any last-assistant text.
+        if !saw_agent_end || !prompt_ack {
             let stderr_text = stderr_task.await.unwrap_or_default();
             if looks_like_auth_error(&stderr_text) {
                 return Err(ProviderError::Unauthorized);
             }
             let detail = stderr_text.trim();
-            let stage = if prompt_ack {
-                "prime-agent ended before the turn completed"
+            let stage = if !prompt_ack {
+                "prime-agent ended the turn without acknowledging the prompt"
             } else {
-                "prime-agent ended before acknowledging the prompt"
+                "prime-agent ended before the turn completed"
             };
             return Err(ProviderError::Upstream(if detail.is_empty() {
                 stage.to_string()
@@ -437,7 +489,7 @@ impl PrimeProvider {
         let mut content = String::new();
         while let Some(value) = read_line_value(&mut reader).await? {
             if let Some(found) = extract_usage(&value) {
-                usage = found;
+                accumulate_usage(&mut usage, found);
             }
             let is_text_response = value.get("type").and_then(serde_json::Value::as_str)
                 == Some("response")
@@ -555,14 +607,21 @@ async fn read_line_value(
     let mut line = String::new();
     loop {
         line.clear();
-        let read = reader
+        // Bound the read BEFORE the delimiter is found. A plain `read_line`
+        // grows the buffer until a newline or EOF, so a child that emits a huge
+        // record — or never emits a newline at all — could exhaust memory long
+        // before any post-hoc length check ran. `take` caps the bytes this call
+        // can consume, and hitting the cap without a newline is a protocol
+        // error rather than an invitation to keep buffering.
+        let read = (&mut *reader)
+            .take(MAX_LINE_BYTES as u64 + 1)
             .read_line(&mut line)
             .await
             .map_err(|e| ProviderError::Upstream(format!("reading prime-agent stdout: {e}")))?;
         if read == 0 {
             return Ok(None);
         }
-        if line.len() > MAX_LINE_BYTES {
+        if read > MAX_LINE_BYTES || !line.ends_with('\n') {
             return Err(ProviderError::Upstream(
                 "prime-agent emitted an oversized stdout line".into(),
             ));
@@ -598,22 +657,55 @@ fn extract_usage(value: &serde_json::Value) -> Option<Usage> {
     })
 }
 
-/// Whether a child diagnostic describes an authentication/authorization problem
-/// rather than a general failure.
+/// Whether a child diagnostic describes a *credential* failure rather than a
+/// general failure.
+///
+/// The phrases are deliberately specific. A bare `"api key"` or `"expired"`
+/// substring also appears in retryable diagnostics such as
+/// `rate limit exceeded for api key ...`, and classifying those as
+/// [`ProviderError::Unauthorized`] would tell the caller to go fix credentials
+/// that are perfectly valid — turning a transient failure into a permanent one.
+/// Only missing/invalid/revoked-credential wording counts.
 fn looks_like_auth_error(text: &str) -> bool {
     let lowered = text.to_ascii_lowercase();
-    [
+
+    // Rate-limit and quota diagnostics frequently name the key; they are not
+    // credential failures and must never be reclassified as such.
+    const RETRYABLE: [&str; 4] = ["rate limit", "rate-limit", "quota", "too many requests"];
+    if RETRYABLE.iter().any(|needle| lowered.contains(needle)) {
+        return false;
+    }
+
+    const CREDENTIAL_FAILURES: [&str; 12] = [
         "not logged in",
         "no api key",
-        "api key",
+        "missing api key",
+        "invalid api key",
+        "incorrect api key",
+        "api key expired",
+        "revoked",
         "unauthorized",
         "unauthenticated",
-        "authentication",
+        "authentication failed",
+        "credentials",
         "/login",
-        "expired",
-    ]
-    .iter()
-    .any(|needle| lowered.contains(needle))
+    ];
+    CREDENTIAL_FAILURES
+        .iter()
+        .any(|needle| lowered.contains(needle))
+}
+
+/// Add one usage record into the running total for a turn.
+///
+/// Saturating so a pathological child cannot wrap the counters.
+fn accumulate_usage(total: &mut Usage, found: Usage) {
+    total.tokens_in = total.tokens_in.saturating_add(found.tokens_in);
+    total.tokens_out = total.tokens_out.saturating_add(found.tokens_out);
+    match (total.cost_cents, found.cost_cents) {
+        (Some(a), Some(b)) => total.cost_cents = Some(a.saturating_add(b)),
+        (None, Some(b)) => total.cost_cents = Some(b),
+        _ => {}
+    }
 }
 
 /// Flatten a chat transcript into the single prompt string the RPC `prompt`
@@ -710,6 +802,97 @@ mod tests {
         assert!(looks_like_auth_error("Error: not logged in; run /login"));
         assert!(looks_like_auth_error("API key expired"));
         assert!(!looks_like_auth_error("model produced an internal error"));
+    }
+
+    #[test]
+    fn rate_limits_naming_a_key_are_not_credential_failures() {
+        // Review finding: a bare "api key" substring also appears in retryable
+        // diagnostics. Classifying these as Unauthorized would tell the caller
+        // to fix credentials that are valid, turning a transient failure into a
+        // permanent one.
+        for retryable in [
+            "rate limit exceeded for API key sk-abc",
+            "Rate-limit hit; retry later (api key quota)",
+            "quota exhausted for this api key",
+            "429 too many requests",
+        ] {
+            assert!(
+                !looks_like_auth_error(retryable),
+                "{retryable:?} must not be classified as a credential failure"
+            );
+        }
+        // Genuine credential failures still classify.
+        for credential in [
+            "invalid api key",
+            "missing API key",
+            "api key expired",
+            "token revoked",
+            "authentication failed",
+            "401 unauthorized",
+        ] {
+            assert!(
+                looks_like_auth_error(credential),
+                "{credential:?} should be a credential failure"
+            );
+        }
+    }
+
+    #[test]
+    fn usage_accumulates_across_multiple_assistant_messages() {
+        // Review finding: with child tools enabled one prompt can drive several
+        // model calls; keeping only the last record under-reports the run.
+        let mut total = Usage {
+            tokens_in: 0,
+            tokens_out: 0,
+            cost_cents: None,
+        };
+        accumulate_usage(
+            &mut total,
+            Usage {
+                tokens_in: 10,
+                tokens_out: 3,
+                cost_cents: None,
+            },
+        );
+        accumulate_usage(
+            &mut total,
+            Usage {
+                tokens_in: 7,
+                tokens_out: 5,
+                cost_cents: None,
+            },
+        );
+        assert_eq!(total.tokens_in, 17, "input tokens must accumulate");
+        assert_eq!(total.tokens_out, 8, "output tokens must accumulate");
+    }
+
+    #[test]
+    fn usage_accumulation_saturates_rather_than_wrapping() {
+        let mut total = Usage {
+            tokens_in: u32::MAX,
+            tokens_out: 0,
+            cost_cents: None,
+        };
+        accumulate_usage(
+            &mut total,
+            Usage {
+                tokens_in: 100,
+                tokens_out: 0,
+                cost_cents: None,
+            },
+        );
+        assert_eq!(total.tokens_in, u32::MAX);
+    }
+
+    #[test]
+    fn max_tokens_floor_is_configurable_and_zero_delegates() {
+        let default = PrimeConfig::default();
+        assert_eq!(default.max_tokens_floor, DEFAULT_MAX_TOKENS_FLOOR);
+        let delegating = PrimeConfig {
+            max_tokens_floor: 0,
+            ..PrimeConfig::default()
+        };
+        assert_eq!(delegating.max_tokens_floor, 0);
     }
 
     #[test]

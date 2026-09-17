@@ -71,7 +71,10 @@ fn request(prompt: &str) -> CompletionRequest {
             tool_call_id: None,
         }],
         model: ModelId(String::new()),
-        max_tokens: 256,
+        // At/above the default `max_tokens_floor`: this backend refuses a
+        // ceiling it cannot enforce, so the shared fixture must ask for one it
+        // can honour. The refusal path has its own dedicated test.
+        max_tokens: 8_192,
         temperature: 0.0,
         stop_sequences: Vec::new(),
         requested_cost_envelope: CostEnvelope::default(),
@@ -319,6 +322,205 @@ for line in sys.stdin:
         .await
         .expect("human-facing stdout noise must not abort the turn");
     assert_eq!(response.content, "SURVIVED-THE-NOISE");
+}
+
+#[tokio::test]
+async fn agent_end_without_a_prompt_ack_is_not_a_completed_turn() {
+    // Review finding (fail-closed hole): a child that emits `agent_end` without
+    // ever acknowledging the prompt must not be treated as a completed turn,
+    // even when the session still holds last-assistant text from earlier.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let shim = write_shim(
+        dir.path(),
+        "prime-no-ack",
+        r#"#!/usr/bin/env python3
+import json, sys
+
+def emit(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+# Read the prompt, then emit `agent_end` with NO prompt acknowledgement and
+# exit. Exiting matters: a correct provider fails at the missing ack and never
+# sends a follow-up command, so a shim that kept reading stdin would idle until
+# the turn timeout and mask the assertion under a NetworkFailure.
+sys.stdin.readline()
+emit({"type": "agent_end"})
+"#,
+    );
+
+    let err = provider_for(shim)
+        .complete(request("hello"))
+        .await
+        .expect_err("an unacknowledged prompt must not look successful");
+    match err {
+        ProviderError::Upstream(msg) => assert!(
+            msg.contains("without acknowledging the prompt"),
+            "expected a missing-ack diagnostic, got: {msg}"
+        ),
+        other => panic!("expected Upstream, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_rejected_prompt_is_not_rescued_by_stale_assistant_text() {
+    // Same hole from the other side: the prompt is explicitly rejected, yet the
+    // session would still answer `get_last_assistant_text`.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let shim = write_shim(
+        dir.path(),
+        "prime-rejected",
+        r#"#!/usr/bin/env python3
+import json, sys
+
+def emit(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+cmd = json.loads(sys.stdin.readline())
+emit({"id": cmd.get("id"), "type": "response", "command": "prompt",
+      "success": False, "error": "prompt rejected by policy"})
+emit({"type": "agent_end"})
+"#,
+    );
+
+    let err = provider_for(shim)
+        .complete(request("hello"))
+        .await
+        .expect_err("a rejected prompt must fail the turn");
+    match err {
+        ProviderError::Upstream(msg) => assert!(
+            msg.contains("rejected") || msg.contains("acknowledging"),
+            "expected a rejection diagnostic, got: {msg}"
+        ),
+        other => panic!("expected Upstream, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn an_unterminated_stdout_flood_is_bounded_not_buffered_forever() {
+    // Review finding: `read_line` grows its buffer until a newline or EOF, so a
+    // child emitting a newline-free flood could exhaust memory before any
+    // post-hoc length check ran. The read itself must be bounded.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let shim = write_shim(
+        dir.path(),
+        "prime-flood",
+        r#"#!/usr/bin/env python3
+import sys
+sys.stdin.readline()
+# 64 MiB with no newline, well past the 8 MiB line cap.
+chunk = "A" * (1 << 20)
+for _ in range(64):
+    sys.stdout.write(chunk)
+    sys.stdout.flush()
+"#,
+    );
+
+    let started = std::time::Instant::now();
+    let err = provider_for(shim)
+        .complete(request("hello"))
+        .await
+        .expect_err("an oversized line must be refused");
+    match err {
+        ProviderError::Upstream(msg) => assert!(
+            msg.contains("oversized"),
+            "expected an oversized-line diagnostic, got: {msg}"
+        ),
+        other => panic!("expected Upstream, got {other:?}"),
+    }
+    assert!(
+        started.elapsed() < Duration::from_secs(30),
+        "the bounded read should fail fast"
+    );
+}
+
+#[tokio::test]
+async fn usage_accumulates_over_a_multi_message_turn() {
+    // Review finding: several assistant messages in one turn must sum, not
+    // overwrite.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let shim = write_shim(
+        dir.path(),
+        "prime-multi",
+        r#"#!/usr/bin/env python3
+import json, sys
+
+def emit(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    cmd = json.loads(line)
+    if cmd.get("type") == "prompt":
+        emit({"id": cmd.get("id"), "type": "response", "command": "prompt", "success": True})
+        emit({"type": "message_end", "message": {"usage": {"input": 100, "output": 10}}})
+        emit({"type": "message_end", "message": {"usage": {"input": 50, "output": 5}}})
+        emit({"type": "agent_end"})
+    else:
+        emit({"id": cmd.get("id"), "type": "response",
+              "command": "get_last_assistant_text", "success": True,
+              "data": {"text": "MULTI-OK"}})
+        break
+"#,
+    );
+
+    let response = provider_for(shim)
+        .complete(request("hello"))
+        .await
+        .expect("turn should succeed");
+    assert_eq!(
+        response.usage.tokens_in, 150,
+        "input tokens across messages must sum, not overwrite"
+    );
+    assert_eq!(response.usage.tokens_out, 15);
+    assert_eq!(response.cost.tokens_in, 150);
+}
+
+#[tokio::test]
+async fn an_unenforceable_output_ceiling_is_refused_not_ignored() {
+    // Review finding: prime-agent has no per-completion output cap, so a
+    // ceiling below the floor must fail rather than be silently discarded —
+    // otherwise the runtime authorizes N tokens and is billed for more while
+    // the response still reports a clean stop.
+    let provider = provider_for(PathBuf::from("/nonexistent/must-not-spawn"));
+    let mut req = request("hello");
+    req.max_tokens = 16;
+
+    let err = provider
+        .complete(req)
+        .await
+        .expect_err("an unenforceable ceiling must be refused");
+    match err {
+        ProviderError::InvalidRequest(msg) => assert!(
+            msg.contains("cannot enforce"),
+            "expected an enforcement diagnostic, got: {msg}"
+        ),
+        other => panic!("expected InvalidRequest (not a spawn failure), got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_zero_floor_delegates_enforcement_and_accepts_any_ceiling() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let shim = write_shim(dir.path(), "prime-floor-ok", HAPPY_SHIM);
+    let provider = PrimeProvider::new(PrimeConfig {
+        binary: shim,
+        max_tokens_floor: 0,
+        request_timeout: Duration::from_secs(30),
+        ..PrimeConfig::default()
+    });
+
+    let mut req = request("hello");
+    req.max_tokens = 16;
+    let response = provider
+        .complete(req)
+        .await
+        .expect("a zero floor delegates enforcement");
+    assert_eq!(response.content, "SHIM-ROUNDTRIP-OK");
 }
 
 #[tokio::test]
