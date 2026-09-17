@@ -183,6 +183,24 @@ impl RequestBinding {
     }
 }
 
+/// Generate a fresh, unpredictable nonce for a [`RequestBinding`].
+///
+/// Callers MUST NOT hand-pick nonces. Predictability is not a theoretical
+/// concern here: an attacker who can guess the next nonce can pre-burn it in the
+/// verifier's [`ReplayCache`] and lock the legitimate holder out — a denial of
+/// service built out of the replay defence. 128 bits from the OS CSPRNG makes
+/// collision or prediction infeasible.
+///
+/// Test fixtures use literal nonces deliberately (a replay test must reuse one),
+/// which is why this helper exists: production paths have no reason to.
+#[must_use]
+pub fn fresh_nonce() -> String {
+    use rand::Rng as _;
+    let mut bytes = [0u8; 16];
+    rand::rng().fill_bytes(&mut bytes);
+    B64URL.encode(bytes)
+}
+
 /// A holder's proof that it possesses the bound private key.
 #[derive(Clone, Debug)]
 pub struct PopProof {
@@ -379,6 +397,8 @@ pub fn proof_acceptance_window() -> Duration {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use ed25519_dalek::SigningKey;
 
     use super::*;
@@ -387,13 +407,21 @@ mod tests {
         SigningKey::from_bytes(&[seed; 32])
     }
 
+    /// A FIXED test nonce.
+    ///
+    /// Deliberately constant, not a template for callers: the replay guards must
+    /// present the same nonce twice, which `fresh_nonce()` cannot do by design.
+    /// Production paths mint nonces with `fresh_nonce()`; that contract is
+    /// pinned by `fresh_nonces_are_unique_and_high_entropy`.
+    const TEST_FIXED_NONCE: &str = "test-fixture-nonce-not-for-production";
+
     fn binding() -> RequestBinding {
         RequestBinding {
             token_id: "01a0adca-0000-4000-8000-00000000000e".into(),
             tool: "file.read".into(),
             cost: 1,
             audience: "cli://localhost".into(),
-            nonce: "nonce-1".into(),
+            nonce: TEST_FIXED_NONCE.into(),
             issued_at: 1_789_621_936,
         }
     }
@@ -694,6 +722,8 @@ mod tests {
 
     #[test]
     fn the_replay_cache_evicts_entries_older_than_its_window() {
+        // Fixed labels, not cryptographic nonces: this test exercises the
+        // cache's eviction policy, so the values must be stable and comparable.
         let mut cache = ReplayCache::new(60);
         assert!(cache.record("n1", 1_000));
         assert_eq!(cache.len(), 1);
@@ -723,6 +753,39 @@ mod tests {
                 "must reject malformed thumbprint {bad:?}"
             );
         }
+    }
+
+    #[test]
+    fn fresh_nonces_are_unique_and_high_entropy() {
+        // A predictable nonce lets an attacker pre-burn it in the verifier's
+        // replay cache and lock the legitimate holder out, so this is a
+        // security property, not a hygiene one.
+        let nonces: BTreeSet<String> = (0..256).map(|_| fresh_nonce()).collect();
+        assert_eq!(nonces.len(), 256, "fresh_nonce must not repeat");
+        for n in &nonces {
+            // 16 bytes base64url-encoded, unpadded.
+            assert_eq!(n.len(), 22, "expected 128 bits of nonce, got {n:?}");
+        }
+    }
+
+    #[test]
+    fn a_freshly_minted_nonce_passes_verification() {
+        let k = key(1);
+        let mut b = binding();
+        b.nonce = fresh_nonce();
+        let proof = PopProof::create(&k, b.clone());
+        let mut cache = ReplayCache::new(DEFAULT_PROOF_MAX_AGE_SECS);
+        assert!(
+            verify_pop(
+                Some(&cnf(&k)),
+                Some(&proof),
+                &b,
+                PopRequirement::Required,
+                1_789_621_940,
+                &mut cache,
+            )
+            .is_ok()
+        );
     }
 
     #[test]

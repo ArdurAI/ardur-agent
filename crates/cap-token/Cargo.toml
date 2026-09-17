@@ -44,6 +44,9 @@ ed25519-dalek = { version = "2.2.0", default-features = false, features = ["std"
 sha2 = { workspace = true }
 # Signatures travel base64url-encoded, matching the receipt/JWS convention.
 base64 = { workspace = true }
+# PoP nonces come from the OS CSPRNG. A predictable nonce lets an attacker
+# pre-burn it in the verifier's replay cache and lock the real holder out.
+rand = { workspace = true }
 
 [dev-dependencies]
 # Throwaway deny-list files for persistence/propagation tests.
