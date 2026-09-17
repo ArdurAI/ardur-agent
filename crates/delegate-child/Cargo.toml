@@ -1,0 +1,22 @@
+[package]
+name = "ardur-delegate-child"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.90"
+license = "Apache-2.0"
+description = "Supervised provider-backed child agents for delegate_task: attenuated authority, reserved budget, real cancellation"
+publish = false
+
+[dependencies]
+ardur-cap-token = { workspace = true }
+ardur-core-types = { workspace = true }
+ardur-provider-runtime = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+# Issuing a real fixture token beats a byte blob: the lifecycle proofs then
+# exercise genuine revocation ids rather than a shape that only looks like one.
+biscuit-auth = { workspace = true }
+async-trait = { workspace = true }
