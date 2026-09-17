@@ -39,7 +39,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -52,6 +52,7 @@ use ardur_channel_discord::DiscordChannel;
 use ardur_channel_matrix::MatrixChannel;
 use ardur_channel_telegram::TelegramChannel;
 use ardur_cost_gate::{CostEnvelope, CostTuple as GateCostTuple, HolderId as GateHolderId};
+use ardur_fused_runtime::settlement::SettlementSupervisor;
 use ardur_fused_runtime::{
     FusedEvent, FusedRuntime, FusedRuntimeBuilder, SharedDenyList, TurnCommitHandshake,
     VerifiedReceiptCache,
@@ -372,7 +373,10 @@ pub struct AppState {
     /// to join the worker after closing the work channel. `None` in test harnesses
     /// that construct an `AppState` without spawning a real worker.
     worker_handle: Mutex<Option<std::thread::JoinHandle<()>>>,
+    worker_failed: Arc<AtomicBool>,
     journal: Arc<dyn SessionJournal>,
+    /// Retained outside the worker, including after a panic or failed drain.
+    settlements: SettlementSupervisor,
     data_dir: PathBuf,
     chat_bearer_tokens: Vec<String>,
     admin_bearer_tokens: Vec<String>,
@@ -602,6 +606,7 @@ impl AppState {
             receipt_key,
             ModelId::new(&config.model),
         )
+        .require_durable_settlements()
         .audience(AUDIENCE)
         .tool(TOOL)
         // gh#361: the same durable deny list the delegate_task tool was
@@ -699,6 +704,7 @@ impl AppState {
         let security_metrics = Arc::new(SecurityMetrics::default());
         let security_events = SecurityEventLog::in_data_dir(&data_dir);
         let receipt_cache = Arc::new(VerifiedReceiptCache::new());
+        let settlements = runtime.settlement_supervisor();
         let processor = Processor {
             runtime,
             slack: slack.clone(),
@@ -714,7 +720,13 @@ impl AppState {
             security_metrics: security_metrics.clone(),
             security_events,
         };
-        let (work_tx, worker_handle) = spawn_worker(processor);
+        let worker_failed = Arc::new(AtomicBool::new(false));
+        let (work_tx, worker_handle) = spawn_worker(
+            processor,
+            settlements.clone(),
+            journal.clone(),
+            worker_failed.clone(),
+        );
 
         // 8. The MCP surface (opt-in). The same `tools` registry the runtime
         //    invokes is re-exposed over MCP; `build_router` mounts the
@@ -738,6 +750,8 @@ impl AppState {
             slack,
             work_tx: Arc::new(Mutex::new(Some(work_tx))),
             worker_handle: Mutex::new(Some(worker_handle)),
+            worker_failed,
+            settlements,
             journal,
             data_dir,
             chat_bearer_tokens: config.chat_bearer_tokens.clone(),
@@ -1162,7 +1176,8 @@ impl AppState {
     /// Taking the only long-lived sender closes the queue after any in-flight
     /// send completes. Forwarder tasks borrow the sender through the same mutex
     /// instead of holding permanent clones, so the worker can observe closure and
-    /// exit before the process closes the journal.
+    /// exit before the process closes the journal. This joins only; use
+    /// [`finish_shutdown`](Self::finish_shutdown) to check safe settlement closure.
     pub fn shutdown(&self) {
         tracing::info!("graceful shutdown requested");
         let sender = self.work_tx.lock().expect("work_tx mutex poisoned").take();
@@ -1175,10 +1190,43 @@ impl AppState {
             .take();
         if let Some(handle) = worker_handle {
             match handle.join() {
-                Ok(()) => tracing::info!("turn worker shut down cleanly"),
-                Err(_panic) => tracing::error!("turn worker panicked during shutdown"),
+                Ok(()) => {
+                    tracing::info!("turn worker joined; settlement closure still must be checked")
+                }
+                Err(_panic) => {
+                    self.worker_failed.store(true, Ordering::SeqCst);
+                    tracing::error!(
+                        "turn worker panicked during shutdown; retaining settlement owner"
+                    );
+                }
             }
         }
+    }
+
+    /// Retaining control/status handle. A failed drain never consumes ownership.
+    pub fn settlement_supervisor(&self) -> SettlementSupervisor {
+        self.settlements.clone()
+    }
+
+    /// Join the worker and drain before journal closure. No finite-I/O guarantee:
+    /// a stuck provider or filesystem can still block shutdown. On failure the
+    /// state retains the supervisor and journal for inspection/retry.
+    pub async fn finish_shutdown(&self) -> anyhow::Result<()> {
+        self.shutdown();
+        self.settlements.stop_admission();
+        self.settlements
+            .drain_pending(self.journal.as_ref())
+            .await?;
+        anyhow::ensure!(
+            !self.worker_failed.load(Ordering::SeqCst),
+            "turn worker failed; shutdown is not clean"
+        );
+        self.settlements.clone().try_close().map_err(|_| {
+            anyhow::anyhow!(
+                "shutdown has unresolved settlements: {:?}",
+                self.settlements.status()
+            )
+        })
     }
 
     fn work_sender(&self) -> Option<mpsc::Sender<WorkItem>> {
@@ -1423,6 +1471,9 @@ impl Processor {
             caller_gone,
             handshake,
         } = turn;
+        if reply.is_closed() {
+            return;
+        }
 
         let token = match self.mint_session_token(now_unix()) {
             Ok(token) => token,
@@ -1543,14 +1594,18 @@ impl Processor {
     /// Run one `/chat` SSE turn through the progressive fused-runtime pipeline.
     /// Each event is forwarded to the HTTP response body. If forwarding fails,
     /// the receiver has been dropped by the client; dropping the fused stream at
-    /// that point cancels the in-flight provider round before receipt/journal/
-    /// memory side effects are committed.
+    /// that point selects cancellation for uncommitted work. Known expense is
+    /// preserved synchronously; the worker drains its journal projection only
+    /// after this handler and the actual owning stream have dropped.
     async fn handle_http_stream(&self, turn: HttpStreamTurn) {
         let HttpStreamTurn {
             message,
             session_id,
             events,
         } = turn;
+        if events.is_closed() {
+            return; // Already abandoned in the queue: do not admit or dispatch.
+        }
 
         let token = match self.mint_session_token(now_unix()) {
             Ok(token) => token,
@@ -1832,7 +1887,12 @@ const APPROVAL_DECIDE_TOOL: &str = "approval.decide";
 /// Spawn the worker thread: a current-thread Tokio runtime that drains the work
 /// queue, processing each message to completion in arrival order. Returns the
 /// sender the HTTP layer enqueues onto.
-fn spawn_worker(processor: Processor) -> (mpsc::Sender<WorkItem>, std::thread::JoinHandle<()>) {
+fn spawn_worker(
+    processor: Processor,
+    settlements: SettlementSupervisor,
+    journal: Arc<dyn SessionJournal>,
+    worker_failed: Arc<AtomicBool>,
+) -> (mpsc::Sender<WorkItem>, std::thread::JoinHandle<()>) {
     let (tx, mut rx) = mpsc::channel::<WorkItem>(WORKER_QUEUE_CAPACITY);
     let handle = std::thread::Builder::new()
         .name("ardur-turn-worker".to_string())
@@ -1843,6 +1903,7 @@ fn spawn_worker(processor: Processor) -> (mpsc::Sender<WorkItem>, std::thread::J
             {
                 Ok(rt) => rt,
                 Err(e) => {
+                    worker_failed.store(true, Ordering::SeqCst);
                     tracing::error!(error = %e, "worker runtime failed to start");
                     return;
                 }
@@ -1883,6 +1944,16 @@ fn spawn_worker(processor: Processor) -> (mpsc::Sender<WorkItem>, std::thread::J
                             "turn worker: a turn panicked; isolating it and continuing"
                         );
                     }
+                    // All request futures and owning streams above have dropped.
+                    // Do not stop admission between turns; the retained owner
+                    // keeps any unresolved money/storage facts fail-closed.
+                    if let Err(error) = settlements.drain_pending(journal.as_ref()).await {
+                        tracing::error!(%error, status = ?settlements.status(), "turn settlement drain unresolved");
+                    }
+                }
+                settlements.stop_admission();
+                if let Err(error) = settlements.drain_pending(journal.as_ref()).await {
+                    tracing::error!(%error, status = ?settlements.status(), "worker exit settlement drain unresolved");
                 }
             });
         })
@@ -2238,10 +2309,34 @@ mod tests {
     /// Build a minimal `AppState` wired to `work_tx` for enqueue-path tests.
     /// The worker side of the channel is the caller's to hold (or drop).
     fn test_state(work_tx: mpsc::Sender<WorkItem>, tempdir: &tempfile::TempDir) -> AppState {
+        let model = ModelId::new("test");
+        let runtime = FusedRuntimeBuilder::new(
+            KeyPair::new().public(),
+            CedarPolicyBundle::load(PolicySource::Embedded(
+                "permit(principal, action, resource);".into(),
+            ))
+            .unwrap(),
+            Arc::new(ardur_provider_runtime::AnthropicProvider::stub(
+                model.clone(),
+            )),
+            Es256SigningKey::generate(),
+            model,
+        )
+        .receipt_log(
+            tempdir
+                .path()
+                .canonicalize()
+                .unwrap()
+                .join("receipts.jsonl"),
+        )
+        .build()
+        .unwrap();
         AppState {
             slack: None,
             work_tx: Arc::new(Mutex::new(Some(work_tx))),
             worker_handle: Mutex::new(None),
+            worker_failed: Arc::new(AtomicBool::new(false)),
+            settlements: runtime.settlement_supervisor(),
             journal: Arc::new(InMemorySessionJournal::new(SessionId::new())),
             data_dir: tempdir.path().to_path_buf(),
             chat_bearer_tokens: Vec::new(),
@@ -2310,53 +2405,30 @@ mod tests {
         );
     }
 
-    #[test]
-    fn shutdown_closes_worker_queue_and_joins_thread() {
-        let (work_tx, mut work_rx) = mpsc::channel::<WorkItem>(1);
-        let (joined_tx, joined_rx) = std::sync::mpsc::channel();
-        let worker_handle = std::thread::spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("test runtime builds");
-            runtime.block_on(async move { while work_rx.recv().await.is_some() {} });
-            joined_tx.send(()).expect("joined signal sends");
-        });
-
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let state = AppState {
-            slack: Some(Arc::new(SlackAdapter::new(
-                SecretString::from("xoxb-test".to_string()),
-                SecretString::from("signing-secret".to_string()),
-                "A123".to_string(),
-            ))),
-            work_tx: Arc::new(Mutex::new(Some(work_tx))),
-            worker_handle: Mutex::new(Some(worker_handle)),
-            journal: Arc::new(InMemorySessionJournal::new(SessionId::new())),
-            data_dir: tempdir.path().to_path_buf(),
-            chat_bearer_tokens: Vec::new(),
-            admin_bearer_tokens: Vec::new(),
-            admin_cap_token_gate: false,
-            cap_issuer_public_key: KeyPair::new().public(),
-            deny_list: SharedDenyList::new(),
-            cors_origins: Vec::new(),
-            tool_allowlist: Vec::new(),
-            cost_budget_cents: 0,
-            mcp: None,
-            matrix: Arc::new(OnceLock::new()),
-            discord: Arc::new(OnceLock::new()),
-            telegram: Arc::new(OnceLock::new()),
-            receipt_jwks: ardur_receipt::Jwks::new(),
-            receipt_cache: Arc::new(VerifiedReceiptCache::new()),
-            security_metrics: Arc::new(SecurityMetrics::default()),
-            http_turn_timeout: Duration::from_secs(30),
-        };
-
+    #[tokio::test]
+    async fn shutdown_closes_worker_queue_and_joins_thread() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(tx, &dir);
+        let handle = std::thread::spawn(move || while rx.blocking_recv().is_some() {});
+        *state.worker_handle.lock().unwrap() = Some(handle);
         assert!(state.worker_alive());
-        state.shutdown();
+        state.finish_shutdown().await.unwrap();
         assert!(!state.worker_alive());
-        joined_rx
-            .recv_timeout(std::time::Duration::from_secs(1))
-            .expect("worker thread observed channel close");
+    }
+
+    #[tokio::test]
+    async fn worker_panic_cannot_be_reported_as_clean_shutdown() {
+        let (tx, _rx) = mpsc::channel(1);
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(tx, &dir);
+        *state.worker_handle.lock().unwrap() =
+            Some(std::thread::spawn(|| panic!("local worker fault")));
+        assert!(state.finish_shutdown().await.is_err());
+        assert!(
+            state.finish_shutdown().await.is_err(),
+            "failure remains observable on repeated shutdown"
+        );
+        assert!(state.settlement_supervisor().status().stopped);
     }
 }

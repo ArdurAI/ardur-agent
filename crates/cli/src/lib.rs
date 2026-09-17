@@ -408,6 +408,7 @@ pub(crate) fn journal_entries_to_history(entries: &[JournalEntry]) -> Vec<ChatMe
             }
             JournalEntry::ToolInvocation { .. }
             | JournalEntry::CostFinalized { .. }
+            | JournalEntry::OperatorExpense { .. }
             | JournalEntry::Checkpoint { .. }
             | JournalEntry::Invalidation { .. }
             | JournalEntry::Rollback { .. } => {}
@@ -529,7 +530,12 @@ async fn run_chat_loop(config: Config, args: &ChatArgs) -> Result<(), CliError> 
     let mut history: Vec<ChatMessage> = restored_history;
     // A tty drives the rich line-editor; piped/redirected stdin reads lines
     // directly so `echo "hi" | ardur chat` (and the integration tests) work.
-    if stdin_tty {
+    // Retain independently of every turn/REPL future, including early errors.
+    let settlements = match &engine {
+        ActiveEngine::Fused(e) => Some(e.settlements.clone()),
+        ActiveEngine::Echo(_) => None,
+    };
+    let result = if stdin_tty {
         run_interactive(
             &engine,
             &bus,
@@ -538,7 +544,7 @@ async fn run_chat_loop(config: Config, args: &ChatArgs) -> Result<(), CliError> 
             &mut history,
             stream_enabled,
         )
-        .await?;
+        .await
     } else {
         run_piped(
             &engine,
@@ -549,8 +555,16 @@ async fn run_chat_loop(config: Config, args: &ChatArgs) -> Result<(), CliError> 
             stream_enabled,
         )
         .await;
+        Ok(())
+    };
+    if let Some(settlements) = settlements {
+        let closed = settlements.finish().await;
+        // An earlier REPL/output error wins, but shutdown failure is logged and
+        // never advertised as clean completion.
+        result.and(closed)
+    } else {
+        result
     }
-    Ok(())
 }
 
 /// The interactive REPL over a `rustyline` line-editor.

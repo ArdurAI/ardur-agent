@@ -50,6 +50,7 @@ fn every_variant_roundtrips() {
                 attention_score: 0,
             },
             at: UnixTsMillis(4),
+            reason: None,
         },
         JournalEntry::Checkpoint {
             checkpoint_id: Uuid::new_v4(),
@@ -70,6 +71,32 @@ fn every_variant_roundtrips() {
     // The discriminant is the tagged `kind` field.
     let json = serde_json::to_value(&variants[0]).expect("to_value");
     assert_eq!(json["kind"], "UserMessage");
+}
+
+#[test]
+fn settlement_records_and_legacy_cost_without_reason_roundtrip() {
+    let finalized = JournalEntry::CostFinalized {
+        reservation_id: ReservationId::new(),
+        actual: CostTuple::cents(2),
+        refunded: CostDelta::full_credit(&CostTuple::cents(8)),
+        at: UnixTsMillis(4),
+        reason: Some("refusal:tool_policy".into()),
+    };
+    assert_roundtrips(&finalized);
+    let mut legacy = serde_json::to_value(&finalized).unwrap();
+    legacy.as_object_mut().unwrap().remove("reason");
+    let decoded: JournalEntry = serde_json::from_value(legacy).unwrap();
+    assert!(
+        matches!(decoded, JournalEntry::CostFinalized { reason: None, actual, .. } if actual.cents == 2)
+    );
+    assert_roundtrips(&JournalEntry::OperatorExpense {
+        session_id: ardur_session_journals::SessionId::new(),
+        reservation_id: ReservationId::new(),
+        provider_cost: CostTuple::cents(9),
+        class: "cancelled_precommit".into(),
+        reason: "known usage, caller refunded".into(),
+        at: UnixTsMillis(5),
+    });
 }
 
 #[test]

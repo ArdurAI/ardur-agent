@@ -43,7 +43,7 @@ fn sample_history() -> Vec<ChatMessage> {
 /// `context.compact.applied.v1` verb.
 #[tokio::test]
 async fn compact_installs_a_checkpoint_without_polluting_the_turn_journal() {
-    let dir = tempfile::tempdir().expect("journal dir");
+    let dir = support::tempdir().expect("journal dir");
     let session_id = SessionId::new();
     let journal = Arc::new(FileSessionJournal::new(dir.path(), session_id).expect("journal opens"));
     let provider = Arc::new(support::EchoProvider::new());
@@ -88,7 +88,7 @@ async fn compact_installs_a_checkpoint_without_polluting_the_turn_journal() {
 /// what the provider is asked to preserve.
 #[tokio::test]
 async fn compact_includes_the_focus_text_in_the_provider_request() {
-    let dir = tempfile::tempdir().expect("journal dir");
+    let dir = support::tempdir().expect("journal dir");
     let session_id = SessionId::new();
     let journal = Arc::new(FileSessionJournal::new(dir.path(), session_id).expect("journal opens"));
     let provider = Arc::new(support::EchoProvider::new());
@@ -115,7 +115,7 @@ async fn compact_includes_the_focus_text_in_the_provider_request() {
 /// append happens) no receipt either.
 #[tokio::test]
 async fn preview_compact_does_not_install_anything() {
-    let dir = tempfile::tempdir().expect("journal dir");
+    let dir = support::tempdir().expect("journal dir");
     let session_id = SessionId::new();
     let journal = Arc::new(FileSessionJournal::new(dir.path(), session_id).expect("journal opens"));
     let provider = Arc::new(support::EchoProvider::new());
@@ -137,7 +137,7 @@ async fn preview_compact_does_not_install_anything() {
 /// `rollback_to_checkpoint` path a manual §1.8 checkpoint does.
 #[tokio::test]
 async fn a_compaction_checkpoint_is_restorable_via_rollback() {
-    let dir = tempfile::tempdir().expect("journal dir");
+    let dir = support::tempdir().expect("journal dir");
     let session_id = SessionId::new();
     let journal = Arc::new(FileSessionJournal::new(dir.path(), session_id).expect("journal opens"));
     let provider = Arc::new(support::EchoProvider::new());
@@ -173,7 +173,7 @@ async fn a_compaction_checkpoint_is_restorable_via_rollback() {
 /// provider is never dispatched (verification happens before spending).
 #[tokio::test]
 async fn compact_is_denied_without_the_capability_and_never_spends() {
-    let dir = tempfile::tempdir().expect("journal dir");
+    let dir = support::tempdir().expect("journal dir");
     let session_id = SessionId::new();
     let journal = Arc::new(FileSessionJournal::new(dir.path(), session_id).expect("journal opens"));
     let provider = Arc::new(support::EchoProvider::new());
@@ -206,10 +206,11 @@ async fn compact_is_denied_without_the_capability_and_never_spends() {
 /// side chain.
 #[tokio::test]
 async fn compaction_receipts_chain_with_turn_receipts() {
-    let dir = tempfile::tempdir().expect("journal dir");
+    let dir = support::tempdir().expect("journal dir");
     let session_id = SessionId::new();
     let journal = Arc::new(FileSessionJournal::new(dir.path(), session_id).expect("journal opens"));
-    let receipt_log = tempfile::NamedTempFile::new().expect("receipt log");
+    let receipt_dir = support::tempdir().expect("receipt directory");
+    let receipt_log = tempfile::NamedTempFile::new_in(receipt_dir.path()).expect("receipt log");
     let provider = Arc::new(support::EchoProvider::new());
     let runtime = support::runtime_builder_with_policy(provider, permissive_policy())
         .with_journal(journal)

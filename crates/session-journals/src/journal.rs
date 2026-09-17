@@ -7,6 +7,17 @@ use crate::error::JournalError;
 use crate::types::{EntryId, JournalEntry};
 use ardur_runtime::SessionId;
 
+/// Acknowledgement of one settlement projection. Generic errors are ambiguous.
+#[derive(Debug)]
+pub enum ProjectionOutcome {
+    /// The entry was durably appended.
+    Durable(EntryId),
+    /// The implementation proves it never entered a write for this attempt.
+    DefinitelyNotApplied(JournalError),
+    /// The write may have happened. Do not refund or retry blindly.
+    Unknown(JournalError),
+}
+
 /// The durable, replayable record of one agent session.
 ///
 /// A journal is append-only: entries are written in order and never mutated in
@@ -33,6 +44,16 @@ pub trait SessionJournal: Send + Sync {
     /// Returns [`JournalError::Io`]/[`JournalError::Serde`] if the entry could
     /// not be persisted.
     async fn append(&self, entry: JournalEntry) -> Result<EntryId, JournalError>;
+
+    /// Append a stable settlement projection. The caller must serialize and
+    /// retain the exact attempt across cancellation. The default cannot resolve
+    /// ambiguous errors; replay absence is NOT proof of nonapplication.
+    async fn append_settlement(&self, _id: uuid::Uuid, entry: JournalEntry) -> ProjectionOutcome {
+        match self.append(entry).await {
+            Ok(id) => ProjectionOutcome::Durable(id),
+            Err(error) => ProjectionOutcome::Unknown(error),
+        }
+    }
 
     /// Return the number of entries currently in this journal.
     ///

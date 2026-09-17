@@ -53,7 +53,7 @@ impl SessionJournal for FailingAppendJournal {
 
 #[tokio::test]
 async fn journal_append_failure_leaves_reconcilable_orphan_receipt() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = support::tempdir().expect("tempdir");
     let receipt_log = root.path().join("receipts.jsonl");
     let session_id = SessionId::new();
     let provider = Arc::new(EchoProvider::new());
@@ -82,8 +82,8 @@ async fn journal_append_failure_leaves_reconcilable_orphan_receipt() {
 
 #[tokio::test]
 async fn receipt_persist_failure_rolls_back_journal_entries() {
-    let root = tempfile::tempdir().expect("tempdir");
-    let receipt_log_is_directory = root.path().join("missing-parent").join("receipts.jsonl");
+    let root = support::tempdir().expect("tempdir");
+    let receipt_log_is_directory = root.path().join("receipts.jsonl");
     let session_id = SessionId::new();
     let provider = Arc::new(EchoProvider::new());
     let journal = Arc::new(ardur_session_journals::InMemorySessionJournal::new(
@@ -94,7 +94,10 @@ async fn receipt_persist_failure_rolls_back_journal_entries() {
         .with_journal(journal.clone())
         .receipt_log(&receipt_log_is_directory)
         .build()
-        .expect("runtime builds even before opening receipt log for append");
+        .expect("runtime builds against an initially regular receipt log");
+    // Fail the actual receipt path after boot preflight, not during construction.
+    std::fs::remove_file(&receipt_log_is_directory).unwrap();
+    std::fs::create_dir(&receipt_log_is_directory).unwrap();
     let holder = ardur_cost_gate::HolderId(support::HOLDER.to_string());
     let budget_before = runtime
         .remaining_budget(&holder)
@@ -130,7 +133,7 @@ async fn receipt_persist_failure_rolls_back_journal_entries() {
 
 #[tokio::test]
 async fn stream_journal_append_failure_leaves_reconcilable_orphan_receipt() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = support::tempdir().expect("tempdir");
     let receipt_log = root.path().join("receipts.jsonl");
     let session_id = SessionId::new();
     let provider = Arc::new(EchoProvider::new());
@@ -166,8 +169,8 @@ async fn stream_journal_append_failure_leaves_reconcilable_orphan_receipt() {
 
 #[tokio::test]
 async fn stream_receipt_persist_failure_rolls_back_journal_entries() {
-    let root = tempfile::tempdir().expect("tempdir");
-    let receipt_log_is_directory = root.path().join("missing-parent").join("receipts.jsonl");
+    let root = support::tempdir().expect("tempdir");
+    let receipt_log_is_directory = root.path().join("receipts.jsonl");
     let session_id = SessionId::new();
     let provider = Arc::new(EchoProvider::new());
     let journal = Arc::new(ardur_session_journals::InMemorySessionJournal::new(
@@ -178,7 +181,10 @@ async fn stream_receipt_persist_failure_rolls_back_journal_entries() {
         .with_journal(journal.clone())
         .receipt_log(&receipt_log_is_directory)
         .build()
-        .expect("runtime builds even before opening receipt log for append");
+        .expect("runtime builds against an initially regular receipt log");
+    // Fail the actual receipt path after boot preflight, not during construction.
+    std::fs::remove_file(&receipt_log_is_directory).unwrap();
+    std::fs::create_dir(&receipt_log_is_directory).unwrap();
     let holder = ardur_cost_gate::HolderId(support::HOLDER.to_string());
     let budget_before = runtime
         .remaining_budget(&holder)
@@ -214,7 +220,7 @@ async fn stream_receipt_persist_failure_rolls_back_journal_entries() {
 
 #[test]
 fn boot_refuses_broken_receipt_chain() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = support::tempdir().expect("tempdir");
     let receipt_log = root.path().join("receipts.jsonl");
     let key = support::receipt_key();
 
@@ -263,7 +269,7 @@ fn boot_refuses_broken_receipt_chain() {
 
 #[test]
 fn boot_refuses_hash_linked_receipt_with_wrong_es256_key() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = support::tempdir().expect("tempdir");
     let receipt_log = root.path().join("receipts.jsonl");
     let wrong_key = Es256SigningKey::generate();
 
@@ -305,7 +311,7 @@ fn boot_refuses_hash_linked_receipt_with_wrong_es256_key() {
 
 #[tokio::test]
 async fn direct_reconciliation_reauthenticates_receipts_loaded_after_boot() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = support::tempdir().expect("tempdir");
     let receipt_log = root.path().join("receipts.jsonl");
     let session_id = SessionId::new();
     let journal = Arc::new(InMemorySessionJournal::new(session_id));
@@ -354,7 +360,7 @@ async fn direct_reconciliation_reauthenticates_receipts_loaded_after_boot() {
 
 #[test]
 fn load_persisted_chain_drops_and_truncates_torn_trailing_line() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = support::tempdir().expect("tempdir");
     let receipt_log = root.path().join("receipts.jsonl");
     let key = support::receipt_key();
     let body = ReceiptBody {

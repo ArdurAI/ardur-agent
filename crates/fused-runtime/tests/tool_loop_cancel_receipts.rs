@@ -140,7 +140,7 @@ fn probe_gone_after_rounds(
 /// that never happened — is the bug.
 #[tokio::test]
 async fn a_cancel_during_a_later_round_does_not_leave_a_silent_orphan_receipt() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = support::tempdir().expect("tempdir");
     let receipt_log = root.path().join("receipts.jsonl");
     let session_id = ardur_runtime::SessionId::new();
 
@@ -212,7 +212,7 @@ async fn a_cancel_during_a_later_round_does_not_leave_a_silent_orphan_receipt() 
 /// minting cancellation receipts for turns that never committed anything.
 #[tokio::test]
 async fn a_cancel_before_the_first_commit_still_mints_nothing() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = support::tempdir().expect("tempdir");
     let receipt_log = root.path().join("receipts.jsonl");
     let session_id = ardur_runtime::SessionId::new();
 
@@ -254,7 +254,7 @@ async fn a_cancel_before_the_first_commit_still_mints_nothing() {
 /// chain ends with the final answer's receipt, not a cancellation record.
 #[tokio::test]
 async fn an_uncancelled_multi_round_loop_settles_normally() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = support::tempdir().expect("tempdir");
     let receipt_log = root.path().join("receipts.jsonl");
     let session_id = ardur_runtime::SessionId::new();
 
@@ -311,7 +311,7 @@ async fn an_uncancelled_multi_round_loop_settles_normally() {
 /// marker would double-count a cancelled turn's spend.
 #[tokio::test]
 async fn a_cancellation_marker_carries_zero_cost() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = support::tempdir().expect("tempdir");
     let receipt_log = root.path().join("receipts.jsonl");
     let session_id = ardur_runtime::SessionId::new();
 
@@ -382,13 +382,13 @@ fn recording_a_cancellation_never_happens_while_the_commit_guard_is_held() {
     // at the same indentation.
     let open = lines
         .iter()
-        .position(|l| l.trim_start().starts_with("let (signed, receipt) = {"))
+        .position(|l| l.trim_start().starts_with("let signed = {"))
         .expect("commit block should exist; if this function was renamed, re-point this guard");
     let indent = lines[open].len() - lines[open].trim_start().len();
     let closer = format!("{}}};", " ".repeat(indent));
     let close = lines[open + 1..]
         .iter()
-        .position(|l| *l == closer)
+        .position(|l| l.split("//").next().unwrap_or("").trim_end() == closer)
         .map(|i| i + open + 1)
         .expect("commit block should close");
 

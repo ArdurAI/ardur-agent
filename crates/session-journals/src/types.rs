@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use ardur_cost_gate::{CostDelta, CostTuple, UnixTsMillis};
-use ardur_runtime::ReceiptId;
+use ardur_runtime::{ReceiptId, SessionId};
 use ardur_tool_registry::ToolId;
 
 // The content digest a `ToolInvocation` records is the workspace-canonical
@@ -132,6 +132,34 @@ pub enum JournalEntry {
         actual: CostTuple,
         /// The amount released back from the original hold.
         refunded: CostDelta,
+        /// When it was recorded.
+        at: UnixTsMillis,
+        /// Why the reservation settled at `actual` rather than through a
+        /// committed receipt — present only on the gh#452 refusal/timeout
+        /// settlements (a committed turn's settlement carries no reason).
+        /// Absent on every legacy entry (skip-serialized).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+
+    /// gh#452 — operator-incurred expense that must never be billed to the
+    /// caller: known provider usage from a turn the caller was refunded for
+    /// (a precommit cancellation, #359/#422 economics) or an uncertain
+    /// interrupted effect. Deliberately NOT a receipt: the receipt chain only
+    /// carries committed turns, so this record lives in the journal with its
+    /// own class and the reservation it came from.
+    OperatorExpense {
+        /// The session the abandoned turn belonged to.
+        session_id: SessionId,
+        /// The reservation whose known usage became operator expense.
+        reservation_id: ReservationId,
+        /// The known provider cost incurred before the turn was abandoned.
+        provider_cost: CostTuple,
+        /// Machine-readable class, e.g. `cancelled_precommit`,
+        /// `uncertain_interrupted`.
+        class: String,
+        /// Human-readable reason naming what happened.
+        reason: String,
         /// When it was recorded.
         at: UnixTsMillis,
     },

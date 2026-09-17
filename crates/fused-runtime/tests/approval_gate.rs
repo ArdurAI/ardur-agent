@@ -170,7 +170,7 @@ async fn gated_call_proposes_a_pending_card_instead_of_invoking_the_tool() {
         json!({"cmd": "ls"}),
         invocations.clone(),
     ));
-    let approvals_dir = tempfile::tempdir().expect("approvals dir");
+    let approvals_dir = support::tempdir().expect("approvals dir");
     let store = ApprovalStore::new(approvals_dir.path());
     let runtime = runtime_builder(provider)
         .with_tools(gated_registry(
@@ -220,7 +220,7 @@ async fn a_retried_identical_call_while_pending_does_not_duplicate_the_card() {
         json!({"cmd": "ls"}),
         invocations.clone(),
     ));
-    let approvals_dir = tempfile::tempdir().expect("approvals dir");
+    let approvals_dir = support::tempdir().expect("approvals dir");
     let store = ApprovalStore::new(approvals_dir.path());
     let runtime = runtime_builder(provider)
         .with_tools(gated_registry(
@@ -270,7 +270,7 @@ async fn approved_card_lets_the_retried_call_proceed() {
         json!({"cmd": "ls"}),
         invocations.clone(),
     ));
-    let approvals_dir = tempfile::tempdir().expect("approvals dir");
+    let approvals_dir = support::tempdir().expect("approvals dir");
     let store = ApprovalStore::new(approvals_dir.path());
     let runtime = runtime_builder(provider)
         .with_tools(gated_registry(
@@ -323,7 +323,7 @@ async fn denied_card_rejects_the_retried_call() {
         json!({"cmd": "ls"}),
         invocations.clone(),
     ));
-    let approvals_dir = tempfile::tempdir().expect("approvals dir");
+    let approvals_dir = support::tempdir().expect("approvals dir");
     let store = ApprovalStore::new(approvals_dir.path());
     let runtime = runtime_builder(provider)
         .with_tools(gated_registry(
@@ -414,9 +414,9 @@ async fn propose_receipt_chains_with_turn_receipts() {
         json!({"cmd": "ls"}),
         invocations.clone(),
     ));
-    let approvals_dir = tempfile::tempdir().expect("approvals dir");
+    let approvals_dir = support::tempdir().expect("approvals dir");
     let store = ApprovalStore::new(approvals_dir.path());
-    let receipt_log = tempfile::NamedTempFile::new().expect("receipt log");
+    let receipt_log = tempfile::NamedTempFile::new_in(approvals_dir.path()).expect("receipt log");
     let runtime = runtime_builder(provider)
         .with_tools(gated_registry(
             "gated.shell",
@@ -467,7 +467,7 @@ async fn propose_receipt_chains_with_turn_receipts() {
 /// authorisation than the one given.
 #[tokio::test]
 async fn an_approved_card_authorises_one_call_and_is_then_spent() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = support::tempdir().expect("tempdir");
     let store = ApprovalStore::new(root.path().join("approvals"));
 
     let card = store
@@ -534,7 +534,7 @@ async fn an_approved_card_authorises_one_call_and_is_then_spent() {
 /// Claiming a card that was never approved would invent an authorisation.
 #[tokio::test]
 async fn a_pending_or_denied_card_cannot_be_claimed() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = support::tempdir().expect("tempdir");
     let store = ApprovalStore::new(root.path().join("approvals"));
 
     let pending = store
@@ -675,9 +675,9 @@ async fn overlapping_admitted_calls_have_exactly_one_effect() {
         json!({"cmd": "ls"}),
         invocations.clone(),
     ));
-    let approvals_dir = tempfile::tempdir().expect("approvals dir");
+    let approvals_dir = support::tempdir().expect("approvals dir");
     let store = ApprovalStore::new(approvals_dir.path());
-    let receipt_log = tempfile::NamedTempFile::new().expect("receipt log");
+    let receipt_log = tempfile::NamedTempFile::new_in(approvals_dir.path()).expect("receipt log");
 
     let mut registry = ToolRegistry::new();
     registry
@@ -688,8 +688,17 @@ async fn overlapping_admitted_calls_have_exactly_one_effect() {
             release.clone(),
         )))
         .expect("gated id is unique");
+    let registry = Arc::new(registry);
+    // Each runtime permits one economic execution. Race the shared real
+    // approval store across two independent owners, not a capacity rejection.
+    let runtime_b = runtime_builder(provider.clone())
+        .with_tools(registry.clone())
+        .with_approvals(store.clone())
+        .with_approval_gated_capabilities(gated_caps())
+        .build()
+        .expect("second runtime builds");
     let runtime = runtime_builder(provider)
-        .with_tools(Arc::new(registry))
+        .with_tools(registry)
         .with_approvals(store.clone())
         .with_approval_gated_capabilities(gated_caps())
         .receipt_log(receipt_log.path())
@@ -731,7 +740,7 @@ async fn overlapping_admitted_calls_have_exactly_one_effect() {
         entered.notified().await;
         // A is now inside the tool, holding the spent card. B must NOT also
         // invoke: it gets its own pending card instead.
-        let b_err = runtime
+        let b_err = runtime_b
             .submit(request_for("run a command", &token, session_id))
             .await
             .expect_err("the overlapping call must not proceed on a spent grant");
@@ -848,7 +857,7 @@ async fn a_failed_gated_invocation_is_recorded_failed_and_stays_spent() {
         }
     }
 
-    let approvals_dir = tempfile::tempdir().expect("approvals dir");
+    let approvals_dir = support::tempdir().expect("approvals dir");
     let store = ApprovalStore::new(approvals_dir.path());
     let mut registry = ToolRegistry::new();
     registry.register(Box::new(FailingTool)).expect("id unique");
@@ -913,7 +922,7 @@ async fn a_timed_out_gated_invocation_leaves_the_effect_ambiguous() {
         json!({"cmd": "ls"}),
         invocations.clone(),
     ));
-    let approvals_dir = tempfile::tempdir().expect("approvals dir");
+    let approvals_dir = support::tempdir().expect("approvals dir");
     let store = ApprovalStore::new(approvals_dir.path());
 
     let mut registry = ToolRegistry::new();

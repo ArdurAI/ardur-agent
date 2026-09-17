@@ -9,6 +9,58 @@ implementation inventory for `v0.2.0`, not a claim that the open follow-ups
 below have shipped. “Available” distinguishes shipped binary wiring from
 library-only surfaces; a partial slice does not close its larger feature.
 
+## Unreleased E4.2 runtime settlement integration
+
+The fused library now uses the real owned budget capability and bounded file
+settlement store for submit and streaming turns. A configured receipt log is
+required by default; its sibling settlement directory is bound to the actual
+absolute log path and full public signing identity. The explicit `test-support`
+fixture mode owns its temporary directory; product builders force durable mode
+regardless of feature unification or setter order.
+
+Owning stream Drop synchronously preserves known expense and actual refund in
+an authoritative snapshot, **not an asynchronous journal append**. The server now
+retains the supervisor in `AppState`, drains on its existing worker after request
+futures/owning streams drop (including caught turn panics), and drains before
+worker exit. `finish_shutdown` checks settlement closure before the binary closes
+the journal; a worker failure or unresolved settlement is not clean shutdown.
+Already-abandoned queued HTTP work is skipped before admission/provider dispatch.
+CLI chat and scheduler adapters retain the same kind of owner across turn errors,
+drain before reporting successful results, and explicitly drain/close on normal
+exit. Original turn/output errors retain priority; cleanup failures remain logged
+and inspectable through the retained supervisor. Library embedders still must
+retain `settlement_supervisor()` and drive `drain_pending` with their journal.
+Generic append errors remain ambiguous and close admission; only a typed,
+backend-proven nonapplication permits compensation. Receipt ambiguity retains the
+exact signed candidate and actual application. Legacy reconciliation excludes
+modern settlement receipts rather than synthesizing assistant output for them.
+
+Limits: four live/backlog slots, one economic execution, 64 retained snapshots,
+five rounds, eight tools per round, 256 KiB snapshots and 16 KiB receipt candidates.
+There is no pruning or eviction. Snapshot bounds are not disk preallocation or
+an RSS guarantee. Prior-epoch unresolved applications/projections are quarantined;
+budgets remain process-local and are never replayed. Focused local controls cover
+real router/SSE-body abandonment after nonzero usage (including the saturated
+16-event forwarder), worker-owned drain, healthy JSON continuation, same-identity
+server reopen, and fresh-process runtime reopen of acknowledged versus ambiguous
+projection state. The fresh budget is unchanged, prior ambiguity remains closed,
+and no assistant/accounting events are invented or truncated. These are bounded
+controls, not an all-yield/death/restart-repair proof.
+
+Caller-cost consumers keep `OperatorExpense` separate, deduplicate repeated
+reservation projections, and accept legacy `CostFinalized` without `reason`.
+CLI session totals add unreceipted refusal costs to receipt-backed completions
+without counting the completion projection twice. Server receipt statistics use
+the authenticated chain; admin consumer tests use explicit synthetic fixtures,
+not a claim of dashboard signature verification.
+
+Still unimplemented: generic ambiguous receipt/journal acknowledgement repair,
+completion-transcript reconstruction/shared-writer association (E4.3), arbitrary
+process-death losslessness, finite shutdown under blocked nonpreemptible I/O
+(E4.5), and non-host/ACL durability proof. Last-supervisor/process destruction with
+unresolved work is outside the supervised failure model, not safe shutdown.
+This section describes unreleased source, not release or broad CI-parity evidence.
+
 ## Repository and Verification Status
 
 The previous main promotion, `663cd1b` (`v0.1.0-beta.2`), has the same tree as

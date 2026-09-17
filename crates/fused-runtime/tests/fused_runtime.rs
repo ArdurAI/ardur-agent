@@ -134,11 +134,12 @@ impl Provider for PausingProvider {
 async fn happy_path_runs_every_stage() {
     let provider = Arc::new(EchoProvider::new());
     let memory = Arc::new(InMemoryMemoryRuntime::new());
-    let journal_dir = tempfile::tempdir().expect("temp dir");
+    let journal_dir = support::tempdir().expect("temp dir");
     let session_id = SessionId::new();
     let journal =
         Arc::new(FileSessionJournal::new(journal_dir.path(), session_id).expect("journal opens"));
-    let receipt_log = tempfile::NamedTempFile::new().expect("receipt log");
+    let receipt_dir = support::tempdir().expect("receipt directory");
+    let receipt_log = tempfile::NamedTempFile::new_in(receipt_dir.path()).expect("receipt log");
 
     let runtime = runtime_builder(provider.clone())
         .with_memory(memory.clone())
@@ -160,15 +161,23 @@ async fn happy_path_runs_every_stage() {
     let visible = memory.current_as_of(&MemHolderId(HOLDER.to_string()), UnixTsMillis(NOW_MS + 1));
     assert_eq!(visible.len(), 1, "the turn is recorded as one memory fact");
 
-    // 10. the journal persisted the user + assistant messages, replayable.
+    // 10. the typed cost projection and both messages are replayable.
     let replayed = journal.replay(session_id).await.expect("journal replays");
-    assert_eq!(replayed.len(), 2);
-    assert!(matches!(replayed[0], JournalEntry::UserMessage { .. }));
-    assert!(matches!(replayed[1], JournalEntry::AssistantMessage { .. }));
+    assert_eq!(replayed.len(), 3);
+    assert!(
+        matches!(replayed[0], JournalEntry::CostFinalized { actual, reason: None, .. } if actual == outcome.cost)
+    );
+    assert!(
+        matches!(&replayed[1], JournalEntry::UserMessage { content, .. } if content == "hello substrate")
+    );
+    assert!(
+        matches!(&replayed[2], JournalEntry::AssistantMessage { content, receipt_id, .. } if content == &outcome.response.content && receipt_id == &outcome.receipt_id)
+    );
 
     // 6. the receipt log holds one genesis receipt.
     let chain = load_persisted_chain(receipt_log.path()).expect("chain loads");
     assert_eq!(chain.len(), 1);
+    assert_eq!(chain[0].body.cost, outcome.cost);
     assert!(
         chain[0].body.parent_hash.is_none(),
         "first receipt is genesis"
@@ -184,7 +193,8 @@ async fn happy_path_runs_every_stage() {
 async fn mint_records_provider_on_receipt() {
     let provider = Arc::new(EchoProvider::new());
     let session_id = SessionId::new();
-    let receipt_log = tempfile::NamedTempFile::new().expect("receipt log");
+    let receipt_dir = support::tempdir().expect("receipt directory");
+    let receipt_log = tempfile::NamedTempFile::new_in(receipt_dir.path()).expect("receipt log");
 
     let runtime = runtime_builder(provider.clone())
         .receipt_log(receipt_log.path())
@@ -585,7 +595,8 @@ async fn pre_submit_replace_rewrites_request_and_receipt() {
     let provider = Arc::new(EchoProvider::new());
     let mut registry = HookRegistry::new();
     registry.register(Arc::new(RedactingHook::new("redactor")));
-    let receipt_log = tempfile::NamedTempFile::new().expect("receipt log");
+    let receipt_dir = support::tempdir().expect("receipt directory");
+    let receipt_log = tempfile::NamedTempFile::new_in(receipt_dir.path()).expect("receipt log");
 
     let runtime = runtime_builder(provider.clone())
         .registry(Arc::new(registry))
@@ -649,7 +660,8 @@ async fn post_receipt_observer_runs_after_pre_submit() {
 #[tokio::test]
 async fn post_receipt_observer_sees_persisted_signed_jws() {
     let provider = Arc::new(EchoProvider::new());
-    let receipt_log = tempfile::NamedTempFile::new().expect("receipt log");
+    let receipt_dir = support::tempdir().expect("receipt directory");
+    let receipt_log = tempfile::NamedTempFile::new_in(receipt_dir.path()).expect("receipt log");
     let capture = Arc::new(CapturingSignedJwsHook::new());
     let mut registry = HookRegistry::new();
     registry.register(capture.clone());
@@ -686,7 +698,8 @@ async fn post_receipt_observer_sees_persisted_signed_jws() {
 #[tokio::test]
 async fn receipts_chain_across_turns() {
     let provider = Arc::new(EchoProvider::new());
-    let receipt_log = tempfile::NamedTempFile::new().expect("receipt log");
+    let receipt_dir = support::tempdir().expect("receipt directory");
+    let receipt_log = tempfile::NamedTempFile::new_in(receipt_dir.path()).expect("receipt log");
     let runtime = runtime_builder(provider.clone())
         .receipt_log(receipt_log.path())
         .build()
@@ -718,13 +731,18 @@ async fn receipts_chain_across_turns() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_turns_serialize_receipt_chain() {
     let provider = Arc::new(EchoProvider::new());
-    let receipt_log = tempfile::NamedTempFile::new().expect("receipt log");
+    let journal_dir = support::tempdir().expect("journal directory");
+    let session_id = SessionId::new();
+    let journal = Arc::new(FileSessionJournal::new(journal_dir.path(), session_id).unwrap());
+    let receipt_dir = support::tempdir().expect("receipt directory");
+    let receipt_log = tempfile::NamedTempFile::new_in(receipt_dir.path()).expect("receipt log");
     let runtime = Arc::new(
         runtime_builder(provider.clone())
             .projected_envelope(CostEnvelope {
                 cents_max: 1,
                 ..Default::default()
             })
+            .with_journal(journal.clone())
             .receipt_log(receipt_log.path())
             .build()
             .expect("builds"),
@@ -758,6 +776,135 @@ async fn concurrent_turns_serialize_receipt_chain() {
         "only the first concurrent receipt may be a genesis receipt"
     );
     verify_persisted_chain(&chain).expect("the concurrent receipt chain verifies");
+    assert_eq!(provider.call_count(), 16);
+    let entries = journal.replay(session_id).await.unwrap();
+    assert_eq!(entries.len(), 16 * 3);
+    for chunk in entries.chunks_exact(3) {
+        assert!(matches!(
+            chunk[0],
+            JournalEntry::CostFinalized { reason: None, .. }
+        ));
+        assert!(matches!(chunk[1], JournalEntry::UserMessage { .. }));
+        assert!(matches!(chunk[2], JournalEntry::AssistantMessage { .. }));
+    }
+}
+
+/// Waiting submissions allocate no slot/hold, and owning Drop hands execution
+/// to the next caller only after the abandoned reservation has been discharged.
+#[tokio::test]
+async fn queued_admission_and_executing_owner_are_drop_safe() {
+    let provider = Arc::new(PausingProvider::new());
+    let runtime = runtime_builder(provider.clone()).build().unwrap();
+    let token = valid_token();
+    let mut first = Box::pin(runtime.submit(user_request("first", &token)));
+    assert!(futures::poll!(&mut first).is_pending());
+    assert_eq!(provider.call_count(), 1);
+    let held = runtime.remaining_budget(&gate_holder()).await.unwrap();
+    let mut cancelled_waiter = Box::pin(runtime.submit(user_request("cancel waiter", &token)));
+    assert!(futures::poll!(&mut cancelled_waiter).is_pending());
+    assert_eq!(provider.call_count(), 1);
+    assert_eq!(runtime.settlement_supervisor().status().turns.len(), 1);
+    assert_eq!(
+        runtime.remaining_budget(&gate_holder()).await.unwrap(),
+        held
+    );
+    drop(cancelled_waiter);
+    let mut next = Box::pin(runtime.submit(user_request("next", &token)));
+    assert!(futures::poll!(&mut next).is_pending());
+    drop(first);
+    assert_eq!(
+        runtime.remaining_budget(&gate_holder()).await.unwrap(),
+        generous_budget()
+    );
+    provider.resume();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), next)
+        .await
+        .expect("queued submit wakes after owning drop")
+        .expect("queued submit succeeds");
+    assert_eq!(result.response.content, "next");
+    assert_eq!(provider.call_count(), 2);
+    assert!(runtime.settlement_supervisor().status().turns.is_empty());
+}
+
+struct PausingFirstReceipt {
+    calls: AtomicUsize,
+    resume: Notify,
+}
+
+#[async_trait]
+impl LifecycleHook for PausingFirstReceipt {
+    async fn on_post_receipt(&self, _ctx: &PostReceiptCtx<'_>) -> Result<(), HookError> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            self.resume.notified().await;
+        }
+        Ok(())
+    }
+
+    fn hook_id(&self) -> HookId {
+        HookId::new("pausing-first-receipt")
+    }
+}
+
+#[tokio::test]
+async fn final_observer_and_receipt_yield_do_not_hold_economic_admission() {
+    use futures::StreamExt;
+    let provider = Arc::new(EchoProvider::new());
+    let hook = Arc::new(PausingFirstReceipt {
+        calls: AtomicUsize::new(0),
+        resume: Notify::new(),
+    });
+    let mut hooks = HookRegistry::new();
+    hooks.register(hook.clone());
+    let journal_dir = support::tempdir().unwrap();
+    let session_id = SessionId::new();
+    let journal = Arc::new(FileSessionJournal::new(journal_dir.path(), session_id).unwrap());
+    let runtime = runtime_builder(provider.clone())
+        .projected_envelope(CostEnvelope {
+            cents_max: 10,
+            ..Default::default()
+        })
+        .registry(Arc::new(hooks))
+        .with_journal(journal.clone())
+        .build()
+        .unwrap();
+    let token = valid_token();
+    let mut first = Box::pin(runtime.submit(user_request("park observer", &token)));
+    assert!(futures::poll!(&mut first).is_pending());
+    assert_eq!(
+        hook.calls.load(Ordering::SeqCst),
+        1,
+        "parked at the final observer"
+    );
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        runtime.submit(user_request("after observer", &token)),
+    )
+    .await
+    .expect("observer does not retain economic capacity")
+    .unwrap();
+    hook.resume.notify_one();
+    first.await.unwrap();
+
+    let mut stream = Box::pin(runtime.stream(user_request("park receipt", &token)));
+    loop {
+        let event = stream.next().await.expect("receipt event").unwrap();
+        if matches!(event, ardur_fused_runtime::FusedEvent::Receipt { .. }) {
+            break;
+        }
+    }
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        runtime.submit(user_request("after receipt", &token)),
+    )
+    .await
+    .expect("Receipt yield does not retain economic capacity")
+    .unwrap();
+    while let Some(event) = stream.next().await {
+        event.unwrap();
+    }
+    assert_eq!(provider.call_count(), 4);
+    assert_eq!(journal.replay(session_id).await.unwrap().len(), 4 * 3);
+    assert!(runtime.settlement_supervisor().status().turns.is_empty());
 }
 
 /// ARD-501: a provider call slower than the reservation TTL must not discard a
@@ -773,11 +920,12 @@ async fn concurrent_turns_serialize_receipt_chain() {
 async fn slow_provider_turn_survives_reservation_ttl_and_commits() {
     let provider = Arc::new(PausingProvider::new());
     let clock = Arc::new(ManualClock::new(UnixTsMillis(NOW_MS)));
-    let journal_dir = tempfile::tempdir().expect("journal dir");
+    let journal_dir = support::tempdir().expect("journal dir");
     let session_id = SessionId::new();
     let journal =
         Arc::new(FileSessionJournal::new(journal_dir.path(), session_id).expect("journal opens"));
-    let receipt_log = tempfile::NamedTempFile::new().expect("receipt log");
+    let receipt_dir = support::tempdir().expect("receipt directory");
+    let receipt_log = tempfile::NamedTempFile::new_in(receipt_dir.path()).expect("receipt log");
     let runtime = Arc::new(
         runtime_builder(provider.clone())
             .clock(clock.clone())

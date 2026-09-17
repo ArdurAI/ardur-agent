@@ -75,7 +75,7 @@ impl Provider for FailingProvider {
 /// foreground conversation).
 #[tokio::test]
 async fn run_background_task_completes_and_mints_a_receipt() {
-    let dir = tempfile::tempdir().expect("journal dir");
+    let dir = support::tempdir().expect("journal dir");
     let session_id = SessionId::new();
     let journal = Arc::new(FileSessionJournal::new(dir.path(), session_id).expect("journal opens"));
     let provider = Arc::new(support::EchoProvider::new());
@@ -110,7 +110,7 @@ async fn run_background_task_completes_and_mints_a_receipt() {
 /// `error` set — the outcome, not the call, records the failure.
 #[tokio::test]
 async fn run_background_task_failure_still_mints_a_terminal_receipt() {
-    let dir = tempfile::tempdir().expect("journal dir");
+    let dir = support::tempdir().expect("journal dir");
     let session_id = SessionId::new();
     let journal = Arc::new(FileSessionJournal::new(dir.path(), session_id).expect("journal opens"));
     let provider: Arc<dyn Provider> = Arc::new(FailingProvider::new());
@@ -129,7 +129,7 @@ async fn run_background_task_failure_still_mints_a_terminal_receipt() {
 /// `cancel_background_task` mints a `task.background.cancelled.v1` receipt.
 #[tokio::test]
 async fn cancel_background_task_mints_a_receipt() {
-    let dir = tempfile::tempdir().expect("journal dir");
+    let dir = support::tempdir().expect("journal dir");
     let session_id = SessionId::new();
     let journal = Arc::new(FileSessionJournal::new(dir.path(), session_id).expect("journal opens"));
     let provider = Arc::new(support::EchoProvider::new());
@@ -148,7 +148,7 @@ async fn cancel_background_task_mints_a_receipt() {
 /// never dispatched.
 #[tokio::test]
 async fn background_task_is_denied_without_the_capability() {
-    let dir = tempfile::tempdir().expect("journal dir");
+    let dir = support::tempdir().expect("journal dir");
     let session_id = SessionId::new();
     let journal = Arc::new(FileSessionJournal::new(dir.path(), session_id).expect("journal opens"));
     let provider = Arc::new(support::EchoProvider::new());
@@ -169,10 +169,11 @@ async fn background_task_is_denied_without_the_capability() {
 async fn background_task_receipts_chain_with_turn_receipts() {
     use ardur_runtime::ChatRuntime;
 
-    let dir = tempfile::tempdir().expect("journal dir");
+    let dir = support::tempdir().expect("journal dir");
     let session_id = SessionId::new();
     let journal = Arc::new(FileSessionJournal::new(dir.path(), session_id).expect("journal opens"));
-    let receipt_log = tempfile::NamedTempFile::new().expect("receipt log");
+    let receipt_dir = support::tempdir().expect("receipt directory");
+    let receipt_log = tempfile::NamedTempFile::new_in(receipt_dir.path()).expect("receipt log");
     let provider = Arc::new(support::EchoProvider::new());
     let runtime = support::runtime_builder_with_policy(provider, permissive_policy())
         .with_journal(journal)

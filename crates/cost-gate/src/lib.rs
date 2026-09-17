@@ -46,13 +46,14 @@ mod error;
 mod gate;
 mod types;
 
-pub use budget::{BudgetStore, InMemoryBudgetStore};
+pub use budget::{BudgetStore, InMemoryBudgetStore, SyncBudgetStore};
 pub use clock::{Clock, ManualClock, SystemClock};
-pub use error::{AdmissionError, BudgetError, ProvisionError};
-pub use gate::{CostAdmissionGate, InMemoryCostAdmissionGate};
+pub use error::{AdmissionError, BudgetError, OwnedDebitUnrepresentable, ProvisionError};
+pub use gate::{CostAdmissionGate, InMemoryCostAdmissionGate, SettlementReservation};
 pub use types::{
-    AdmissionRequest, CostDelta, CostEnvelope, CostTuple, ModelId, ProviderId, RefundReceipt,
-    Reservation, ReservationHandle, ReservationStatus, Sha256Digest, TokenId, UnixTsMillis,
+    AdmissionRequest, AppliedRefund, CostDelta, CostEnvelope, CostTuple, ModelId, OwnedApplication,
+    OwnedBudgetStatus, OwnedBudgetView, OwnedCost, ProviderId, RefundReceipt, Reservation,
+    ReservationHandle, ReservationStatus, Sha256Digest, TokenId, UnixTsMillis,
 };
 
 /// The principal a budget is held against (a runtime profile, agent, org, or

@@ -91,6 +91,86 @@ pub struct RefundReceipt {
     pub finalized_at: UnixTsMillis,
 }
 
+/// State of a process-local owned reservation. Pending states require the live
+/// capability to be retained; a successful operation can still return pending
+/// if a credit was clamped at the maximum balance.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OwnedBudgetStatus {
+    /// Held, not yet applied; independent of reservation TTL.
+    Active,
+    /// Applied once, with rollback authority retained.
+    Finalized,
+    /// Full release was requested, but some credit remains unapplied.
+    ReleasePending,
+    /// Rollback was requested, but some credit remains unapplied.
+    RollbackPending,
+    /// Hold fully refunded, no authority remains.
+    Released,
+    /// Exact applied debit fully refunded, no authority remains.
+    RolledBack,
+    /// Applied debit retained and rollback authority retired.
+    Committed,
+}
+
+/// Known work and the separately selected caller debit, including failed attempts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwnedCost {
+    /// Observed work, retained even when cancellation selects no caller charge.
+    pub known_incurred: CostTuple,
+    /// Requested caller charge, not a claim that capacity covered the work.
+    pub requested_debit: CostTuple,
+}
+
+/// Exact atomic application evidence, never authority to replay a refund.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwnedApplication {
+    /// Nominal receipt; its signed delta is checked for representability.
+    pub receipt: RefundReceipt,
+    /// Actual hold credit, which may be less than the nominal refund.
+    pub reserved_credit: CostTuple,
+    /// Actual additional charge after the original reservation.
+    pub additional_debit: CostTuple,
+    /// Net charged capacity: reserved minus credit plus additional debit.
+    pub applied_debit: CostTuple,
+    /// Requested debit not covered by applied capacity, per axis.
+    pub shortfall: CostTuple,
+    /// Balance immediately before the atomic application.
+    pub balance_before: CostTuple,
+    /// Balance immediately after the atomic application.
+    pub balance_after: CostTuple,
+}
+
+/// Cumulative exact release/rollback credit. Partial credit remains pending.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppliedRefund {
+    /// Original refund obligation, not a fresh nominal requested charge.
+    pub requested_credit: CostTuple,
+    /// Sum of successfully applied credits; retries only request the remainder.
+    pub applied_credit: CostTuple,
+    /// Credit still owed, including headroom-clamped amounts.
+    pub remaining_credit: CostTuple,
+}
+
+/// Read-only snapshot of live or closed ownership. Serializable evidence does
+/// not carry authority: no gate mutation accepts this type or its receipt.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwnedBudgetView {
+    /// The original reservation id.
+    pub reservation_id: Uuid,
+    /// Holder resolved by admission, never supplied by a settlement caller.
+    pub holder: HolderId,
+    /// Original atomic reservation debit.
+    pub reserved: CostTuple,
+    /// Current lifecycle state.
+    pub status: OwnedBudgetStatus,
+    /// Last selected known/requested tuple; retained on application error.
+    pub attempt: Option<OwnedCost>,
+    /// Successful application, retained across rollback and retirement.
+    pub application: Option<OwnedApplication>,
+    /// Release/rollback obligation and actual cumulative progress.
+    pub refund: Option<AppliedRefund>,
+}
+
 /// An opaque handle returned by [`try_reserve`](crate::BudgetStore::try_reserve)
 /// and consumed by [`refund`](crate::BudgetStore::refund). It carries exactly
 /// what the store needs to credit the right holder back: who was charged, how

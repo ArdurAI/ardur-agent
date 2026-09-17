@@ -48,7 +48,7 @@ use ardur_provider_runtime::{
 };
 use ardur_provider_selector as provider_selector;
 use ardur_runtime::{CapTokenRef, ChatMessage, ChatRuntime, SessionId, SubmitRequest};
-use ardur_session_journals::FileSessionJournal;
+use ardur_session_journals::{FileSessionJournal, SessionJournal};
 use ardur_tool_registry::{
     HttpFetchTool, ListDirTool, ReadFileTool, ShellTool, ToolId, ToolRegistry, WriteFileTool,
 };
@@ -319,9 +319,74 @@ impl GrantTooling {
 /// The default per-turn cents ceiling when `ARDUR_CLI_PER_TURN_CENTS` is unset,
 /// capped at the session budget so a tiny budget still affords a turn.
 const DEFAULT_PER_TURN_CENTS: u64 = 100;
+/// Retained outside cancellable turn futures. No asynchronous work runs in
+/// Drop; callers must finish explicitly before journal/runtime teardown.
+#[derive(Clone)]
+pub(crate) struct SettlementLifecycle {
+    supervisor: ardur_fused_runtime::settlement::SettlementSupervisor,
+    journal: Arc<dyn SessionJournal>,
+}
+impl SettlementLifecycle {
+    pub(crate) fn new(
+        runtime: &ardur_fused_runtime::FusedRuntime,
+        journal: Arc<dyn SessionJournal>,
+    ) -> Self {
+        Self {
+            supervisor: runtime.settlement_supervisor(),
+            journal,
+        }
+    }
+
+    pub(crate) async fn drain(&self) -> Result<(), CliError> {
+        let result = self.supervisor.drain_pending(self.journal.as_ref()).await;
+        let status = self.supervisor.status();
+        if let Err(error) = result {
+            tracing::error!(%error, ?status, "settlement drain unresolved; owner retained");
+            return Err(CliError::State(format!(
+                "settlement drain unresolved: {error}"
+            )));
+        }
+        if !status.turns.is_empty()
+            || status.busy.is_some()
+            || status.executing.is_some()
+            || status.boot_problem.is_some()
+        {
+            tracing::error!(?status, "settlement remains unresolved; owner retained");
+            return Err(CliError::State(
+                "settlement remains unresolved; inspect retained supervisor".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    // Drain even when the original result failed; preserve that error's priority.
+    pub(crate) async fn after<T, E>(
+        &self,
+        result: Result<T, E>,
+        map: impl FnOnce(CliError) -> E,
+    ) -> Result<T, E> {
+        let drained = self.drain().await.map_err(map);
+        result.and_then(|value| drained.map(|()| value))
+    }
+
+    pub(crate) async fn finish(&self) -> Result<(), CliError> {
+        self.supervisor.stop_admission();
+        self.drain().await?;
+        self.supervisor
+            .clone()
+            .try_close()
+            .map_err(|_| CliError::State("unsafe settlement shutdown; owner retained".into()))?;
+        self.journal
+            .close()
+            .await
+            .map_err(|e| CliError::State(format!("closing session journal: {e}")))
+    }
+}
+
 /// A FusedRuntime-backed chat substrate for one interactive session.
 pub struct FusedEngine {
     runtime: ardur_fused_runtime::FusedRuntime,
+    pub(crate) settlements: SettlementLifecycle,
     /// The selected (instrumented) backend, retained for streaming capability
     /// discovery and rate-card rendering. Streamed turns themselves run through
     /// [`ardur_fused_runtime::FusedRuntime::stream`].
@@ -477,8 +542,10 @@ impl FusedEngine {
         };
 
         let session_id = session_id.unwrap_or_default();
-        let journal = FileSessionJournal::new(&dirs.journals, session_id)
-            .map_err(|e| CliError::State(format!("opening the session journal: {e}")))?;
+        let journal = Arc::new(
+            FileSessionJournal::new(&dirs.journals, session_id)
+                .map_err(|e| CliError::State(format!("opening the session journal: {e}")))?,
+        );
         // TODO §7.0: no file-backed `MemoryRuntime` exists yet, so the bi-temporal
         // memory sink is in-process for now (the `~/.ardur/memory/` dir is created
         // for the persistent store that replaces this).
@@ -491,6 +558,7 @@ impl FusedEngine {
             receipt_key,
             model.clone(),
         )
+        .require_durable_settlements()
         .audience(AUDIENCE)
         .tool(TOOL)
         .provision_budget(
@@ -505,7 +573,7 @@ impl FusedEngine {
         )
         .projected_envelope(envelope)
         .with_memory(memory.clone())
-        .with_journal(Arc::new(journal))
+        .with_journal(journal.clone())
         // ARD-457: the operator-granted hardened tools (empty registry when no
         // grants exist — fail-closed).
         // ARD-459: integration tools are folded into the same registry, so a
@@ -535,6 +603,7 @@ impl FusedEngine {
         )?;
 
         Ok(Self {
+            settlements: SettlementLifecycle::new(&runtime, journal),
             runtime,
             provider: provider_handle,
             cap_token,
@@ -545,6 +614,18 @@ impl FusedEngine {
             remaining: Arc::new(AtomicU64::new(budget_cents)),
             offline,
         })
+    }
+
+    /// Inspect/retry retained settlement work, including after an externally
+    /// cancelled `stream_turn` future. Keep this handle until safe closure.
+    pub fn settlement_supervisor(&self) -> ardur_fused_runtime::settlement::SettlementSupervisor {
+        self.settlements.supervisor.clone()
+    }
+
+    /// Explicit normal-exit drain and journal close. Failure leaves this engine
+    /// owning unresolved work; process destruction is not a successful shutdown.
+    pub async fn shutdown(&self) -> Result<(), CliError> {
+        self.settlements.finish().await
     }
 
     /// Whether this session fell back to the network-free stub provider (no
@@ -882,13 +963,18 @@ impl FusedEngine {
     ///
     /// The same cap-token, Cedar policy, cost gate, receipt chain, memory plane,
     /// and durable session journal used by [`run_turn`](Self::run_turn) remain in
-    /// force. Cancelling an unfinished stream leaves no receipt or journal entry.
+    /// force. Drop records cancellation synchronously; this owner drains its
+    /// journal projection after the owning stream (not only its pin) is dropped.
     pub async fn stream_turn<W: std::io::Write>(
         &self,
         messages: &[ChatMessage],
         out: &mut W,
         ctx: &crate::stream::RenderCtx<'_>,
     ) -> std::io::Result<StreamOutcome> {
+        self.settlements
+            .drain()
+            .await
+            .map_err(std::io::Error::other)?;
         let outcome = {
             let stream = self.runtime.stream(SubmitRequest {
                 messages: messages.to_vec(),
@@ -896,18 +982,19 @@ impl FusedEngine {
                 session_id: self.session_id,
                 requested_provider: None,
             });
-            drive_fused_turn(stream, out, ctx).await?
+            drive_fused_turn(stream, out, ctx).await
         };
 
         if let Some(balance) = self.runtime.remaining_budget(&self.holder).await {
             self.remaining.store(balance.cents, Ordering::SeqCst);
         }
-        Ok(outcome)
+        self.settlements.after(outcome, std::io::Error::other).await
     }
 
     /// Run one chat turn over `messages` through the full fused pipeline, then
     /// refresh the displayed budget from the cost gate's ledger.
     pub async fn run_turn(&self, messages: &[ChatMessage]) -> Result<TurnOutcome, CliError> {
+        self.settlements.drain().await?;
         let result = self
             .runtime
             .submit(SubmitRequest {
@@ -916,7 +1003,13 @@ impl FusedEngine {
                 session_id: self.session_id,
                 requested_provider: None,
             })
-            .await?;
+            .await
+            .map_err(CliError::from);
+        // Refresh even on failure, from actual ledger economics (not receipt presence).
+        if let Some(balance) = self.runtime.remaining_budget(&self.holder).await {
+            self.remaining.store(balance.cents, Ordering::SeqCst);
+        }
+        let result = self.settlements.after(result, |e| e).await?;
 
         let used_cents = result.cost.cents;
         // Refresh the displayed balance from the same ledger the gate settled
@@ -1147,6 +1240,152 @@ impl ardur_tool_registry::Tool for ArcTool {
 #[cfg(test)]
 mod grant_tooling_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn broken_output_drains_owning_stream_before_returning_original_error() {
+        use ardur_session_journals::SessionJournal;
+        struct BrokenOutput;
+        impl std::io::Write for BrokenOutput {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "original stdout failure",
+                ))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let dirs = StateDirs {
+            root: root.clone(),
+            memory: root.join("memory"),
+            journals: root.join("journals"),
+            receipts: root.join("receipts"),
+            keys: root.join("keys"),
+        };
+        dirs.create().unwrap();
+        dirs.write_starter_cedar_policy_if_absent().unwrap();
+        let engine = FusedEngine::new(&Config::default(), &dirs, 100)
+            .await
+            .unwrap();
+        let theme = crate::theme::Theme::default().plain();
+        let error = engine
+            .stream_turn(
+                &[ChatMessage::user("local")],
+                &mut BrokenOutput,
+                &crate::stream::RenderCtx::new(&theme, 80),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+        assert_eq!(error.to_string(), "original stdout failure");
+        let status = engine.runtime.settlement_supervisor().status();
+        assert!(
+            status.turns.is_empty(),
+            "stdout error must not strand cancellation projection: {status:?}"
+        );
+        let journal = FileSessionJournal::new(&dirs.journals, engine.session_id).unwrap();
+        let entries = journal.replay(engine.session_id).await.unwrap();
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|e| matches!(
+                    e,
+                    ardur_session_journals::JournalEntry::CostFinalized { .. }
+                ))
+                .count(),
+            1
+        );
+        assert!(!entries.iter().any(|e| matches!(
+            e,
+            ardur_session_journals::JournalEntry::AssistantMessage { .. }
+        )));
+        assert_eq!(engine.remaining_cents(), 100);
+        assert!(crate::journal_entries_to_history(&entries).is_empty());
+
+        struct UnknownJournal {
+            session: SessionId,
+            closed: AtomicU64,
+        }
+        #[async_trait::async_trait]
+        impl SessionJournal for UnknownJournal {
+            async fn append(
+                &self,
+                _: ardur_session_journals::JournalEntry,
+            ) -> Result<ardur_session_journals::EntryId, ardur_session_journals::JournalError>
+            {
+                Err(ardur_session_journals::JournalError::Io(
+                    std::io::Error::other("unknown append"),
+                ))
+            }
+            async fn replay(
+                &self,
+                _: SessionId,
+            ) -> Result<
+                Vec<ardur_session_journals::JournalEntry>,
+                ardur_session_journals::JournalError,
+            > {
+                Ok(vec![])
+            }
+            async fn replay_from(
+                &self,
+                id: SessionId,
+                _: ardur_session_journals::EntryId,
+            ) -> Result<
+                Vec<ardur_session_journals::JournalEntry>,
+                ardur_session_journals::JournalError,
+            > {
+                self.replay(id).await
+            }
+            async fn close(&self) -> Result<(), ardur_session_journals::JournalError> {
+                self.closed.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+            fn session_id(&self) -> &SessionId {
+                &self.session
+            }
+        }
+        let mut engine = engine;
+        let journal = engine.settlements.journal.clone();
+        let unknown = Arc::new(UnknownJournal {
+            session: engine.session_id,
+            closed: AtomicU64::new(0),
+        });
+        engine.settlements.journal = unknown.clone();
+        let error = engine
+            .stream_turn(
+                &[ChatMessage::user("local again")],
+                &mut BrokenOutput,
+                &crate::stream::RenderCtx::new(&theme, 80),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "original stdout failure",
+            "drain failure must not erase original outcome"
+        );
+        assert!(
+            engine.shutdown().await.is_err(),
+            "no clean shutdown with unknown accounting"
+        );
+        assert_eq!(
+            unknown.closed.load(Ordering::SeqCst),
+            0,
+            "do not close unresolved journal"
+        );
+        let supervisor = engine.settlement_supervisor();
+        assert!(!supervisor.status().turns.is_empty());
+        assert!(!supervisor.status().turns[0].pending_projections.is_empty());
+        drop(engine); // Retained supervisor outlives the runtime on failure.
+        assert!(
+            supervisor.drain_pending(journal.as_ref()).await.is_err(),
+            "healthy backend alone cannot erase ambiguity"
+        );
+        assert!(supervisor.try_close().is_err());
+    }
 
     fn record(tool: &str, caps: &[&str], scope: Option<&str>) -> GrantRecord {
         GrantRecord {

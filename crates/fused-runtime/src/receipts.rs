@@ -39,6 +39,12 @@ pub struct PersistedReceipt {
 /// A failure loading or verifying a persisted receipt chain.
 #[derive(Debug, thiserror::Error)]
 pub enum ReceiptChainError {
+    /// Production turns require an explicitly configured durable receipt log.
+    #[error("durable settlement requires a receipt log")]
+    SettlementLogRequired,
+    /// The authoritative settlement store could not be established.
+    #[error("settlement initialization failed: {0}")]
+    Settlement(#[from] crate::settlement::SettlementError),
     /// The receipt-log file could not be read.
     #[error("receipt log i/o error: {0}")]
     Io(#[from] std::io::Error),
@@ -276,6 +282,21 @@ pub(crate) fn open_append_no_follow(path: &Path) -> std::io::Result<std::fs::Fil
         file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
     }
     Ok(file)
+}
+
+/// Append only at the frozen candidate's expected end. Any returned error is
+/// ambiguous after entry to this method; the owner retains candidate and debit.
+pub(crate) fn append_at_expected_end(
+    path: &Path,
+    expected_end: u64,
+    compact: &str,
+) -> std::io::Result<()> {
+    let mut file = open_append_no_follow(path)?;
+    if file.metadata()?.len() != expected_end {
+        return Err(std::io::Error::other("settlement receipt log end changed"));
+    }
+    writeln!(file, "{compact}")?;
+    file.sync_all()
 }
 
 /// Atomically replace a receipt log from an anchored parent descriptor without

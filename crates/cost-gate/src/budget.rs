@@ -61,6 +61,39 @@ pub trait BudgetStore: Send + Sync {
     ) -> Result<CostTuple, BudgetError>;
 }
 
+/// Synchronous, atomic refund extension for process-local owned settlement.
+/// Implementations must return the balances from inside the same mutation and
+/// leave the balance unchanged on `Err`. The returned `after` must equal
+/// `before.apply_delta(&delta)` with the existing per-axis clamping semantics.
+/// This is a process-local capability, not a persistence or replay protocol.
+/// Implementations must not panic or call back into the gate: the owned-state
+/// lock is held across this short synchronous operation.
+pub trait SyncBudgetStore: BudgetStore {
+    /// Apply a signed, clamped change and return atomic before/after balances.
+    fn refund_sync_with_balances(
+        &self,
+        handle: ReservationHandle,
+        delta: CostDelta,
+    ) -> Result<(CostTuple, CostTuple), BudgetError>;
+}
+
+impl SyncBudgetStore for InMemoryBudgetStore {
+    fn refund_sync_with_balances(
+        &self,
+        handle: ReservationHandle,
+        delta: CostDelta,
+    ) -> Result<(CostTuple, CostTuple), BudgetError> {
+        let mut accounts = self.accounts.write();
+        let acct = accounts
+            .get_mut(&handle.holder)
+            .ok_or(BudgetError::HolderNotFound)?;
+        let before = acct.balance;
+        acct.balance = acct.balance.apply_delta(&delta);
+        acct.version = acct.version.wrapping_add(1);
+        Ok((before, acct.balance))
+    }
+}
+
 struct Account {
     balance: CostTuple,
     version: u64,
@@ -103,13 +136,7 @@ impl InMemoryBudgetStore {
         handle: ReservationHandle,
         delta: CostDelta,
     ) -> Result<(), BudgetError> {
-        let mut accounts = self.accounts.write();
-        let acct = accounts
-            .get_mut(&handle.holder)
-            .ok_or(BudgetError::HolderNotFound)?;
-        acct.balance = acct.balance.apply_delta(&delta);
-        acct.version = acct.version.wrapping_add(1);
-        Ok(())
+        self.refund_sync_with_balances(handle, delta).map(|_| ())
     }
 }
 
@@ -167,15 +194,7 @@ impl BudgetStore for InMemoryBudgetStore {
         handle: ReservationHandle,
         delta: CostDelta,
     ) -> Result<(CostTuple, CostTuple), BudgetError> {
-        let mut accounts = self.accounts.write();
-        let acct = accounts
-            .get_mut(&handle.holder)
-            .ok_or(BudgetError::HolderNotFound)?;
-        let before = acct.balance;
-        acct.balance = acct.balance.apply_delta(&delta);
-        let after = acct.balance;
-        acct.version = acct.version.wrapping_add(1);
-        Ok((before, after))
+        self.refund_sync_with_balances(handle, delta)
     }
 
     async fn provision_merge(

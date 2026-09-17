@@ -32,7 +32,7 @@ ardur-cedar-policy = { workspace = true }
 ardur-cli = { path = "../cli" }
 ardur-cost-gate = { workspace = true }
 ardur-cron = { workspace = true }
-ardur-fused-runtime = { workspace = true }
+ardur-fused-runtime = { workspace = true, features = ["test-support"] }
 ardur-lifecycle-hooks = { workspace = true }
 ardur-memory = { workspace = true }
 ardur-media-audio = { workspace = true }

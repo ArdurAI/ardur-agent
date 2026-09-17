@@ -24,7 +24,7 @@ use ardur_e2e_tests::fixtures::{self};
 use ardur_fused_runtime::{load_persisted_chain, verify_persisted_chain};
 use ardur_receipt::Sha256Digest;
 use ardur_runtime::{CapTokenRef, ChatMessage, ChatRuntime, SessionId, SubmitRequest};
-use ardur_session_journals::{FileSessionJournal, SessionJournal};
+use ardur_session_journals::{FileSessionJournal, JournalEntry, SessionJournal};
 
 mod support;
 use support::EchoProvider;
@@ -67,9 +67,9 @@ async fn receipt_chain_and_journal_survive_a_restart() {
         assert_eq!(chain.len(), 3);
         verify_persisted_chain(&chain).expect("the pre-restart chain verifies");
 
-        // The journal holds two entries per turn.
+        // A cost projection is separate from each user/assistant transcript.
         let replayed = journal.replay(session_id).await.expect("journal A replays");
-        assert_eq!(replayed.len(), 6, "three turns × (user + assistant)");
+        assert_turn_entries(&replayed, 3);
 
         // ---- 2. A is dropped here at end of scope — only the files remain.
     }
@@ -110,11 +110,19 @@ async fn receipt_chain_and_journal_survive_a_restart() {
         .replay(session_id)
         .await
         .expect("journal B replays");
-    assert_eq!(
-        replayed.len(),
-        8,
-        "four turns × (user + assistant), durable across restart"
-    );
+    assert_turn_entries(&replayed, 4);
 
     drop(root);
+}
+
+fn assert_turn_entries(entries: &[JournalEntry], turns: usize) {
+    assert_eq!(entries.len(), turns * 3);
+    for turn in entries.chunks_exact(3) {
+        assert!(matches!(
+            turn[0],
+            JournalEntry::CostFinalized { reason: None, .. }
+        ));
+        assert!(matches!(turn[1], JournalEntry::UserMessage { .. }));
+        assert!(matches!(turn[2], JournalEntry::AssistantMessage { .. }));
+    }
 }

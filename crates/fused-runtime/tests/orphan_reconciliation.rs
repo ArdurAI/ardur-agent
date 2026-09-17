@@ -1,18 +1,10 @@
-//! ARD-17 — orphan-receipt reconciliation unit tests.
+//! ARD-17 — reconciliation of authenticated legacy receipt/journal artifacts.
 //!
-//! These exercise [`FusedRuntime::reconcile_receipts`] directly, in isolation
-//! from the mid-turn-crash machinery scenario §2.E9 uses. The orphan is
-//! manufactured the simplest faithful way: run clean turns through a
-//! receipt-log + journal pair, then **truncate the journal's last
-//! `AssistantMessage` line off disk** — leaving that turn's receipt durable in
-//! the chain with no journal entry referencing it. That is byte-for-byte the
-//! state a crash in the stage-6→10 window leaves behind (receipt fsynced at
-//! stage 6, journal append at stage 10 never committed), without needing a
-//! panicking journal decorator.
-//!
-//! A fresh runtime is then built over the same paths — the realistic restart —
-//! so the journal's entry counter is recomputed from the truncated file rather
-//! than carrying a stale in-memory count.
+//! Legacy fixtures use the real receipt signer and file journal, but deliberately
+//! predate durable settlement snapshots. Removing an assistant line leaves a
+//! genuine legacy orphan for the production reconciler. Modern settlement-backed
+//! receipts have a separate non-destructive control: the legacy sweep must not
+//! truncate their evidence or invent a recovered assistant transcript.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -29,25 +21,66 @@ use support::{
     EchoProvider, gate_holder, generous_budget, request_for, runtime_builder, valid_token,
 };
 
-/// Run `prompts.len()` clean turns through a runtime wired with a file journal
-/// at `<root>/sessions/<session>/journal.jsonl` and a receipt log at
-/// `receipt_log`, all on `session_id`. Returns once every turn has journaled.
+/// Seed genuine signed legacy artifacts, not modern state with its safety
+/// metadata deleted. The real reconciler authenticates these receipts at boot.
 async fn run_clean_turns(root: &Path, receipt_log: &Path, session_id: SessionId, prompts: &[&str]) {
-    let provider = Arc::new(EchoProvider::new());
-    let journal = Arc::new(FileSessionJournal::new(root, session_id).expect("journal opens"));
-    let runtime = runtime_builder(provider.clone())
-        .provision_budget(gate_holder(), generous_budget())
-        .with_journal(journal)
-        .receipt_log(receipt_log)
-        .build()
-        .expect("runtime builds");
-    let token = valid_token();
-    for prompt in prompts {
-        runtime
-            .submit(request_for(prompt, &token, session_id))
-            .await
-            .expect("clean turn completes");
+    use ardur_receipt::{ReceiptBody, ReceiptSigner, Sha256Digest, VerbObject};
+    use std::io::Write;
+    let journal = FileSessionJournal::new(root, session_id).expect("journal opens");
+    let mut parent = load_persisted_chain(receipt_log)
+        .unwrap()
+        .last()
+        .map(|r| Sha256Digest::of(r.jws_compact.as_bytes()));
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
     }
+    let mut file = options.open(receipt_log).unwrap();
+    for prompt in prompts {
+        let id = uuid::Uuid::new_v4();
+        let body = ReceiptBody {
+            receipt_id: id,
+            parent_hash: parent,
+            verb: VerbObject::new("llm.completion.minted.v1").unwrap(),
+            issued_at: ardur_receipt::UnixTsMillis(support::NOW_MS),
+            subject: ardur_receipt::HolderId(support::HOLDER.into()),
+            cap_token_id: ardur_receipt::TokenId(uuid::Uuid::new_v4()),
+            payload_digest: Sha256Digest::of(prompt.as_bytes()),
+            session_id: Some(session_id.0),
+            cost: ardur_receipt::CostTuple {
+                tokens_in: 0,
+                tokens_out: 0,
+                cents: 0,
+                wall_ms: 0,
+                attention_score: 0,
+            },
+            tool_calls: vec![],
+            provider: Some("legacy-fixture".into()),
+        };
+        let signed = ReceiptSigner::sign(body, &support::receipt_key()).unwrap();
+        writeln!(file, "{}", signed.jws_compact()).unwrap();
+        file.sync_all().unwrap();
+        parent = Some(Sha256Digest::of(signed.jws_compact().as_bytes()));
+        journal
+            .append(JournalEntry::UserMessage {
+                content: (*prompt).into(),
+                at: ardur_cost_gate::UnixTsMillis(support::NOW_MS),
+            })
+            .await
+            .unwrap();
+        journal
+            .append(JournalEntry::AssistantMessage {
+                content: (*prompt).into(),
+                at: ardur_cost_gate::UnixTsMillis(support::NOW_MS),
+                receipt_id: ardur_runtime::ReceiptId(id),
+            })
+            .await
+            .unwrap();
+    }
+    journal.close().await.unwrap();
 }
 
 /// The path the file journal writes to for `session_id` under `root`.
@@ -109,8 +142,65 @@ fn restart_over(
 }
 
 #[tokio::test]
+async fn modern_receipt_without_transcript_is_not_legacy_recovery_or_truncation() {
+    let root = support::tempdir().unwrap();
+    let receipt_log = root.path().join("receipts.jsonl");
+    let session = SessionId::new();
+    let journal = Arc::new(FileSessionJournal::new(root.path(), session).unwrap());
+    let runtime = runtime_builder(Arc::new(EchoProvider::new()))
+        .with_journal(journal.clone())
+        .receipt_log(&receipt_log)
+        .build()
+        .unwrap();
+    runtime
+        .submit(request_for("modern", &valid_token(), session))
+        .await
+        .unwrap();
+    assert_eq!(
+        runtime
+            .settlement_supervisor()
+            .durable_snapshots()
+            .unwrap()
+            .len(),
+        1
+    );
+    drop(runtime);
+    drop(journal);
+    drop_last_journal_lines(&journal_path(root.path(), session), 1);
+    let original_chain = std::fs::read(&receipt_log).unwrap();
+    let original_journal = std::fs::read(journal_path(root.path(), session)).unwrap();
+    for strategy in [
+        ReconciliationStrategy::AppendSyntheticJournal,
+        ReconciliationStrategy::TruncateOrphans,
+    ] {
+        let (runtime, journal, _) = restart_over(root.path(), &receipt_log, session, strategy);
+        let report = runtime.reconcile_receipts(false).await.unwrap();
+        assert_eq!(
+            report.orphan_receipt_count(),
+            0,
+            "legacy sweep excludes modern settlement ownership"
+        );
+        assert_eq!(std::fs::read(&receipt_log).unwrap(), original_chain);
+        assert_eq!(
+            std::fs::read(journal_path(root.path(), session)).unwrap(),
+            original_journal
+        );
+        assert!(
+            journaled_ids(&journal.replay(session).await.unwrap()).is_empty(),
+            "missing transcript is not fabricated as repaired"
+        );
+        let chain = load_persisted_chain(&receipt_log).unwrap();
+        ardur_fused_runtime::verify_persisted_chain_with_jwks(
+            &chain,
+            &ardur_receipt::Jwks::from_public_key(&support::receipt_key().public_key()),
+        )
+        .unwrap();
+    }
+}
+
+#[tokio::test]
 async fn reconcile_no_orphans_is_noop() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = support::tempdir().expect("tempdir");
     let receipt_log = root.path().join("receipts.jsonl");
     let session_id = SessionId::new();
 
@@ -139,7 +229,7 @@ async fn reconcile_no_orphans_is_noop() {
 
 #[tokio::test]
 async fn reconciliation_ignores_receipts_owned_by_other_session_journals() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = support::tempdir().expect("tempdir");
     let receipt_log = root.path().join("receipts.jsonl");
     let first_session = SessionId::new();
     let second_session = SessionId::new();
@@ -170,7 +260,7 @@ async fn reconciliation_ignores_receipts_owned_by_other_session_journals() {
 
 #[tokio::test]
 async fn reconcile_one_orphan_appends_synthetic_journal_entry() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = support::tempdir().expect("tempdir");
     let receipt_log = root.path().join("receipts.jsonl");
     let session_id = SessionId::new();
 
@@ -244,7 +334,7 @@ async fn reconcile_one_orphan_appends_synthetic_journal_entry() {
 
 #[tokio::test]
 async fn reconcile_one_orphan_truncate_strategy_removes_receipt() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = support::tempdir().expect("tempdir");
     let receipt_log = root.path().join("receipts.jsonl");
     let session_id = SessionId::new();
 
@@ -304,7 +394,7 @@ async fn reconcile_one_orphan_truncate_strategy_removes_receipt() {
 async fn reconcile_truncate_unique_temp_avoids_symlink_collision() {
     use std::os::unix::fs::symlink;
 
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = support::tempdir().expect("tempdir");
     let receipt_log = root.path().join("receipts.jsonl");
     let session_id = SessionId::new();
     run_clean_turns(root.path(), &receipt_log, session_id, &["one", "two"]).await;
@@ -339,7 +429,7 @@ async fn reconcile_truncate_unique_temp_avoids_symlink_collision() {
 
 #[tokio::test]
 async fn reconcile_truncate_non_suffix_orphan_is_undecidable() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = support::tempdir().expect("tempdir");
     let receipt_log = root.path().join("receipts.jsonl");
     let session_id = SessionId::new();
 
@@ -393,7 +483,7 @@ async fn reconcile_truncate_non_suffix_orphan_is_undecidable() {
 
 #[tokio::test]
 async fn reconcile_dry_run_reports_but_does_not_modify() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = support::tempdir().expect("tempdir");
     let receipt_log = root.path().join("receipts.jsonl");
     let session_id = SessionId::new();
 
@@ -432,7 +522,7 @@ async fn reconcile_dry_run_reports_but_does_not_modify() {
 
 #[tokio::test]
 async fn reconcile_idempotent_on_repeat_runs() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = support::tempdir().expect("tempdir");
     let receipt_log = root.path().join("receipts.jsonl");
     let session_id = SessionId::new();
 
@@ -499,7 +589,7 @@ fn drop_assistant_entries_for_receipts(path: &Path, ids: &[uuid::Uuid]) {
 
 #[tokio::test]
 async fn reconcile_mixed_committed_and_orphaned_receipts_appends_recovery_entries() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = support::tempdir().expect("tempdir");
     let receipt_log = root.path().join("receipts.jsonl");
     let session_id = SessionId::new();
 
@@ -579,7 +669,7 @@ async fn reconcile_mixed_committed_and_orphaned_receipts_appends_recovery_entrie
 #[tokio::test]
 async fn reconcile_one_hundred_tail_orphan_iterations_leave_zero_orphans() {
     for iteration in 0..100 {
-        let root = tempfile::tempdir().expect("tempdir");
+        let root = support::tempdir().expect("tempdir");
         let receipt_log = root.path().join("receipts.jsonl");
         let session_id = SessionId::new();
 

@@ -17,13 +17,15 @@ use async_trait::async_trait;
 use parking_lot::RwLock;
 use uuid::Uuid;
 
-use crate::HolderId;
-use crate::budget::BudgetStore;
+use crate::budget::{BudgetStore, SyncBudgetStore};
 use crate::clock::{Clock, SystemClock};
 use crate::error::{AdmissionError, BudgetError, ProvisionError};
 use crate::types::{
     AdmissionRequest, CostDelta, CostEnvelope, CostTuple, ProviderId, RefundReceipt, Reservation,
     ReservationHandle, ReservationStatus, UnixTsMillis,
+};
+use crate::{
+    AppliedRefund, HolderId, OwnedApplication, OwnedBudgetStatus, OwnedBudgetView, OwnedCost,
 };
 
 /// The admission gate every metered call routes through. [`admit`](Self::admit)
@@ -70,6 +72,44 @@ pub trait CostAdmissionGate: Send + Sync {
 /// Default reservation lifetime: how long a hold survives without a finalize.
 const DEFAULT_TTL_MS: u64 = 30_000;
 
+/// Exclusive, process-local settlement authority. It is neither cloneable nor
+/// serializable. Dropping it does not refund or declare success: the gate keeps
+/// the pending state. A runtime registry must retain it until settlement closes.
+/// Moving the gate or token does not change its identity; the token holds a
+/// private, gate-instance identity allocation that cannot be replayed in a new
+/// gate or process. No `Drop` implementation performs budget work.
+///
+/// ```compile_fail
+/// use ardur_cost_gate::SettlementReservation;
+/// fn needs_clone<T: Clone>() {}
+/// needs_clone::<SettlementReservation>();
+/// ```
+///
+/// ```compile_fail
+/// use ardur_cost_gate::SettlementReservation;
+/// fn needs_deserialize<T: for<'de> serde::Deserialize<'de>>() {}
+/// needs_deserialize::<SettlementReservation>();
+/// ```
+#[must_use = "retain the owner in a runtime registry until explicitly closed"]
+#[derive(Debug)]
+pub struct SettlementReservation {
+    gate_identity: Arc<()>,
+    reservation_id: Uuid,
+    closed: Option<OwnedBudgetView>,
+}
+
+struct OwnedRecord {
+    handle: ReservationHandle,
+    view: OwnedBudgetView,
+}
+
+impl SettlementReservation {
+    /// Stable identity for evidence; the id alone is not settlement authority.
+    pub fn reservation_id(&self) -> Uuid {
+        self.reservation_id
+    }
+}
+
 struct ReservationRecord {
     handle: ReservationHandle,
     expires_at: UnixTsMillis,
@@ -82,6 +122,24 @@ struct ReservationRecord {
 struct FinalizedRecord {
     handle: ReservationHandle,
     rollback_credit: CostTuple,
+}
+
+fn release_matches(view: &OwnedBudgetView, known: Option<CostTuple>) -> bool {
+    known.is_none_or(|known| {
+        view.attempt
+            .is_some_and(|attempt| attempt.known_incurred == known)
+    })
+}
+
+// Per-axis positive difference; this is not a narrowing conversion.
+fn positive_difference(a: CostTuple, b: CostTuple) -> CostTuple {
+    CostTuple {
+        tokens_in: a.tokens_in.saturating_sub(b.tokens_in),
+        tokens_out: a.tokens_out.saturating_sub(b.tokens_out),
+        cents: a.cents.saturating_sub(b.cents),
+        wall_ms: a.wall_ms.saturating_sub(b.wall_ms),
+        attention_score: a.attention_score.saturating_sub(b.attention_score),
+    }
 }
 
 fn rollback_credit(
@@ -127,6 +185,7 @@ fn rollback_credit(
 /// handle) and a Phase-1 cap-token→holder directory.
 pub struct InMemoryCostAdmissionGate<B: BudgetStore> {
     budget: B,
+    identity: Arc<()>,
     clock: Arc<dyn Clock>,
     ttl_ms: u64,
     token_holders: RwLock<HashMap<crate::types::TokenId, HolderId>>,
@@ -135,6 +194,10 @@ pub struct InMemoryCostAdmissionGate<B: BudgetStore> {
     provision_cap: Option<CostTuple>,
     reservations: RwLock<HashMap<Uuid, ReservationRecord>>,
     finalized: RwLock<HashMap<Uuid, FinalizedRecord>>,
+    // Lock order: reservations -> owned -> synchronous budget operation.
+    // No owned-state lock crosses an await. SyncBudgetStore must not re-enter
+    // the gate. Owned records never enter the generic finalized/expiry tables.
+    owned: RwLock<HashMap<Uuid, OwnedRecord>>,
 }
 
 impl<B: BudgetStore> InMemoryCostAdmissionGate<B> {
@@ -148,6 +211,7 @@ impl<B: BudgetStore> InMemoryCostAdmissionGate<B> {
     pub fn with_clock(budget: B, clock: Arc<dyn Clock>) -> Self {
         Self {
             budget,
+            identity: Arc::new(()),
             clock,
             ttl_ms: DEFAULT_TTL_MS,
             token_holders: RwLock::new(HashMap::new()),
@@ -156,6 +220,7 @@ impl<B: BudgetStore> InMemoryCostAdmissionGate<B> {
             provision_cap: None,
             reservations: RwLock::new(HashMap::new()),
             finalized: RwLock::new(HashMap::new()),
+            owned: RwLock::new(HashMap::new()),
         }
     }
 
@@ -233,6 +298,309 @@ impl<B: BudgetStore> InMemoryCostAdmissionGate<B> {
     // (Biscuit) claims instead of this explicit directory.
     pub fn bind_token(&self, token_id: crate::types::TokenId, holder: HolderId) {
         self.token_holders.write().insert(token_id, holder);
+    }
+}
+
+impl<B: SyncBudgetStore> InMemoryCostAdmissionGate<B> {
+    fn validate_owner(&self, owner: &SettlementReservation) -> Result<(), AdmissionError> {
+        if !Arc::ptr_eq(&self.identity, &owner.gate_identity) {
+            return Err(AdmissionError::Internal(anyhow::anyhow!(
+                "foreign gate owner"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Inspect pending evidence by id without recovering settlement authority.
+    pub fn pending_owned(&self, id: Uuid) -> Option<OwnedBudgetView> {
+        self.owned.read().get(&id).map(|record| record.view.clone())
+    }
+
+    /// Read a snapshot through the capability, including terminal evidence.
+    pub fn owned_view(
+        &self,
+        owner: &SettlementReservation,
+    ) -> Result<OwnedBudgetView, AdmissionError> {
+        self.validate_owner(owner)?;
+        owner
+            .closed
+            .clone()
+            .or_else(|| self.pending_owned(owner.reservation_id))
+            .ok_or_else(|| AdmissionError::Internal(anyhow::anyhow!("no owned reservation")))
+    }
+
+    /// Apply a selected caller debit synchronously, once, independently of TTL.
+    /// `known` preserves observed work separately from `requested`; cancellation
+    /// may select zero even with known work. Each requested axis must fit in
+    /// `i64::MAX`, ensuring both application and full rollback are representable.
+    /// An out-of-range axis returns an [`AdmissionError::Internal`] containing
+    /// [`crate::OwnedDebitUnrepresentable`], with the attempt retained in the view.
+    ///
+    /// Errors never consume the borrowed owner. A successful application reports
+    /// exact atomic movement, not just the nominal signed receipt. Inspect its
+    /// shortfall and credit components before claiming a fully funded settlement.
+    /// Repeated finalization is refused rather than applying again.
+    pub fn finalize_owned_sync(
+        &self,
+        owner: &mut SettlementReservation,
+        known: CostTuple,
+        requested: CostTuple,
+    ) -> Result<OwnedBudgetView, AdmissionError> {
+        self.validate_owner(owner)?;
+        // The injected clock may panic or re-enter the gate. Sample it before
+        // locking or applying the ledger delta, never between mutation and evidence.
+        let finalized_at = self.clock.now_ms();
+        let mut owned = self.owned.write();
+        let record = owned
+            .get_mut(&owner.reservation_id)
+            .ok_or_else(|| AdmissionError::Internal(anyhow::anyhow!("no owned reservation")))?;
+        if record.view.status != OwnedBudgetStatus::Active {
+            return Err(AdmissionError::Internal(anyhow::anyhow!(
+                "owner is not active"
+            )));
+        }
+        record.view.attempt = Some(OwnedCost {
+            known_incurred: known,
+            requested_debit: requested,
+        });
+        for (axis, value) in [
+            ("tokens_in", requested.tokens_in),
+            ("tokens_out", requested.tokens_out),
+            ("cents", requested.cents),
+            ("wall_ms", requested.wall_ms),
+            ("attention_score", requested.attention_score),
+        ] {
+            i64::try_from(value).map_err(|_| {
+                AdmissionError::Internal(anyhow::Error::new(crate::OwnedDebitUnrepresentable {
+                    dimension: axis,
+                }))
+            })?;
+        }
+        let reserved = record.handle.reserved;
+        // Both operands are <= i64::MAX (reservation axes originate as u32).
+        // CostDelta::between therefore cannot clamp on this owned path.
+        let delta = CostDelta::between(&reserved, &requested);
+        let (before, after) = self
+            .budget
+            .refund_sync_with_balances(record.handle.clone(), delta)
+            .map_err(internal)?;
+        let reserved_credit = positive_difference(after, before);
+        let additional_debit = positive_difference(before, after);
+        let applied_debit = reserved
+            .checked_sub(&reserved_credit)
+            .and_then(|net| net.checked_add(&additional_debit))
+            .expect("clamped movement and bounded nominal debit");
+        record.view.application = Some(OwnedApplication {
+            receipt: RefundReceipt {
+                reservation_id: owner.reservation_id,
+                actual: requested,
+                refunded: delta,
+                finalized_at,
+            },
+            reserved_credit,
+            additional_debit,
+            applied_debit,
+            shortfall: positive_difference(requested, applied_debit),
+            balance_before: before,
+            balance_after: after,
+        });
+        record.view.status = OwnedBudgetStatus::Finalized;
+        Ok(record.view.clone())
+    }
+
+    /// Retire rollback authority after the caller establishes settlement.
+    /// Idempotent only for an already committed owner; never refunds a hold or
+    /// retires a pending refund. This does not itself establish durability.
+    pub fn commit_owned_sync(
+        &self,
+        owner: &mut SettlementReservation,
+    ) -> Result<OwnedBudgetView, AdmissionError> {
+        self.validate_owner(owner)?;
+        if let Some(view) = &owner.closed {
+            return if view.status == OwnedBudgetStatus::Committed {
+                Ok(view.clone())
+            } else {
+                Err(AdmissionError::Internal(anyhow::anyhow!(
+                    "owner already closed differently"
+                )))
+            };
+        }
+        let mut owned = self.owned.write();
+        let record = owned
+            .get_mut(&owner.reservation_id)
+            .ok_or_else(|| AdmissionError::Internal(anyhow::anyhow!("no owned reservation")))?;
+        if record.view.status != OwnedBudgetStatus::Finalized {
+            return Err(AdmissionError::Internal(anyhow::anyhow!(
+                "owner is not finalized"
+            )));
+        }
+        record.view.status = OwnedBudgetStatus::Committed;
+        let view = record.view.clone();
+        owned.remove(&owner.reservation_id);
+        owner.closed = Some(view.clone());
+        Ok(view)
+    }
+
+    /// Refund the exact applied debit once, retaining the owner on failure.
+    /// `Ok` can report `RollbackPending` if maximum-balance clamping prevented
+    /// full credit. Keep the owner and retry only its remaining credit. Failure
+    /// also preserves `RollbackPending`, preventing retirement of lost refunds.
+    /// An already rolled-back owner returns its original terminal snapshot.
+    pub fn rollback_owned_sync(
+        &self,
+        owner: &mut SettlementReservation,
+    ) -> Result<OwnedBudgetView, AdmissionError> {
+        self.refund_owned_sync(owner, None)
+    }
+
+    /// Release an unfinalized hold, retaining known work as separate evidence.
+    /// Never use this for finalized cleanup: only rollback or commit is valid
+    /// then. `Ok(ReleasePending)` is not a completed refund; retain the owner for
+    /// retry. Retries require the same `known` tuple and credit only the remainder.
+    /// Full release is idempotent; all errors leave usable ownership in place.
+    pub fn release_owned_sync(
+        &self,
+        owner: &mut SettlementReservation,
+        known: CostTuple,
+    ) -> Result<OwnedBudgetView, AdmissionError> {
+        self.refund_owned_sync(owner, Some(known))
+    }
+
+    fn refund_owned_sync(
+        &self,
+        owner: &mut SettlementReservation,
+        release_known: Option<CostTuple>,
+    ) -> Result<OwnedBudgetView, AdmissionError> {
+        self.validate_owner(owner)?;
+        let (initial, pending, terminal) = if release_known.is_some() {
+            (
+                OwnedBudgetStatus::Active,
+                OwnedBudgetStatus::ReleasePending,
+                OwnedBudgetStatus::Released,
+            )
+        } else {
+            (
+                OwnedBudgetStatus::Finalized,
+                OwnedBudgetStatus::RollbackPending,
+                OwnedBudgetStatus::RolledBack,
+            )
+        };
+        if let Some(view) = &owner.closed {
+            return if view.status == terminal && release_matches(view, release_known) {
+                Ok(view.clone())
+            } else {
+                Err(AdmissionError::Internal(anyhow::anyhow!(
+                    "owner already closed differently"
+                )))
+            };
+        }
+        let mut owned = self.owned.write();
+        let record = owned
+            .get_mut(&owner.reservation_id)
+            .ok_or_else(|| AdmissionError::Internal(anyhow::anyhow!("no owned reservation")))?;
+        if record.view.status == initial {
+            let credit = if let Some(known) = release_known {
+                record.view.attempt = Some(OwnedCost {
+                    known_incurred: known,
+                    requested_debit: CostTuple::ZERO,
+                });
+                record.handle.reserved
+            } else {
+                record
+                    .view
+                    .application
+                    .as_ref()
+                    .expect("finalized application")
+                    .applied_debit
+            };
+            record.view.refund = Some(AppliedRefund {
+                requested_credit: credit,
+                applied_credit: CostTuple::ZERO,
+                remaining_credit: credit,
+            });
+            record.view.status = pending;
+        } else if record.view.status != pending {
+            return Err(AdmissionError::Internal(anyhow::anyhow!(
+                "invalid owner refund state"
+            )));
+        }
+        if !release_matches(&record.view, release_known) {
+            return Err(AdmissionError::Internal(anyhow::anyhow!(
+                "release evidence differs from pending attempt"
+            )));
+        }
+        let refund = record.view.refund.as_mut().expect("pending refund");
+        let (before, after) = self
+            .budget
+            .refund_sync_with_balances(
+                record.handle.clone(),
+                CostDelta::full_credit(&refund.remaining_credit),
+            )
+            .map_err(internal)?;
+        let applied = after.checked_sub(&before).expect("positive credit");
+        refund.applied_credit = refund
+            .applied_credit
+            .checked_add(&applied)
+            .expect("credit bounded by original obligation");
+        refund.remaining_credit = refund
+            .remaining_credit
+            .checked_sub(&applied)
+            .expect("clamped credit cannot exceed request");
+        if refund.remaining_credit != CostTuple::ZERO {
+            return Ok(record.view.clone());
+        }
+        record.view.status = terminal;
+        let view = record.view.clone();
+        owned.remove(&owner.reservation_id);
+        owner.closed = Some(view.clone());
+        Ok(view)
+    }
+
+    /// Claim a just-admitted reservation exactly once for synchronous settlement.
+    /// Call immediately after ordinary admission, before the next await/event.
+    /// The live hold moves out of generic take/finalize/expiry reach, and stays
+    /// live until its owner explicitly releases, rolls back, or commits it.
+    /// Already expired unclaimed holds stay on the ordinary expiry/refund path.
+    /// Reservation metadata is evidence only: holder and reserved amount always
+    /// come from the gate's original store handle, not from the caller's copy.
+    pub fn claim_owned(
+        &self,
+        reservation: &Reservation,
+    ) -> Result<SettlementReservation, AdmissionError> {
+        // Clock callbacks must run outside the reservation/owned lock boundary.
+        let now = self.clock.now_ms();
+        let mut reservations = self.reservations.write();
+        let record = reservations
+            .get(&reservation.reservation_id)
+            .filter(|record| !record.finalizing)
+            .ok_or_else(|| AdmissionError::Internal(anyhow::anyhow!("no claimable reservation")))?;
+        if now > record.expires_at {
+            // Leave unclaimed expiry/refund to the ordinary finalize path.
+            return Err(AdmissionError::ReservationExpired);
+        }
+        let record = reservations
+            .remove(&reservation.reservation_id)
+            .expect("checked under lock");
+        self.owned.write().insert(
+            reservation.reservation_id,
+            OwnedRecord {
+                view: OwnedBudgetView {
+                    reservation_id: reservation.reservation_id,
+                    holder: record.handle.holder.clone(),
+                    reserved: record.handle.reserved,
+                    status: OwnedBudgetStatus::Active,
+                    attempt: None,
+                    application: None,
+                    refund: None,
+                },
+                handle: record.handle,
+            },
+        );
+        Ok(SettlementReservation {
+            gate_identity: self.identity.clone(),
+            reservation_id: reservation.reservation_id,
+            closed: None,
+        })
     }
 }
 

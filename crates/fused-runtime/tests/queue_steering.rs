@@ -41,7 +41,7 @@ async fn build_runtime_with_journal(
 /// control-plane action against a background task, not a chat turn.
 #[tokio::test]
 async fn accept_steer_directive_mints_a_receipt_without_journaling() {
-    let dir = tempfile::tempdir().expect("journal dir");
+    let dir = support::tempdir().expect("journal dir");
     let session_id = SessionId::new();
     let journal = Arc::new(FileSessionJournal::new(dir.path(), session_id).expect("journal opens"));
     let runtime = build_runtime_with_journal(journal.clone()).await;
@@ -70,7 +70,7 @@ async fn accept_steer_directive_mints_a_receipt_without_journaling() {
 /// An interrupt mints a real, fresh `input.interrupt.accepted.v1` receipt.
 #[tokio::test]
 async fn accept_interrupt_mints_a_receipt() {
-    let dir = tempfile::tempdir().expect("journal dir");
+    let dir = support::tempdir().expect("journal dir");
     let session_id = SessionId::new();
     let journal = Arc::new(FileSessionJournal::new(dir.path(), session_id).expect("journal opens"));
     let runtime = build_runtime_with_journal(journal).await;
@@ -88,7 +88,7 @@ async fn accept_interrupt_mints_a_receipt() {
 /// A steering directive is denied without the `input.steer` capability.
 #[tokio::test]
 async fn accept_steer_directive_is_denied_without_the_capability() {
-    let dir = tempfile::tempdir().expect("journal dir");
+    let dir = support::tempdir().expect("journal dir");
     let session_id = SessionId::new();
     let journal = Arc::new(FileSessionJournal::new(dir.path(), session_id).expect("journal opens"));
     let runtime = build_runtime_with_journal(journal).await;
@@ -110,7 +110,7 @@ async fn accept_steer_directive_is_denied_without_the_capability() {
 /// An interrupt is denied without the `input.interrupt` capability.
 #[tokio::test]
 async fn accept_interrupt_is_denied_without_the_capability() {
-    let dir = tempfile::tempdir().expect("journal dir");
+    let dir = support::tempdir().expect("journal dir");
     let session_id = SessionId::new();
     let journal = Arc::new(FileSessionJournal::new(dir.path(), session_id).expect("journal opens"));
     let runtime = build_runtime_with_journal(journal).await;
@@ -134,10 +134,11 @@ async fn accept_interrupt_is_denied_without_the_capability() {
 async fn steer_and_interrupt_receipts_chain_with_turn_receipts() {
     use ardur_runtime::ChatRuntime;
 
-    let dir = tempfile::tempdir().expect("journal dir");
+    let dir = support::tempdir().expect("journal dir");
     let session_id = SessionId::new();
     let journal = Arc::new(FileSessionJournal::new(dir.path(), session_id).expect("journal opens"));
-    let receipt_log = tempfile::NamedTempFile::new().expect("receipt log");
+    let receipt_dir = support::tempdir().expect("receipt directory");
+    let receipt_log = tempfile::NamedTempFile::new_in(receipt_dir.path()).expect("receipt log");
     let provider = Arc::new(support::EchoProvider::new());
     let runtime = support::runtime_builder_with_policy(provider, permissive_policy())
         .with_journal(journal)

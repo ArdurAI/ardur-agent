@@ -10,6 +10,7 @@ repository.workspace = true
 # `Sha256Digest` (which owns the SHA-256 hashing) is re-exported from the
 # workspace's leaf `core-types` crate, so `sha2` is no longer a direct dep.
 ardur-core-types = { workspace = true }
+ardur-durability = { workspace = true }
 # §1.0 owns the session identity a journal is keyed on and the receipt id an
 # assistant turn / tool call folds into; re-exported so the journal and the
 # runtime never drift into two incompatible schemas (§7.10).

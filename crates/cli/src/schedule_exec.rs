@@ -38,10 +38,10 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ardur_automation::{
-    AutomationAttenuation, AutomationChannel, AutomationDeliveryEvent, AutomationSchedule,
-    AutomationScheduleId, AutomationScheduleStatus, FireReport, FusedAutomationRuntime,
-    ProactiveAutomationError, ProactiveAutomationLoop, ScheduleDriver, ScheduleStore,
-    ScheduledCapToken,
+    AutomationAttenuation, AutomationChannel, AutomationDeliveryEvent, AutomationRuntime,
+    AutomationSchedule, AutomationScheduleId, AutomationScheduleStatus, FireReport,
+    FusedAutomationRuntime, ProactiveAutomationError, ProactiveAutomationLoop, ScheduleDriver,
+    ScheduleStore, ScheduledCapToken,
 };
 use ardur_cap_token::{BiscuitCapTokenIssuer, CapScope, CapTokenIssuer, HolderId as CapHolderId};
 use ardur_cost_gate::{CostEnvelope, CostTuple as GateCostTuple, HolderId as GateHolderId};
@@ -402,6 +402,7 @@ impl AutomationChannel for StdoutAutomationChannel {
 /// The fused runtime plus the issuer/subject a fired schedule needs.
 struct SchedulerRuntime {
     runtime: Arc<FusedRuntime>,
+    settlements: crate::fused::SettlementLifecycle,
     issuer: Arc<BiscuitCapTokenIssuer>,
     subject: String,
     /// Whether the selected provider fell back to the offline stub (no creds).
@@ -453,12 +454,15 @@ async fn build_scheduler_runtime(
     };
 
     let journal_session = SessionId(uuid::Uuid::from_u128(SCHEDULER_JOURNAL_SESSION_UUID));
-    let journal = FileSessionJournal::new(&dirs.journals, journal_session)
-        .map_err(|e| CliError::State(format!("opening the scheduler journal: {e}")))?;
+    let journal = Arc::new(
+        FileSessionJournal::new(&dirs.journals, journal_session)
+            .map_err(|e| CliError::State(format!("opening the scheduler journal: {e}")))?,
+    );
     let memory = Arc::new(InMemoryMemoryRuntime::new());
 
     let (runtime, _reconciliation) =
         FusedRuntimeBuilder::new(cap_root, policies, provider, receipt_key, model)
+            .require_durable_settlements()
             .audience(SCHEDULE_AUDIENCE)
             .tool(SCHEDULE_TOOL)
             .provision_budget(
@@ -473,7 +477,7 @@ async fn build_scheduler_runtime(
             )
             .projected_envelope(envelope)
             .with_memory(memory)
-            .with_journal(Arc::new(journal))
+            .with_journal(journal.clone())
             .with_default_injection_filters()
             .receipt_log(dirs.receipt_log())
             .build_reconciled()
@@ -481,6 +485,7 @@ async fn build_scheduler_runtime(
             .map_err(|e| CliError::State(format!("building the scheduler runtime: {e}")))?;
 
     Ok(SchedulerRuntime {
+        settlements: crate::fused::SettlementLifecycle::new(&runtime, journal),
         runtime: Arc::new(runtime),
         issuer,
         subject,
@@ -491,7 +496,28 @@ async fn build_scheduler_runtime(
 /// Assemble the automation loop over the CLI schedule store, the scheduler
 /// runtime, and the stdout delivery channel.
 type CliLoop =
-    ProactiveAutomationLoop<FusedAutomationRuntime, CliScheduleStore, StdoutAutomationChannel>;
+    ProactiveAutomationLoop<SettledAutomationRuntime, CliScheduleStore, StdoutAutomationChannel>;
+
+/// Existing scheduler adapter plus the same product lifecycle used by chat.
+/// Drain before delivery is reported, and retain ownership across submit drops.
+struct SettledAutomationRuntime {
+    inner: FusedAutomationRuntime,
+    settlements: crate::fused::SettlementLifecycle,
+}
+#[async_trait]
+impl AutomationRuntime for SettledAutomationRuntime {
+    async fn submit(
+        &self,
+        request: ardur_runtime::SubmitRequest,
+        provisioning: ardur_fused_runtime::PerRequestProvisioning,
+    ) -> Result<ardur_runtime::SubmitResult, ardur_runtime::RuntimeError> {
+        let map =
+            |e: CliError| ardur_runtime::RuntimeError::Internal(anyhow::anyhow!(e.to_string()));
+        self.settlements.drain().await.map_err(map)?;
+        let result = self.inner.submit(request, provisioning).await;
+        self.settlements.after(result, map).await
+    }
+}
 
 fn build_loop(scheduler: &SchedulerRuntime, dirs: &StateDirs) -> Arc<CliLoop> {
     let store = CliScheduleStore::new(
@@ -500,7 +526,10 @@ fn build_loop(scheduler: &SchedulerRuntime, dirs: &StateDirs) -> Arc<CliLoop> {
         scheduler.subject.clone(),
         DEFAULT_PER_FIRE_CENTS,
     );
-    let runtime = FusedAutomationRuntime::new(Arc::clone(&scheduler.runtime));
+    let runtime = SettledAutomationRuntime {
+        inner: FusedAutomationRuntime::new(Arc::clone(&scheduler.runtime)),
+        settlements: scheduler.settlements.clone(),
+    };
     Arc::new(ProactiveAutomationLoop::new(
         Arc::new(runtime),
         Arc::new(store),
@@ -553,8 +582,10 @@ pub fn run_schedule_fire(dirs: &StateDirs, config: &Config, id: &str) -> Result<
         let report = loop_
             .fire_now(&AutomationScheduleId(id.to_string()))
             .await
-            .map_err(|e| CliError::State(format!("firing schedule `{id}`: {e}")))?;
-        report_or_err(id, &report)
+            .map_err(|e| CliError::State(format!("firing schedule `{id}`: {e}")))
+            .and_then(|report| report_or_err(id, &report));
+        let closed = scheduler.settlements.finish().await;
+        report.and(closed)
     })
 }
 
@@ -598,7 +629,7 @@ pub fn run_schedule_run(
             ),
         }
         driver.run_bounded(max_ticks).await;
-        Ok::<(), CliError>(())
+        scheduler.settlements.finish().await
     })
 }
 
