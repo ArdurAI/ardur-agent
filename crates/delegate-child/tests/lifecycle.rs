@@ -16,7 +16,7 @@ use ardur_cap_token::{
 use ardur_core_types::{CostEnvelope, CostTuple, ModelId};
 use ardur_delegate_child::{
     BudgetReservation, CHILD_CANCELLED_VERB, CHILD_COMPLETED_VERB, ChildError, ChildOutcome,
-    ChildSpec, ChildSupervisor,
+    ChildSpec, ChildSupervisor, ParentBudget,
 };
 use ardur_provider_runtime::{
     CompletionRequest, CompletionResponse, FinishReason, Provider, ProviderError, ProviderId,
@@ -33,6 +33,7 @@ struct MockProvider {
     reply: String,
     cents_per_call: u64,
     fail_with: Option<ProviderErrorKind>,
+    finish_error: Option<String>,
     rate_card: RateCard,
 }
 
@@ -50,6 +51,7 @@ impl MockProvider {
             reply: reply.to_string(),
             cents_per_call: 1,
             fail_with: None,
+            finish_error: None,
             rate_card: RateCard {
                 version_id: "mock-test-v1".into(),
                 cents_per_1k_input: 0.0,
@@ -74,6 +76,13 @@ impl MockProvider {
         self
     }
 
+    /// Return content but end the turn with a provider-reported error, the
+    /// shape that made content-only completion unsafe.
+    fn finishing_with_error(mut self, msg: &str) -> Self {
+        self.finish_error = Some(msg.to_string());
+        self
+    }
+
     fn counter(&self) -> Arc<AtomicU32> {
         Arc::clone(&self.dispatches)
     }
@@ -91,7 +100,10 @@ impl Provider for MockProvider {
             }
             None => Ok(CompletionResponse {
                 content: self.reply.clone(),
-                finish_reason: FinishReason::Stop,
+                finish_reason: match &self.finish_error {
+                    Some(msg) => FinishReason::Error(msg.clone()),
+                    None => FinishReason::Stop,
+                },
                 usage: Usage {
                     tokens_in: 10,
                     tokens_out: 5,
@@ -164,7 +176,9 @@ async fn a_child_runs_to_completion_and_reports_its_text() {
     let provider = Arc::new(MockProvider::new("child answer"));
     let sup = ChildSupervisor::new(Arc::clone(&provider), Box::new(HashSetDenyList::new()));
 
-    let reservation = BudgetReservation::reserve(10, 100).expect("reservation fits");
+    let reservation = ParentBudget::new(100)
+        .reserve(10)
+        .expect("reservation fits");
     let child = sup
         .spawn(spec("do the thing", reservation, 4))
         .await
@@ -199,7 +213,9 @@ async fn cancel_stops_the_worker_before_it_dispatches_another_round() {
 
     // max_rounds is high and the budget generous, so nothing but cancellation
     // can stop this child — otherwise the test could pass for the wrong reason.
-    let reservation = BudgetReservation::reserve(10_000, 10_000).expect("reservation fits");
+    let reservation = ParentBudget::new(10_000)
+        .reserve(10_000)
+        .expect("reservation fits");
     let child = sup
         .spawn(spec("long job", reservation, 100_000))
         .await
@@ -254,7 +270,9 @@ async fn a_revoked_token_stops_the_child_at_the_next_action_boundary() {
     );
 
     let sup = ChildSupervisor::new(Arc::clone(&provider), Box::new(deny));
-    let reservation = BudgetReservation::reserve(100, 100).expect("reservation fits");
+    let reservation = ParentBudget::new(100)
+        .reserve(100)
+        .expect("reservation fits");
     let Err(err) = sup
         .spawn(spec_with_token("job", token, reservation, 10))
         .await
@@ -283,7 +301,9 @@ async fn revocation_is_distinct_from_cancellation() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_child_cannot_reserve_more_than_its_parent_holds() {
-    let err = BudgetReservation::reserve(500, 100).expect_err("over-reservation must fail");
+    let err = ParentBudget::new(100)
+        .reserve(500)
+        .expect_err("over-reservation must fail");
     match err {
         ChildError::ReservationTooLarge {
             requested,
@@ -298,7 +318,7 @@ async fn a_child_cannot_reserve_more_than_its_parent_holds() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn spend_is_recorded_against_the_reservation_per_child() {
-    let reservation = BudgetReservation::reserve(10, 100).expect("fits");
+    let reservation = ParentBudget::new(100).reserve(10).expect("fits");
     assert_eq!(reservation.remaining_cents(), 10);
 
     reservation.record_spend(&CostTuple {
@@ -329,7 +349,9 @@ async fn an_exhausted_budget_stops_the_child_without_dispatching() {
     let counter = provider.counter();
     let sup = ChildSupervisor::new(Arc::clone(&provider), Box::new(HashSetDenyList::new()));
 
-    let reservation = BudgetReservation::reserve(0, 100).expect("zero reservation is legal");
+    let reservation = ParentBudget::new(100)
+        .reserve(0)
+        .expect("zero reservation is legal");
     let child = sup
         .spawn(spec("job", reservation, 10))
         .await
@@ -353,7 +375,7 @@ async fn an_empty_prompt_is_refused_before_a_worker_exists() {
     let counter = provider.counter();
     let sup = ChildSupervisor::new(Arc::clone(&provider), Box::new(HashSetDenyList::new()));
 
-    let reservation = BudgetReservation::reserve(10, 100).expect("fits");
+    let reservation = ParentBudget::new(100).reserve(10).expect("fits");
     let Err(err) = sup.spawn(spec("   ", reservation, 4)).await else {
         panic!("an empty prompt must be refused");
     };
@@ -370,7 +392,7 @@ async fn an_unauthorized_provider_failure_keeps_its_own_classification() {
     let provider = Arc::new(MockProvider::new("").failing(ProviderErrorKind::Unauthorized));
     let sup = ChildSupervisor::new(Arc::clone(&provider), Box::new(HashSetDenyList::new()));
 
-    let reservation = BudgetReservation::reserve(10, 100).expect("fits");
+    let reservation = ParentBudget::new(100).reserve(10).expect("fits");
     let child = sup
         .spawn(spec("job", reservation, 4))
         .await
@@ -391,7 +413,7 @@ async fn a_network_failure_is_not_reported_as_an_auth_failure() {
     let provider = Arc::new(MockProvider::new("").failing(ProviderErrorKind::Network));
     let sup = ChildSupervisor::new(Arc::clone(&provider), Box::new(HashSetDenyList::new()));
 
-    let reservation = BudgetReservation::reserve(10, 100).expect("fits");
+    let reservation = ParentBudget::new(100).reserve(10).expect("fits");
     let child = sup
         .spawn(spec("job", reservation, 4))
         .await
@@ -435,5 +457,239 @@ async fn only_a_clean_completion_settles_as_completed() {
             "{unfinished:?} must not settle as completed"
         );
         assert!(!unfinished.is_success(), "{unfinished:?} is not a success");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Guards for the review findings on PR #516.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn two_children_cannot_reserve_the_same_cent() {
+    // The bug: `available` was a copied scalar, so both children saw 100 and
+    // both succeeded, committing 120 cents of a 100-cent parent.
+    let parent = ParentBudget::new(100);
+    let first = parent.reserve(60).expect("first child fits");
+    let second = parent.reserve(60);
+
+    assert_eq!(first.reserved_cents(), 60);
+    assert!(
+        second.is_err(),
+        "a second 60-cent child must not fit in a 100-cent parent"
+    );
+    assert_eq!(
+        parent.available_cents(),
+        40,
+        "the first reservation must be deducted"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_reservations_never_oversubscribe_the_parent() {
+    // A single-threaded check cannot catch a lost update; race many tasks and
+    // assert the invariant on the ledger itself.
+    let parent = ParentBudget::new(100);
+    let mut set = tokio::task::JoinSet::new();
+    for _ in 0..40 {
+        let p = parent.clone();
+        set.spawn(async move { p.reserve(10).is_ok() });
+    }
+    let mut granted = 0;
+    while let Some(r) = set.join_next().await {
+        if r.expect("task joins") {
+            granted += 1;
+        }
+    }
+    assert_eq!(
+        granted, 10,
+        "exactly 100/10 reservations may be granted, got {granted}"
+    );
+    assert_eq!(
+        parent.available_cents(),
+        0,
+        "the parent must be fully committed, never negative"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn settling_returns_unspent_cents_to_the_parent() {
+    let parent = ParentBudget::new(100);
+    let child = parent.reserve(40).expect("fits");
+    assert_eq!(parent.available_cents(), 60);
+
+    child.record_spend(&CostTuple {
+        cents: 15,
+        ..CostTuple::default()
+    });
+    child.settle();
+
+    assert_eq!(
+        parent.available_cents(),
+        85,
+        "the 25 unspent cents must return to the parent, not stay locked"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_round_limit_is_not_reported_as_budget_exhaustion() {
+    // The bug: hitting max_rounds with funds left reported BudgetExhausted,
+    // telling an operator to top up a budget that was never the constraint.
+    let provider = Arc::new(MockProvider::new("")); // empty replies keep it looping
+    let sup = ChildSupervisor::new(Arc::clone(&provider), Box::new(HashSetDenyList::new()));
+
+    let reservation = ParentBudget::new(10_000)
+        .reserve(10_000)
+        .expect("plenty of budget");
+    let child = sup
+        .spawn(spec("job", reservation, 3))
+        .await
+        .expect("spawns");
+    let outcome = child.join().await.expect("joins");
+
+    assert!(
+        matches!(outcome, ChildOutcome::RoundLimitReached { rounds: 3 }),
+        "expected RoundLimitReached with funds remaining, got {outcome:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn partial_output_with_an_error_finish_is_a_failure_not_a_completion() {
+    // The bug: content-only success meant a provider that emitted a partial
+    // message and THEN failed produced a Completed child with the success verb.
+    let provider =
+        Arc::new(MockProvider::new("partial answer").finishing_with_error("turn.failed"));
+    let sup = ChildSupervisor::new(Arc::clone(&provider), Box::new(HashSetDenyList::new()));
+
+    let reservation = ParentBudget::new(100).reserve(10).expect("fits");
+    let child = sup
+        .spawn(spec("job", reservation, 4))
+        .await
+        .expect("spawns");
+    let outcome = child.join().await.expect("joins");
+
+    assert!(
+        !outcome.is_success(),
+        "a turn that finished with an error must not be a success: {outcome:?}"
+    );
+    assert_eq!(outcome.verb(), CHILD_CANCELLED_VERB);
+    match outcome {
+        ChildOutcome::Failed { reason, .. } => {
+            assert!(
+                reason.contains("turn.failed"),
+                "the provider reason must survive: {reason}"
+            );
+        }
+        other => panic!("expected Failed, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_provider_billing_above_the_projection_stops_the_child() {
+    // The bug: the pre-dispatch check admitted the call on a 1-cent projection
+    // while the provider billed 50, and nothing enforced the reservation after.
+    //
+    // Asserting only the OUTCOME is vacuous: without the overdraft check the
+    // next iteration's affordability check also yields BudgetExhausted. The
+    // observable difference is how many times the provider was actually
+    // BILLED, so assert the dispatch count. 60 reserved with 50 billed per
+    // round leaves 10 cents, which still affords the 1-cent projection, so
+    // only the overdraft check can stop a second paid round.
+    let provider = Arc::new(MockProvider::new("").cents(50));
+    let counter = provider.counter();
+    let sup = ChildSupervisor::new(Arc::clone(&provider), Box::new(HashSetDenyList::new()));
+
+    let reservation = ParentBudget::new(100).reserve(60).expect("fits");
+    let child = sup
+        .spawn(spec("job", reservation, 100))
+        .await
+        .expect("spawns");
+    let outcome = child.join().await.expect("joins");
+
+    assert!(
+        matches!(outcome, ChildOutcome::BudgetExhausted { .. }),
+        "an overdrawn child must stop, got {outcome:?}"
+    );
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        1,
+        "the child billed a second time, overrunning its reservation"
+    );
+    assert_eq!(
+        outcome.rounds(),
+        1,
+        "it must stop after the round that overdrew it"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_supervisor_accepts_a_dyn_provider_handle() {
+    // The bug: `P: Provider` implies Sized, so Arc<dyn Provider> - what the
+    // production selector hands out - could not construct a supervisor at all.
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider::new("dyn answer"));
+    let sup = ChildSupervisor::new(Arc::clone(&provider), Box::new(HashSetDenyList::new()));
+
+    let reservation = ParentBudget::new(100).reserve(10).expect("fits");
+    let child = sup
+        .spawn(spec("job", reservation, 4))
+        .await
+        .expect("spawns");
+    let outcome = child.join().await.expect("joins");
+
+    assert!(
+        outcome.is_success(),
+        "the dyn-dispatched child must run: {outcome:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stopping_a_revoked_child_reports_revocation_not_cancellation() {
+    // The bug: the worker is mid-dispatch when the stop lands and reports
+    // Cancelled, so the operator saw an ordinary cancellation for a child whose
+    // authority had been withdrawn.
+    let provider = Arc::new(MockProvider::new("").slow(Duration::from_millis(5)));
+    let sup = ChildSupervisor::new(Arc::clone(&provider), Box::new(HashSetDenyList::new()));
+
+    let reservation = ParentBudget::new(10_000).reserve(10_000).expect("fits");
+    let child = sup
+        .spawn(spec("job", reservation, 100_000))
+        .await
+        .expect("spawns");
+    tokio::time::sleep(Duration::from_millis(30)).await;
+
+    let outcome = sup.stop_revoked(child).await.expect("stops");
+    assert!(
+        matches!(outcome, ChildOutcome::Revoked { .. }),
+        "a revoked child must settle as Revoked, got {outcome:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_completed_round_is_accounted_even_when_a_cancel_arrives_together() {
+    // The bug: a biased select always took the cancel arm, discarding a
+    // response the upstream had already billed - understating spend and rounds.
+    let provider = Arc::new(MockProvider::new("done").cents(3));
+    let sup = ChildSupervisor::new(Arc::clone(&provider), Box::new(HashSetDenyList::new()));
+
+    let reservation = ParentBudget::new(100).reserve(50).expect("fits");
+    let child = sup
+        .spawn(spec("job", reservation, 4))
+        .await
+        .expect("spawns");
+
+    // The provider is fast, so the response is ready essentially immediately;
+    // cancelling now races it.
+    let outcome = child.cancel().await.expect("cancel joins");
+
+    if outcome.is_success() {
+        assert_eq!(
+            outcome.rounds(),
+            1,
+            "a completed round must be counted, not dropped"
+        );
+    } else {
+        assert!(
+            matches!(outcome, ChildOutcome::Cancelled { .. }),
+            "otherwise it must be an honest cancellation, got {outcome:?}"
+        );
     }
 }

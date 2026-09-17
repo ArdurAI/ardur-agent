@@ -9,6 +9,9 @@ publish = false
 
 [dependencies]
 ardur-cap-token = { workspace = true }
+# PublicKey for the trusted issuing root. Already in the lock as cap-token's own
+# backend, so this adds no new supply-chain surface.
+biscuit-auth = { workspace = true }
 ardur-core-types = { workspace = true }
 ardur-provider-runtime = { workspace = true }
 thiserror = { workspace = true }
