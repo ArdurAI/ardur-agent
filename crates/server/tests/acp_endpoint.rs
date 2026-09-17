@@ -122,8 +122,11 @@ async fn post_acp_rejects_unsupported_methods_without_forwarding_params() {
     }
 
     let receipt_log = dir.path().join("receipts/chain.jsonl");
+    // Durable boot preflight creates the empty file; existence is not a receipt.
     assert!(
-        !receipt_log.exists(),
-        "unsupported ACP methods must fail before fused-runtime/provider receipt work"
+        std::fs::read(&receipt_log)
+            .expect("preflight receipt log exists")
+            .is_empty(),
+        "unsupported ACP methods must not append any receipt bytes"
     );
 }
