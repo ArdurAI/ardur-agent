@@ -44,7 +44,37 @@ pub enum AuthOutcome {
 impl AuthOutcome {
     /// Map a cap-token verification failure to an ER outcome, following the
     /// verifier-contract §9 fail-closed table.
+    ///
+    /// The match is deliberately **exhaustive with no wildcard arm**. A new
+    /// `CapTokenError` variant must break this build and force an explicit
+    /// classification decision: a `_ =>` catch-all would silently file every
+    /// future failure under whatever the fallback happened to be, which is how
+    /// an unprojectable token could come to look like a clean policy denial.
     pub fn from_cap_token_error(err: &CapTokenError) -> Self {
+        // Not every verification failure is a *violation*. When the verifier
+        // cannot project an attenuation into effective claims it has not caught
+        // the token breaking a rule — it has failed to establish what the token
+        // authorizes at all. §9.2 calls a value that is "unusable for
+        // deterministic policy evaluation" missing telemetry, so the honest
+        // verdict is `insufficient_evidence`. Reporting it as a violation would
+        // claim knowledge the verifier does not have.
+        if let CapTokenError::UnprojectableAttenuation(statement) = err {
+            // Log a DIGEST, never the statement. Attenuation literals are
+            // holder-controlled and may carry paths, identifiers or credential
+            // material; emitting them verbatim turns a verification warning into
+            // a data-exfiltration channel that survives in log aggregation. The
+            // digest still correlates repeat occurrences of the same offending
+            // block across runs, which is what the operator actually needs.
+            tracing::warn!(
+                statement_digest = %sha256_hex(statement.as_bytes()),
+                statement_len = statement.len(),
+                "cap-token attenuation could not be projected; reporting insufficient_evidence"
+            );
+            return AuthOutcome::InsufficientEvidence {
+                internal: "unprojectable_attenuation".to_string(),
+            };
+        }
+
         let (public, internal) = match err {
             CapTokenError::Expired => (PublicDenialReason::PolicyDenied, "grant_expired"),
             CapTokenError::AudienceMismatch => {
@@ -59,6 +89,13 @@ impl AuthOutcome {
                 (PublicDenialReason::ChainInvalid, "signature_invalid")
             }
             CapTokenError::Malformed(_) => (PublicDenialReason::ChainInvalid, "malformed_token"),
+            // Handled above as `insufficient_evidence`; repeated here so the
+            // match stays exhaustive without a wildcard.
+            CapTokenError::UnprojectableAttenuation(_) => {
+                return AuthOutcome::InsufficientEvidence {
+                    internal: "unprojectable_attenuation".to_string(),
+                };
+            }
         };
         AuthOutcome::Violation {
             public,

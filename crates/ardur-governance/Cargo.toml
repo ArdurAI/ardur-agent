@@ -31,6 +31,10 @@ thiserror = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 # RFC 3339 `timestamp` claim rendering from Unix-millis step time.
 chrono = { workspace = true }
+# Structured warning when a cap-token attenuation cannot be projected: the ER
+# records `insufficient_evidence`, and the offending statement belongs in the
+# operator log rather than in the receipt's public denial text.
+tracing = { workspace = true }
 
 [dev-dependencies]
 # The E2E test mints a real cap-token and native receipt through the actual
