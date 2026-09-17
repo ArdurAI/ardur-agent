@@ -148,11 +148,41 @@ struct Attempt {
     next: EncodedSnapshot,
 }
 
+// Own the acquired flock separately from its file descriptor. A descriptor
+// inherited between fork and exec must not extend the logical writer lifetime.
+struct WriterLease(File);
+
+impl WriterLease {
+    fn acquire(file: File) -> Result<Self, SettlementStoreError> {
+        match flock(&file, FlockOperation::NonBlockingLockExclusive) {
+            Ok(()) => Ok(Self(file)),
+            Err(rustix::io::Errno::WOULDBLOCK) => Err(SettlementStoreError::WriterBusy),
+            Err(error) => Err(error.into()),
+        }
+    }
+}
+
+impl std::ops::Deref for WriterLease {
+    type Target = File;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Drop for WriterLease {
+    fn drop(&mut self) {
+        // File close alone waits for every duplicate open-file description
+        // reference to close. Unlock now; close remains the cleanup fallback.
+        let _ = flock(&self.0, FlockOperation::Unlock);
+    }
+}
+
 /// A synchronous writer holding a stable, separate lifetime lease.
 /// No other receipt writer is coordinated unless it also honors this lease.
 pub struct FileSettlementStore {
     root: PathBuf,
-    lease: File,
+    lease: WriterLease,
     dir: File,
     identity: ReceiptIdentity,
     acknowledged: HashMap<TurnId, (u64, Sha256Digest)>,
@@ -216,12 +246,7 @@ impl FileSettlementStore {
         } else {
             OFlags::RDWR
         };
-        let lease = regular(&dir, "writer.lock", flags)?;
-        match flock(&lease, FlockOperation::NonBlockingLockExclusive) {
-            Ok(()) => (),
-            Err(rustix::io::Errno::WOULDBLOCK) => return Err(SettlementStoreError::WriterBusy),
-            Err(e) => return Err(e.into()),
-        }
+        let lease = WriterLease::acquire(regular(&dir, "writer.lock", flags)?)?;
         lease.sync_all()?;
         dir.sync_all()?;
         if empty {
@@ -636,6 +661,40 @@ mod tests {
             FileSettlementStore::open(&root, identity, limits).unwrap(),
             encoded,
         )
+    }
+
+    #[test]
+    fn store_drop_releases_writer_lease_while_duplicated_descriptor_lives() {
+        let (_temp, mut store, snapshot) = fixture();
+        let root = store.root.clone();
+        let identity = store.identity.clone();
+        let limits = store.limits;
+        // dup retains the same open-file description, as a child can between
+        // fork and exec even though the original descriptor is close-on-exec.
+        let inherited = store.lease.try_clone().unwrap();
+        assert!(matches!(
+            FileSettlementStore::open(&root, identity.clone(), limits),
+            Err(SettlementStoreError::WriterBusy)
+        ));
+        assert_eq!(
+            store.put_exact(None, &snapshot),
+            WriteResolution::Durable(1)
+        );
+        drop(store);
+        let mut next = FileSettlementStore::open(&root, identity.clone(), limits).expect(
+            "dropping the writer must release its lease before inherited descriptors close",
+        );
+        assert_eq!(
+            next.resolve_exact(snapshot.turn().turn_id, 1, snapshot.digest()),
+            WriteResolution::Durable(1)
+        );
+        drop(inherited);
+        assert!(matches!(
+            FileSettlementStore::open(&root, identity.clone(), limits),
+            Err(SettlementStoreError::WriterBusy)
+        ));
+        drop(next);
+        assert!(FileSettlementStore::open(&root, identity, limits).is_ok());
     }
 
     #[test]
