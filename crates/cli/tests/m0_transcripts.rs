@@ -4,9 +4,10 @@
 mod cases;
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
 use std::rc::Rc;
 use std::task::Poll;
 use std::time::Duration;
@@ -125,11 +126,7 @@ async fn frozen_repl_transcripts() {
             "CI must never regenerate goldens"
         );
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let head = std::process::Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(&root)
-            .output()
-            .unwrap();
+        let head = regeneration_head(&root);
         assert!(head.status.success());
         assert_eq!(
             String::from_utf8(head.stdout).unwrap().trim(),
@@ -161,46 +158,66 @@ async fn frozen_repl_transcripts() {
     }
 }
 
-fn regeneration_diff(root: &Path, base: &str) -> std::process::Output {
-    std::process::Command::new("git")
+fn local_git(root: &Path) -> Command {
+    let mut command = Command::new("git");
+    command.current_dir(root);
+    // A deliberate superset of `git rev-parse --local-env-vars`: also remove
+    // config injection and future Git overrides without first asking an
+    // unsanitized Git process to parse config. Keep PATH, HOME, TMPDIR, etc.
+    for (key, _) in std::env::vars_os() {
+        if key
+            .to_string_lossy()
+            .to_ascii_uppercase()
+            .starts_with("GIT_")
+        {
+            command.env_remove(key);
+        }
+    }
+    command
+}
+
+fn regeneration_head(root: &Path) -> Output {
+    local_git(root)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("git HEAD for regeneration")
+}
+
+fn regeneration_diff(root: &Path, base: &str) -> Output {
+    local_git(root)
         .args(["diff", "--exit-code", base, "--"])
-        .current_dir(root)
         .output()
         .expect("git diff for regeneration")
 }
 
+fn fixture_git(root: &Path, args: &[&str]) -> Output {
+    let output = local_git(root)
+        .args([
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+        ])
+        .arg(format!(
+            "core.hooksPath={}",
+            root.join("empty-hooks").display()
+        ))
+        .args(args)
+        .output()
+        .expect("fixture git command");
+    assert!(
+        output.status.success(),
+        "{args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output
+}
+
 #[test]
 fn regeneration_diff_covers_all_tracked_sources() {
-    fn git(root: &Path, args: &[&str]) -> std::process::Output {
-        let output = std::process::Command::new("git")
-            .args([
-                "-c",
-                "user.name=Fixture",
-                "-c",
-                "user.email=fixture@example.invalid",
-                "-c",
-                "commit.gpgsign=false",
-                "-c",
-            ])
-            .arg(format!(
-                "core.hooksPath={}",
-                root.join("empty-hooks").display()
-            ))
-            .args(args)
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_INDEX_FILE")
-            .current_dir(root)
-            .output()
-            .expect("fixture git command");
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        output
-    }
-
     let paths = [
         "crates/provider-runtime/src/types.rs",
         "crates/core-types/src/lib.rs",
@@ -212,15 +229,15 @@ fn regeneration_diff_covers_all_tracked_sources() {
             let fixture = tempfile::tempdir().unwrap();
             let root = fixture.path();
             std::fs::create_dir(root.join("empty-hooks")).unwrap();
-            git(root, &["init", "-q"]);
+            fixture_git(root, &["init", "-q"]);
             for path in paths {
                 let path = root.join(path);
                 std::fs::create_dir_all(path.parent().unwrap()).unwrap();
                 std::fs::write(path, "baseline source\n").unwrap();
             }
-            git(root, &["add", "crates"]);
-            git(root, &["commit", "-q", "-s", "-m", "fixture baseline"]);
-            let base = String::from_utf8(git(root, &["rev-parse", "HEAD"]).stdout).unwrap();
+            fixture_git(root, &["add", "crates"]);
+            fixture_git(root, &["commit", "-q", "-s", "-m", "fixture baseline"]);
+            let base = String::from_utf8(fixture_git(root, &["rev-parse", "HEAD"]).stdout).unwrap();
             let base = base.trim();
             assert!(
                 regeneration_diff(root, base).status.success(),
@@ -235,7 +252,7 @@ fn regeneration_diff_covers_all_tracked_sources() {
             );
             std::fs::write(root.join(changed), "changed source\n").unwrap();
             if staged {
-                git(root, &["add", changed]);
+                fixture_git(root, &["add", changed]);
             }
             if regeneration_diff(root, base).status.success() {
                 admitted_dirty_sources.push(format!("{changed} staged={staged}"));
@@ -245,6 +262,217 @@ fn regeneration_diff_covers_all_tracked_sources() {
     assert!(
         admitted_dirty_sources.is_empty(),
         "regeneration accepted dirty tracked inputs: {admitted_dirty_sources:?}"
+    );
+}
+
+fn fixture_repository(root: &Path, content: &str) -> String {
+    std::fs::create_dir(root.join("empty-hooks")).unwrap();
+    fixture_git(root, &["init", "-q"]);
+    std::fs::write(root.join("source.txt"), content).unwrap();
+    fixture_git(root, &["add", "source.txt"]);
+    fixture_git(root, &["commit", "-q", "-s", "-m", "fixture baseline"]);
+    String::from_utf8(fixture_git(root, &["rev-parse", "HEAD"]).stdout)
+        .unwrap()
+        .trim()
+        .to_owned()
+}
+
+// Re-enter only the named test: contamination belongs to a child process, never
+// to the process-global environment shared with parallel tests.
+fn git_probe_root(test: &str) -> Option<PathBuf> {
+    let probe = std::env::var_os("ARDUR_M0_GIT_PROBE")?;
+    assert_eq!(probe, test);
+    println!("M0_GIT_PROBE_ENTERED:{test}");
+    Some(std::env::current_dir().unwrap())
+}
+
+fn git_probe_command(test: &str, root: &Path) -> Command {
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
+        .args(["--exact", test, "--nocapture", "--test-threads=1"])
+        .current_dir(root)
+        .env("ARDUR_M0_GIT_PROBE", test);
+    command
+}
+
+fn git_probe_output(test: &str, command: &mut Command) -> Output {
+    let output = command.output().expect("Git environment probe");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    println!(
+        "{test} child {}\n{stdout}\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.contains("running 1 test"), "probe must run one test");
+    assert!(
+        stdout.contains(&format!("M0_GIT_PROBE_ENTERED:{test}")),
+        "probe must enter the exact requested test"
+    );
+    output
+}
+
+fn assert_git_probe_passed(test: &str, output: &Output) {
+    assert!(output.status.success(), "{test} child failed");
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .contains("test result: ok. 1 passed; 0 failed; 0 ignored;"),
+        "a zero-test or ignored-test success is not a probe"
+    );
+}
+
+#[test]
+fn regeneration_head_ignores_git_environment() {
+    const TEST: &str = "regeneration_head_ignores_git_environment";
+    if let Some(root) = git_probe_root(TEST) {
+        let head = regeneration_head(&root);
+        assert!(head.status.success(), "{head:?}");
+        assert_eq!(
+            String::from_utf8(head.stdout).unwrap().trim(),
+            std::env::var("ARDUR_M0_EXPECTED_HEAD").unwrap(),
+            "regeneration HEAD was redirected to the foreign repository"
+        );
+        return;
+    }
+
+    let source = tempfile::tempdir().unwrap();
+    let foreign = tempfile::tempdir().unwrap();
+    let head = fixture_repository(source.path(), "local baseline\n");
+    let foreign_head = fixture_repository(foreign.path(), "foreign baseline\n");
+    assert_ne!(head, foreign_head, "distinct HEAD control");
+    std::fs::write(source.path().join("source.txt"), "dirty local source\n").unwrap();
+    let output = git_probe_output(
+        TEST,
+        git_probe_command(TEST, source.path())
+            .env("ARDUR_M0_EXPECTED_HEAD", head)
+            .env("GIT_DIR", foreign.path().join(".git"))
+            .env("GIT_WORK_TREE", foreign.path())
+            .env("GIT_INDEX_FILE", foreign.path().join(".git/index")),
+    );
+    assert_git_probe_passed(TEST, &output);
+}
+
+#[test]
+fn regeneration_diff_ignores_git_environment() {
+    const TEST: &str = "regeneration_diff_ignores_git_environment";
+    if let Some(root) = git_probe_root(TEST) {
+        let base = std::env::var("ARDUR_M0_EXPECTED_HEAD").unwrap();
+        let diff = regeneration_diff(&root, &base);
+        assert_eq!(
+            diff.status.code(),
+            Some(1),
+            "regeneration diff must reject dirty local source, not inspect a clean foreign base: {diff:?}"
+        );
+        assert!(String::from_utf8_lossy(&diff.stdout).contains("dirty local source"));
+        return;
+    }
+
+    let source = tempfile::tempdir().unwrap();
+    let foreign = tempfile::tempdir().unwrap();
+    let base = fixture_repository(source.path(), "baseline source\n");
+    std::fs::create_dir(foreign.path().join("empty-hooks")).unwrap();
+    fixture_git(foreign.path(), &["init", "-q"]);
+    // Copy the same base using only these two owned TempDirs, not a user repo.
+    fixture_git(
+        foreign.path(),
+        &["fetch", "-q", source.path().to_str().unwrap(), "HEAD"],
+    );
+    fixture_git(
+        foreign.path(),
+        &["checkout", "-q", "--detach", "FETCH_HEAD"],
+    );
+    for root in [source.path(), foreign.path()] {
+        assert!(
+            regeneration_diff(root, &base).status.success(),
+            "clean control"
+        );
+    }
+    std::fs::write(source.path().join("source.txt"), "dirty local source\n").unwrap();
+    let output = git_probe_output(
+        TEST,
+        git_probe_command(TEST, source.path())
+            .env("ARDUR_M0_EXPECTED_HEAD", base)
+            .env("GIT_DIR", foreign.path().join(".git"))
+            .env("GIT_WORK_TREE", foreign.path())
+            .env("GIT_INDEX_FILE", foreign.path().join(".git/index")),
+    );
+    assert_git_probe_passed(TEST, &output);
+}
+
+fn repository_files(root: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
+    fn visit(root: &Path, dir: &Path, files: &mut BTreeMap<PathBuf, Option<Vec<u8>>>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            let relative = path.strip_prefix(root).unwrap().to_owned();
+            if entry.file_type().unwrap().is_dir() {
+                files.insert(relative, None);
+                visit(root, &path, files);
+            } else {
+                files.insert(relative, Some(std::fs::read(path).unwrap()));
+            }
+        }
+    }
+    let mut files = BTreeMap::new();
+    visit(root, root, &mut files);
+    assert!(
+        !files.is_empty(),
+        "foreign repository snapshot is populated"
+    );
+    files
+}
+
+fn fixture_git_environment_isolation(test: &str, variable: &str, foreign_directory: &str) {
+    const CONTENT: &str = "new local objects must stay local\n";
+    if let Some(root) = git_probe_root(test) {
+        fixture_repository(&root, CONTENT);
+        return;
+    }
+
+    let source = tempfile::tempdir().unwrap();
+    let foreign = tempfile::tempdir().unwrap();
+    fixture_repository(foreign.path(), "unrelated foreign baseline\n");
+    let before = repository_files(foreign.path());
+    let output = git_probe_output(
+        test,
+        git_probe_command(test, source.path())
+            .env(variable, foreign.path().join(foreign_directory)),
+    );
+    // Inspect side effects even if init/add/commit failed in the child. Keep
+    // object-dir and common-dir cases separate from each other and the read
+    // probes, so an earlier failure cannot hide writes outside the local repo.
+    let after = repository_files(foreign.path());
+    let changed: BTreeSet<_> = before
+        .keys()
+        .chain(after.keys())
+        .filter(|path| before.get(*path) != after.get(*path))
+        .collect();
+    assert!(
+        changed.is_empty(),
+        "{variable} mutated the foreign repository: {changed:?}"
+    );
+    assert_git_probe_passed(test, &output);
+    assert_eq!(
+        fixture_git(source.path(), &["show", "HEAD:source.txt"]).stdout,
+        CONTENT.as_bytes(),
+        "the fixture commit must be readable without the foreign object store"
+    );
+}
+
+#[test]
+fn fixture_git_ignores_object_directory_environment() {
+    fixture_git_environment_isolation(
+        "fixture_git_ignores_object_directory_environment",
+        "GIT_OBJECT_DIRECTORY",
+        ".git/objects",
+    );
+}
+
+#[test]
+fn fixture_git_ignores_common_directory_environment() {
+    fixture_git_environment_isolation(
+        "fixture_git_ignores_common_directory_environment",
+        "GIT_COMMON_DIR",
+        ".git",
     );
 }
 

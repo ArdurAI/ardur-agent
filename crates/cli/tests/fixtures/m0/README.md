@@ -76,5 +76,25 @@ Copied capture tests must remain untracked in the baseline checkout. Regression
 coverage uses real temporary Git repositories and rejects both staged and
 unstaged changes in direct and transitive source files, while allowing clean
 tracked trees with copied untracked tests.
+
+Both regeneration checks (HEAD and diff) and every fixture Git operation share
+one local command constructor that removes inherited `GIT_*` variables. This
+is a deliberate superset of `git rev-parse --local-env-vars`: it also removes
+config injection and future Git overrides, without running an unsanitized Git
+command to discover the list. Non-Git process environment, including `PATH`,
+`HOME` and temporary-directory settings, is preserved; the parent process
+is never mutated.
+
+Separate child-process regressions contaminate HEAD/diff checks with a clean
+foreign repository and contaminate fixture init/add/commit with
+`GIT_OBJECT_DIRECTORY` or `GIT_COMMON_DIR`. Every source and foreign repository
+is a fresh owned temporary directory. The write probes compare the foreign
+repository's file bytes and directory inventory before and after each child,
+then verify that the local commit is independently readable. Each child must
+enter the exact requested test and report one passing test; zero-test success
+is rejected. Object-directory and common-directory cases run independently, so
+a failed read check cannot hide a write-isolation failure. Fixture writes use a
+local fake identity, DCO sign-off, disabled signing, and an empty hooks path.
+
 Any `CI` environment variable forbids regeneration, even when the explicit flag
 is present. Never replace this fixture with post-refactor output to fix a drift.
