@@ -54,6 +54,7 @@ mod error;
 mod grant;
 mod hash;
 mod jcs;
+mod mission;
 mod project;
 mod sign;
 
@@ -67,6 +68,12 @@ pub use er::{
 };
 pub use error::GovernanceError;
 pub use grant::{GrantDescriptor, MissionRef};
+pub use mission::{
+    BudgetPair, DelegationPolicy, EFFECT_CLASSES, EffectPolicy, FlowPolicy, GovernedMemoryStore,
+    GrantRecord, LineageBudgets, MissionAuthoringError, MissionDeclaration, MissionIdentity,
+    ReceiptPolicy, ResourcePolicy, SUPPORTED_TELEMETRY, author_mission_declaration, mission_digest,
+    tool_manifest_digest,
+};
 pub use project::{
     AuthOutcome, StepContext, ToolInvocation, check_verdict_invariant, project_execution_receipt,
 };
