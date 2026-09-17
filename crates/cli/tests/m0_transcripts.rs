@@ -136,22 +136,7 @@ async fn frozen_repl_transcripts() {
             BASE,
             "regenerate on the frozen base only"
         );
-        let diff = std::process::Command::new("git")
-            .args([
-                "diff",
-                "--exit-code",
-                BASE,
-                "--",
-                "crates/cli/src",
-                "crates/runtime/src/error.rs",
-                "crates/fused-runtime/src/streaming.rs",
-                "Cargo.toml",
-                "Cargo.lock",
-                "crates/cli/Cargo.toml",
-            ])
-            .current_dir(root)
-            .output()
-            .unwrap();
+        let diff = regeneration_diff(&root, BASE);
         assert!(
             diff.status.success(),
             "production must match the pre-M0 base"
@@ -174,6 +159,93 @@ async fn frozen_repl_transcripts() {
     for (key, snapshot) in actual {
         assert_eq!(snapshot, expected[&key], "frozen transcript {key}");
     }
+}
+
+fn regeneration_diff(root: &Path, base: &str) -> std::process::Output {
+    std::process::Command::new("git")
+        .args(["diff", "--exit-code", base, "--"])
+        .current_dir(root)
+        .output()
+        .expect("git diff for regeneration")
+}
+
+#[test]
+fn regeneration_diff_covers_all_tracked_sources() {
+    fn git(root: &Path, args: &[&str]) -> std::process::Output {
+        let output = std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+            ])
+            .arg(format!(
+                "core.hooksPath={}",
+                root.join("empty-hooks").display()
+            ))
+            .args(args)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .current_dir(root)
+            .output()
+            .expect("fixture git command");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output
+    }
+
+    let paths = [
+        "crates/provider-runtime/src/types.rs",
+        "crates/core-types/src/lib.rs",
+        "crates/cli/src/stream.rs",
+    ];
+    let mut admitted_dirty_sources = Vec::new();
+    for changed in paths {
+        for staged in [false, true] {
+            let fixture = tempfile::tempdir().unwrap();
+            let root = fixture.path();
+            std::fs::create_dir(root.join("empty-hooks")).unwrap();
+            git(root, &["init", "-q"]);
+            for path in paths {
+                let path = root.join(path);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, "baseline source\n").unwrap();
+            }
+            git(root, &["add", "crates"]);
+            git(root, &["commit", "-q", "-s", "-m", "fixture baseline"]);
+            let base = String::from_utf8(git(root, &["rev-parse", "HEAD"]).stdout).unwrap();
+            let base = base.trim();
+            assert!(
+                regeneration_diff(root, base).status.success(),
+                "clean control"
+            );
+            let copied_test = root.join("crates/cli/tests/m0_copied.rs");
+            std::fs::create_dir_all(copied_test.parent().unwrap()).unwrap();
+            std::fs::write(copied_test, "copied capture test\n").unwrap();
+            assert!(
+                regeneration_diff(root, base).status.success(),
+                "untracked test control"
+            );
+            std::fs::write(root.join(changed), "changed source\n").unwrap();
+            if staged {
+                git(root, &["add", changed]);
+            }
+            if regeneration_diff(root, base).status.success() {
+                admitted_dirty_sources.push(format!("{changed} staged={staged}"));
+            }
+        }
+    }
+    assert!(
+        admitted_dirty_sources.is_empty(),
+        "regeneration accepted dirty tracked inputs: {admitted_dirty_sources:?}"
+    );
 }
 
 #[derive(Default)]

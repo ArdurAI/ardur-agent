@@ -70,6 +70,11 @@ ARDUR_REGENERATE_M0_GOLDENS=1 CARGO_TARGET_DIR="$PWD/target" \
   cargo test -p ardur-cli --test m0_transcripts frozen_repl_transcripts -- --exact
 ```
 
-The test checks the base HEAD and unchanged source/manifests before writing.
+The test checks the base HEAD and the full tracked tree before writing, so
+changes in transitive source types cannot silently replace the frozen outcomes.
+Copied capture tests must remain untracked in the baseline checkout. Regression
+coverage uses real temporary Git repositories and rejects both staged and
+unstaged changes in direct and transitive source files, while allowing clean
+tracked trees with copied untracked tests.
 Any `CI` environment variable forbids regeneration, even when the explicit flag
 is present. Never replace this fixture with post-refactor output to fix a drift.
