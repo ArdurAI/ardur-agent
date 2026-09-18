@@ -606,6 +606,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ardur-delegate-child"
+version = "0.0.1"
+dependencies = [
+ "ardur-cap-token",
+ "ardur-core-types",
+ "ardur-provider-runtime",
+ "async-trait",
+ "biscuit-auth",
+ "thiserror 2.0.20",
+ "tokio",
+]
+
+[[package]]
 name = "ardur-delegate-tool"
 version = "0.0.1"
 dependencies = [
