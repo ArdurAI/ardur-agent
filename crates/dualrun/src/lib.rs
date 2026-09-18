@@ -113,6 +113,59 @@ pub struct PathVerdict {
     pub audit_code: Option<String>,
 }
 
+/// A verdict from the path that decides.
+///
+/// Separate types rather than a runtime role check: `debug_assert!` compiles
+/// out in release, so a caller that swapped the two arguments would silently
+/// let the shadow path govern the action — precisely the invariant this crate
+/// exists to hold. Distinct types make that swap a compile error instead.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LegacyVerdict(PathVerdict);
+
+/// A verdict from the path under evaluation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AatVerdict(PathVerdict);
+
+impl LegacyVerdict {
+    /// Tag a verdict as the deciding path's.
+    #[must_use]
+    pub fn new(verdict: Verdict) -> Self {
+        Self(PathVerdict::new(Path::Legacy, verdict))
+    }
+
+    /// Tag a verdict carrying the path's internal reason code.
+    #[must_use]
+    pub fn with_code(verdict: Verdict, audit_code: impl Into<String>) -> Self {
+        Self(PathVerdict::with_code(Path::Legacy, verdict, audit_code))
+    }
+
+    /// The underlying verdict record.
+    #[must_use]
+    pub fn inner(&self) -> &PathVerdict {
+        &self.0
+    }
+}
+
+impl AatVerdict {
+    /// Tag a verdict as the shadow path's.
+    #[must_use]
+    pub fn new(verdict: Verdict) -> Self {
+        Self(PathVerdict::new(Path::Aat, verdict))
+    }
+
+    /// Tag a verdict carrying the path's internal reason code.
+    #[must_use]
+    pub fn with_code(verdict: Verdict, audit_code: impl Into<String>) -> Self {
+        Self(PathVerdict::with_code(Path::Aat, verdict, audit_code))
+    }
+
+    /// The underlying verdict record.
+    #[must_use]
+    pub fn inner(&self) -> &PathVerdict {
+        &self.0
+    }
+}
+
 impl PathVerdict {
     /// A verdict with no reason code.
     #[must_use]
@@ -143,13 +196,21 @@ impl PathVerdict {
     #[must_use]
     pub fn digest(&self) -> String {
         let mut h = Sha256::new();
-        for field in [
-            self.path.to_string(),
-            self.verdict.as_str().to_string(),
-            self.audit_code.clone().unwrap_or_default(),
-        ] {
+        for field in [self.path.to_string(), self.verdict.as_str().to_string()] {
             h.update((field.len() as u64).to_be_bytes());
             h.update(field.as_bytes());
+        }
+        // An absent code and an empty one are DIFFERENT records, and collapsing
+        // them with `unwrap_or_default()` created a deterministic collision in
+        // evidence whose whole purpose is telling records apart. The presence
+        // tag is hashed before the content so the two can never coincide.
+        match &self.audit_code {
+            None => h.update([0u8]),
+            Some(code) => {
+                h.update([1u8]);
+                h.update((code.len() as u64).to_be_bytes());
+                h.update(code.as_bytes());
+            }
         }
         format!("sha-256:{}", hex_lower(&h.finalize()))
     }
@@ -169,12 +230,35 @@ pub struct ShadowOutcome {
     pub mismatch: Option<Mismatch>,
 }
 
+/// Which way a disagreement points, operationally.
+///
+/// Three-valued rather than a bool: two paths can disagree while BOTH deny
+/// execution (`Violation` vs `InsufficientEvidence`), and reporting that as
+/// "not more restrictive" made it indistinguishable from a genuine
+/// authorization gap — corrupting the very statistics the promotion decision
+/// rests on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MismatchDirection {
+    /// Legacy permitted, AAT denied: a potential outage on promotion.
+    AatMoreRestrictive,
+    /// Legacy denied, AAT permitted: a potential authorization gap.
+    AatMorePermissive,
+    /// The verdicts differ but neither permits execution. No execution
+    /// difference, but the recorded reason would change.
+    BothDeny,
+}
+
 /// A recorded disagreement between the two paths.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Mismatch {
-    /// Always [`MISMATCH_VERB`], carried so a serialized record is
-    /// self-describing to a consumer that has never seen this crate.
-    pub verb: &'static str,
+    /// Always [`MISMATCH_VERB`].
+    ///
+    /// An owned `String`, not `&'static str`: the derived deserializer would
+    /// otherwise demand a `'static` input buffer, so `Mismatch` would not
+    /// implement `DeserializeOwned` and `serde_json::from_reader` could not
+    /// reconstruct evidence this crate advertises as durable.
+    pub verb: String,
     /// Digest of the legacy verdict.
     pub legacy_digest: String,
     /// Digest of the AAT verdict.
@@ -183,22 +267,33 @@ pub struct Mismatch {
     pub legacy_verdict: Verdict,
     /// The AAT verdict.
     pub aat_verdict: Verdict,
-    /// Whether the AAT path would have been *more* restrictive.
-    ///
-    /// The direction is the operationally important part: an AAT path that
-    /// denies what legacy allowed is a potential outage on promotion, while the
-    /// reverse is a potential authorization gap. They are not symmetric and a
-    /// bare "mismatch" count hides which one is happening.
-    pub aat_more_restrictive: bool,
+    /// Which way the disagreement points.
+    pub direction: MismatchDirection,
+}
+
+/// The gate's accumulated evidence, independent of any process.
+///
+/// Separated from the comparator so it can be persisted and restored. A gate
+/// held only in memory silently resets on restart: after another clean run the
+/// comparator would report ready while the durable chain still contained an
+/// earlier mismatch, which is the opposite of the "one mismatch blocks forever"
+/// guarantee.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GateState {
+    /// Governed steps observed.
+    pub steps: u64,
+    /// Disagreements recorded.
+    pub mismatches: u64,
+    /// Unix time of the first observed step.
+    pub first_step_unix: Option<u64>,
+    /// Unix time of the most recent observed step.
+    pub last_step_unix: Option<u64>,
 }
 
 /// Runs both paths and decides with legacy.
 #[derive(Clone, Debug, Default)]
 pub struct ShadowComparator {
-    steps: u64,
-    mismatches: u64,
-    first_step_unix: Option<u64>,
-    last_step_unix: Option<u64>,
+    state: GateState,
 }
 
 impl ShadowComparator {
@@ -208,27 +303,42 @@ impl ShadowComparator {
         Self::default()
     }
 
+    /// Resume from previously persisted evidence.
+    ///
+    /// The caller is responsible for loading this from the durable chain; the
+    /// point is that resuming is *possible*, so a restart cannot quietly
+    /// discharge a recorded mismatch.
+    #[must_use]
+    pub fn resume(state: GateState) -> Self {
+        Self { state }
+    }
+
+    /// The evidence accumulated so far, for persisting across restarts.
+    #[must_use]
+    pub fn state(&self) -> GateState {
+        self.state
+    }
+
     /// Compare one governed step.
     ///
     /// Returns the legacy verdict as the decision **always** — including when
     /// the paths disagree and including when AAT is stricter. A comparator that
     /// sometimes lets the shadow path decide is not running in shadow mode.
     ///
-    /// # Panics
-    /// Never. Argument order is enforced by [`Path`], so a caller cannot
-    /// silently swap the two paths and invert the recorded direction.
+    /// The two arguments have distinct types, so a caller cannot swap them and
+    /// silently invert which path governs.
     pub fn compare(
         &mut self,
-        legacy: &PathVerdict,
-        aat: &PathVerdict,
+        legacy: &LegacyVerdict,
+        aat: &AatVerdict,
         now_unix: u64,
     ) -> ShadowOutcome {
-        debug_assert_eq!(legacy.path, Path::Legacy, "legacy slot must carry Legacy");
-        debug_assert_eq!(aat.path, Path::Aat, "aat slot must carry Aat");
+        let legacy = legacy.inner();
+        let aat = aat.inner();
 
-        self.steps += 1;
-        self.first_step_unix.get_or_insert(now_unix);
-        self.last_step_unix = Some(now_unix);
+        self.state.steps += 1;
+        self.state.first_step_unix.get_or_insert(now_unix);
+        self.state.last_step_unix = Some(now_unix);
 
         // Compare the VERDICT only. Two paths may reach the same answer by
         // different internal reasoning, and treating a differing audit code as
@@ -241,17 +351,30 @@ impl ShadowComparator {
             };
         }
 
-        self.mismatches += 1;
+        self.state.mismatches += 1;
+        let direction = match (
+            legacy.verdict.permits_execution(),
+            aat.verdict.permits_execution(),
+        ) {
+            (true, false) => MismatchDirection::AatMoreRestrictive,
+            (false, true) => MismatchDirection::AatMorePermissive,
+            // Both deny by different reasoning: no execution difference, but
+            // the recorded reason would change on promotion.
+            (false, false) => MismatchDirection::BothDeny,
+            // Unreachable: equal permission with differing verdicts would mean
+            // two distinct verdicts both permit, and only Compliant does.
+            (true, true) => MismatchDirection::BothDeny,
+        };
+
         ShadowOutcome {
             decided: legacy.verdict,
             mismatch: Some(Mismatch {
-                verb: MISMATCH_VERB,
+                verb: MISMATCH_VERB.to_string(),
                 legacy_digest: legacy.digest(),
                 aat_digest: aat.digest(),
                 legacy_verdict: legacy.verdict,
                 aat_verdict: aat.verdict,
-                aat_more_restrictive: legacy.verdict.permits_execution()
-                    && !aat.verdict.permits_execution(),
+                direction,
             }),
         }
     }
@@ -259,19 +382,19 @@ impl ShadowComparator {
     /// Governed steps compared so far.
     #[must_use]
     pub fn steps(&self) -> u64 {
-        self.steps
+        self.state.steps
     }
 
     /// Disagreements recorded so far.
     #[must_use]
     pub fn mismatches(&self) -> u64 {
-        self.mismatches
+        self.state.mismatches
     }
 
     /// Seconds spanned by the observed steps.
     #[must_use]
     pub fn elapsed_secs(&self) -> u64 {
-        match (self.first_step_unix, self.last_step_unix) {
+        match (self.state.first_step_unix, self.state.last_step_unix) {
             (Some(a), Some(b)) => b.saturating_sub(a),
             _ => 0,
         }
@@ -286,8 +409,8 @@ impl ShadowComparator {
     /// time bound is what exposes the comparison to varied conditions.
     #[must_use]
     pub fn promotion_ready(&self) -> bool {
-        self.mismatches == 0
-            && self.steps >= PROMOTION_MIN_STEPS
+        self.state.mismatches == 0
+            && self.state.steps >= PROMOTION_MIN_STEPS
             && self.elapsed_secs() >= PROMOTION_MIN_SECONDS
     }
 
@@ -295,16 +418,16 @@ impl ShadowComparator {
     #[must_use]
     pub fn promotion_blockers(&self) -> Vec<String> {
         let mut out = Vec::new();
-        if self.mismatches > 0 {
+        if self.state.mismatches > 0 {
             out.push(format!(
                 "{} mismatch(es) recorded; the gate requires zero",
-                self.mismatches
+                self.state.mismatches
             ));
         }
-        if self.steps < PROMOTION_MIN_STEPS {
+        if self.state.steps < PROMOTION_MIN_STEPS {
             out.push(format!(
                 "{} of {PROMOTION_MIN_STEPS} governed steps observed",
-                self.steps
+                self.state.steps
             ));
         }
         if self.elapsed_secs() < PROMOTION_MIN_SECONDS {

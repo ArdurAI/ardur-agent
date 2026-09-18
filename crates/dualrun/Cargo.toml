@@ -10,3 +10,8 @@ publish = false
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
 sha2 = { workspace = true }
+
+[dev-dependencies]
+# Proving a persisted mismatch reloads through `from_reader` - the API a
+# borrowed `verb` made impossible.
+serde_json = { workspace = true }

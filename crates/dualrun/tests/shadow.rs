@@ -7,19 +7,19 @@
 //! system nobody is running.
 
 use ardur_dualrun::{
-    MISMATCH_VERB, PROMOTION_MIN_SECONDS, PROMOTION_MIN_STEPS, Path, PathVerdict, ShadowComparator,
-    Verdict,
+    AatVerdict, GateState, LegacyVerdict, MISMATCH_VERB, MismatchDirection, PROMOTION_MIN_SECONDS,
+    PROMOTION_MIN_STEPS, Path, PathVerdict, ShadowComparator, Verdict,
 };
 
 const T0: u64 = 1_800_000_000;
 const WEEK: u64 = PROMOTION_MIN_SECONDS;
 
-fn legacy(v: Verdict) -> PathVerdict {
-    PathVerdict::new(Path::Legacy, v)
+fn legacy(v: Verdict) -> LegacyVerdict {
+    LegacyVerdict::new(v)
 }
 
-fn aat(v: Verdict) -> PathVerdict {
-    PathVerdict::new(Path::Aat, v)
+fn aat(v: Verdict) -> AatVerdict {
+    AatVerdict::new(v)
 }
 
 #[test]
@@ -55,8 +55,9 @@ fn legacy_decides_even_when_the_aat_path_would_deny() {
     );
     assert!(out.decided.permits_execution());
     let m = out.mismatch.expect("the disagreement must be recorded");
-    assert!(
-        m.aat_more_restrictive,
+    assert_eq!(
+        m.direction,
+        MismatchDirection::AatMoreRestrictive,
         "an allow/deny split must be marked as the AAT path being stricter"
     );
 }
@@ -75,8 +76,9 @@ fn legacy_decides_even_when_the_aat_path_would_allow() {
     );
     assert!(!out.decided.permits_execution());
     let m = out.mismatch.expect("the disagreement must be recorded");
-    assert!(
-        !m.aat_more_restrictive,
+    assert_eq!(
+        m.direction,
+        MismatchDirection::AatMorePermissive,
         "a deny/allow split is the AAT path being more permissive"
     );
 }
@@ -94,8 +96,9 @@ fn insufficient_evidence_never_reads_as_permission_on_either_path() {
     let m = out
         .mismatch
         .expect("compliant vs insufficient is a disagreement");
-    assert!(
-        m.aat_more_restrictive,
+    assert_eq!(
+        m.direction,
+        MismatchDirection::AatMoreRestrictive,
         "insufficient evidence blocks, so it is the stricter answer"
     );
 }
@@ -172,8 +175,8 @@ fn a_differing_audit_code_alone_is_not_a_mismatch() {
     // difference that changes no decision.
     let mut c = ShadowComparator::new();
     let out = c.compare(
-        &PathVerdict::with_code(Path::Legacy, Verdict::Violation, "policy_denied"),
-        &PathVerdict::with_code(Path::Aat, Verdict::Violation, "cedar_forbid"),
+        &LegacyVerdict::with_code(Verdict::Violation, "policy_denied"),
+        &AatVerdict::with_code(Verdict::Violation, "cedar_forbid"),
         T0,
     );
     assert!(
@@ -279,4 +282,132 @@ fn a_fresh_comparator_is_not_promotion_ready() {
     );
     assert_eq!(c.steps(), 0);
     assert_eq!(c.elapsed_secs(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Guards for the review findings on PR #524.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_disagreement_where_neither_path_permits_is_its_own_direction() {
+    // The bug: a bool collapsed "both deny, differently" into the same value as
+    // "AAT is more permissive", which is a genuine authorization gap. The two
+    // call for completely different responses, so the statistics the promotion
+    // decision rests on were corrupted.
+    let mut c = ShadowComparator::new();
+    let out = c.compare(
+        &legacy(Verdict::Violation),
+        &aat(Verdict::InsufficientEvidence),
+        T0,
+    );
+    let m = out.mismatch.expect("differing verdicts disagree");
+
+    assert!(!m.legacy_verdict.permits_execution());
+    assert!(!m.aat_verdict.permits_execution());
+    assert_eq!(
+        m.direction,
+        MismatchDirection::BothDeny,
+        "neither path permits, so this is not an authorization gap"
+    );
+
+    // And the reverse ordering must classify identically, not as a gap.
+    let mut c2 = ShadowComparator::new();
+    let rev = c2.compare(
+        &legacy(Verdict::InsufficientEvidence),
+        &aat(Verdict::Violation),
+        T0,
+    );
+    assert_eq!(
+        rev.mismatch.expect("disagreement").direction,
+        MismatchDirection::BothDeny,
+        "the mirror case must not read as AAT being more permissive"
+    );
+}
+
+#[test]
+fn an_absent_audit_code_does_not_digest_like_an_empty_one() {
+    // The bug: `unwrap_or_default()` hashed None and Some("") identically, a
+    // deterministic collision in evidence whose entire purpose is telling
+    // records apart.
+    let absent = PathVerdict::new(Path::Aat, Verdict::Violation);
+    let empty = PathVerdict::with_code(Path::Aat, Verdict::Violation, "");
+    assert_ne!(
+        absent.digest(),
+        empty.digest(),
+        "an absent code and an empty code are different records"
+    );
+}
+
+#[test]
+fn a_mismatch_round_trips_through_owned_deserialization() {
+    // The bug: `verb: &'static str` meant the derived deserializer required a
+    // 'static buffer, so `Mismatch` did not implement DeserializeOwned and
+    // `from_reader` could not reconstruct evidence advertised as durable.
+    let mut c = ShadowComparator::new();
+    let out = c.compare(&legacy(Verdict::Compliant), &aat(Verdict::Violation), T0);
+    let m = out.mismatch.expect("recorded");
+
+    let json = serde_json::to_string(&m).expect("serializes");
+    // from_reader is the API a persisted record is actually loaded with, and is
+    // exactly what a borrowed verb made impossible.
+    let restored: ardur_dualrun::Mismatch =
+        serde_json::from_reader(std::io::Cursor::new(json.into_bytes()))
+            .expect("durable evidence must be loadable from a reader");
+
+    assert_eq!(restored.verb, MISMATCH_VERB);
+    assert_eq!(restored, m, "a round trip must preserve the record exactly");
+}
+
+#[test]
+fn a_restart_does_not_discharge_an_earlier_mismatch() {
+    // The bug: the gate lived only in process memory. A restart reset it, so
+    // after another clean run promotion_ready() returned true while the durable
+    // chain still contained a mismatch - the opposite of "one mismatch blocks
+    // forever".
+    let mut before = ShadowComparator::new();
+    before.compare(&legacy(Verdict::Compliant), &aat(Verdict::Violation), T0);
+    for i in 0..PROMOTION_MIN_STEPS {
+        before.compare(
+            &legacy(Verdict::Compliant),
+            &aat(Verdict::Compliant),
+            T0 + WEEK + i,
+        );
+    }
+    assert!(!before.promotion_ready());
+
+    // Persist and resume, as a restarting service would.
+    let saved: GateState = before.state();
+    let json = serde_json::to_string(&saved).expect("gate state serializes");
+    let loaded: GateState = serde_json::from_str(&json).expect("and deserializes");
+    let after = ShadowComparator::resume(loaded);
+
+    assert_eq!(
+        after.mismatches(),
+        1,
+        "the mismatch must survive the restart"
+    );
+    assert!(
+        !after.promotion_ready(),
+        "a restart must not discharge a recorded mismatch"
+    );
+
+    // A comparator that simply forgot would look ready on the same history.
+    let mut forgetful = ShadowComparator::new();
+    for i in 0..PROMOTION_MIN_STEPS {
+        forgetful.compare(
+            &legacy(Verdict::Compliant),
+            &aat(Verdict::Compliant),
+            T0 + WEEK + i,
+        );
+    }
+    forgetful.compare(
+        &legacy(Verdict::Compliant),
+        &aat(Verdict::Compliant),
+        T0 + WEEK * 3,
+    );
+    assert!(
+        forgetful.promotion_ready(),
+        "control: without the earlier mismatch this history DOES promote, \
+         which is what makes the restored-state assertion meaningful"
+    );
 }
