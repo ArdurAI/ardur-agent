@@ -45,6 +45,14 @@ use crate::skills::skill::{Skill, SkillError};
 /// level spare; anything deeper is a filesystem to index, not a skills library.
 pub const MAX_SKILL_DEPTH: usize = 3;
 
+/// Environment variable overriding [`MAX_SKILL_DEPTH`].
+///
+/// A library nested more deeply than the default is an operator setting, not a
+/// recompile. An unparseable or zero value falls back to the default with a
+/// warning rather than failing the boot, since an unreadable override should
+/// not be more disruptive than the misconfiguration it describes.
+pub const ARDUR_SKILL_MAX_DEPTH_ENV: &str = "ARDUR_SKILL_MAX_DEPTH";
+
 /// Loads [`Skill`]s from the filesystem.
 pub struct SkillLoader;
 
@@ -67,8 +75,45 @@ impl SkillLoader {
 
         // The root is read eagerly so a missing or unreadable root stays a hard
         // error. Only nested levels are best-effort.
-        Self::collect(dir, 0, &mut skills, true)?;
+        Self::collect(dir, 0, &mut skills, true, Self::depth_limit())?;
 
+        skills.sort_by(|a, b| a.frontmatter.name.cmp(&b.frontmatter.name));
+        Ok(skills)
+    }
+
+    /// Resolve the discovery depth bound, honouring the environment override.
+    fn depth_limit() -> usize {
+        Self::parse_depth_limit(std::env::var(ARDUR_SKILL_MAX_DEPTH_ENV).ok().as_deref())
+    }
+
+    /// Interpret a raw override value. Separate from the environment read so
+    /// it is testable without mutating a shared process environment.
+    fn parse_depth_limit(raw: Option<&str>) -> usize {
+        let Some(raw) = raw else {
+            return MAX_SKILL_DEPTH;
+        };
+        match raw.trim().parse::<usize>() {
+            Ok(depth) if depth > 0 => depth,
+            _ => {
+                tracing::warn!(
+                    env = ARDUR_SKILL_MAX_DEPTH_ENV,
+                    value = %raw,
+                    default = MAX_SKILL_DEPTH,
+                    "ignoring unusable skills depth override; using the default"
+                );
+                MAX_SKILL_DEPTH
+            }
+        }
+    }
+
+    /// Load with an explicit depth bound, bypassing the environment override.
+    pub fn load_directory_with_depth(
+        dir: impl AsRef<Path>,
+        depth_limit: usize,
+    ) -> Result<Vec<Skill>, SkillError> {
+        let dir = dir.as_ref();
+        let mut skills = Vec::new();
+        Self::collect(dir, 0, &mut skills, true, depth_limit.max(1))?;
         skills.sort_by(|a, b| a.frontmatter.name.cmp(&b.frontmatter.name));
         Ok(skills)
     }
@@ -78,6 +123,7 @@ impl SkillLoader {
         depth: usize,
         skills: &mut Vec<Skill>,
         root: bool,
+        depth_limit: usize,
     ) -> Result<(), SkillError> {
         let entries = match std::fs::read_dir(dir) {
             Ok(entries) => entries,
@@ -103,16 +149,18 @@ impl SkillLoader {
             };
             let path = entry.path();
 
-            // `file_type()` does not follow symlinks, so a link to a directory
-            // is not descended into. That is what keeps the bounded walk
-            // bounded: a symlink cycle would otherwise present the same
-            // directory at every level and defeat the depth limit.
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            if !file_type.is_dir() {
+            // `is_dir()` follows symlinks, so a linked skill directory still
+            // loads -- some libraries are assembled by linking, and dropping
+            // those would be a silent regression.
+            if !path.is_dir() {
                 continue;
             }
+
+            // Whether this entry is itself a link decides if we may RECURSE
+            // into it. A symlinked directory is loaded as a leaf but never
+            // descended into, so a cycle cannot be built out of linked
+            // categories and the bounded walk stays bounded.
+            let is_symlink = entry.file_type().map(|ft| ft.is_symlink()).unwrap_or(true);
 
             let manifest = path.join("SKILL.md");
             if manifest.is_file() {
@@ -128,13 +176,27 @@ impl SkillLoader {
                 continue;
             }
 
-            if depth + 1 < MAX_SKILL_DEPTH {
-                Self::collect(&path, depth + 1, skills, false)?;
-            } else {
-                tracing::debug!(
+            if is_symlink {
+                tracing::warn!(
                     path = %path.display(),
-                    max_depth = MAX_SKILL_DEPTH,
-                    "not descending further for skills"
+                    "not descending into a symlinked directory that holds no SKILL.md; \
+                     skills nested below it will not be registered"
+                );
+                continue;
+            }
+
+            if depth + 1 < depth_limit {
+                Self::collect(&path, depth + 1, skills, false, depth_limit)?;
+            } else {
+                // Warn, not debug: a hidden truncation is the same silent
+                // partial registration this loader exists to prevent.
+                tracing::warn!(
+                    path = %path.display(),
+                    max_depth = depth_limit,
+                    env = ARDUR_SKILL_MAX_DEPTH_ENV,
+                    "skills discovery truncated: not descending further, so any \
+                     skills below this directory are NOT registered; raise the \
+                     depth limit to include them"
                 );
             }
         }
@@ -236,25 +298,91 @@ mod tests {
     }
 
     #[test]
-    fn a_symlinked_directory_is_not_followed() {
-        // `file_type()` does not follow symlinks, which is what keeps the
-        // bounded walk bounded: a cycle would otherwise present the same
-        // directory at every level and defeat the depth limit.
+    fn a_symlinked_skill_directory_still_loads() {
+        // Some libraries are assembled by linking skills into a root. The
+        // pre-recursion loader used `path.is_dir()`, which follows links, so
+        // dropping them here would be a silent regression on upgrade.
         #[cfg(unix)]
         {
             let tmp = tempfile::tempdir().unwrap();
-            write_skill_at(tmp.path(), "real", "real");
-            let linked = tmp.path().join("link");
-            std::os::unix::fs::symlink(tmp.path().join("real"), &linked).unwrap();
+            let store = tmp.path().join("store");
+            let root = tmp.path().join("root");
+            std::fs::create_dir_all(&root).unwrap();
+            write_skill_at(&store, "linked", "linked");
+            std::os::unix::fs::symlink(store.join("linked"), root.join("linked")).unwrap();
 
-            let skills = SkillLoader::load_directory(tmp.path()).unwrap();
+            let skills = SkillLoader::load_directory(&root).unwrap();
+            let names: Vec<_> = skills.iter().map(|s| s.frontmatter.name.as_str()).collect();
+            assert_eq!(
+                names,
+                vec!["linked"],
+                "a symlinked skill directory must still be registered"
+            );
+        }
+    }
+
+    #[test]
+    fn a_symlink_cycle_terminates_and_does_not_duplicate() {
+        // Following links is only safe because a symlinked directory is a
+        // LEAF: we never recurse through one. A link pointing at its own
+        // ancestor must therefore neither hang nor re-register its contents.
+        #[cfg(unix)]
+        {
+            let tmp = tempfile::tempdir().unwrap();
+            write_skill_at(tmp.path(), "category/real", "real");
+            // `loop` -> the root itself, placed AT the root and exercised with a
+            // raised bound, so the depth limit cannot be what stops the cycle:
+            // only the symlinks-are-leaves rule can.
+            std::os::unix::fs::symlink(tmp.path(), tmp.path().join("loop")).unwrap();
+
+            let skills = SkillLoader::load_directory_with_depth(tmp.path(), 8).unwrap();
             let names: Vec<_> = skills.iter().map(|s| s.frontmatter.name.as_str()).collect();
             assert_eq!(
                 names,
                 vec!["real"],
-                "a symlink must not re-register the skill it points at"
+                "a symlink cycle must terminate without duplicate registrations"
             );
         }
+    }
+
+    #[test]
+    fn the_depth_limit_is_configurable() {
+        // A deeper library should be an operator setting, not a recompile.
+        let tmp = tempfile::tempdir().unwrap();
+        write_skill_at(tmp.path(), "a/b/c/too-deep", "too-deep");
+
+        assert!(
+            SkillLoader::load_directory_with_depth(tmp.path(), MAX_SKILL_DEPTH)
+                .unwrap()
+                .is_empty(),
+            "the default bound must exclude this skill, or a raised bound proves nothing"
+        );
+
+        let skills = SkillLoader::load_directory_with_depth(tmp.path(), 4).unwrap();
+        let names: Vec<_> = skills.iter().map(|s| s.frontmatter.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["too-deep"],
+            "a raised bound must admit a deeper tree"
+        );
+    }
+
+    #[test]
+    fn an_unusable_depth_override_falls_back_to_the_default() {
+        // An unreadable override must not be more disruptive than the
+        // misconfiguration it describes: fall back, warn, keep booting.
+        for bad in [Some("not-a-number"), Some("0"), Some(""), Some("-1"), None] {
+            assert_eq!(
+                SkillLoader::parse_depth_limit(bad),
+                MAX_SKILL_DEPTH,
+                "override {bad:?} must fall back to the default, not disable discovery"
+            );
+        }
+        assert_eq!(
+            SkillLoader::parse_depth_limit(Some(" 5 ")),
+            5,
+            "a usable override must be honoured, or the fallback test is vacuous"
+        );
     }
 
     #[test]
