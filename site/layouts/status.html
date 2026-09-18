@@ -61,7 +61,7 @@
         <p class="mt-4 text-sm text-ink-faint">
           Last regenerated
           <time datetime="{{ index $data "generated_at" }}">{{ index $data "generated_at" }}</time>
-          · dev @ <code class="font-mono text-xs">{{ substr (index $data "dev_head") 0 7 }}</code>
+          · dev CI green at <code class="font-mono text-xs">{{ substr (index $data "dev_head") 0 7 }}</code>
         </p>
 
         {{ $beads := index $sources "beads" }}
@@ -120,6 +120,12 @@
           {{ if $laneEntries }}
           <section class="mt-12">
             <h2 class="text-lg font-semibold">{{ $lane }}</h2>
+            {{ if eq $lane "Workstream board" }}
+            <p class="mt-1 text-sm text-ink-faint">
+              Engineering workstream board snapshot — operational detail, not
+              the authoritative public project tracker.
+            </p>
+            {{ end }}
             <ul class="mt-4 space-y-3">
               {{ range $laneEntries }}
               <li class="card p-5">

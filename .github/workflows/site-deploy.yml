@@ -24,6 +24,10 @@ on:
 
 permissions:
   contents: read
+  # actions: read lets the status collector fetch public CI job logs (test
+  # totals) with the job token; without it the totals degrade to "not
+  # asserted" (review finding on #526).
+  actions: read
   pages: write
   id-token: write
 
@@ -84,14 +88,21 @@ jobs:
         run: hugo --gc --minify --logLevel info --baseURL "https://ardurai.github.io/ardur-agent/"
 
       - name: Upload Pages artifact
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: >-
+          github.event_name == 'push' && github.ref == 'refs/heads/main' ||
+          github.event_name == 'schedule'
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
         with:
           path: site/public
 
   deploy:
-    # Only deploy on pushes to main, never on PRs or dev pushes.
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # Deploy on pushes to main and on the nightly schedule (the nightly run
+    # IS the refresh mechanism for the live page — restricting it to pushes
+    # would leave the published data stale; review finding on #526). Never
+    # on PRs or dev pushes.
+    if: >-
+      github.event_name == 'push' && github.ref == 'refs/heads/main' ||
+      github.event_name == 'schedule'
     needs: hugo
     runs-on: ubuntu-latest
     environment:

@@ -139,6 +139,28 @@ class BeadsTests(unittest.TestCase):
             self.assertEqual(rows, [])
             self.assertIn("carried-forward", meta["note"])
 
+    def test_bd_failure_note_carries_no_command_diagnostics(self):
+        """Diagnostics (paths, config detail) must stay out of metadata (#526 P1).
+
+        run() embeds command stderr into CollectorError; none of it may
+        reach the generated public metadata — fixed-string reasons only.
+        """
+        from unittest import mock
+
+        def fake_run(cmd, cwd=None):
+            raise self.collector.CollectorError(
+                "command failed (1): bd list --json\nError: /Users/x/.beads secret"
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = pathlib.Path(tmp)
+            self.collector.write_beads_snapshot(repo_root, [])
+            with mock.patch("shutil.which", return_value="/usr/local/bin/bd"):
+                with mock.patch.object(self.collector, "run", side_effect=fake_run):
+                    _, meta = self.collector.collect_beads(repo_root)
+            self.assertNotIn("/Users/x", json.dumps(meta))
+            self.assertNotIn(".beads secret", json.dumps(meta))
+
 
 class StrictModeTests(unittest.TestCase):
     def test_strict_exits_one_on_missing_sources(self):
@@ -164,6 +186,9 @@ class StrictModeTests(unittest.TestCase):
 class WorkflowWiringTests(unittest.TestCase):
     """Guard the site-deploy generation step (plan #515 S0)."""
 
+    def setUp(self):
+        self.collector = load_collector()
+
     def test_regeneration_step_precedes_hugo_build(self):
         workflow = SITE_DEPLOY.read_text(encoding="utf-8")
         regen = workflow.index("Regenerate status data")
@@ -182,6 +207,33 @@ class WorkflowWiringTests(unittest.TestCase):
     def test_nightly_schedule_present(self):
         workflow = SITE_DEPLOY.read_text(encoding="utf-8")
         self.assertRegex(workflow, r"(?s)schedule:.*?- cron: \"40 2 \* \* \*\"")
+
+    def test_workflow_grants_actions_read_for_job_logs(self):
+        workflow = SITE_DEPLOY.read_text(encoding="utf-8")
+        self.assertLess(
+            workflow.index("actions: read"), workflow.index("jobs:"), "permissions must precede jobs"
+        )
+
+    def test_scheduled_runs_deploy(self):
+        workflow = SITE_DEPLOY.read_text(encoding="utf-8")
+        self.assertEqual(
+            workflow.count("github.event_name == 'schedule'"), 2,
+            "both upload and deploy must include scheduled runs",
+        )
+
+    def test_release_collection_failure_propagates_in_strict_mode(self):
+        from unittest import mock
+
+        def fail(slug):
+            raise self.collector.CollectorError("HTTP 403 rate limited")
+
+        with mock.patch.object(self.collector, "gh_api", side_effect=fail):
+            with self.assertRaises(self.collector.CollectorError):
+                self.collector.collect_release("x/y")
+
+    def test_dev_head_is_ci_run_head_not_checkout(self):
+        workflow = SITE_DEPLOY.read_text(encoding="utf-8")
+        self.assertNotIn("git rev-parse", workflow)
 
     def test_progress_data_is_tracked_so_pr_builds_render(self):
         data = ROOT / "site" / "data" / "progress.json"

@@ -101,10 +101,6 @@ def git_repo_slug(repo_root: Path) -> str:
     return match.group(1)
 
 
-def git_head(repo_root: Path) -> str:
-    return run(["git", "rev-parse", "HEAD"], cwd=repo_root).strip()
-
-
 def gh_api(
     path: str,
     repo_root: Path | None = None,
@@ -203,15 +199,18 @@ def collect_beads(repo_root: Path) -> tuple[list[dict], dict]:
         except (CollectorError, json.JSONDecodeError, KeyError) as exc:
             # bd present but unusable here (e.g. no .beads database in this
             # checkout — forks and CI). Degrade to the committed snapshot,
-            # marked stale; only a missing snapshot is fatal below.
+            # marked stale; only a missing snapshot is fatal below. The note
+            # stays a fixed string: command diagnostics (paths, config
+            # details) must not leak into generated public metadata.
+            print(f"warning: bd list failed: {exc}", file=sys.stderr)
             snapshot = load_beads_snapshot(repo_root)
             if snapshot is None:
-                raise CollectorError(f"bd list failed: {exc}") from exc
+                raise CollectorError("bd list failed in this checkout") from exc
             return snapshot.get("items", []), {
                 "fresh": False,
                 "regenerated_at": snapshot.get("regenerated_at"),
                 "note": (
-                    f"bd unavailable in this checkout ({exc}); "
+                    "bd unavailable in this checkout; "
                     "carried-forward committed snapshot"
                 ),
                 "item_count": len(snapshot.get("items", [])),
@@ -300,7 +299,12 @@ def collect_ci(slug: str, with_logs: bool) -> dict:
     except CollectorError as exc:
         # A green run with unavailable logs is degradable evidence: the run
         # link still proves CI state; the totals are simply not asserted.
-        result["tests_note"] = f"job log unavailable: {exc}"
+        # Fixed-string reason only — gh diagnostics must not leak into
+        # generated public metadata.
+        print(f"warning: job log unavailable: {exc}", file=sys.stderr)
+        result["tests_note"] = (
+            "job log unavailable in this environment; totals not asserted"
+        )
         return result
     result["tests"] = parse_test_result_lines(log_text)
     if result["tests"]["seen"] == 0:
@@ -329,10 +333,13 @@ def parse_test_result_lines(text: str) -> dict:
 
 
 def collect_release(slug: str) -> dict | None:
-    try:
-        data = gh_api(f"repos/{slug}/releases/latest")
-    except CollectorError:
-        return None
+    """Latest published release, or None only when confirmed absent.
+
+    Collection failures (rate limit, network, server error) propagate: under
+    --strict a missing release must mean "no release exists", never "the
+    API call failed" (review finding on #526).
+    """
+    data = gh_api(f"repos/{slug}/releases/latest")
     if not isinstance(data, dict) or not data.get("tag_name"):
         return None
     return {
@@ -397,7 +404,6 @@ def beads_to_entries(items: list[dict]) -> list[dict]:
 def build_payload(
     repo_root: Path,
     slug: str,
-    head: str,
     beads: tuple[list[dict], dict],
     with_ci_logs: bool = True,
 ) -> dict:
@@ -474,7 +480,10 @@ def build_payload(
         },
         "generated_at": generated_at,
         "repo": slug,
-        "dev_head": head,
+        # dev tip as verified by the green CI run — NOT the local checkout
+        # HEAD, which is main during promotions and the default branch on
+        # scheduled runs (review finding on #526).
+        "dev_head": ci["head_sha"],
         "summary": {
             "open_issues": issue_total,
             "open_pull_requests": pr_total,
@@ -538,10 +547,9 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         slug = git_repo_slug(args.repo_root)
-        head = git_head(args.repo_root)
         beads = collect_beads(args.repo_root)
         payload = build_payload(
-            args.repo_root, slug, head, beads, with_ci_logs=not args.skip_ci_logs
+            args.repo_root, slug, beads, with_ci_logs=not args.skip_ci_logs
         )
         out = write_payload(output_dir, payload)
     except CollectorError as exc:
