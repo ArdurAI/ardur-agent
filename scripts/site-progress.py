@@ -34,6 +34,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -258,6 +259,47 @@ def search_issues(slug: str, kind: str) -> tuple[int, list[dict]]:
     return int(data.get("total_count", 0)), items
 
 
+def fetch_job_log(slug: str, job_id: int) -> str:
+    """Download a CI job log, following the 302 to the backing blob.
+
+    Deliberately not `gh api`: job logs contain ANSI escape sequences, and
+    newer gh releases refuse to print them to a piped stdout unless given
+    --allow-escape-sequences (observed on the site-deploy runner) — a
+    version-dependent flag. A plain request with redirect-following works
+    everywhere; GH_TOKEN (job token in CI) authenticates when present.
+
+    The redirect target (a signed blob URL) carries its own auth in the
+    query string, so the Authorization header is dropped on cross-host
+    redirects — forwarding it makes the blob reject the request.
+    """
+
+    class _NoAuthRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+            if redirected is not None and redirected.host != req.host:
+                redirected.headers.pop("Authorization", None)
+                redirected.unredirected_hdrs.pop("Authorization", None)
+            return redirected
+
+    url = f"{GITHUB_API}/repos/{slug}/actions/jobs/{job_id}/logs"
+    headers = {"Accept": "application/vnd.github+json"}
+    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    if not token and shutil.which("gh") is not None:
+        try:
+            token = run(["gh", "auth", "token"]).strip()
+        except CollectorError:
+            token = None
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(url, headers=headers)
+    opener = urllib.request.build_opener(_NoAuthRedirect)
+    try:
+        with opener.open(req, timeout=120) as resp:
+            return resp.read().decode("utf-8", errors="replace")
+    except (urllib.error.URLError, OSError) as exc:
+        raise CollectorError(f"job log request failed: {url}") from exc
+
+
 def collect_ci(slug: str, with_logs: bool) -> dict:
     """Latest successful CI run on dev, plus gauntlet test totals."""
     runs = gh_api(
@@ -293,9 +335,7 @@ def collect_ci(slug: str, with_logs: bool) -> dict:
         )
         return result
     try:
-        log_text = run(
-            ["gh", "api", f"repos/{slug}/actions/jobs/{job_id}/logs"]
-        )
+        log_text = fetch_job_log(slug, job_id)
     except CollectorError as exc:
         # A green run with unavailable logs is degradable evidence: the run
         # link still proves CI state; the totals are simply not asserted.
