@@ -76,7 +76,7 @@ pub use mcp::{
     bearer_token_allowed, extract_bearer_token,
 };
 pub use registry::ToolRegistry;
-pub use skills::{Skill, SkillError, SkillFrontmatter, SkillLoader, SkillTool};
+pub use skills::{MAX_SKILL_DEPTH, Skill, SkillError, SkillFrontmatter, SkillLoader, SkillTool};
 pub use tool::{InvocationId, Tool, ToolContext, ToolExample, ToolId, ToolOutput, ToolSchema};
 
 // Shared value types owned by §1.0; re-exported so the tool layer and the
