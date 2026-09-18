@@ -99,7 +99,109 @@ class AllowlistGuardTests(unittest.TestCase):
             with self.assertRaises(self.gen.DocsError):
                 self.gen.generate(repo)
 
-    def test_drift_check_detects_hand_edits(self):
+    def test_symlinked_allowlist_entry_is_rejected(self):
+        """A symlink at an allowlisted path must not publish its target (#528)."""
+        import os
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = pathlib.Path(tmp)
+            secret = repo / "architect" / "private.md"
+            secret.parent.mkdir(parents=True)
+            secret.write_text("# Secret\n\nInternal.\n", encoding="utf-8")
+            doc = repo / "docs" / "benchmarks.md"
+            doc.parent.mkdir(parents=True)
+            os.symlink(secret, doc)
+            for src in self.gen.ALLOWED_DOCS:
+                if src == "docs/benchmarks.md":
+                    continue
+                target = repo / src
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(f"# T {src}\n\nD {src}.\n", encoding="utf-8")
+            with self.assertRaises(self.gen.DocsError):
+                self.gen.generate(repo)
+
+    def test_yaml_scalars_survive_quotes_and_backslashes(self):
+        self.assertEqual(
+            self.gen.yaml_scalar('Ardur "Quick Start"'),
+            '"Ardur \\"Quick Start\\""',
+        )
+        self.assertEqual(self.gen.yaml_scalar("back\\slash"), '"back\\\\slash"')
+
+    def test_relative_links_are_rewritten(self):
+        """Cross-doc links go to slugs; repo files to GitHub URLs (#528)."""
+        gen = self.gen
+        self.assertEqual(
+            gen.rewrite_link("fresh-machine.md", "docs/current-status.md"),
+            "../fresh-machine/",
+        )
+        self.assertEqual(
+            gen.rewrite_link("../RUN.md", "docs/fresh-machine.md"),
+            "https://github.com/ArdurAI/ardur-agent/blob/dev/RUN.md",
+        )
+        self.assertEqual(
+            gen.rewrite_link("https://example.com/x", "docs/a.md"),
+            "https://example.com/x",
+        )
+        self.assertEqual(gen.rewrite_link("#anchor", "docs/a.md"), "#anchor")
+        self.assertEqual(
+            gen.rewrite_link("../crates/benches/README.md", "docs/benchmarks.md"),
+            "https://github.com/ArdurAI/ardur-agent/blob/dev/crates/benches/README.md",
+        )
+
+    def test_generated_body_contains_rewritten_links(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = pathlib.Path(tmp)
+            body = (
+                "# Title\n\nSee [the runbook](fresh-machine.md) and "
+                "[RUN.md](../RUN.md).\n"
+            )
+            for src in ("docs/benchmarks.md", "docs/fresh-machine.md"):
+                target = repo / src
+                target.parent.mkdir(parents=True, exist_ok=True)
+                content = body if src.endswith("benchmarks.md") else "# FM\n\nFM body.\n"
+                target.write_text(content, encoding="utf-8")
+            for src in self.gen.ALLOWED_DOCS:
+                if src in ("docs/benchmarks.md", "docs/fresh-machine.md"):
+                    continue
+                target = repo / src
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(f"# T {src}\n\nD {src}.\n", encoding="utf-8")
+            self.gen.generate(repo)
+            generated = (repo / self.gen.OUTPUT_DIR / "benchmarks.md").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("(../fresh-machine/)", generated)
+            self.assertIn(
+                "(https://github.com/ArdurAI/ardur-agent/blob/dev/RUN.md)", generated
+            )
+
+    def test_links_inside_code_fences_are_not_rewritten(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = pathlib.Path(tmp)
+            doc = repo / "docs" / "benchmarks.md"
+            doc.parent.mkdir(parents=True)
+            doc.write_text(
+                "# T\n\n```\nsee [x](fresh-machine.md)\n```\n",
+                encoding="utf-8",
+            )
+            for src in self.gen.ALLOWED_DOCS:
+                if src == "docs/benchmarks.md":
+                    continue
+                target = repo / src
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(f"# T {src}\n\nD {src}.\n", encoding="utf-8")
+            self.gen.generate(repo)
+            generated = (repo / self.gen.OUTPUT_DIR / "benchmarks.md").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("[x](fresh-machine.md)", generated)
+
+    def test_footer_links_docs_and_status_on_all_viewports(self):
+        footer = (
+            ROOT / "site" / "layouts" / "partials" / "footer.html"
+        ).read_text(encoding="utf-8")
+        self.assertIn('href="{{ "docs/" | relURL }}"', footer)
+        self.assertIn('href="{{ "status/" | relURL }}"', footer)
         with tempfile.TemporaryDirectory() as tmp:
             repo = pathlib.Path(tmp)
             for src in self.gen.ALLOWED_DOCS:

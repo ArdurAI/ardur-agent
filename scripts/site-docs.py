@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import json
 import re
 import shutil
 import sys
@@ -91,6 +92,60 @@ def is_forbidden(path: str) -> bool:
     return any(p.search(path) for p in FORBIDDEN_PATH_PATTERNS)
 
 
+def yaml_scalar(value: str) -> str:
+    """YAML-safe double-quoted scalar (JSON strings are valid YAML 1.2
+    double-quoted scalars; review finding on #528)."""
+    return json.dumps(value, ensure_ascii=False)
+
+
+REPO_FILE_URL = "https://github.com/ArdurAI/ardur-agent/blob/dev/"
+
+# Allowlisted-doc filename -> site slug (for cross-doc link rewriting).
+SLUG_BY_FILENAME = {
+    Path(src).name: slug for src, slug in ALLOWED_DOCS.items()
+}
+
+LINK_RE = re.compile(r"(?P<prefix>[\[<][^]>\n]*[\]>]\()\s?(?P<href>[^)\s]+)\)?")
+
+
+def rewrite_link(href: str, src_rel: str) -> str:
+    """Rewrite a repo-relative link for its generated page (#528 P2).
+
+    - Links to another allowlisted doc point at that page's site slug
+      (site-relative so they work under any baseURL).
+    - Links to other repository files point at the canonical GitHub view
+      so they resolve instead of 404ing under /docs/.
+    - External/anchor/absolute links pass through unchanged.
+    """
+    if href.startswith(("http://", "https://", "#", "mailto:", "/")):
+        return href
+    href_path = href.split("#", 1)[0].split("?", 1)[0]
+    if not href_path:
+        return href
+    resolved = (Path(src_rel).parent / href_path).as_posix()
+    resolved = re.sub(r"^\./", "", resolved)
+    # Collapse ./ and ../ lexically (POSIX-style, no filesystem access).
+    parts: list[str] = []
+    for part in resolved.split("/"):
+        if part == "." or part == "":
+            continue
+        if part == "..":
+            if parts:
+                parts.pop()
+            continue
+        parts.append(part)
+    normalized = "/".join(parts)
+    slug = ALLOWED_DOCS.get(normalized)
+    if slug is not None:
+        return f"../{slug}/"
+    target_name = Path(normalized).name
+    if target_name in SLUG_BY_FILENAME and "/" not in normalized.rstrip("/"):
+        return f"../{SLUG_BY_FILENAME[target_name]}/"
+    if normalized:
+        return f"{REPO_FILE_URL}{normalized}"
+    return href
+
+
 def extract_title(body: str) -> str:
     for line in body.splitlines():
         stripped = line.strip()
@@ -120,13 +175,38 @@ def extract_description(body: str, limit: int = 220) -> str:
     return "Ardur engineering documentation."
 
 
-def transform(source: Path, body: str) -> str:
-    """Strip the leading H1 (rendered as the page title) and return the rest."""
+def transform(source: Path, body: str, src_rel: str) -> str:
+    """Strip the leading H1 and rewrite repo-relative links (#528 P2).
+
+    Link rewriting skips fenced code blocks; HTML <a href> links are
+    handled by the same href rule.
+    """
+    lines = transform_strip_h1(body).splitlines()
+    out: list[str] = []
+    in_code = False
+    for line in lines:
+        if line.strip().startswith("```"):
+            in_code = not in_code
+            out.append(line)
+            continue
+        if not in_code:
+            line = MD_LINK_RE.sub(
+                lambda m: f"{m.group('prefix')}{rewrite_link(m.group('href'), src_rel)})",
+                line,
+            )
+        out.append(line)
+    return "\n".join(out)
+
+
+def transform_strip_h1(body: str) -> str:
     lines = body.splitlines()
     for index, line in enumerate(lines):
         if line.strip().startswith("# "):
             return "\n".join(lines[index + 1 :]).lstrip("\n")
     return body
+
+
+MD_LINK_RE = re.compile(r"(?P<prefix>\[[^\]\n]*\]\()\s?(?P<href>[^)\s]+)\)?")
 
 
 def generate(repo_root: Path) -> list[str]:
@@ -139,23 +219,39 @@ def generate(repo_root: Path) -> list[str]:
         source = repo_root / src_rel
         if not source.is_file():
             raise DocsError(f"allowlisted doc missing: {src_rel}")
+        # A symlink at an allowlisted path could point outside the repo or
+        # into a forbidden directory; the literal path check alone would not
+        # catch it (#528 P2). Resolve and re-check.
+        resolved = source.resolve()
+        try:
+            resolved_rel = resolved.relative_to(repo_root.resolve()).as_posix()
+        except ValueError as exc:
+            raise DocsError(
+                f"allowlisted doc {src_rel!r} resolves outside the repository"
+            ) from exc
+        if is_forbidden(resolved_rel):
+            raise DocsError(
+                f"allowlisted doc {src_rel!r} resolves to forbidden path {resolved_rel!r}"
+            )
         body = source.read_text(encoding="utf-8")
         title = extract_title(body)
         description = extract_description(body)
         frontmatter = (
             "---\n"
-            f'title: "{title}"\n'
-            f'description: "{description}"\n'
+            f"title: {yaml_scalar(title)}\n"
+            f"description: {yaml_scalar(description)}\n"
             f"layout: docs\n"
-            f'slug: "{slug}"\n'
-            f'weight: {len(written) + 1}\n'
+            f"slug: {yaml_scalar(slug)}\n"
+            f"weight: {len(written) + 1}\n"
             "---\n\n"
             f"<!-- generated by {GENERATED_BY} from {src_rel} — do not "
             "hand-edit; regenerate with scripts/site-docs.py -->\n\n"
         )
         target = output_dir / f"{slug}.md"
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(frontmatter + transform(source, body), encoding="utf-8")
+        target.write_text(
+            frontmatter + transform(source, body, src_rel), encoding="utf-8"
+        )
         written.append(slug)
     # Prune stale generated files (renamed/removed allowlist entries). The
     # committed section index (_index.md) is NOT generated — keep it.
