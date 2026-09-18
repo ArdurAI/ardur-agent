@@ -1,16 +1,25 @@
+{{/* Fragment nav targets live on the landing page; when this partial is
+      rendered on a subpage (e.g. /status), point the fragments back at the
+      homepage instead of dangling no-op anchors (review finding on #526). */}}
+{{ $home := "" | relURL }}
+{{ $fragSuffix := "" }}
+{{ if ne .RelPermalink $home }}
+  {{ $fragSuffix = $home }}
+{{ end }}
 <header class="site-nav fixed inset-x-0 top-0 z-50">
   <nav class="container-content flex items-center justify-between py-4">
-    <a href="#top" class="flex items-center gap-2 font-semibold tracking-tight">
+    <a href="{{ $home }}#top" class="flex items-center gap-2 font-semibold tracking-tight">
       <span class="inline-block h-3 w-3 rounded-sm bg-accent-gradient"></span>
       <span>Ardur</span>
     </a>
 
     <div class="hidden items-center gap-7 text-sm text-ink-muted md:flex">
-      <a href="#differentiators" class="hover:text-ink transition">Differentiators</a>
-      <a href="#capabilities" class="hover:text-ink transition">Capabilities</a>
-      <a href="#architecture" class="hover:text-ink transition">Architecture</a>
-      <a href="#quickstart" class="hover:text-ink transition">Quickstart</a>
-      <a href="#open-source" class="hover:text-ink transition">Open source</a>
+      <a href="{{ "status/" | relURL }}" class="hover:text-ink transition">Status</a>
+      <a href="{{ $fragSuffix }}#differentiators" class="hover:text-ink transition">Differentiators</a>
+      <a href="{{ $fragSuffix }}#capabilities" class="hover:text-ink transition">Capabilities</a>
+      <a href="{{ $fragSuffix }}#architecture" class="hover:text-ink transition">Architecture</a>
+      <a href="{{ $fragSuffix }}#quickstart" class="hover:text-ink transition">Quickstart</a>
+      <a href="{{ $fragSuffix }}#open-source" class="hover:text-ink transition">Open source</a>
     </div>
 
     <div class="flex items-center gap-3">
