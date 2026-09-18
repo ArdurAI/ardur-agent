@@ -604,10 +604,18 @@ def main(argv: list[str] | None = None) -> int:
 
     summary = payload["summary"]
     print(f"wrote {out}")
+    tests = summary.get("tests")
+    tests_line = (
+        f"tests={tests['passed']}/{tests['failed']}/{tests['ignored']} (passed/failed/ignored)"
+        if tests
+        else "tests=not asserted"
+    )
     print(
         "open issues={open_issues} open PRs={open_pull_requests} "
-        "board-open={board_items_open} ci-run={run}".format(
-            run=payload["sources"]["ci"]["run_id"], **summary
+        "board-open={board_items_open} ci-run={run} {tests_line}".format(
+            run=payload["sources"]["ci"]["run_id"],
+            tests_line=tests_line,
+            **{k: v for k, v in summary.items() if k != "tests"},
         )
     )
     return 0
