@@ -81,6 +81,15 @@ jobs:
           cd "${GITHUB_WORKSPACE}" && python3 scripts/site-progress.py --strict
         continue-on-error: ${{ github.event_name == 'pull_request' }}
 
+      - name: Generate docs pages
+        # Copies the allowlisted repo docs into site/content/docs/ with
+        # injected frontmatter (#515 S1). docs/ stays the single source; the
+        # copy is generated here, never committed. --check would fail the
+        # build on drift, but since the directory is gitignored there is
+        # nothing to drift against — generation is unconditional.
+        run: python3 "${GITHUB_WORKSPACE}/scripts/site-docs.py"
+        working-directory: ${{ github.workspace }}
+
       - name: Build
         # Pages serves this project under the /ardur-agent/ subpath, so baseURL
         # must include it or every asset link 404s. Override the hugo.toml value
