@@ -9,3 +9,8 @@ resources/
 # Generated Tailwind build-stats files
 assets/jsconfig.json
 hugo_stats.json
+
+# Generated docs pages (scripts/site-docs.py; docs/ is the single source)
+content/docs/*
+!content/docs/_index.md
+content/docs/.generated

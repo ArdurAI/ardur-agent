@@ -37,6 +37,6 @@ mod loader;
 mod skill;
 mod tool;
 
-pub use loader::SkillLoader;
+pub use loader::{MAX_SKILL_DEPTH, SkillLoader};
 pub use skill::{Skill, SkillError, SkillFrontmatter};
 pub use tool::SkillTool;

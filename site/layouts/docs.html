@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{ .Title }} — Ardur Docs</title>
+  <meta name="description" content="{{ .Description }}" />
+  <meta property="og:title" content="{{ .Title }} — Ardur Docs" />
+  <meta property="og:description" content="{{ .Description }}" />
+  <meta property="og:type" content="article" />
+  <meta name="theme-color" content="#0a0e17" />
+
+  <script>
+    try {
+      var t = localStorage.getItem("ardur-theme");
+      if (t) document.documentElement.setAttribute("data-theme", t);
+    } catch (e) {}
+  </script>
+
+  <link rel="preload" href="/fonts/inter-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin />
+  <link rel="preload" href="/fonts/inter-latin-700-normal.woff2" as="font" type="font/woff2" crossorigin />
+
+  {{ $css := resources.Get "css/main.css" | css.PostCSS }}
+  {{ if hugo.IsProduction }}
+    {{ $css = $css | minify | fingerprint }}
+  {{ end }}
+  <link rel="stylesheet" href="{{ $css.RelPermalink }}"{{ with $css.Data.Integrity }} integrity="{{ . }}"{{ end }} />
+</head>
+<body>
+  {{ partial "nav.html" . }}
+
+  <main class="pt-32 pb-24 md:pt-40">
+    <div class="container-content">
+      <div class="mx-auto flex max-w-6xl flex-col gap-10 md:flex-row">
+        <aside class="md:w-56 md:shrink-0">
+          <p class="text-sm font-semibold text-ink">Documentation</p>
+          <p class="mt-1 text-xs text-ink-faint">Generated from the repo's docs/ allowlist.</p>
+          <ul class="mt-4 space-y-2 text-sm">
+            {{ $page := . }}
+            {{ range $i, $e := where site.RegularPages "Type" "docs" }}
+              <li>
+                <a
+                  href="{{ $e.RelPermalink }}"
+                  class="{{ if eq $e.RelPermalink $page.RelPermalink }}text-accent-cyan{{ else }}text-ink-muted hover:text-ink{{ end }} transition"
+                >{{ $e.Title }}</a>
+              </li>
+            {{ end }}
+          </ul>
+          <p class="mt-6 text-xs text-ink-faint">
+            Single source: the repository. Pages regenerate on every merge.
+          </p>
+        </aside>
+
+        <article class="min-w-0 flex-1">
+          <p class="text-sm text-ink-faint">
+            <a href="{{ "" | relURL }}" class="hover:text-ink transition">Ardur</a>
+            <span class="mx-1.5">/</span>
+            <a href="{{ "docs/" | relURL }}" class="hover:text-ink transition">Docs</a>
+          </p>
+          <h1 class="mt-4 text-3xl font-bold tracking-tight md:text-4xl">{{ .Title }}</h1>
+          <div class="doc-prose mt-10">
+            {{ .Content }}
+          </div>
+          <p class="mt-14 border-t border-[var(--border)] pt-6 text-sm text-ink-faint">
+            Generated from the repository's <code class="font-mono text-xs">docs/</code>
+            — report inaccuracies in the source file, not here. Regenerated on every deploy.
+          </p>
+        </article>
+      </div>
+    </div>
+  </main>
+
+  {{ partial "footer.html" . }}
+
+  {{ $js := resources.Get "js/observer.js" }}
+  {{ if hugo.IsProduction }}
+    {{ $js = $js | minify | fingerprint }}
+  {{ end }}
+  <script src="{{ $js.RelPermalink }}" defer></script>
+</body>
+</html>

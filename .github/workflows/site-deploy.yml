@@ -15,10 +15,19 @@ on:
     branches: [main, dev]
   pull_request:
     branches: [main, dev]
+  schedule:
+    # Nightly regeneration window (UTC): 02:40, offset from the CI cron to
+    # avoid the top-of-hour rush. Catches cross-repo and time-based drift
+    # the push trigger cannot see (plan #515 §3).
+    - cron: "40 2 * * *"
   workflow_dispatch: {}
 
 permissions:
   contents: read
+  # actions: read lets the status collector fetch public CI job logs (test
+  # totals) with the job token; without it the totals degrade to "not
+  # asserted" (review finding on #526).
+  actions: read
   pages: write
   id-token: write
 
@@ -60,6 +69,27 @@ jobs:
           hugo-version: ${{ env.HUGO_VERSION }}
           extended: true
 
+      - name: Regenerate status data
+        # Collects public evidence (GitHub REST surface + the committed
+        # workstream-board snapshot) into site/data/progress.json before the
+        # Hugo build. Pushes fail loudly on missing sources; PR validations
+        # only warn so dependabot PRs (no repo access) don't break the hugo
+        # check. GH_TOKEN lets gh use the job token in CI.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd "${GITHUB_WORKSPACE}" && python3 scripts/site-progress.py --strict
+        continue-on-error: ${{ github.event_name == 'pull_request' }}
+
+      - name: Generate docs pages
+        # Copies the allowlisted repo docs into site/content/docs/ with
+        # injected frontmatter (#515 S1). docs/ stays the single source; the
+        # copy is generated here, never committed. --check would fail the
+        # build on drift, but since the directory is gitignored there is
+        # nothing to drift against — generation is unconditional.
+        run: python3 "${GITHUB_WORKSPACE}/scripts/site-docs.py"
+        working-directory: ${{ github.workspace }}
+
       - name: Build
         # Pages serves this project under the /ardur-agent/ subpath, so baseURL
         # must include it or every asset link 404s. Override the hugo.toml value
@@ -67,14 +97,21 @@ jobs:
         run: hugo --gc --minify --logLevel info --baseURL "https://ardurai.github.io/ardur-agent/"
 
       - name: Upload Pages artifact
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: >-
+          github.event_name == 'push' && github.ref == 'refs/heads/main' ||
+          github.event_name == 'schedule'
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
         with:
           path: site/public
 
   deploy:
-    # Only deploy on pushes to main, never on PRs or dev pushes.
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # Deploy on pushes to main and on the nightly schedule (the nightly run
+    # IS the refresh mechanism for the live page — restricting it to pushes
+    # would leave the published data stale; review finding on #526). Never
+    # on PRs or dev pushes.
+    if: >-
+      github.event_name == 'push' && github.ref == 'refs/heads/main' ||
+      github.event_name == 'schedule'
     needs: hugo
     runs-on: ubuntu-latest
     environment:
