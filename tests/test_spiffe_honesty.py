@@ -39,9 +39,18 @@ class SpiffeHonestyTests(unittest.TestCase):
         """
         text = SECURITY.read_text(encoding="utf-8")
         for phrase in (
+            # The naming is a convention, not an integration.
             "naming convention, not an",
-            "operator-scoped keypair",
-            "attesting itself",
+            # The workload attests itself - the gap itself.
+            "attests itself",
+            # Both keys are named, because conflating them hides that their
+            # compromise consequences differ.
+            "issuer.key",
+            "receipt.pem",
+            # The local-SPIRE assessment must stay non-categorical: an earlier
+            # draft claimed no local deployment could help, which review showed
+            # was wrong.
+            "is **not** ruled out",
         ):
             self.assertIn(
                 phrase.lower(),
@@ -51,6 +60,12 @@ class SpiffeHonestyTests(unittest.TestCase):
 
     def test_no_spiffe_dependency_exists(self):
         """The honesty claim is false the moment a real SPIFFE crate appears.
+
+        Scans manifests AND `Cargo.lock`. Manifests alone are insufficient: a
+        newly added SDK can pull a SPIFFE crate transitively, leaving every
+        manifest line free of the word while the lockfile gains the package —
+        the test stays green and SECURITY.md silently becomes false, which is
+        precisely the drift this guard exists to prevent.
 
         This test is expected to FAIL when the gh#514 integration lands — that
         failure is the reminder to rewrite SECURITY.md rather than ship prose
@@ -66,11 +81,26 @@ class SpiffeHonestyTests(unittest.TestCase):
                     continue
                 if SPIFFE_WORD.search(stripped):
                     offenders.append(f"{manifest.relative_to(REPO)}:{i}: {stripped}")
+
+        # Package NAMES only. Matching the whole lockfile would fire on an
+        # unrelated crate whose `source` or checksum happened to contain the
+        # substring, and a guard that cries wolf gets disabled.
+        lock = REPO / "Cargo.lock"
+        if lock.exists():
+            for i, line in enumerate(
+                lock.read_text(encoding="utf-8").splitlines(), start=1
+            ):
+                stripped = line.strip()
+                if not stripped.startswith("name = "):
+                    continue
+                if SPIFFE_WORD.search(stripped):
+                    offenders.append(f"Cargo.lock:{i}: {stripped}")
+
         self.assertEqual(
             offenders,
             [],
-            "a SPIFFE/SPIRE dependency now exists, so SECURITY.md's "
-            "'no integration' claim is stale:\n" + "\n".join(offenders),
+            "a SPIFFE/SPIRE dependency now exists (possibly transitively), so "
+            "SECURITY.md's 'no integration' claim is stale:\n" + "\n".join(offenders),
         )
 
     def test_docs_do_not_claim_bare_spiffe_identity(self):
@@ -88,6 +118,10 @@ class SpiffeHonestyTests(unittest.TestCase):
             "server/fleet",
             "no spiffe",
             "not an integration",
+            # The failure message tells authors to point at the canonical
+            # document; the acceptance logic must honour its own advice, or the
+            # prescribed remedy fails CI.
+            "security.md",
         )
         offenders = []
         for doc in tracked_files(".md"):
