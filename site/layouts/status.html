@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{ .Title }} — Ardur</title>
+  <meta name="description" content="{{ .Description }}" />
+  <meta property="og:title" content="{{ .Title }} — Ardur" />
+  <meta property="og:description" content="{{ .Description }}" />
+  <meta property="og:type" content="website" />
+  <meta name="theme-color" content="#0a0e17" />
+
+  <script>
+    try {
+      var t = localStorage.getItem("ardur-theme");
+      if (t) document.documentElement.setAttribute("data-theme", t);
+    } catch (e) {}
+  </script>
+
+  <link rel="preload" href="/fonts/inter-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin />
+  <link rel="preload" href="/fonts/inter-latin-700-normal.woff2" as="font" type="font/woff2" crossorigin />
+
+  {{ $css := resources.Get "css/main.css" | css.PostCSS }}
+  {{ if hugo.IsProduction }}
+    {{ $css = $css | minify | fingerprint }}
+  {{ end }}
+  <link rel="stylesheet" href="{{ $css.RelPermalink }}"{{ with $css.Data.Integrity }} integrity="{{ . }}"{{ end }} />
+</head>
+<body>
+  {{ partial "nav.html" . }}
+
+  <main class="pt-32 pb-24 md:pt-40">
+    <div class="container-content">
+      <div class="mx-auto max-w-4xl">
+        <p class="text-sm text-ink-faint">
+          <a href="{{ "" | relURL }}" class="hover:text-ink transition">Ardur</a>
+          <span class="mx-1.5">/</span>Status
+        </p>
+        <h1 class="mt-4 text-3xl font-bold tracking-tight md:text-4xl">Status</h1>
+        <p class="mt-3 max-w-2xl text-ink-muted">
+          Live project state, regenerated automatically from public evidence —
+          the workstream board, open issues and pull requests, the latest green
+          CI run with test totals, and the current release. Every entry links
+          its source.
+        </p>
+
+        {{ $data := site.Data.progress }}
+        {{ if not $data }}
+          <div class="card mt-10 p-6">
+            <p class="font-semibold">Status data unavailable.</p>
+            <p class="mt-2 text-sm text-ink-muted">
+              The generated progress data (site/data/progress.json) was not
+              found or could not be read. It is produced by
+              scripts/site-progress.py during site generation — see the
+              repository for the collector and its evidence sources.
+            </p>
+          </div>
+        {{ else }}
+        {{ $summary := index $data "summary" }}
+        {{ $sources := index $data "sources" }}
+        <p class="mt-4 text-sm text-ink-faint">
+          Last regenerated
+          <time datetime="{{ index $data "generated_at" }}">{{ index $data "generated_at" }}</time>
+          · dev @ <code class="font-mono text-xs">{{ substr (index $data "dev_head") 0 7 }}</code>
+        </p>
+
+        {{ $beads := index $sources "beads" }}
+        {{ if not (index $beads "fresh") }}
+        <div class="card mt-4 border-l-4 p-4 text-sm" style="border-left-color: #f59e0b;">
+          <p>
+            <span class="font-semibold">Stale source:</span> workstream-board
+            data is a carried-forward snapshot (bd unavailable at generation
+            time; snapshot from {{ index $beads "regenerated_at" }}). It is
+            shown for continuity, not as current state.
+          </p>
+        </div>
+        {{ end }}
+
+        <div class="mt-10 grid grid-cols-2 gap-4 md:grid-cols-4">
+          <div class="card p-5">
+            <p class="text-sm text-ink-faint">Open issues</p>
+            <p class="mt-1 text-2xl font-bold">{{ index $summary "open_issues" }}</p>
+          </div>
+          <div class="card p-5">
+            <p class="text-sm text-ink-faint">Open pull requests</p>
+            <p class="mt-1 text-2xl font-bold">{{ index $summary "open_pull_requests" }}</p>
+          </div>
+          <div class="card p-5">
+            <p class="text-sm text-ink-faint">Board items open</p>
+            <p class="mt-1 text-2xl font-bold">{{ index $summary "board_items_open" }}</p>
+          </div>
+          <div class="card p-5">
+            <p class="text-sm text-ink-faint">Latest release</p>
+            <p class="mt-1 text-2xl font-bold">
+              {{ with index $summary "latest_release" }}{{ index . "tag" }}{{ else }}—{{ end }}
+            </p>
+          </div>
+        </div>
+
+        {{ $ci := index $sources "ci" }}
+        <div class="card mt-6 flex flex-col gap-2 p-6 md:flex-row md:items-center md:justify-between">
+          <div>
+            <p class="font-semibold">Latest green CI run on dev</p>
+            <p class="mt-1 text-sm text-ink-muted">
+              {{ $tests := index $summary "tests" }}
+              {{ with $tests }}
+                {{ index . "passed" }} tests passed · {{ index . "failed" }} failed · {{ index . "ignored" }} ignored
+              {{ else }}
+                Test totals not asserted for this run (see run log).
+              {{ end }}
+              · run <code class="font-mono text-xs">{{ index $ci "run_id" }}</code>
+              · head <code class="font-mono text-xs">{{ substr (index $ci "head_sha") 0 7 }}</code>
+            </p>
+          </div>
+          <a href="{{ index $ci "url" }}" class="btn btn-ghost shrink-0">View run →</a>
+        </div>
+
+        {{ range $lane := slice "Workstream board" "Open issues" "Pull requests" "CI" "Release" }}
+          {{ $laneEntries := where (index $data "entries") "lane" "==" $lane }}
+          {{ if $laneEntries }}
+          <section class="mt-12">
+            <h2 class="text-lg font-semibold">{{ $lane }}</h2>
+            <ul class="mt-4 space-y-3">
+              {{ range $laneEntries }}
+              <li class="card p-5">
+                <div class="flex flex-col gap-1 md:flex-row md:items-baseline md:justify-between">
+                  <div>
+                    <p class="font-medium">{{ .title }}</p>
+                    <p class="mt-1 text-sm text-ink-faint">
+                      {{ with .source_sha_or_id }}<span class="font-mono text-xs">{{ . }}</span> · {{ end }}
+                      state: <span class="text-ink-muted">{{ .state }}</span>
+                      {{ with .updated_at }} · updated {{ . }}{{ end }}
+                    </p>
+                    {{ with .notes }}<p class="mt-2 text-sm text-ink-muted">{{ . }}</p>{{ end }}
+                  </div>
+                  {{ if .evidence_url }}
+                  <a href="{{ .evidence_url }}" class="shrink-0 text-sm text-accent-cyan hover:underline">evidence ↗</a>
+                  {{ else }}
+                  <span class="shrink-0 text-sm text-ink-faint">local tracker</span>
+                  {{ end }}
+                </div>
+              </li>
+              {{ end }}
+            </ul>
+          </section>
+          {{ end }}
+        {{ end }}
+
+        <p class="mt-14 border-t border-[var(--border)] pt-6 text-sm text-ink-faint">
+          Generated by scripts/site-progress.py from public sources (GitHub
+          REST surface, local workstream-board snapshot). Numbers are point-in-time
+          measurements tied to the linked evidence — never estimates.
+        </p>
+        {{ end }}
+      </div>
+    </div>
+  </main>
+
+  {{ partial "footer.html" . }}
+
+  {{ $js := resources.Get "js/observer.js" }}
+  {{ if hugo.IsProduction }}
+    {{ $js = $js | minify | fingerprint }}
+  {{ end }}
+  <script src="{{ $js.RelPermalink }}" defer></script>
+</body>
+</html>

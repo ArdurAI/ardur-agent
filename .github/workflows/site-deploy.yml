@@ -15,6 +15,11 @@ on:
     branches: [main, dev]
   pull_request:
     branches: [main, dev]
+  schedule:
+    # Nightly regeneration window (UTC): 02:40, offset from the CI cron to
+    # avoid the top-of-hour rush. Catches cross-repo and time-based drift
+    # the push trigger cannot see (plan #515 §3).
+    - cron: "40 2 * * *"
   workflow_dispatch: {}
 
 permissions:
@@ -59,6 +64,18 @@ jobs:
         with:
           hugo-version: ${{ env.HUGO_VERSION }}
           extended: true
+
+      - name: Regenerate status data
+        # Collects public evidence (GitHub REST surface + the committed
+        # workstream-board snapshot) into site/data/progress.json before the
+        # Hugo build. Pushes fail loudly on missing sources; PR validations
+        # only warn so dependabot PRs (no repo access) don't break the hugo
+        # check. GH_TOKEN lets gh use the job token in CI.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd "${GITHUB_WORKSPACE}" && python3 scripts/site-progress.py --strict
+        continue-on-error: ${{ github.event_name == 'pull_request' }}
 
       - name: Build
         # Pages serves this project under the /ardur-agent/ subpath, so baseURL
