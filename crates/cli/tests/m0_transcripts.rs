@@ -1,0 +1,773 @@
+//! Frozen pre-refactor REPL bytes; see fixtures/m0/README.md for provenance.
+
+#[path = "support/m0_cases.rs"]
+mod cases;
+
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+use std::rc::Rc;
+use std::task::Poll;
+use std::time::Duration;
+
+use ardur_cli::{RenderCtx, Theme, ThemeName, TurnStats, drive_fused_turn, render_cost_line};
+use ardur_fused_runtime::{FusedEvent, StageKind};
+use ardur_runtime::RuntimeError;
+use serde::{Deserialize, Serialize};
+
+const BASE: &str = "f3ed034ce7dd9f0aaf9df9890c89e4ed33f84b1f";
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct Snapshot {
+    transcript: String,
+    outcome_debug: Option<String>,
+}
+
+fn themes() -> [(String, Theme); 4] {
+    [
+        ("plain".into(), Theme::named(ThemeName::Night).plain()),
+        ("night".into(), Theme::named(ThemeName::Night)),
+        ("dawn".into(), Theme::named(ThemeName::Dawn)),
+        ("terminal".into(), Theme::named(ThemeName::Terminal)),
+    ]
+}
+
+// Only the decimal elapsed-seconds token on the final usage line is normalized.
+// ANSI, rules, whitespace, cost, and all other bytes remain untouched. A duration
+// long enough to change the rule width deliberately fails instead of hiding drift.
+fn normalize_elapsed(output: &str) -> String {
+    let body = output
+        .strip_suffix('\n')
+        .expect("cost line ends in one newline");
+    let line_start = body.rfind('\n').map_or(0, |index| index + 1);
+    let last = &body[line_start..];
+    let re = regex::Regex::new(r"( · )(\d+\.\d)(s )").unwrap();
+    assert_eq!(
+        re.captures_iter(last).count(),
+        1,
+        "usage elapsed token: {last:?}"
+    );
+    let captures = re.captures(last).unwrap();
+    let elapsed = captures.get(2).unwrap();
+    let mut normalized = output.to_string();
+    normalized.replace_range(
+        line_start + elapsed.start()..line_start + elapsed.end(),
+        "<elapsed>",
+    );
+    normalized
+}
+
+#[test]
+fn elapsed_normalization_preserves_every_other_byte() {
+    let raw = "\r\x1b[2Ktext\n\n─\x1b[38;5;242m 3 tokens in · 2 out · $0.3100 · 1.4s \x1b[0m─\n";
+    assert_eq!(
+        normalize_elapsed(raw),
+        "\r\x1b[2Ktext\n\n─\x1b[38;5;242m 3 tokens in · 2 out · $0.3100 · <elapsed>s \x1b[0m─\n"
+    );
+    assert!(
+        std::panic::catch_unwind(|| normalize_elapsed(&(raw.to_string() + "\n"))).is_err(),
+        "an extra newline must not be hidden"
+    );
+}
+
+#[tokio::test]
+async fn frozen_repl_transcripts() {
+    let mut actual = BTreeMap::new();
+    let mut raw = BTreeMap::new();
+    for (theme_name, theme) in themes() {
+        for (name, events) in cases::cases() {
+            let mut bytes = Vec::new();
+            let outcome = drive_fused_turn(
+                futures::stream::iter(events),
+                &mut bytes,
+                &RenderCtx::new(&theme, 80),
+            )
+            .await
+            .unwrap();
+            let output = String::from_utf8(bytes).unwrap();
+            let key = format!("{theme_name}/{name}");
+            raw.insert(key.clone(), output.clone());
+            let transcript = if outcome.usage.is_some() {
+                normalize_elapsed(&output)
+            } else {
+                output
+            };
+            actual.insert(
+                key,
+                Snapshot {
+                    transcript,
+                    outcome_debug: Some(format!("{outcome:#?}")),
+                },
+            );
+        }
+        for (name, cents, elapsed) in [("zero", 0, 0), ("paid", 31, 1400), ("long", 234, 123_400)] {
+            let stats = TurnStats {
+                tokens_in: 421,
+                tokens_out: 187,
+                cost_dollars: cents as f64 / 100.0,
+                elapsed: Duration::from_millis(elapsed),
+                context_frac: None,
+            };
+            actual.insert(
+                format!("{theme_name}/fixed_cost_{name}"),
+                Snapshot {
+                    transcript: format!("{}\n", render_cost_line(&stats, &theme, 80)),
+                    outcome_debug: None,
+                },
+            );
+        }
+    }
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/m0/baseline.json");
+    if std::env::var("ARDUR_REGENERATE_M0_GOLDENS").as_deref() == Ok("1") {
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "CI must never regenerate goldens"
+        );
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let head = regeneration_head(&root);
+        assert!(head.status.success());
+        assert_eq!(
+            String::from_utf8(head.stdout).unwrap().trim(),
+            BASE,
+            "regenerate on the frozen base only"
+        );
+        let diff = regeneration_diff(&root, BASE);
+        assert!(
+            diff.status.success(),
+            "production must match the pre-M0 base"
+        );
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, serde_json::to_string_pretty(&actual).unwrap() + "\n").unwrap();
+        if let Some(raw_path) = std::env::var_os("ARDUR_M0_RAW_TRANSCRIPTS") {
+            std::fs::write(raw_path, serde_json::to_string_pretty(&raw).unwrap() + "\n").unwrap();
+        }
+    }
+    let expected: BTreeMap<String, Snapshot> = serde_json::from_slice(
+        &std::fs::read(path).expect("frozen baseline fixture (explicit regeneration only)"),
+    )
+    .unwrap();
+    assert_eq!(
+        actual.keys().collect::<Vec<_>>(),
+        expected.keys().collect::<Vec<_>>(),
+        "fixture inventory drift"
+    );
+    for (key, snapshot) in actual {
+        assert_eq!(snapshot, expected[&key], "frozen transcript {key}");
+    }
+}
+
+fn local_git(root: &Path) -> Command {
+    let mut command = Command::new("git");
+    command.current_dir(root);
+    // A deliberate superset of `git rev-parse --local-env-vars`: also remove
+    // config injection and future Git overrides without first asking an
+    // unsanitized Git process to parse config. Keep PATH, HOME, TMPDIR, etc.
+    for (key, _) in std::env::vars_os() {
+        if key
+            .to_string_lossy()
+            .to_ascii_uppercase()
+            .starts_with("GIT_")
+        {
+            command.env_remove(key);
+        }
+    }
+    command
+}
+
+fn regeneration_head(root: &Path) -> Output {
+    local_git(root)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("git HEAD for regeneration")
+}
+
+fn regeneration_diff(root: &Path, base: &str) -> Output {
+    local_git(root)
+        .args(["diff", "--exit-code", base, "--"])
+        .output()
+        .expect("git diff for regeneration")
+}
+
+fn fixture_git(root: &Path, args: &[&str]) -> Output {
+    let output = local_git(root)
+        .args([
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "maintenance.auto=false",
+            "-c",
+            "gc.auto=0",
+            "-c",
+        ])
+        .arg(format!(
+            "core.hooksPath={}",
+            root.join("empty-hooks").display()
+        ))
+        .args(args)
+        .output()
+        .expect("fixture git command");
+    assert!(
+        output.status.success(),
+        "{args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output
+}
+
+#[test]
+fn fixture_git_disables_automatic_maintenance() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path();
+    std::fs::create_dir(root.join("empty-hooks")).unwrap();
+    fixture_git(root, &["init", "-q"]);
+    fixture_git(root, &["config", "--local", "maintenance.auto", "true"]);
+    fixture_git(root, &["config", "--local", "gc.auto", "1"]);
+    let values: Vec<_> = ["maintenance.auto", "gc.auto"]
+        .into_iter()
+        .map(|key| {
+            let stored = local_git(root)
+                .args(["config", "--local", "--get", key])
+                .output()
+                .unwrap();
+            assert!(stored.status.success());
+            (
+                stored.stdout,
+                fixture_git(root, &["config", "--get", key]).stdout,
+            )
+        })
+        .collect();
+    assert_eq!(values[0].0, b"true\n", "enabled maintenance control");
+    assert_eq!(values[1].0, b"1\n", "enabled auto-GC control");
+    assert_eq!(
+        [&values[0].1, &values[1].1],
+        [&b"false\n".to_vec(), &b"0\n".to_vec()],
+        "fixture commands must not leave background maintenance racing their snapshots"
+    );
+}
+
+#[test]
+fn regeneration_diff_covers_all_tracked_sources() {
+    let paths = [
+        "crates/provider-runtime/src/types.rs",
+        "crates/core-types/src/lib.rs",
+        "crates/cli/src/stream.rs",
+    ];
+    let mut admitted_dirty_sources = Vec::new();
+    for changed in paths {
+        for staged in [false, true] {
+            let fixture = tempfile::tempdir().unwrap();
+            let root = fixture.path();
+            std::fs::create_dir(root.join("empty-hooks")).unwrap();
+            fixture_git(root, &["init", "-q"]);
+            for path in paths {
+                let path = root.join(path);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, "baseline source\n").unwrap();
+            }
+            fixture_git(root, &["add", "crates"]);
+            fixture_git(root, &["commit", "-q", "-s", "-m", "fixture baseline"]);
+            let base = String::from_utf8(fixture_git(root, &["rev-parse", "HEAD"]).stdout).unwrap();
+            let base = base.trim();
+            assert!(
+                regeneration_diff(root, base).status.success(),
+                "clean control"
+            );
+            let copied_test = root.join("crates/cli/tests/m0_copied.rs");
+            std::fs::create_dir_all(copied_test.parent().unwrap()).unwrap();
+            std::fs::write(copied_test, "copied capture test\n").unwrap();
+            assert!(
+                regeneration_diff(root, base).status.success(),
+                "untracked test control"
+            );
+            std::fs::write(root.join(changed), "changed source\n").unwrap();
+            if staged {
+                fixture_git(root, &["add", changed]);
+            }
+            if regeneration_diff(root, base).status.success() {
+                admitted_dirty_sources.push(format!("{changed} staged={staged}"));
+            }
+        }
+    }
+    assert!(
+        admitted_dirty_sources.is_empty(),
+        "regeneration accepted dirty tracked inputs: {admitted_dirty_sources:?}"
+    );
+}
+
+fn fixture_repository(root: &Path, content: &str) -> String {
+    std::fs::create_dir(root.join("empty-hooks")).unwrap();
+    fixture_git(root, &["init", "-q"]);
+    std::fs::write(root.join("source.txt"), content).unwrap();
+    fixture_git(root, &["add", "source.txt"]);
+    fixture_git(root, &["commit", "-q", "-s", "-m", "fixture baseline"]);
+    String::from_utf8(fixture_git(root, &["rev-parse", "HEAD"]).stdout)
+        .unwrap()
+        .trim()
+        .to_owned()
+}
+
+// Re-enter only the named test: contamination belongs to a child process, never
+// to the process-global environment shared with parallel tests.
+fn git_probe_root(test: &str) -> Option<PathBuf> {
+    let probe = std::env::var_os("ARDUR_M0_GIT_PROBE")?;
+    assert_eq!(probe, test);
+    println!("M0_GIT_PROBE_ENTERED:{test}");
+    Some(std::env::current_dir().unwrap())
+}
+
+fn git_probe_command(test: &str, root: &Path) -> Command {
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
+        .args(["--exact", test, "--nocapture", "--test-threads=1"])
+        .current_dir(root)
+        .env("ARDUR_M0_GIT_PROBE", test);
+    command
+}
+
+fn git_probe_output(test: &str, command: &mut Command) -> Output {
+    let output = command.output().expect("Git environment probe");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    println!(
+        "{test} child {}\n{stdout}\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.contains("running 1 test"), "probe must run one test");
+    assert!(
+        stdout.contains(&format!("M0_GIT_PROBE_ENTERED:{test}")),
+        "probe must enter the exact requested test"
+    );
+    output
+}
+
+fn assert_git_probe_passed(test: &str, output: &Output) {
+    assert!(output.status.success(), "{test} child failed");
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .contains("test result: ok. 1 passed; 0 failed; 0 ignored;"),
+        "a zero-test or ignored-test success is not a probe"
+    );
+}
+
+#[test]
+fn regeneration_head_ignores_git_environment() {
+    const TEST: &str = "regeneration_head_ignores_git_environment";
+    if let Some(root) = git_probe_root(TEST) {
+        let head = regeneration_head(&root);
+        assert!(head.status.success(), "{head:?}");
+        assert_eq!(
+            String::from_utf8(head.stdout).unwrap().trim(),
+            std::env::var("ARDUR_M0_EXPECTED_HEAD").unwrap(),
+            "regeneration HEAD was redirected to the foreign repository"
+        );
+        return;
+    }
+
+    let source = tempfile::tempdir().unwrap();
+    let foreign = tempfile::tempdir().unwrap();
+    let head = fixture_repository(source.path(), "local baseline\n");
+    let foreign_head = fixture_repository(foreign.path(), "foreign baseline\n");
+    assert_ne!(head, foreign_head, "distinct HEAD control");
+    std::fs::write(source.path().join("source.txt"), "dirty local source\n").unwrap();
+    let output = git_probe_output(
+        TEST,
+        git_probe_command(TEST, source.path())
+            .env("ARDUR_M0_EXPECTED_HEAD", head)
+            .env("GIT_DIR", foreign.path().join(".git"))
+            .env("GIT_WORK_TREE", foreign.path())
+            .env("GIT_INDEX_FILE", foreign.path().join(".git/index")),
+    );
+    assert_git_probe_passed(TEST, &output);
+}
+
+#[test]
+fn regeneration_diff_ignores_git_environment() {
+    const TEST: &str = "regeneration_diff_ignores_git_environment";
+    if let Some(root) = git_probe_root(TEST) {
+        let base = std::env::var("ARDUR_M0_EXPECTED_HEAD").unwrap();
+        let diff = regeneration_diff(&root, &base);
+        assert_eq!(
+            diff.status.code(),
+            Some(1),
+            "regeneration diff must reject dirty local source, not inspect a clean foreign base: {diff:?}"
+        );
+        assert!(String::from_utf8_lossy(&diff.stdout).contains("dirty local source"));
+        return;
+    }
+
+    let source = tempfile::tempdir().unwrap();
+    let foreign = tempfile::tempdir().unwrap();
+    let base = fixture_repository(source.path(), "baseline source\n");
+    std::fs::create_dir(foreign.path().join("empty-hooks")).unwrap();
+    fixture_git(foreign.path(), &["init", "-q"]);
+    // Copy the same base using only these two owned TempDirs, not a user repo.
+    fixture_git(
+        foreign.path(),
+        &["fetch", "-q", source.path().to_str().unwrap(), "HEAD"],
+    );
+    fixture_git(
+        foreign.path(),
+        &["checkout", "-q", "--detach", "FETCH_HEAD"],
+    );
+    for root in [source.path(), foreign.path()] {
+        assert!(
+            regeneration_diff(root, &base).status.success(),
+            "clean control"
+        );
+    }
+    std::fs::write(source.path().join("source.txt"), "dirty local source\n").unwrap();
+    let output = git_probe_output(
+        TEST,
+        git_probe_command(TEST, source.path())
+            .env("ARDUR_M0_EXPECTED_HEAD", base)
+            .env("GIT_DIR", foreign.path().join(".git"))
+            .env("GIT_WORK_TREE", foreign.path())
+            .env("GIT_INDEX_FILE", foreign.path().join(".git/index")),
+    );
+    assert_git_probe_passed(TEST, &output);
+}
+
+fn repository_files(root: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
+    fn visit(root: &Path, dir: &Path, files: &mut BTreeMap<PathBuf, Option<Vec<u8>>>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            let relative = path.strip_prefix(root).unwrap().to_owned();
+            if entry.file_type().unwrap().is_dir() {
+                files.insert(relative, None);
+                visit(root, &path, files);
+            } else {
+                files.insert(relative, Some(std::fs::read(path).unwrap()));
+            }
+        }
+    }
+    let mut files = BTreeMap::new();
+    visit(root, root, &mut files);
+    assert!(
+        !files.is_empty(),
+        "foreign repository snapshot is populated"
+    );
+    files
+}
+
+fn fixture_git_environment_isolation(test: &str, variable: &str, foreign_directory: &str) {
+    const CONTENT: &str = "new local objects must stay local\n";
+    if let Some(root) = git_probe_root(test) {
+        fixture_repository(&root, CONTENT);
+        return;
+    }
+
+    let source = tempfile::tempdir().unwrap();
+    let foreign = tempfile::tempdir().unwrap();
+    fixture_repository(foreign.path(), "unrelated foreign baseline\n");
+    let before = repository_files(foreign.path());
+    let output = git_probe_output(
+        test,
+        git_probe_command(test, source.path())
+            .env(variable, foreign.path().join(foreign_directory)),
+    );
+    // Inspect side effects even if init/add/commit failed in the child. Keep
+    // object-dir and common-dir cases separate from each other and the read
+    // probes, so an earlier failure cannot hide writes outside the local repo.
+    let after = repository_files(foreign.path());
+    let changed: BTreeSet<_> = before
+        .keys()
+        .chain(after.keys())
+        .filter(|path| before.get(*path) != after.get(*path))
+        .collect();
+    assert!(
+        changed.is_empty(),
+        "{variable} mutated the foreign repository: {changed:?}"
+    );
+    assert_git_probe_passed(test, &output);
+    assert_eq!(
+        fixture_git(source.path(), &["show", "HEAD:source.txt"]).stdout,
+        CONTENT.as_bytes(),
+        "the fixture commit must be readable without the foreign object store"
+    );
+}
+
+#[test]
+fn fixture_git_ignores_object_directory_environment() {
+    fixture_git_environment_isolation(
+        "fixture_git_ignores_object_directory_environment",
+        "GIT_OBJECT_DIRECTORY",
+        ".git/objects",
+    );
+}
+
+#[test]
+fn fixture_git_ignores_common_directory_environment() {
+    fixture_git_environment_isolation(
+        "fixture_git_ignores_common_directory_environment",
+        "GIT_COMMON_DIR",
+        ".git",
+    );
+}
+
+#[derive(Default)]
+struct Writes {
+    bytes: Vec<u8>,
+    flushed: Vec<Vec<u8>>,
+}
+
+struct ObservedWriter(Rc<RefCell<Writes>>);
+impl Write for ObservedWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.borrow_mut().bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        let mut state = self.0.borrow_mut();
+        let bytes = state.bytes.clone();
+        state.flushed.push(bytes);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn content_is_flushed_before_the_next_source_poll_including_empty_chunks() {
+    let state = Rc::new(RefCell::new(Writes::default()));
+    let mut writer = ObservedWriter(state.clone());
+    let mut index = 0;
+    let stream = futures::stream::poll_fn(|_| {
+        let expected: &[&[u8]] = match index {
+            0 => &[],
+            1 => &[b"first"],
+            2 => &[b"first", b"first"],
+            _ => &[b"first", b"first", b"firstsecond"],
+        };
+        assert_eq!(
+            state.borrow().flushed,
+            expected,
+            "flush before poll {index}"
+        );
+        let item = match index {
+            0 => Some(cases::content("first")),
+            1 => Some(cases::content("")),
+            2 => Some(cases::content("second")),
+            _ => None,
+        };
+        index += 1;
+        Poll::Ready(item)
+    });
+    let theme = Theme::named(ThemeName::Night).plain();
+    drive_fused_turn(stream, &mut writer, &RenderCtx::new(&theme, 80))
+        .await
+        .unwrap();
+    assert_eq!(index, 4);
+    assert_eq!(state.borrow().bytes, b"firstsecond\n");
+}
+
+#[tokio::test]
+async fn pending_source_pulses_two_frames_then_empty_content_clears_and_flushes() {
+    let state = Rc::new(RefCell::new(Writes::default()));
+    let mut writer = ObservedWriter(state.clone());
+    let mut delivered = false;
+    let stream = futures::stream::poll_fn(|_| {
+        if delivered {
+            return Poll::Ready(None);
+        }
+        if state.borrow().flushed.len() < 2 {
+            return Poll::Pending;
+        }
+        delivered = true;
+        Poll::Ready(Some(cases::content("")))
+    });
+    let theme = Theme::named(ThemeName::Night);
+    // Real interval, event-gated frame count: no wall-clock speed claim. No
+    // test-util feature or production clock seam is needed for this contract.
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        drive_fused_turn(stream, &mut writer, &RenderCtx::new(&theme, 80)),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let state = state.borrow();
+    assert_eq!(
+        state.bytes,
+        "\r\x1b[2K\x1b[38;5;242m·\x1b[0m\r\x1b[2K\x1b[38;5;242m··\x1b[0m\r\x1b[2K".as_bytes()
+    );
+    assert_eq!(state.flushed.len(), 4, "two frames, clear, empty chunk");
+}
+
+#[tokio::test]
+async fn typing_dot_writer_failure_does_not_poll_source_again() {
+    struct FailureObservedWriter {
+        inner: FailingWriter,
+        failed: Rc<std::cell::Cell<bool>>,
+    }
+    impl Write for FailureObservedWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            let result = self.inner.write(bytes);
+            self.failed.set(result.is_err());
+            result
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            let result = self.inner.flush();
+            self.failed.set(result.is_err());
+            result
+        }
+    }
+    for fail_flush in [false, true] {
+        let failed = Rc::new(std::cell::Cell::new(false));
+        let mut polls = 0;
+        let stream = futures::stream::poll_fn(|_| {
+            assert!(!failed.get(), "poll after typing-dot I/O failure");
+            polls += 1;
+            Poll::<Option<cases::SourceItem>>::Pending
+        });
+        let theme = Theme::named(ThemeName::Night);
+        let error = drive_fused_turn(
+            stream,
+            &mut FailureObservedWriter {
+                inner: FailingWriter { fail_flush },
+                failed: failed.clone(),
+            },
+            &RenderCtx::new(&theme, 80),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.kind(),
+            if fail_flush {
+                io::ErrorKind::ConnectionReset
+            } else {
+                io::ErrorKind::BrokenPipe
+            }
+        );
+        assert!(failed.get());
+        assert!(polls >= 1);
+    }
+}
+
+#[tokio::test]
+async fn source_is_never_polled_after_runtime_error() {
+    let mut polls = 0;
+    let stream = futures::stream::poll_fn(|_| {
+        polls += 1;
+        assert_eq!(polls, 1, "source polled after terminal error");
+        Poll::Ready(Some(Err(RuntimeError::ProviderUnavailable)))
+    });
+    let mut bytes = Vec::new();
+    let theme = Theme::named(ThemeName::Night).plain();
+    let outcome = drive_fused_turn(stream, &mut bytes, &RenderCtx::new(&theme, 80))
+        .await
+        .unwrap();
+    assert_eq!(polls, 1);
+    assert_eq!(outcome.error.as_deref(), Some("provider unavailable"));
+}
+
+struct FailingWriter {
+    fail_flush: bool,
+}
+impl Write for FailingWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if self.fail_flush {
+            Ok(bytes.len())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "fixture write failure",
+            ))
+        }
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::ConnectionReset,
+            "fixture flush failure",
+        ))
+    }
+}
+
+#[tokio::test]
+async fn write_and_flush_failures_propagate_without_another_source_poll() {
+    for styled in [false, true] {
+        for fail_flush in [false, true] {
+            let mut polls = 0;
+            let stream = futures::stream::poll_fn(|_| {
+                polls += 1;
+                assert_eq!(polls, 1, "source polled after writer failure");
+                Poll::Ready(Some(cases::content("first")))
+            });
+            let theme = Theme::named(ThemeName::Night);
+            let theme = if styled { theme } else { theme.plain() };
+            let error = drive_fused_turn(
+                stream,
+                &mut FailingWriter { fail_flush },
+                &RenderCtx::new(&theme, 80),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(
+                error.kind(),
+                if fail_flush {
+                    io::ErrorKind::ConnectionReset
+                } else {
+                    io::ErrorKind::BrokenPipe
+                }
+            );
+            assert_eq!(polls, 1);
+        }
+    }
+}
+
+#[tokio::test]
+async fn only_visible_events_clear_typing_dots_even_for_unknown_results() {
+    for visible in [
+        cases::content(""),
+        cases::result("unknown"),
+        Ok(FusedEvent::Finish(
+            ardur_provider_runtime::FinishReason::Stop,
+        )),
+        Err(RuntimeError::CapTokenMissing),
+    ] {
+        let state = Rc::new(RefCell::new(Writes::default()));
+        let mut writer = ObservedWriter(state.clone());
+        let mut invisible = vec![
+            Ok(FusedEvent::StageStart {
+                stage: StageKind::CedarCheck,
+            }),
+            Ok(FusedEvent::StageEnd {
+                stage: StageKind::CedarCheck,
+                ok: true,
+            }),
+            cases::start("a", "read"),
+            cases::delta("a", "{}"),
+            cases::receipt(1, 0),
+        ]
+        .into_iter();
+        let mut visible = Some(visible);
+        let stream = futures::stream::poll_fn(|_| {
+            if let Some(event) = invisible.next() {
+                assert!(
+                    state.borrow().bytes.is_empty(),
+                    "invisible events must not erase waiting line"
+                );
+                return Poll::Ready(Some(event));
+            }
+            if let Some(event) = visible.take() {
+                assert!(state.borrow().bytes.is_empty());
+                Poll::Ready(Some(event))
+            } else {
+                assert!(state.borrow().flushed[0].starts_with(b"\r\x1b[2K"));
+                Poll::Ready(None)
+            }
+        });
+        drive_fused_turn(
+            stream,
+            &mut writer,
+            &RenderCtx::new(&Theme::named(ThemeName::Night), 80),
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.borrow().flushed[0], b"\r\x1b[2K");
+    }
+}
