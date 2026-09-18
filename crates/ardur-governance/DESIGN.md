@@ -71,7 +71,8 @@ record** projected from the same facts.
 Mapping decisions (all in code, all tested):
 
 - **`grant_id` = cap-token `VerifiedClaims.token_id`** (UUIDv4 satisfies ER
-  `idString`). `actor` = `subject` (SPIFFE URI). `budget_remaining` =
+  `idString`). `actor` = `subject` (SPIFFE-style URI; a naming convention, not
+  an attested SVID — see `SECURITY.md`). `budget_remaining` =
   `{"cost": <remaining>}`.
 - **Verdict/denial mapping** follows verifier-contract §9 fail-closed table:
   cap-token `Expired`/`AudienceMismatch`/`ToolNotAllowed` → `violation` +
