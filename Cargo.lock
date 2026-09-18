@@ -639,6 +639,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ardur-dualrun"
+version = "0.0.1"
+dependencies = [
+ "serde",
+ "sha2 0.11.0",
+]
+
+[[package]]
 name = "ardur-durability"
 version = "0.0.1"
 dependencies = [

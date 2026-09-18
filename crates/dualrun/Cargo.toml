@@ -1,0 +1,12 @@
+[package]
+name = "ardur-dualrun"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.90"
+license = "Apache-2.0"
+description = "Shadow-mode dual-run verdict comparison: legacy decides, disagreements are recorded as durable evidence"
+publish = false
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+sha2 = { workspace = true }
