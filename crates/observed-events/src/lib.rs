@@ -413,19 +413,47 @@ impl ObservedEvent {
             "observed_manifest_digest" => !self.observed_manifest_digest.trim().is_empty(),
             "budget_delta" => !self.budget_delta.effect_class.trim().is_empty(),
             // Every remaining canonical §6.2 field. These are typed (enums,
-            // bools, option-linked ids) rather than free strings, so "usable"
-            // means the value is carried at all — reporting them missing while
-            // they sit in the serialized event would make an MD that names any
-            // of them permanently unsatisfiable.
+            // bools) rather than free strings, so "usable" means the value is
+            // carried at all — reporting them missing while they sit in the
+            // serialized event would make an MD that names any of them
+            // permanently unsatisfiable.
+            //
+            // `content_provenance` and `confidence_hint` are deliberately NOT
+            // here. They are §6.2 (MIC-State) field NAMES the plane's MD schema
+            // knows, but this event type does not carry them, so a serialized
+            // event never evidences them (#535). Recognizing the name is not a
+            // value: an MD requiring either must be told the evidence is
+            // missing (InsufficientEvidence) rather than being handed a
+            // fabricated `compliant`. They fall through to the unknown-field
+            // arm below, which fails closed.
+            //
+            // For the typed fields, "usable" means carried at all; visibility
+            // QUALITY is §6.4's concern and is checked before this loop, so a
+            // degraded-visibility event never reaches a `compliant` from here.
             "side_effect_class"
             | "visibility"
             | "instruction_bearing"
-            | "envelope_signature_valid"
-            | "content_provenance"
-            | "confidence_hint" => true,
-            "parent_event_id" => self.delegation.parent_event_id.is_some(),
-            "delegation_from" => self.delegation.delegation_from.is_some(),
-            "delegation_to" => !self.delegation.downstream_receipt_ids.is_empty(),
+            | "envelope_signature_valid" => true,
+            "parent_event_id" => self
+                .delegation
+                .parent_event_id
+                .as_deref()
+                .is_some_and(|v| !v.trim().is_empty()),
+            "delegation_from" => self
+                .delegation
+                .delegation_from
+                .as_deref()
+                .is_some_and(|v| !v.trim().is_empty()),
+            // #535: evidenced by its OWN value, never inferred from
+            // `downstream_receipt_ids` — that is a different §6.2 field that
+            // records children this event spawned. Inferring one from the
+            // other fabricated `compliant` when the target was null and false
+            // insufficiency when the target was present without receipts.
+            "delegation_to" => self
+                .delegation
+                .delegation_to
+                .as_deref()
+                .is_some_and(|v| !v.trim().is_empty()),
             // An unknown required field cannot be established, so it fails
             // closed rather than being ignored as "not my field".
             _ => false,
