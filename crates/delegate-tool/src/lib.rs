@@ -74,7 +74,7 @@ use ardur_delegate_child::{
     ChildError, ChildOutcome, ChildSpec, ChildSupervisor, ParentBudget, TokenAuthority,
 };
 use ardur_multi_agent::{AgentId, CHAT_SUBMIT_TOOL, TerminationReason, TerminationReceipt};
-use ardur_provider_runtime::Provider;
+use ardur_provider_runtime::{ModelId, Provider};
 use ardur_receipt::CostTuple as ReceiptCostTuple;
 use ardur_runtime::{CostTuple, ReceiptId};
 use ardur_tool_registry::{
@@ -153,10 +153,28 @@ pub struct DelegateTaskTool<D: DenyList + Clone + Send + Sync + 'static = HashSe
     /// private in-memory list and do NOT see server-side revocations; only
     /// [`with_deny_list`](Self::with_deny_list) wires a shared one.
     deny: D,
-    /// Real provider for supervised children (D1). Production wiring supplies
-    /// via with_provider (or from_env in default seam); tests supply mocks.
-    /// Arc<dyn Provider> is the production handle shape (see delegate-child).
-    provider: Arc<dyn Provider + Send + Sync>,
+    /// Real provider for supervised children (D1). `None` only when the
+    /// legacy env-seam constructor could not build any backend; `invoke` then
+    /// fails closed with a typed error instead of panicking during tool
+    /// registration (a stubbed or credential-less server must still boot).
+    provider: Option<Arc<dyn Provider + Send + Sync>>,
+    /// The model delegated requests are pinned to. Real backends serialize
+    /// the request's model id directly (Messages API `model`, CLI `--model`),
+    /// so this must be the model the injected provider was built for, or one
+    /// it explicitly serves.
+    model: ModelId,
+    /// Optional shared parent ledger (D1 hardening): when present, every
+    /// delegation reserves from THIS budget, so two concurrent children
+    /// cannot each spend the full allowance of an isolated per-call budget.
+    /// Production wiring binds the session's real budget here (E4.3
+    /// integration debt); without it each call gets an isolated ledger sized
+    /// to its own envelope.
+    session_budget: Option<ParentBudget>,
+    /// Terminal outcomes whose waiter was dropped before delivery (caller
+    /// timeout/cancel). Retained so the paid work's accounting is never lost
+    /// with the invoke future; embedders drain via
+    /// [`drain_settlements`](Self::drain_settlements).
+    settlements: Arc<std::sync::Mutex<Vec<Result<ChildOutcome, ChildError>>>>,
 }
 
 impl DelegateTaskTool<HashSetDenyList> {
@@ -173,26 +191,36 @@ impl DelegateTaskTool<HashSetDenyList> {
     /// noted for server registration sites).
     #[must_use]
     pub fn new(root: PublicKey, audience: impl Into<String>) -> Self {
-        // D1 seam: production callers (server) will migrate to with_provider;
-        // for now default to from_env so existing call sites in other crates
-        // continue to type-check until E4.3 wiring. Tests use explicit mocks.
-        let provider = ardur_provider_selector::from_env(
-            ardur_provider_runtime::ModelId::new("default"),
-        )
-        .expect("D1: provider from_env for delegate_task default constructor (record debt for server sites)");
-        Self::with_max_concurrency(root, audience, DEFAULT_MAX_CONCURRENCY, provider)
+        // Env seam for legacy call sites. NEVER panics: when no backend can
+        // be built (stubbed/embedded server, credentials unset) the tool
+        // registers anyway and fails closed with a typed error at invoke
+        // time, so one missing provider cannot abort the whole registry.
+        // Server registration should migrate to `with_deny_list_and_provider`
+        // so children share the parent's injected provider (E4.3 debt).
+        let model = std::env::var("ARDUR_MODEL")
+            .ok()
+            .filter(|m| !m.trim().is_empty())
+            .unwrap_or_else(|| "default".to_string());
+        let provider: Option<Arc<dyn Provider + Send + Sync>> =
+            ardur_provider_selector::from_env(ModelId::new(model.clone()))
+                .ok()
+                .map(|p| -> Arc<dyn Provider + Send + Sync> { p });
+        let mut tool =
+            Self::with_max_concurrency(root, audience, DEFAULT_MAX_CONCURRENCY, provider);
+        tool.model = ModelId::new(model);
+        tool
     }
 
     /// Build a `delegate_task` tool with an explicit concurrency ceiling in
     /// place of [`DEFAULT_MAX_CONCURRENCY`]. The deny list is private and
     /// in-memory; see [`with_deny_list`](Self::with_deny_list) for the shared
-    /// variant.
+    /// variant. `provider` may be `None` (env seam) — see [`new`](Self::new).
     #[must_use]
     pub fn with_max_concurrency(
         root: PublicKey,
         audience: impl Into<String>,
         max_concurrency: usize,
-        provider: Arc<dyn Provider + Send + Sync>,
+        provider: Option<Arc<dyn Provider + Send + Sync>>,
     ) -> Self {
         let schema = ToolSchema {
             description: "Spawn a bounded child agent under a cap-token attenuated from this \
@@ -224,7 +252,7 @@ impl DelegateTaskTool<HashSetDenyList> {
                 "type": "object",
                 "properties": {
                     "child_agent_id": { "type": "string" },
-                    "outcome": { "type": "string", "enum": ["completed", "failed"] },
+                    "outcome": { "type": "string", "enum": ["completed", "failed", "cancelled", "budget_exhausted", "round_limit_reached"] },
                     "response": { "type": "string" },
                     "cents_used": { "type": "integer" },
                     "parent_receipt_id": { "type": "string" },
@@ -243,6 +271,9 @@ impl DelegateTaskTool<HashSetDenyList> {
             max_concurrency,
             deny: HashSetDenyList::new(),
             provider,
+            model: ModelId::new("default"),
+            session_budget: None,
+            settlements: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -253,7 +284,7 @@ impl DelegateTaskTool<HashSetDenyList> {
         audience: impl Into<String>,
         provider: Arc<dyn Provider + Send + Sync>,
     ) -> Self {
-        Self::with_max_concurrency(root, audience, DEFAULT_MAX_CONCURRENCY, provider)
+        Self::with_max_concurrency(root, audience, DEFAULT_MAX_CONCURRENCY, Some(provider))
     }
 }
 
@@ -274,7 +305,61 @@ impl<D: DenyList + Clone + Send + Sync + 'static> DelegateTaskTool<D> {
             max_concurrency: base.max_concurrency,
             deny,
             provider: base.provider,
+            model: base.model,
+            session_budget: base.session_budget,
+            settlements: base.settlements,
         }
+    }
+
+    /// [`with_deny_list`](Self::with_deny_list) plus an explicitly injected
+    /// provider (D1 hardening): the server retains the SAME configured
+    /// provider its own runtime was booted with, instead of the tool silently
+    /// rebuilding a possibly different backend from the environment — or
+    /// panicking when the environment names none.
+    #[must_use]
+    pub fn with_deny_list_and_provider(
+        root: PublicKey,
+        audience: impl Into<String>,
+        deny: D,
+        provider: Arc<dyn Provider + Send + Sync>,
+    ) -> Self {
+        let mut tool = Self::with_deny_list(root, audience, deny);
+        tool.provider = Some(provider);
+        tool
+    }
+
+    /// Pin delegated requests to `model`. Must be the model the injected
+    /// provider was built for, or one it explicitly serves — real backends
+    /// serialize this id directly.
+    #[must_use]
+    pub fn with_child_model(mut self, model: ModelId) -> Self {
+        self.model = model;
+        self
+    }
+
+    /// Reserve every delegation from one shared parent ledger (D1 hardening).
+    /// Without this each call reserves from an isolated per-invocation budget
+    /// sized to its own envelope, which can never be refused and is not shared
+    /// with sibling delegations — two concurrent children could each spend the
+    /// full allowance. Production wiring binds the session's real budget here
+    /// (E4.3 integration debt).
+    #[must_use]
+    pub fn with_session_budget(mut self, budget: ParentBudget) -> Self {
+        self.session_budget = Some(budget);
+        self
+    }
+
+    /// Drain terminal child outcomes whose waiter was dropped before the
+    /// result could be delivered (caller timeout/cancel). The paid work's
+    /// accounting is retained here — independent of any invoke future — until
+    /// the embedding runtime folds it into its own settlement path
+    /// (server-side drain wiring is E4.3 integration debt).
+    pub fn drain_settlements(&self) -> Vec<Result<ChildOutcome, ChildError>> {
+        let mut guard = self
+            .settlements
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        std::mem::take(&mut *guard)
     }
 }
 
@@ -300,6 +385,26 @@ impl<D: DenyList + Clone + Send + Sync + 'static> Tool for DelegateTaskTool<D> {
                 "`goal` must not be empty".to_string(),
             ));
         }
+        // The JSON schema's `minimum: 1` is not runtime validation: a zero
+        // budget would pass `can_afford` on a zero projection and dispatch a
+        // real provider request that bills before anyone notices. Reject it
+        // before attenuation or spawning.
+        if matches!(args.max_cost_cents, Some(0)) {
+            return Err(ToolError::InvalidArgs(
+                "`max_cost_cents` must be >= 1: a zero budget cannot authorize any round"
+                    .to_string(),
+            ));
+        }
+
+        // Fail closed when the env-seam constructor found no backend: typed
+        // error here, never a registration-time panic.
+        let provider = self.provider.clone().ok_or_else(|| {
+            ToolError::Internal(anyhow::anyhow!(
+                "delegate_task has no provider: none was injected and the environment built none \
+                 (set ARDUR_PROVIDER + its credentials, or construct with_provider / \
+                 with_deny_list_and_provider)"
+            ))
+        })?;
 
         // Acquire permit up front (fail-fast). The permit is moved into the
         // driver task so it is held for the *actual* worker lifetime, not the
@@ -341,14 +446,16 @@ impl<D: DenyList + Clone + Send + Sync + 'static> Tool for DelegateTaskTool<D> {
             )
             .map_err(|e| ToolError::Internal(anyhow::anyhow!("child budget carve failed: {e}")))?;
 
-        // Reserve from a parent budget sized to this delegation's envelope.
-        // Typed refusal on failure (ChildError -> ToolError::Denied).
-        let parent_budget = ParentBudget::new(child_max);
-        let reservation = parent_budget
-            .reserve(child_max)
-            .map_err(|e| ToolError::Denied {
-                reason: format!("child reservation refused: {e}"),
-            })?;
+        // Reserve from the shared parent ledger when one is bound (sibling
+        // delegations then compete for one real allowance and this call can
+        // legitimately be refused); otherwise from a per-invocation ledger
+        // sized to this envelope (documented limitation until E4.3 binds the
+        // session budget). Refusal stays typed.
+        let ledger = self
+            .session_budget
+            .clone()
+            .unwrap_or_else(|| ParentBudget::new(child_max));
+        let reservation = ledger.reserve(child_max).map_err(map_child_error_to_tool)?;
 
         let authority = TokenAuthority {
             root: self.root,
@@ -363,7 +470,7 @@ impl<D: DenyList + Clone + Send + Sync + 'static> Tool for DelegateTaskTool<D> {
         };
 
         let sup = ChildSupervisor::with_authority(
-            Arc::clone(&self.provider),
+            Arc::clone(&provider),
             Box::new(self.deny.clone()),
             authority,
         );
@@ -372,10 +479,14 @@ impl<D: DenyList + Clone + Send + Sync + 'static> Tool for DelegateTaskTool<D> {
             prompt: args.goal.clone(),
             token: child_token,
             reservation,
-            model: ardur_provider_runtime::ModelId::new("default"),
+            model: self.model.clone(),
             max_rounds: 20,
             envelope: CostEnvelope {
-                cents_max: args.max_cost_cents.unwrap_or(DEFAULT_MAX_COST_CENTS),
+                // Per-ROUND admission projection, estimated from the rate
+                // card — the lifetime ceiling lives in the reservation above.
+                // Using the lifetime figure here would exhaust the child
+                // after its first paid round.
+                cents_max: per_round_estimate_cents(&*provider, 4096, child_max as u32),
                 tokens_out_max: 4096,
                 ..CostEnvelope::default()
             },
@@ -390,11 +501,22 @@ impl<D: DenyList + Clone + Send + Sync + 'static> Tool for DelegateTaskTool<D> {
         // over a oneshot; if the receiver is dropped the driver still runs to
         // completion and settles.
         let (tx, rx) = tokio::sync::oneshot::channel::<Result<ChildOutcome, ChildError>>();
+        let settlements = Arc::clone(&self.settlements);
         tokio::spawn(async move {
             let outcome = child_handle.join().await;
             // Release the permit only after real termination.
             drop(permit);
-            let _ = tx.send(outcome);
+            // Deliver to the waiter if it is still listening. When the caller
+            // timed out or cancelled (receiver dropped), retain the terminal
+            // outcome instead of silently discarding it — the provider's
+            // actual cost must survive for settlement even though no
+            // ToolOutput will ever carry it (drain_settlements).
+            if let Err(undelivered) = tx.send(outcome) {
+                let mut guard = settlements
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                guard.push(undelivered);
+            }
         });
 
         let child_outcome = rx
@@ -402,56 +524,127 @@ impl<D: DenyList + Clone + Send + Sync + 'static> Tool for DelegateTaskTool<D> {
             .map_err(|_| ToolError::Internal(anyhow::anyhow!("delegate child driver lost")))?
             .map_err(map_child_error_to_tool)?;
 
-        // Map to the legacy DelegationOutcome shape for the ToolOutput
-        // (receipt chaining etc. preserved for callers).
         let label = args.task_name.unwrap_or_else(|| "delegate".to_string());
         let agent_id = AgentId::new(format!("{label}-{}", Uuid::new_v4()));
-        let (completed, response_text) = match &child_outcome {
-            ChildOutcome::Completed { text, .. } => (true, text.clone()),
-            _ => (false, String::new()),
-        };
-        let cost_from_child = child_outcome.cost();
-        let receipt_cost = ReceiptCostTuple {
-            tokens_in: cost_from_child.tokens_in,
-            tokens_out: cost_from_child.tokens_out,
-            cents: cost_from_child.cents,
-            wall_ms: cost_from_child.wall_ms,
-            attention_score: cost_from_child.attention_score,
-        };
-        // Synthesize a minimal termination receipt (the real receipt chain
-        // will be wired in later slices; for D1 the cost and verb are truthful).
-        let receipt = TerminationReceipt {
-            receipt_id: ReceiptId(Uuid::new_v4()),
-            agent_id: agent_id.clone(),
-            reason: if completed {
-                TerminationReason::Completed
-            } else {
-                TerminationReason::ErrorOccurred("child did not complete".into())
-            },
-            total_cost: receipt_cost,
-            terminated_at: ardur_receipt::UnixTsMillis(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis() as u64,
-            ),
-            parent_receipt_id: ReceiptId(ctx.invocation_id.0),
-        };
-
-        let outcome = DelegationOutcome {
-            child_agent_id: agent_id,
-            completed,
-            response_text,
-            cost_used: receipt_cost,
-            receipt,
-        };
-
-        Ok(outcome.into_tool_output())
+        child_outcome_to_tool_result(child_outcome, agent_id, ReceiptId(ctx.invocation_id.0))
     }
 
     fn required_capabilities(&self) -> &[Capability] {
         &self.capabilities
     }
+}
+
+/// Estimate ONE round's cost from the provider's rate card, so the admission
+/// projection is a per-round figure rather than the child's whole lifetime
+/// budget — projecting the lifetime amount every round exhausts the
+/// reservation after a single paid round even when many smaller rounds would
+/// fit. After the first billed round the supervisor's `worst_round_cents`
+/// takes over, so a rough card estimate is sufficient. Falls back to the
+/// lifetime figure when the card prices nothing (zero-price test mocks and
+/// backends), preserving the pre-hardening projection rather than inventing a
+/// price.
+fn per_round_estimate_cents(
+    provider: &(dyn Provider + Send + Sync),
+    tokens_out_max: u32,
+    lifetime_cents: u32,
+) -> u32 {
+    let card = provider.rate_card();
+    let k_tokens = f64::from(tokens_out_max) / 1000.0;
+    let estimate = card.cents_per_request
+        + card.cents_per_1k_input * k_tokens
+        + card.cents_per_1k_output * k_tokens;
+    if estimate.is_finite() && estimate >= 1.0 {
+        (estimate.ceil() as u32).max(1).min(lifetime_cents)
+    } else {
+        lifetime_cents
+    }
+}
+
+/// Fold a terminal [`ChildOutcome`] into the tool result, preserving the
+/// taxonomy end to end: revocation and mid-flight authority failures stay
+/// typed authorization errors (with the settled actuals in the reason), while
+/// budget exhaustion, cancellation, round-limit and provider faults remain
+/// distinguishable terminal states in the output — never one collapsed
+/// "failed" with a generic receipt reason.
+fn child_outcome_to_tool_result(
+    outcome: ChildOutcome,
+    agent_id: AgentId,
+    parent_receipt_id: ReceiptId,
+) -> Result<ToolOutput, ToolError> {
+    let cost_from_child = outcome.cost();
+    let rounds = outcome.rounds();
+    let receipt_cost = ReceiptCostTuple {
+        tokens_in: cost_from_child.tokens_in,
+        tokens_out: cost_from_child.tokens_out,
+        cents: cost_from_child.cents,
+        wall_ms: cost_from_child.wall_ms,
+        attention_score: cost_from_child.attention_score,
+    };
+    let (outcome_label, response_text, reason) = match outcome {
+        ChildOutcome::Completed { text, .. } => ("completed", text, TerminationReason::Completed),
+        ChildOutcome::Failed { reason, .. } => (
+            "failed",
+            String::new(),
+            TerminationReason::ErrorOccurred(reason),
+        ),
+        ChildOutcome::Cancelled { .. } => (
+            "cancelled",
+            String::new(),
+            TerminationReason::ErrorOccurred("cancelled by parent before completion".into()),
+        ),
+        ChildOutcome::BudgetExhausted { .. } => (
+            "budget_exhausted",
+            String::new(),
+            TerminationReason::BudgetExhausted,
+        ),
+        ChildOutcome::RoundLimitReached { .. } => (
+            "round_limit_reached",
+            String::new(),
+            TerminationReason::ErrorOccurred("round limit reached without a final answer".into()),
+        ),
+        ChildOutcome::Revoked { .. } => {
+            return Err(ToolError::CapTokenDenied {
+                reason: format!(
+                    "child token revoked mid-flight after {rounds} round(s); settled {}c actuals",
+                    receipt_cost.cents
+                ),
+            });
+        }
+        ChildOutcome::Unauthorized { reason, .. } => {
+            return Err(ToolError::CapTokenDenied {
+                reason: format!(
+                    "child authority failed mid-flight after {rounds} round(s): {reason}; settled {}c actuals",
+                    receipt_cost.cents
+                ),
+            });
+        }
+    };
+
+    // Synthesize a minimal termination receipt (the real receipt chain
+    // will be wired in later slices; for D1 the cost and verb are truthful).
+    let receipt = TerminationReceipt {
+        receipt_id: ReceiptId(Uuid::new_v4()),
+        agent_id: agent_id.clone(),
+        reason,
+        total_cost: receipt_cost,
+        terminated_at: ardur_receipt::UnixTsMillis(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64,
+        ),
+        parent_receipt_id,
+    };
+
+    let outcome = DelegationOutcome {
+        child_agent_id: agent_id,
+        outcome_label,
+        response_text,
+        cost_used: receipt_cost,
+        receipt,
+    };
+
+    Ok(outcome.into_tool_output())
 }
 
 fn map_child_error_to_tool(e: ChildError) -> ToolError {
@@ -472,10 +665,10 @@ fn map_child_error_to_tool(e: ChildError) -> ToolError {
 }
 
 // Re-use the legacy structs for output compatibility (D1 does not change the
-// ToolOutput contract).
+// ToolOutput contract beyond widening `outcome` to the truthful terminal labels).
 struct DelegationOutcome {
     child_agent_id: AgentId,
-    completed: bool,
+    outcome_label: &'static str,
     response_text: String,
     cost_used: ReceiptCostTuple,
     receipt: TerminationReceipt,
@@ -485,7 +678,7 @@ impl DelegationOutcome {
     fn into_tool_output(self) -> ToolOutput {
         let content = json!({
             "child_agent_id": self.child_agent_id.0,
-            "outcome": if self.completed { "completed" } else { "failed" },
+            "outcome": self.outcome_label,
             "response": self.response_text,
             "cents_used": self.receipt.total_cost.cents,
             "parent_receipt_id": self.receipt.parent_receipt_id.0.to_string(),
@@ -530,15 +723,100 @@ fn cap_token_denied(err: CapTokenError) -> ToolError {
 
 #[cfg(test)]
 mod denial_tests {
-    // use super::*; removed to satisfy clippy unused_import under -D warnings
+    use super::*;
 
-    // D1: the old multi-agent mapping tests are superseded by typed ChildError
-    // handling in map_child_error_to_tool and the supervisor itself. Kept as
-    // placeholder for the taxonomy contract (gh#490).
+    /// The ChildError -> ToolError mapping must stay typed per variant; a
+    /// future remap that flattens these into one class is caught here.
     #[test]
-    fn child_denial_taxonomy_is_typed() {
-        // Placeholder: real tests exercise the specific variants via the tool.
-        // (assert true would trigger clippy::assertions-on-constants; use a real check)
-        let _ = 1 + 1; // no-op to keep test body non-vacuous for lint
+    fn child_error_maps_to_typed_tool_errors() {
+        let reservation = map_child_error_to_tool(ChildError::ReservationTooLarge {
+            requested: 10,
+            available: 4,
+        });
+        assert!(
+            matches!(reservation, ToolError::Denied { .. }),
+            "reservation refusal must be a typed denial, got {reservation:?}"
+        );
+        let revoked = map_child_error_to_tool(ChildError::AlreadyRevoked);
+        assert!(
+            matches!(revoked, ToolError::CapTokenDenied { .. }),
+            "pre-spawn revocation must be a cap-token denial, got {revoked:?}"
+        );
+        let empty = map_child_error_to_tool(ChildError::EmptyPrompt);
+        assert!(
+            matches!(empty, ToolError::InvalidArgs(_)),
+            "empty prompt must be invalid args, got {empty:?}"
+        );
+        let lost = map_child_error_to_tool(ChildError::WorkerLost("panicked".into()));
+        assert!(
+            matches!(lost, ToolError::Internal(_)),
+            "worker loss must be internal, got {lost:?}"
+        );
+        let unauthorized = map_child_error_to_tool(ChildError::Unauthorized {
+            reason: "expired".into(),
+        });
+        assert!(
+            matches!(unauthorized, ToolError::CapTokenDenied { .. }),
+            "pre-spawn authority failure must be a cap-token denial, got {unauthorized:?}"
+        );
+    }
+
+    /// Mid-flight revocation must surface as a typed authorization error
+    /// carrying the settled actuals — never as a generic "failed" output that
+    /// auditors cannot distinguish from a provider fault.
+    #[test]
+    fn revoked_outcome_surfaces_typed_auth_error_with_settled_cost() {
+        let outcome = ChildOutcome::Revoked {
+            rounds: 2,
+            cost: CostTuple {
+                cents: 42,
+                ..CostTuple::default()
+            },
+        };
+        let err =
+            child_outcome_to_tool_result(outcome, AgentId::new("t"), ReceiptId(Uuid::new_v4()))
+                .expect_err("revocation must not collapse into a generic failed output");
+        match err {
+            ToolError::CapTokenDenied { reason } => {
+                assert!(
+                    reason.contains("42"),
+                    "settled actuals must ride the denial reason, got: {reason}"
+                );
+            }
+            other => panic!("revocation must be CapTokenDenied, got {other:?}"),
+        }
+    }
+
+    /// Budget exhaustion is a normal terminal state with its own label and a
+    /// BudgetExhausted receipt reason — distinct from a provider fault.
+    #[test]
+    fn budget_exhaustion_is_distinct_from_provider_fault() {
+        let budget = child_outcome_to_tool_result(
+            ChildOutcome::BudgetExhausted {
+                rounds: 3,
+                cost: CostTuple {
+                    cents: 10,
+                    ..CostTuple::default()
+                },
+            },
+            AgentId::new("t"),
+            ReceiptId(Uuid::new_v4()),
+        )
+        .expect("budget exhaustion is a truthful terminal output, not an error");
+        assert_eq!(budget.content["outcome"], "budget_exhausted");
+        assert_eq!(budget.receipt_data["reason"], "budget_exhausted");
+
+        let fault = child_outcome_to_tool_result(
+            ChildOutcome::Failed {
+                reason: "upstream 500".into(),
+                rounds: 1,
+                cost: CostTuple::default(),
+            },
+            AgentId::new("t"),
+            ReceiptId(Uuid::new_v4()),
+        )
+        .expect("provider fault is a failed output, not a tool error");
+        assert_eq!(fault.content["outcome"], "failed");
+        assert_eq!(fault.receipt_data["reason"], "error");
     }
 }

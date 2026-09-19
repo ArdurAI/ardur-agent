@@ -109,7 +109,7 @@ impl DelegatingProvider {
             }])
         };
         CompletionResponse {
-            content: String::new(),
+            content: "task completed by mock".to_string(),
             finish_reason,
             usage: Usage::default(),
             cost: CostTuple::default(),
@@ -216,7 +216,21 @@ async fn late_denial(streaming: bool) -> RuntimeError {
     let control = mint(&issuer);
     let deny = SharedDenyList::new();
     let probe = Arc::new(Probe::default());
-    let delegate = DelegateTaskTool::with_deny_list(root, AUDIENCE, deny.clone());
+    // D1: use an independent instance of the test's own mock provider for the
+    // inner supervised child (guarantees "completed", no creds, no subprocess).
+    // Outer FusedRuntime keeps its own counter instance for the call-count
+    // assertions.
+    let child_provider_for_delegate = Arc::new(DelegatingProvider {
+        complete_calls: AtomicUsize::new(0),
+        stream_calls: AtomicUsize::new(0),
+        rate_card: RateCard::anthropic_2026_q2_v1(),
+    });
+    let delegate = DelegateTaskTool::with_deny_list_and_provider(
+        root,
+        AUDIENCE,
+        deny.clone(),
+        child_provider_for_delegate,
+    );
     assert!(!delegate.required_capabilities().is_empty());
     let mut tools = ToolRegistry::new();
     tools

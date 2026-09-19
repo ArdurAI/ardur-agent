@@ -6,14 +6,17 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use ardur_cap_token::{
     BiscuitCapTokenIssuer, CapScope, CapTokenIssuer, HolderId, KeyPair, PublicKey,
 };
+use ardur_delegate_child::{ChildOutcome, ParentBudget};
 use ardur_delegate_tool::DelegateTaskTool;
 use ardur_provider_runtime::{
-    CompletionRequest, CompletionResponse, CostTuple, FinishReason, Provider, ProviderError,
-    ProviderId, RateCard, Usage,
+    CompletionRequest, CompletionResponse, CostTuple, FinishReason, ModelId, Provider,
+    ProviderError, ProviderId, RateCard, Usage,
 };
 use ardur_runtime::{CapTokenRef, SessionId};
 use ardur_tool_registry::{InvocationId, Tool, ToolContext, ToolError};
@@ -158,9 +161,10 @@ async fn delegate_task_honors_max_cost_cents_override() {
 
     // Truthful settlement (D1): the child provider billed 100; the declared
     // envelope of 5 was used for admission and caused overdrawn stop after the
-    // round. Reported cost is actual, not the declared cap.
+    // round. Reported cost is actual, not the declared cap, and the terminal
+    // label is the truthful budget_exhausted, not a collapsed "failed".
     assert_eq!(output.content["cents_used"], 100);
-    assert_eq!(output.content["outcome"], "failed");
+    assert_eq!(output.content["outcome"], "budget_exhausted");
 }
 
 #[tokio::test]
@@ -171,7 +175,7 @@ async fn delegate_task_denies_at_the_concurrency_ceiling() {
     // gate itself is enforced (and fails fast, spawning nothing) rather than
     // racing real concurrent calls against wall-clock timing.
     let (token, root) = parent_token(&["chat.submit"], 10_000);
-    let tool = DelegateTaskTool::with_max_concurrency(root, AUDIENCE, 0, echo_provider());
+    let tool = DelegateTaskTool::with_max_concurrency(root, AUDIENCE, 0, Some(echo_provider()));
     let ctx = ctx_with(token, InvocationId::new());
 
     let err = tool
@@ -193,7 +197,7 @@ async fn delegate_task_releases_its_permit_after_completing() {
     // returning, must release its permit so a second, later call is not
     // permanently locked out.
     let (token, root) = parent_token(&["chat.submit"], 10_000);
-    let tool = DelegateTaskTool::with_max_concurrency(root, AUDIENCE, 1, echo_provider());
+    let tool = DelegateTaskTool::with_max_concurrency(root, AUDIENCE, 1, Some(echo_provider()));
 
     let first = tool
         .invoke(
@@ -378,53 +382,317 @@ async fn real_child_turn_completes() {
     assert_eq!(output.content["outcome"], "completed");
 }
 
+/// A provider whose round blocks until released, so tests can observe a live
+/// in-flight child deterministically instead of racing wall-clock timing.
+struct GatedMock {
+    started: Arc<AtomicBool>,
+    release: Arc<tokio::sync::Notify>,
+    cents: u64,
+}
+
+#[async_trait]
+impl Provider for GatedMock {
+    async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
+        self.started.store(true, Ordering::SeqCst);
+        self.release.notified().await;
+        Ok(CompletionResponse {
+            content: "gated reply".to_string(),
+            finish_reason: FinishReason::Stop,
+            usage: Usage {
+                tokens_in: 10,
+                tokens_out: 5,
+                cost_cents: Some(self.cents),
+            },
+            cost: CostTuple {
+                cents: self.cents,
+                ..CostTuple::default()
+            },
+            raw_provider_response: None,
+        })
+    }
+
+    fn id(&self) -> ProviderId {
+        ProviderId("gated-mock".into())
+    }
+
+    fn supports_streaming(&self) -> bool {
+        false
+    }
+
+    fn rate_card(&self) -> &RateCard {
+        static CARD: std::sync::OnceLock<RateCard> = std::sync::OnceLock::new();
+        CARD.get_or_init(|| RateCard {
+            version_id: "gated-test-v1".into(),
+            cents_per_1k_input: 0.0,
+            cents_per_1k_output: 0.0,
+            cents_per_request: 0.0,
+        })
+    }
+}
+
+fn gated_provider(
+    started: &Arc<AtomicBool>,
+    release: &Arc<tokio::sync::Notify>,
+    cents: u64,
+) -> Arc<dyn Provider + Send + Sync> {
+    Arc::new(GatedMock {
+        started: Arc::clone(started),
+        release: Arc::clone(release),
+        cents,
+    })
+}
+
+async fn wait_for_start(flag: &AtomicBool) {
+    for _ in 0..300 {
+        if flag.load(Ordering::SeqCst) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("provider round never started — fixture broken, not the code under test");
+}
+
+async fn wait_for_settlement(
+    tool: &DelegateTaskTool,
+) -> Vec<Result<ChildOutcome, ardur_delegate_child::ChildError>> {
+    for _ in 0..300 {
+        let drained = tool.drain_settlements();
+        if !drained.is_empty() {
+            return drained;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("no retained settlement after waiter drop — paid work would be unaccounted");
+}
+
 #[tokio::test]
 async fn dropped_future_not_detached() {
-    // The driver task retains the child handle and permit outside the invoke future.
-    // Dropping the returned future must not orphan the worker.
+    // Poll the invocation until the provider round has STARTED, then cancel the
+    // waiter (drop the invoke future and with it the oneshot receiver). The
+    // retained driver must still run the worker to completion, and the paid
+    // work's accounting must survive in the settlements buffer — a dropped
+    // future is not termination, and undelivered cost is not zero cost.
+    let started = Arc::new(AtomicBool::new(false));
+    let release = Arc::new(tokio::sync::Notify::new());
+    let provider = gated_provider(&started, &release, 25);
     let (token, root) = parent_token(&["chat.submit"], 10_000);
-    let tool = DelegateTaskTool::with_provider(root, AUDIENCE, echo_provider());
+    let tool = Arc::new(DelegateTaskTool::with_provider(root, AUDIENCE, provider));
     let ctx = ctx_with(token, InvocationId::new());
-    let fut = tool.invoke(&ctx, json!({ "goal": "will be dropped" }));
-    // Drop without awaiting: the driver should still run to completion and settle.
-    drop(fut);
-    // No panic or hang; in real the worker settles in background.
-    // (Full drain test would require internal access; this exercises the spawn path.)
+
+    let invoke_tool = Arc::clone(&tool);
+    let waiter =
+        tokio::spawn(async move { invoke_tool.invoke(&ctx, json!({ "goal": "drop me" })).await });
+    wait_for_start(&started).await;
+    waiter.abort();
+
+    release.notify_waiters();
+    let settled = wait_for_settlement(&tool).await;
+    assert_eq!(
+        settled.len(),
+        1,
+        "exactly one terminal outcome must be retained"
+    );
+    match &settled[0] {
+        Ok(ChildOutcome::Completed { cost, .. }) => {
+            assert_eq!(
+                cost.cents, 25,
+                "the billed round's real cost must be retained"
+            );
+        }
+        other => panic!("expected a Completed retained outcome, got {other:?}"),
+    }
 }
 
 #[tokio::test]
 async fn permit_lifetime_vs_cancelled_waiter() {
-    // Acquire permit, cancel the await, assert capacity not released while worker runs.
-    // (Simplified: rely on the releases test + driver design; full semaphore introspection
-    // would require exposing the semaphore or using a test hook.)
+    // Concurrency 1, live in-flight child: cancelling the caller's WAITER must
+    // not release capacity while the provider worker still runs. A second call
+    // is denied until real termination, then admitted.
+    let started = Arc::new(AtomicBool::new(false));
+    let release = Arc::new(tokio::sync::Notify::new());
+    let provider = gated_provider(&started, &release, 25);
     let (token, root) = parent_token(&["chat.submit"], 10_000);
-    let tool = DelegateTaskTool::with_max_concurrency(root, AUDIENCE, 1, echo_provider());
-    let ctx = ctx_with(token, InvocationId::new());
-    // First call takes the only permit.
-    let _first = tool
-        .invoke(&ctx, json!({ "goal": "hold permit" }))
+    let tool = Arc::new(DelegateTaskTool::with_max_concurrency(
+        root,
+        AUDIENCE,
+        1,
+        Some(provider),
+    ));
+
+    let invoke_tool = Arc::clone(&tool);
+    let ctx = ctx_with(token.clone(), InvocationId::new());
+    let waiter = tokio::spawn(async move {
+        invoke_tool
+            .invoke(&ctx, json!({ "goal": "hold permit" }))
+            .await
+    });
+    wait_for_start(&started).await;
+    waiter.abort();
+
+    // Worker is still gated (alive). Capacity must NOT be free.
+    let denied = tool
+        .invoke(
+            &ctx_with(token.clone(), InvocationId::new()),
+            json!({ "goal": "must be denied" }),
+        )
         .await
-        .expect("first completes");
-    // Second would be denied if not released, but since first done, ok.
+        .expect_err("a cancelled waiter must not release the worker's permit");
+    assert!(
+        matches!(denied, ToolError::Denied { .. }),
+        "expected a typed concurrency denial while the worker lives, got {denied:?}"
+    );
+
+    // Real termination releases the permit.
+    release.notify_waiters();
+    let _ = wait_for_settlement(&tool).await;
     let second = tool
-        .invoke(&ctx, json!({ "goal": "after release" }))
+        .invoke(
+            &ctx_with(token, InvocationId::new()),
+            json!({ "goal": "after termination" }),
+        )
         .await
-        .expect("second after first");
+        .expect("after real termination the permit is released");
     assert_eq!(second.content["outcome"], "completed");
 }
 
 #[tokio::test]
 async fn reservation_refusal_typed() {
-    // Large envelope that exceeds what ParentBudget can reserve (or other refusal path).
-    // In current seam the reservation is sized to the request, so this exercises the typed map.
+    // A shared session ledger makes reservation refusal REAL: with 100 cents
+    // total and the first child holding all of them in flight, a second
+    // 100-cent delegation is refused with a typed denial rather than silently
+    // double-spending one allowance.
+    let started = Arc::new(AtomicBool::new(false));
+    let release = Arc::new(tokio::sync::Notify::new());
+    let provider = gated_provider(&started, &release, 25);
+    let (token, root) = parent_token(&["chat.submit"], 10_000);
+    let tool = Arc::new(
+        DelegateTaskTool::with_provider(root, AUDIENCE, provider)
+            .with_session_budget(ParentBudget::new(100)),
+    );
+
+    let invoke_tool = Arc::clone(&tool);
+    let ctx = ctx_with(token.clone(), InvocationId::new());
+    let waiter = tokio::spawn(async move {
+        invoke_tool
+            .invoke(
+                &ctx,
+                json!({ "goal": "holds the whole ledger", "max_cost_cents": 100 }),
+            )
+            .await
+    });
+    wait_for_start(&started).await;
+
+    let refused = tool
+        .invoke(
+            &ctx_with(token.clone(), InvocationId::new()),
+            json!({ "goal": "wants another 100", "max_cost_cents": 100 }),
+        )
+        .await
+        .expect_err("the shared ledger cannot fund two full reservations at once");
+    match refused {
+        ToolError::Denied { reason } => {
+            assert!(
+                reason.contains("reservation"),
+                "refusal must name the reservation, got: {reason}"
+            );
+        }
+        other => panic!("expected a typed Denied, got {other:?}"),
+    }
+
+    // Settlement returns the unspent allowance; a later delegation fits again.
+    release.notify_waiters();
+    let first = waiter
+        .await
+        .expect("first waiter task panicked")
+        .expect("first completes");
+    assert_eq!(first.content["outcome"], "completed");
+    let second = tool
+        .invoke(
+            &ctx_with(token, InvocationId::new()),
+            json!({ "goal": "fits now" }),
+        )
+        .await
+        .expect("unspent allowance released at settlement funds a later delegation");
+    assert_eq!(second.content["outcome"], "completed");
+}
+
+#[tokio::test]
+async fn zero_budget_is_rejected_before_dispatch() {
+    // The schema's `minimum: 1` is not runtime validation; a zero budget would
+    // otherwise authorize a real, billable provider round.
     let (token, root) = parent_token(&["chat.submit"], 10_000);
     let tool = DelegateTaskTool::with_provider(root, AUDIENCE, echo_provider());
-    let ctx = ctx_with(token, InvocationId::new());
-    // Use a budget within the parent token's grant (10k) but exercise the path.
-    let output = tool
-        .invoke(&ctx, json!({ "goal": "normal", "max_cost_cents": 100 }))
+    let err = tool
+        .invoke(
+            &ctx_with(token, InvocationId::new()),
+            json!({ "goal": "zero", "max_cost_cents": 0 }),
+        )
         .await
-        .expect("reasonable budget reservation succeeds or types denial");
-    // If refusal, it surfaces as Denied (typed).
-    let _ = output;
+        .expect_err("a zero budget must be refused before any dispatch");
+    match err {
+        ToolError::InvalidArgs(reason) => {
+            assert!(reason.contains(">= 1"), "got: {reason}");
+        }
+        other => panic!("expected InvalidArgs, got {other:?}"),
+    }
+}
+
+/// A provider that replies with the request's model id, so tests can prove the
+/// configured model is carried into delegated requests.
+struct ModelEchoMock;
+
+#[async_trait]
+impl Provider for ModelEchoMock {
+    async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
+        Ok(CompletionResponse {
+            content: req.model.0.clone(),
+            finish_reason: FinishReason::Stop,
+            usage: Usage {
+                tokens_in: 1,
+                tokens_out: 1,
+                cost_cents: Some(1),
+            },
+            cost: CostTuple {
+                cents: 1,
+                ..CostTuple::default()
+            },
+            raw_provider_response: None,
+        })
+    }
+
+    fn id(&self) -> ProviderId {
+        ProviderId("model-echo".into())
+    }
+
+    fn supports_streaming(&self) -> bool {
+        false
+    }
+
+    fn rate_card(&self) -> &RateCard {
+        static CARD: std::sync::OnceLock<RateCard> = std::sync::OnceLock::new();
+        CARD.get_or_init(|| RateCard {
+            version_id: "model-echo-v1".into(),
+            cents_per_1k_input: 0.0,
+            cents_per_1k_output: 0.0,
+            cents_per_request: 0.0,
+        })
+    }
+}
+
+#[tokio::test]
+async fn configured_model_is_carried_into_delegated_requests() {
+    let (token, root) = parent_token(&["chat.submit"], 10_000);
+    let tool = DelegateTaskTool::with_provider(root, AUDIENCE, Arc::new(ModelEchoMock))
+        .with_child_model(ModelId::new("cfg-model-1"));
+    let output = tool
+        .invoke(
+            &ctx_with(token, InvocationId::new()),
+            json!({ "goal": "which model" }),
+        )
+        .await
+        .expect("child completes");
+    assert_eq!(
+        output.content["response"], "cfg-model-1",
+        "the configured model must reach the provider request, not a literal 'default'"
+    );
 }

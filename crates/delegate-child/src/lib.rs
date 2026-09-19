@@ -615,12 +615,15 @@ impl<P: Provider + ?Sized + 'static> ChildSupervisor<P> {
                 // between calls: a provider round can take tens of seconds, and
                 // a cancel that only lands between rounds is not cancellation.
                 //
-                // NOT biased toward cancellation. When both the response and
-                // the cancel are ready, a biased select would always discard a
-                // call that the upstream has already BILLED - understating both
-                // spend and round count. Preferring the completed response
-                // settles the real cost, then the flag stops the next round.
+                // BIASED toward the completed response: when both the response
+                // and the cancel are ready in the same poll, the response arm
+                // is polled first and wins, so a call the upstream has already
+                // BILLED is recorded rather than discarded (an unbiased select
+                // could choose cancellation and underreport both spend and
+                // round count). A cancel that lands while the response is
+                // still pending still wins the very next poll.
                 let result = tokio::select! {
+                    biased;
                     r = provider.complete(request) => Some(r),
                     _ = &mut cancel_rx => {
                         flag.store(true, Ordering::SeqCst);
