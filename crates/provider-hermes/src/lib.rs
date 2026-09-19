@@ -79,12 +79,12 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
-use ardur_session_journals::{default_secret_patterns, redact_text};
 use ardur_provider_runtime::{
     CompletionRequest, CompletionResponse, FinishReason, ModelId, Provider, ProviderError,
     RateCard, Usage,
 };
 use ardur_runtime::{CostTuple, ProviderId, Role};
+use ardur_session_journals::{default_secret_patterns, redact_text};
 use async_trait::async_trait;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -420,10 +420,7 @@ impl HermesProvider {
             };
             if looks_like_auth_error(detail)
                 || looks_like_auth_error(&stderr_text)
-                || parsed
-                    .error
-                    .as_deref()
-                    .is_some_and(looks_like_auth_error)
+                || parsed.error.as_deref().is_some_and(looks_like_auth_error)
             {
                 return Err(ProviderError::Unauthorized);
             }
@@ -570,7 +567,6 @@ async fn spawn_hermes(cmd: &mut tokio::process::Command) -> std::io::Result<toki
         }
     }
 }
-
 
 /// Strip secret-shaped substrings from a child diagnostic before it enters a
 /// [`ProviderError`]. Hermes (or a shim) may echo an API key in stderr / the
@@ -766,7 +762,6 @@ mod tests {
             "non-secret text must remain: {redacted}"
         );
     }
-
 
     #[test]
     fn request_model_wins_over_config_default() {
