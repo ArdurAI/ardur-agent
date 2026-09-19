@@ -24,13 +24,18 @@
 //!   primitive" trio, with `attention_score` represented as a fixed-point
 //!   integer (see [`CostTuple::attention_score`]) so cost keeps `Eq`, exact
 //!   ledger arithmetic, and byte-stable receipts at once.
+//! - [`tool_manifest_digest`] — the ONE canonical manifest digest (INTER-01 /
+//!   #537): MD author and ObservedEvent emitter both delegate here so an
+//!   unchanged registry can never read as §9.6 drift.
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
 mod cost;
 mod digest;
 mod ids;
+mod manifest;
 
 pub use cost::{CostDelta, CostEnvelope, CostTuple, MILLI_ATTENTION_PER_UNIT};
 pub use digest::{DigestParseError, Sha256Digest};
 pub use ids::{HolderId, ModelId, ProviderId, ReceiptId, TokenId, UnixTsMillis};
+pub use manifest::{MANIFEST_DIGEST_PREFIX, tool_manifest_digest};

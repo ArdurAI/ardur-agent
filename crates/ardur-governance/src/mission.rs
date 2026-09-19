@@ -360,19 +360,17 @@ fn resource_family(tool: &str) -> &'static str {
 
 /// Derive the `sha-256:`-prefixed manifest digest for a tool set.
 ///
-/// Sorted and de-duplicated before hashing so that registry enumeration order
-/// cannot read as drift (§9.6 would otherwise fire spuriously), with a separator
-/// so `["ab","c"]` and `["a","bc"]` cannot collide.
+/// This delegates to [`ardur_core_types::tool_manifest_digest`] — the ONE
+/// canonical implementation the ObservedEvent emitter also uses (INTER-01 /
+/// #537 / F8). The verifier's §9.6 drift check compares the digest published
+/// here against the emitter's observed digest by plain string equality, so
+/// the two call sites must produce identical bytes. Before the alignment this
+/// author hashed (id, descriptor) field pairs while the emitter hashed ids
+/// only and dropped the prefix: an unchanged registry compared as manifest
+/// drift (`sha-256:78e583f0…` vs `7eaa26b8…` for `["file.write"]`).
 #[must_use]
 pub fn tool_manifest_digest(tool_ids: &[String]) -> String {
-    let entries: Vec<ToolManifestEntry> = tool_ids
-        .iter()
-        .map(|id| ToolManifestEntry {
-            id: id.clone(),
-            descriptor_digest: None,
-        })
-        .collect();
-    tool_manifest_digest_of(&entries)
+    ardur_core_types::tool_manifest_digest(tool_ids)
 }
 
 /// One tool as it is pinned by the manifest digest.
@@ -396,15 +394,29 @@ pub struct ToolManifestEntry {
 /// read as drift, and each field is **length-prefixed** rather than
 /// separator-joined: a separator collides as soon as an id can contain it
 /// (`["ab","c"]` vs `["a","bc"]`, or a NUL inside a remotely-registered id).
+///
+/// # Alignment contract (INTER-01 / #537)
+///
+/// An entry WITHOUT a descriptor digest contributes exactly its canonical
+/// id bytes, so an all-`None` entry list hashes identically to
+/// [`ardur_core_types::tool_manifest_digest`] — the digest the ObservedEvent
+/// emitter produces, and the digest [`author_mission_declaration`] publishes.
+/// An entry WITH a descriptor is a strictly stronger pin and hashes
+/// differently by design: do not publish a descriptor-pinned digest where an
+/// id-only observation will be compared against it, or §9.6 will read the
+/// strengthening as drift. (`None` and `Some("")` are deliberately distinct.)
 #[must_use]
 pub fn tool_manifest_digest_of(entries: &[ToolManifestEntry]) -> String {
     let unique: BTreeSet<&ToolManifestEntry> = entries.iter().collect();
     let mut payload: Vec<u8> = Vec::new();
     for entry in unique {
-        let descriptor = entry.descriptor_digest.as_deref().unwrap_or("");
-        for field in [entry.id.as_str(), descriptor] {
-            payload.extend_from_slice(&(field.len() as u64).to_be_bytes());
-            payload.extend_from_slice(field.as_bytes());
+        // Identical to the canonical encoding: a descriptor-less entry must
+        // be indistinguishable from the id-only form the emitter hashes.
+        payload.extend_from_slice(&(entry.id.len() as u64).to_be_bytes());
+        payload.extend_from_slice(entry.id.as_bytes());
+        if let Some(descriptor) = &entry.descriptor_digest {
+            payload.extend_from_slice(&(descriptor.len() as u64).to_be_bytes());
+            payload.extend_from_slice(descriptor.as_bytes());
         }
     }
     format!("sha-256:{}", sha256_hex(&payload))

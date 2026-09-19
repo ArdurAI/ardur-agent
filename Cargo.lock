@@ -804,6 +804,8 @@ name = "ardur-governance"
 version = "0.0.1"
 dependencies = [
  "ardur-cap-token",
+ "ardur-core-types",
+ "ardur-observed-events",
  "ardur-receipt",
  "base64 0.23.1",
  "chrono",
@@ -1082,10 +1084,10 @@ dependencies = [
 name = "ardur-observed-events"
 version = "0.0.1"
 dependencies = [
+ "ardur-core-types",
  "ardur-runtime",
  "serde",
  "serde_json",
- "sha2 0.11.0",
  "tracing",
  "uuid",
 ]

@@ -14,6 +14,9 @@ repository.workspace = true
 # claims (`VerifiedClaims`) an ER binds to.
 ardur-receipt = { workspace = true }
 ardur-cap-token = { workspace = true }
+# The canonical tool-manifest digest lives in the leaf crate (INTER-01 / #537)
+# so the MD author and the ObservedEvent emitter hash identical bytes for §9.6.
+ardur-core-types = { workspace = true }
 # ER JWS is signed on raw p256 (ES256 over NIST P-256) — the MCEP ER v0.1
 # primary wire format (spec §9.1 `alg=ES256`). We mirror the receipt crate's
 # ARD-483 low-S normalization rather than depend on its crate-private signer.
@@ -41,5 +44,8 @@ tracing = { workspace = true }
 # public APIs, then projects + verifies the ER mirror chain.
 ardur-cap-token = { workspace = true }
 ardur-receipt = { workspace = true }
+# INTER-01 (#537): the manifest-digest alignment guard asserts byte equality
+# between the MD author (this crate) and the ObservedEvent emitter.
+ardur-observed-events = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
