@@ -2039,6 +2039,8 @@ impl FusedRuntime {
             });
         };
 
+        // Also serialize against internal control receipts and concurrent sweeps.
+        let _commit = self.commit_lock.lock().await;
         let chain = load_persisted_chain(receipt_log)?;
         let receipt_jwks = ardur_receipt::Jwks::from_public_key(&self.receipt_key.public_key());
         verify_persisted_chain_with_jwks(&chain, &receipt_jwks)?;
@@ -2053,60 +2055,42 @@ impl FusedRuntime {
         let journaled: std::collections::HashSet<uuid::Uuid> = entries
             .iter()
             .filter_map(|e| match e {
-                JournalEntry::AssistantMessage { receipt_id, .. } => Some(receipt_id.0),
+                JournalEntry::AssistantMessage { receipt_id, .. }
+                | JournalEntry::ToolInvocation { receipt_id, .. } => Some(receipt_id.0),
                 _ => None,
             })
             .collect();
 
-        let modern_receipts: HashSet<_> = self
+        let snapshots = self
             .settlement_supervisor()
             .durable_snapshots()
             .map_err(|e| ReconciliationError::Undecidable {
                 reason: e.to_string(),
-            })?
-            .iter()
-            .flat_map(|s| s.turn().rounds.iter())
-            .filter_map(|r| match &r.phase {
-                ardur_session_journals::settlement::SettlementPhase::Settled {
-                    receipt: Some(binding),
-                    ..
-                } => Some(binding.receipt_id.0),
-                ardur_session_journals::settlement::SettlementPhase::Prepared {
-                    candidate: Some(c),
-                }
-                | ardur_session_journals::settlement::SettlementPhase::Finalized {
-                    candidate: Some(c),
-                    ..
-                }
-                | ardur_session_journals::settlement::SettlementPhase::Unresolved {
-                    candidate: Some(c),
-                    ..
-                } => Some(c.receipt_id.0),
-                _ => None,
-            })
-            .collect();
+            })?;
+        let (modern_receipts, recovery) =
+            crate::reconcile::owned_recovery_entries(&chain, &snapshots, session_id, &entries)?;
         let relevant_receipt_count = chain
             .iter()
-            .filter(|receipt| receipt.body.session_id == Some(session_id.0))
+            .filter(|receipt| {
+                recovery.contains_key(&receipt.body.receipt_id)
+                    || (receipt.body.session_id == Some(session_id.0)
+                        && !modern_receipts.contains(&receipt.body.receipt_id))
+            })
             .count();
         let orphan_indices: Vec<usize> = chain
             .iter()
             .enumerate()
             .filter(|(_, receipt)| {
+                if let Some(entries) = recovery.get(&receipt.body.receipt_id) {
+                    // Modern evidence is never authority to truncate the receipt chain.
+                    return self.reconciliation_strategy != ReconciliationStrategy::TruncateOrphans
+                        && !entries.is_empty();
+                }
                 receipt.body.session_id == Some(session_id.0)
-                    && !journaled.contains(&receipt.body.receipt_id)
-                    && !modern_receipts.contains(&receipt.body.receipt_id)
-                    // A cancellation marker (#422) is intentionally
-                    // journal-less: it records that a turn ended WITHOUT
-                    // producing an assistant message, so there is no
-                    // AssistantMessage entry to vouch for it and never will be.
-                    // Without this exemption the default strategy would invent
-                    // a synthetic "crashed, model output lost" message for a
-                    // turn that was simply abandoned, and TruncateOrphans would
-                    // delete the marker and restore an intermediate round as
-                    // the chain tail — re-creating the very orphan the marker
-                    // exists to prevent.
-                    && receipt.body.verb.as_str() != CANCELLED_VERB
+                && !journaled.contains(&receipt.body.receipt_id)
+                && !modern_receipts.contains(&receipt.body.receipt_id)
+                // Genuine legacy completions only; a control receipt is not an answer.
+                && receipt.body.verb.as_str() == "llm.completion.minted.v1"
             })
             .map(|(i, _)| i)
             .collect();
@@ -2140,8 +2124,16 @@ impl FusedRuntime {
                 // so the content is an explicit recovery marker, not a fabricated
                 // response.
                 let now = self.clock.now_ms().get();
+                let mut count = 0;
                 for &i in &orphan_indices {
                     let rid = chain[i].body.receipt_id;
+                    if let Some(entries) = recovery.get(&rid) {
+                        for entry in entries {
+                            journal.append(entry.clone()).await?;
+                            count += 1;
+                        }
+                        continue;
+                    }
                     journal
                         .append(JournalEntry::AssistantMessage {
                             content: format!(
@@ -2154,10 +2146,9 @@ impl FusedRuntime {
                             receipt_id: ReceiptId(rid),
                         })
                         .await?;
+                    count += 1;
                 }
-                report.action = ReconciliationAction::AppendedSyntheticJournal {
-                    count: orphan_indices.len(),
-                };
+                report.action = ReconciliationAction::AppendedSyntheticJournal { count };
             }
             ReconciliationStrategy::TruncateOrphans => {
                 self.truncate_orphan_suffix(receipt_log, &chain, &orphan_indices)?;

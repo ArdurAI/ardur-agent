@@ -202,3 +202,80 @@ fn deciding_an_unknown_id_fails_cleanly() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("not found"), "{stderr}");
 }
+
+#[test]
+fn cli_writer_refuses_before_decision_then_appends_after_owner_release() {
+    use ardur_cedar_policy::{CedarPolicyBundle, PolicyBundle, PolicySource};
+    use ardur_fused_runtime::{
+        FusedRuntimeBuilder, load_persisted_chain, verify_persisted_chain_with_jwks,
+    };
+    use ardur_provider_runtime::{AnthropicProvider, ModelId};
+    use ardur_receipt::{Es256SigningKey, Jwks, Sha256Digest};
+    let home_tmp = tempfile::tempdir().unwrap();
+    let home = home_tmp.path().canonicalize().unwrap();
+    seed_pending_card(&home, "genesis");
+    ardur()
+        .env("HOME", &home)
+        .args(["approvals", "approve", "genesis"])
+        .assert()
+        .success();
+    seed_pending_card(&home, "next");
+    let log = home.join(".ardur/receipts/chain.jsonl");
+    let key = Es256SigningKey::from_pkcs8_pem(
+        &std::fs::read_to_string(home.join(".ardur/keys/receipt.pem")).unwrap(),
+    )
+    .unwrap();
+    let model = ModelId::new("fixture");
+    let runtime = FusedRuntimeBuilder::new(
+        ardur_cap_token::KeyPair::new().public(),
+        CedarPolicyBundle::load(PolicySource::Embedded(
+            "permit(principal, action, resource);".into(),
+        ))
+        .unwrap(),
+        std::sync::Arc::new(AnthropicProvider::stub(model.clone())),
+        key.clone(),
+        model,
+    )
+    .receipt_log(&log)
+    .build()
+    .unwrap();
+    let supervisor = runtime.settlement_supervisor();
+    let before = std::fs::read(&log).unwrap();
+    let mut runtime = Some(runtime);
+    for retain_runtime in [true, false] {
+        if !retain_runtime {
+            drop(runtime.take());
+        }
+        let output = ardur()
+            .env("HOME", &home)
+            .args(["approvals", "approve", "next"])
+            .output()
+            .unwrap();
+        assert!(
+            !output.status.success(),
+            "overlapping CLI writer must refuse ({retain_runtime})"
+        );
+        assert!(String::from_utf8_lossy(&output.stderr).contains("writer already active"));
+        assert_eq!(std::fs::read(&log).unwrap(), before);
+        assert_eq!(
+            read_card(&home, "next")["status"],
+            "pending",
+            "writer refusal must precede decision mutation"
+        );
+    }
+    drop(runtime);
+    assert!(supervisor.try_close().is_ok());
+    ardur()
+        .env("HOME", &home)
+        .args(["approvals", "approve", "next"])
+        .assert()
+        .success();
+    let chain = load_persisted_chain(&log).unwrap();
+    assert_eq!(chain.len(), 2);
+    assert_eq!(
+        chain[1].body.parent_hash,
+        Some(Sha256Digest::of(chain[0].jws_compact.as_bytes()))
+    );
+    verify_persisted_chain_with_jwks(&chain, &Jwks::from_public_key(&key.public_key())).unwrap();
+    assert_eq!(read_card(&home, "next")["status"], "approved");
+}

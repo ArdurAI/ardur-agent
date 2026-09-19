@@ -121,10 +121,26 @@ async fn fresh_process_preserves_terminal_evidence_without_replaying_old_budget(
                 .cents,
             10
         );
+        let after = journal.replay(session).await.unwrap();
+        assert_eq!(&after[..before.len()], before.as_slice());
+        assert_eq!(after.len(), before.len() + usize::from(unknown));
+        if unknown {
+            let id = ardur_fused_runtime::load_persisted_chain(root.join("receipts.jsonl"))
+                .unwrap()[0]
+                .body
+                .receipt_id;
+            assert!(
+                matches!(after.last().unwrap(), JournalEntry::AssistantMessage { content, receipt_id, .. }
+                if content.starts_with("[reconciled]") && receipt_id.0 == id)
+            );
+        }
         assert_eq!(
-            journal.replay(session).await.unwrap(),
-            before,
-            "no invented assistant/accounting events or truncation"
+            runtime
+                .reconcile_receipts(false)
+                .await
+                .unwrap()
+                .orphan_receipt_count(),
+            0
         );
         assert_eq!(
             std::fs::read(root.join("receipts.jsonl")).unwrap_or_default(),

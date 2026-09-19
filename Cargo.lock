@@ -1292,6 +1292,7 @@ dependencies = [
  "ardur-durability",
  "ardur-fused-runtime",
  "ardur-hooks-openclaw-compat",
+ "ardur-lifecycle-hooks",
  "ardur-media-audio",
  "ardur-media-video",
  "ardur-memory",

@@ -569,6 +569,29 @@ impl FusedRuntimeBuilder {
         } else {
             std::env::current_dir()?.join(path)
         };
+        let verifier = ardur_cap_token::BiscuitCapTokenVerifier::new(self.deny.clone());
+
+        let mut gate =
+            InMemoryCostAdmissionGate::with_clock(self.budget.clone(), self.clock.clone());
+        if let Some(ceiling) = self.ceiling {
+            gate = gate.with_ceiling(ceiling);
+        }
+        if let Some(cap) = self.provision_cap {
+            gate = gate.with_provision_cap(cap);
+        }
+        // ARD-488: the runtime hands `Arc` clones of the gate to per-turn
+        // release-on-drop guards, so a cancelled turn can refund its hold from
+        // `Drop` without an await point.
+        let gate = Arc::new(gate);
+        let (settlement_root, identity) =
+            crate::receipts::writer_identity(&path, &self.receipt_key)?;
+        // Own the stable settlement lease BEFORE reading/caching the writable tail.
+        // Retained supervisors keep this same owner alive after runtime teardown.
+        let settlements = crate::settlement::SettlementCoordinator::open(
+            gate.clone(),
+            &settlement_root,
+            identity,
+        )?;
         // Validate the configured path without following symlinks. No fallback.
         let file = crate::receipts::open_append_no_follow(&path)?;
         file.sync_all()?;
@@ -593,39 +616,6 @@ impl FusedRuntimeBuilder {
             None => None,
         };
 
-        let verifier = ardur_cap_token::BiscuitCapTokenVerifier::new(self.deny.clone());
-
-        let mut gate =
-            InMemoryCostAdmissionGate::with_clock(self.budget.clone(), self.clock.clone());
-        if let Some(ceiling) = self.ceiling {
-            gate = gate.with_ceiling(ceiling);
-        }
-        if let Some(cap) = self.provision_cap {
-            gate = gate.with_provision_cap(cap);
-        }
-        // ARD-488: the runtime hands `Arc` clones of the gate to per-turn
-        // release-on-drop guards, so a cancelled turn can refund its hold from
-        // `Drop` without an await point.
-        let gate = Arc::new(gate);
-        let signer = ardur_cost_gate::Sha256Digest::of(
-            &serde_json::to_vec(&ardur_receipt::Jwks::from_public_key(
-                &self.receipt_key.public_key(),
-            ))
-            .map_err(|e| ReceiptChainError::Malformed(e.to_string()))?,
-        );
-        let mut root_name = path
-            .file_name()
-            .ok_or(ReceiptChainError::SettlementLogRequired)?
-            .to_os_string();
-        root_name.push(".settlements");
-        let settlements = crate::settlement::SettlementCoordinator::open(
-            gate.clone(),
-            &path.with_file_name(root_name),
-            ardur_session_journals::settlement::ReceiptIdentity {
-                receipt_log: path,
-                signer,
-            },
-        )?;
         #[cfg(feature = "test-support")]
         let settlements = {
             let mut settlements = settlements;

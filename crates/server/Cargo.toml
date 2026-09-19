@@ -105,6 +105,7 @@ thiserror = { workspace = true }
 subtle = { workspace = true }
 
 [dev-dependencies]
+ardur-lifecycle-hooks = { workspace = true }
 ardur-approvals = { workspace = true }
 # The integration tests drive the router in-process with `oneshot`, mock
 # `chat.postMessage` with wiremock, and recompute a genuine `v0=` Slack

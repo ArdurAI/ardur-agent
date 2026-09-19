@@ -1,5 +1,5 @@
-//! Mid-turn journal failure: modern evidence stays quarantined; legacy receipts
-//! retain their existing explicit, idempotent recovery-marker behavior.
+//! Mid-turn journal failure: definite modern answer markers recover, but unknown
+//! projections stay quarantined; authenticated legacy recovery remains idempotent.
 //!
 //! A caught task panic plus destruction of the runtime models the supported
 //! restart boundary here, not a kernel failure or arbitrary power-loss proof.
@@ -137,8 +137,9 @@ async fn journal_mid_turn_crash_retains_unresolved_settlement_at_boot() {
         .build_reconciled()
         .await
         .unwrap();
-    // Legacy reconstruction must not invent a modern assistant completion.
-    assert_eq!(report.orphan_receipt_count(), 0);
+    // The final receipt binding is definite even though its cost projection is
+    // ambiguous. Recover only the lost answer marker; keep economic quarantine.
+    assert_eq!(report.orphan_receipt_count(), 1);
     let supervisor = runtime.settlement_supervisor();
     assert!(supervisor.status().boot_problem.is_some());
     let budget = runtime.remaining_budget(&fixtures::gate_holder()).await;
@@ -155,7 +156,24 @@ async fn journal_mid_turn_crash_retains_unresolved_settlement_at_boot() {
         runtime.remaining_budget(&fixtures::gate_holder()).await,
         budget
     );
-    assert_eq!(journal.replay(session).await.unwrap(), journal_before);
+    let after = journal.replay(session).await.unwrap();
+    assert_eq!(&after[..journal_before.len()], journal_before.as_slice());
+    assert_eq!(after.len(), journal_before.len() + 1);
+    let final_id = load_persisted_chain(&receipt_log).unwrap()[2]
+        .body
+        .receipt_id;
+    assert!(
+        matches!(after.last().unwrap(), JournalEntry::AssistantMessage { content, receipt_id, .. }
+        if content.starts_with("[reconciled]") && receipt_id.0 == final_id)
+    );
+    assert_eq!(
+        runtime
+            .reconcile_receipts(false)
+            .await
+            .unwrap()
+            .orphan_receipt_count(),
+        0
+    );
     assert_eq!(std::fs::read(&receipt_log).unwrap(), chain_before);
     verify(&receipt_log);
     assert!(supervisor.try_close().is_err());

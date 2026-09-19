@@ -2470,36 +2470,34 @@ const LOCAL_OPERATOR_TOKEN_ID: &str = "cli-local";
 /// `FusedRuntime` over this data dir appends turn receipts to. Returns the
 /// minted receipt's id so the decision card can be linked back to it.
 fn mint_approval_decision_receipt(
-    dirs: &StateDirs,
+    writer: ardur_fused_runtime::ControlReceiptWriter,
     verb: &str,
     approval_id: &str,
 ) -> Result<String, CliError> {
-    let receipt_key = dirs.load_or_create_receipt_key()?;
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
-    let receipt = ardur_fused_runtime::mint_control_receipt(
-        &dirs.receipt_log(),
-        &receipt_key,
-        ardur_receipt::VerbObject::new(verb).map_err(|e| CliError::State(e.to_string()))?,
-        ardur_receipt::Sha256Digest::of(approval_id.as_bytes()),
-        ardur_receipt::HolderId(LOCAL_OPERATOR_SUBJECT.to_string()),
-        ardur_receipt::TokenId(uuid::Uuid::new_v5(
-            &uuid::Uuid::NAMESPACE_URL,
-            LOCAL_OPERATOR_TOKEN_ID.as_bytes(),
-        )),
-        None,
-        ardur_receipt::CostTuple {
-            tokens_in: 0,
-            tokens_out: 0,
-            cents: 0,
-            wall_ms: 0,
-            attention_score: 0,
-        },
-        now_ms,
-    )
-    .map_err(|e| CliError::State(format!("approval receipt mint failed: {e}")))?;
+    let receipt = writer
+        .mint(
+            ardur_receipt::VerbObject::new(verb).map_err(|e| CliError::State(e.to_string()))?,
+            ardur_receipt::Sha256Digest::of(approval_id.as_bytes()),
+            ardur_receipt::HolderId(LOCAL_OPERATOR_SUBJECT.to_string()),
+            ardur_receipt::TokenId(uuid::Uuid::new_v5(
+                &uuid::Uuid::NAMESPACE_URL,
+                LOCAL_OPERATOR_TOKEN_ID.as_bytes(),
+            )),
+            None,
+            ardur_receipt::CostTuple {
+                tokens_in: 0,
+                tokens_out: 0,
+                cents: 0,
+                wall_ms: 0,
+                attention_score: 0,
+            },
+            now_ms,
+        )
+        .map_err(|e| CliError::State(format!("approval receipt mint failed: {e}")))?;
     Ok(receipt.receipt_id.to_string())
 }
 
@@ -2567,6 +2565,9 @@ fn run_approvals(args: ApprovalsArgs) -> Result<(), CliError> {
             }
         }
         ApprovalsAction::Approve { id } => {
+            let key = dirs.load_or_create_receipt_key()?;
+            let writer = ardur_fused_runtime::ControlReceiptWriter::open(&dirs.receipt_log(), &key)
+                .map_err(|e| CliError::State(format!("approval receipt writer: {e}")))?;
             let decided_at = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
@@ -2574,11 +2575,15 @@ fn run_approvals(args: ApprovalsArgs) -> Result<(), CliError> {
             store
                 .decide(&id, ardur_approvals::Decision::Approve, decided_at)
                 .map_err(|e| approval_store_err(&id, e))?;
-            let minted = mint_approval_decision_receipt(&dirs, "approval.approve.accepted.v1", &id);
+            let minted =
+                mint_approval_decision_receipt(writer, "approval.approve.accepted.v1", &id);
             settle_decision_audit(&store, &id, minted)?;
             println!("approved {id}");
         }
         ApprovalsAction::Deny { id, reason } => {
+            let key = dirs.load_or_create_receipt_key()?;
+            let writer = ardur_fused_runtime::ControlReceiptWriter::open(&dirs.receipt_log(), &key)
+                .map_err(|e| CliError::State(format!("approval receipt writer: {e}")))?;
             let decided_at = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
@@ -2592,7 +2597,7 @@ fn run_approvals(args: ApprovalsArgs) -> Result<(), CliError> {
                     decided_at,
                 )
                 .map_err(|e| approval_store_err(&id, e))?;
-            let minted = mint_approval_decision_receipt(&dirs, "approval.reject.accepted.v1", &id);
+            let minted = mint_approval_decision_receipt(writer, "approval.reject.accepted.v1", &id);
             settle_decision_audit(&store, &id, minted)?;
             println!("denied {id}");
         }

@@ -3,8 +3,8 @@
 //! Legacy fixtures use the real receipt signer and file journal, but deliberately
 //! predate durable settlement snapshots. Removing an assistant line leaves a
 //! genuine legacy orphan for the production reconciler. Modern settlement-backed
-//! receipts have a separate non-destructive control: the legacy sweep must not
-//! truncate their evidence or invent a recovered assistant transcript.
+//! receipts have a separate non-destructive control: definite owned answers get
+//! an explicit lost-content marker, never original text or receipt truncation.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -142,7 +142,7 @@ fn restart_over(
 }
 
 #[tokio::test]
-async fn modern_receipt_without_transcript_is_not_legacy_recovery_or_truncation() {
+async fn modern_committed_answer_recovers_without_legacy_truncation() {
     let root = support::tempdir().unwrap();
     let receipt_log = root.path().join("receipts.jsonl");
     let session = SessionId::new();
@@ -170,25 +170,34 @@ async fn modern_receipt_without_transcript_is_not_legacy_recovery_or_truncation(
     let original_chain = std::fs::read(&receipt_log).unwrap();
     let original_journal = std::fs::read(journal_path(root.path(), session)).unwrap();
     for strategy in [
-        ReconciliationStrategy::AppendSyntheticJournal,
         ReconciliationStrategy::TruncateOrphans,
+        ReconciliationStrategy::AppendSyntheticJournal,
     ] {
         let (runtime, journal, _) = restart_over(root.path(), &receipt_log, session, strategy);
         let report = runtime.reconcile_receipts(false).await.unwrap();
-        assert_eq!(
-            report.orphan_receipt_count(),
-            0,
-            "legacy sweep excludes modern settlement ownership"
-        );
+        let recover = strategy == ReconciliationStrategy::AppendSyntheticJournal;
+        assert_eq!(report.orphan_receipt_count(), usize::from(recover));
         assert_eq!(std::fs::read(&receipt_log).unwrap(), original_chain);
-        assert_eq!(
-            std::fs::read(journal_path(root.path(), session)).unwrap(),
-            original_journal
-        );
-        assert!(
-            journaled_ids(&journal.replay(session).await.unwrap()).is_empty(),
-            "missing transcript is not fabricated as repaired"
-        );
+        if recover {
+            assert_eq!(
+                journaled_ids(&journal.replay(session).await.unwrap()).len(),
+                1
+            );
+            assert_eq!(
+                runtime
+                    .reconcile_receipts(false)
+                    .await
+                    .unwrap()
+                    .orphan_receipt_count(),
+                0
+            );
+        } else {
+            assert_eq!(
+                std::fs::read(journal_path(root.path(), session)).unwrap(),
+                original_journal
+            );
+            assert!(journaled_ids(&journal.replay(session).await.unwrap()).is_empty());
+        }
         let chain = load_persisted_chain(&receipt_log).unwrap();
         ardur_fused_runtime::verify_persisted_chain_with_jwks(
             &chain,

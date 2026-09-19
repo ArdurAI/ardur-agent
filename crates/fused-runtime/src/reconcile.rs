@@ -88,7 +88,7 @@ pub enum ReconciliationAction {
     /// Orphans were found but left in place: either `dry_run` was set or the
     /// strategy was [`ReconciliationStrategy::IgnoreOrphans`].
     ReportedOnly,
-    /// `count` recovery journal entries were appended (one per orphan).
+    /// `count` recovery journal entries were appended (answers or tool audits).
     AppendedSyntheticJournal {
         /// The number of recovery entries appended.
         count: usize,
@@ -103,12 +103,12 @@ pub enum ReconciliationAction {
 /// The outcome of one reconciliation sweep over the receipt log + journal.
 #[derive(Clone, Debug)]
 pub struct ReconciliationReport {
-    /// Receipts assigned to this journal's session id at the time of the sweep.
-    /// Legacy receipts without a session id and receipts owned by other journals
-    /// are authenticated as part of the complete chain but excluded here.
+    /// Modern committed receipts assigned by authoritative journal ownership,
+    /// plus genuinely legacy receipts matching this journal's session id.
+    /// Foreign receipts are authenticated as part of the complete chain but excluded.
     pub receipt_count: usize,
-    /// Distinct receipt ids the journal accounts for (via `AssistantMessage`
-    /// entries) at the time of the sweep.
+    /// Distinct receipt ids the journal references through answers or tool audits.
+    /// A partially recovered tool round can still have missing audit entries.
     pub journaled_receipt_count: usize,
     /// The receipt ids found in the chain but absent from the journal — the
     /// orphans, as *detected* (before any recovery action).
@@ -152,3 +152,133 @@ pub enum ReconciliationError {
         reason: String,
     },
 }
+
+/// Project only definite, owned receipt bindings. Root/path/signer identity was
+/// validated by the leased store; the entire chain is authenticated by the caller.
+/// This does NOT resolve prior-epoch economic/projection ambiguity or replay money.
+pub(crate) fn owned_recovery_entries(
+    chain: &[crate::PersistedReceipt],
+    snapshots: &[ardur_session_journals::settlement::EncodedSnapshot],
+    owner: ardur_runtime::SessionId,
+    journal: &[ardur_session_journals::JournalEntry],
+) -> Result<OwnedRecovery, ReconciliationError> {
+    use ardur_receipt::Sha256Digest;
+    use ardur_session_journals::{JournalEntry, settlement::*};
+    let mut modern = std::collections::HashSet::new();
+    let mut recovery = std::collections::HashMap::new();
+    let mut claimed = std::collections::HashSet::new();
+    for snapshot in snapshots {
+        let turn = snapshot.turn();
+        for round in &turn.rounds {
+            match &round.phase {
+                SettlementPhase::Settled {
+                    receipt: Some(binding),
+                    ..
+                } => {
+                    modern.insert(binding.receipt_id.0);
+                }
+                SettlementPhase::Prepared { candidate: Some(c) }
+                | SettlementPhase::Finalized {
+                    candidate: Some(c), ..
+                }
+                | SettlementPhase::Unresolved {
+                    candidate: Some(c), ..
+                } => {
+                    modern.insert(c.receipt_id.0);
+                }
+                _ => {}
+            }
+            let SettlementPhase::Settled {
+                application,
+                receipt: Some(binding),
+            } = &round.phase
+            else {
+                continue;
+            };
+            // Even a same-session or same-signer receipt may belong to another journal.
+            if turn.journal_owner != Some(owner) {
+                continue;
+            }
+            let matches: Vec<_> = chain
+                .iter()
+                .filter(|r| r.body.receipt_id == binding.receipt_id.0)
+                .collect();
+            let [receipt] = matches.as_slice() else {
+                return Err(ReconciliationError::Undecidable {
+                    reason: "owned committed receipt missing or duplicated".into(),
+                });
+            };
+            if !claimed.insert(binding.receipt_id)
+                || Sha256Digest::of(receipt.jws_compact.as_bytes()) != binding.jws_digest
+                || receipt.body.session_id != Some(turn.request_session.0)
+                || receipt.body.subject != turn.verified_subject
+                || receipt.body.cap_token_id != turn.cap_token_id
+                || receipt.body.cost != application.requested_debit
+                || application.rollback != RollbackStatus::None
+            {
+                return Err(ReconciliationError::Undecidable {
+                    reason: "owned receipt binding disagrees with authoritative settlement".into(),
+                });
+            }
+            let Some(SettlementDecision::Completion { final_answer }) = round.decision else {
+                continue;
+            };
+            let mut missing = Vec::new();
+            let has_answer = journal.iter().any(|e| matches!(e, JournalEntry::AssistantMessage { receipt_id, .. } if *receipt_id == binding.receipt_id));
+            if final_answer {
+                if turn.terminal == TurnTerminal::FinalAnswer(binding.receipt_id) && !has_answer {
+                    missing.push(JournalEntry::AssistantMessage {
+                        content: format!("[reconciled] committed receipt {}: original assistant content unavailable.", binding.receipt_id.0),
+                        at: receipt.body.issued_at, receipt_id: binding.receipt_id,
+                    });
+                }
+            } else if !has_answer {
+                // Healthy older runtimes wrote intermediate AssistantMessages;
+                // never manufacture one on recovery. Recover actual successes as
+                // ToolInvocation audit facts, not a final answer or unknown effect.
+                let mut available = journal.to_vec();
+                let mut signed_tools = receipt.body.tool_calls.clone();
+                for tool in &round.tools {
+                    let ToolEffect::Completed {
+                        output_digest,
+                        cost,
+                    } = tool.effect
+                    else {
+                        continue;
+                    };
+                    let Some(i) = signed_tools.iter().position(|c| {
+                        c.call_id == tool.call_id
+                            && c.tool_name == tool.name
+                            && c.arguments_digest == tool.arguments_digest
+                            && c.output_digest == output_digest
+                            && c.cost == cost
+                    }) else {
+                        return Err(ReconciliationError::Undecidable {
+                            reason: "successful tool evidence missing from bound receipt".into(),
+                        });
+                    };
+                    signed_tools.remove(i);
+                    let entry = JournalEntry::ToolInvocation {
+                        tool_id: ardur_session_journals::ToolId(tool.name.clone()),
+                        input_digest: tool.arguments_digest,
+                        output_digest,
+                        at: receipt.body.issued_at,
+                        receipt_id: binding.receipt_id,
+                    };
+                    if let Some(i) = available.iter().position(|e| *e == entry) {
+                        available.remove(i);
+                    } else {
+                        missing.push(entry);
+                    }
+                }
+            }
+            recovery.insert(binding.receipt_id.0, missing);
+        }
+    }
+    Ok((modern, recovery))
+}
+
+type OwnedRecovery = (
+    std::collections::HashSet<uuid::Uuid>,
+    std::collections::HashMap<uuid::Uuid, Vec<ardur_session_journals::JournalEntry>>,
+);
