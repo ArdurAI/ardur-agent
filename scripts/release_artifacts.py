@@ -6,6 +6,7 @@ this structural check. A nonempty bundle alone is not a valid signature.
 """
 
 import argparse
+import os
 import pathlib
 import re
 import struct
@@ -49,10 +50,19 @@ def require_binary(header, target):
         raise ValueError(f"binary format/architecture does not match {target}")
 
 
-def package(tag, target, root=pathlib.Path(".")):
+def package(tag, target, root=pathlib.Path("."), notices=None):
     validate_tag(tag)
     if target not in TARGETS:
         raise ValueError(f"unsupported target: {target}")
+    notice_files = []
+    if target == "x86_64-apple-darwin":
+        if notices is None:
+            raise ValueError("Intel macOS packaging requires ONNX Runtime license notices")
+        for name in ("LICENSE", "ThirdPartyNotices.txt"):
+            notice = pathlib.Path(notices) / name
+            if notice.is_symlink() or not notice.is_file() or notice.stat().st_size == 0:
+                raise ValueError(f"missing regular ONNX Runtime notice: {notice}")
+            notice_files.append(notice)
     source = root / "target" / target / "release"
     # Validate every source before creating even the first archive.
     for name in BINARIES:
@@ -70,6 +80,8 @@ def package(tag, target, root=pathlib.Path(".")):
         archive = dist / f"{name}-{tag}-{target}.tar.gz"
         with tarfile.open(archive, "w:gz") as tar:
             tar.add(source / name, arcname=name, recursive=False)
+            for notice in notice_files:
+                tar.add(notice, arcname=f"licenses/onnxruntime/{notice.name}", recursive=False)
         print(archive, flush=True)
 
 
@@ -115,7 +127,7 @@ def main():
     args = parser.parse_args()
     try:
         if args.command == "package":
-            package(args.tag, args.target)
+            package(args.tag, args.target, notices=os.environ.get("ORT_RELEASE_NOTICES"))
         else:
             check(args.tag, args.stage)
     except (OSError, ValueError) as error:

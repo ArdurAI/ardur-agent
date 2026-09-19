@@ -53,6 +53,14 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
 
+      - name: Provision pinned static ONNX Runtime for Intel macOS
+        if: matrix.target == 'x86_64-apple-darwin'
+        run: python3 scripts/release_onnxruntime.py prepare --directory "${RUNNER_TEMP}/release-onnxruntime"
+
+      - name: Verify Intel static library architecture
+        if: matrix.target == 'x86_64-apple-darwin'
+        run: test "$(lipo -archs "${ORT_LIB_PATH}/libonnxruntime.a")" = x86_64
+
       - name: Install pinned Rust toolchain
         run: |
           rustup toolchain install 1.98.1 --profile minimal --target "${TARGET}"
@@ -79,6 +87,8 @@ jobs:
           path: dist/*.tar.gz
           if-no-files-found: error
           compression-level: 0
+          archive: true
+          overwrite: true
           retention-days: 7
 
   release-artifacts:
@@ -103,6 +113,7 @@ jobs:
           pattern: release-*
           path: dist
           merge-multiple: true
+          digest-mismatch: error
 
       - name: Require the complete archive matrix
         run: python3 scripts/release_artifacts.py check --tag "${RELEASE_TAG}" --stage archives
@@ -117,6 +128,9 @@ jobs:
           output-file: dist/ardur-agent-${{ env.RELEASE_TAG }}.spdx.json
           upload-artifact: false
           upload-release-assets: false
+
+      - name: Record the Intel native dependency in the release SBOM
+        run: python3 scripts/release_onnxruntime.py sbom "dist/ardur-agent-${RELEASE_TAG}.spdx.json"
 
       - name: Require all unsigned release payloads
         run: python3 scripts/release_artifacts.py check --tag "${RELEASE_TAG}" --stage unsigned

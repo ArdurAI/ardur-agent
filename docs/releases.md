@@ -19,6 +19,7 @@ packaged `ardur --version` on its matching runner.
 The binaries are `ardur`, `ardur-server`, `ardur-admin`, `ardur-eval`,
 `ardur-healthcheck`, and `ardur-memory-eval`. Each archive is named
 `<binary>-<tag>-<target>.tar.gz` and contains that executable at its root.
+Intel macOS archives also contain `licenses/onnxruntime/` notices.
 Linux GNU binaries require a compatible glibc-based system; these are not
 static musl builds.
 
@@ -44,6 +45,23 @@ The SBOM action's automatic release upload is disabled so it cannot publish
 an unsigned SBOM ahead of this gate. The final upload remains a GitHub API
 operation, not a transactional release: if an upload fails, treat the release
 as incomplete until a successful rerun and full asset verification.
+
+### Intel macOS native dependency
+
+The locked `ort-sys` crate provides no Intel macOS prebuilt distribution.
+This lane therefore uses the static ONNX Runtime 1.28.0 library from
+[`csukuangfj/onnxruntime-libs`](https://github.com/csukuangfj/onnxruntime-libs/releases/tag/v1.28.0),
+an additional binary supplier explicitly [approved for P0](https://github.com/ArdurAI/ardur-agent/issues/532#issuecomment-5739593965).
+The archive SHA256 is
+`88c6037c0eb9a7f0013729e0181feec4fb9ef30ca37769aa7b69d2478450c415`.
+The workflow checks this before extraction, verifies the library's x86_64
+architecture, and selects static linking through `ORT_LIB_PATH`. No Rust
+feature is disabled and no external ONNX dylib is required. The release-level
+SBOM explicitly records this supplier, version, URL, and input digest; this
+record is not a claim of upstream build-provenance verification. License and
+third-party notices are fetched from the pinned Microsoft source commit with
+separate checksums and included in every Intel archive. Other lanes retain
+the locked crate's existing native dependency download path.
 
 ## Download and verify before executing
 

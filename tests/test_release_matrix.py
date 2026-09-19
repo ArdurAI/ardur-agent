@@ -132,13 +132,20 @@ class ReleaseInventoryTests(unittest.TestCase):
                     binary = source / name
                     binary.write_bytes(self.header(target))
                     binary.chmod(0o755)
-                self.release.package(self.tag, target, lane)
+                notices = lane / "notices"
+                notices.mkdir()
+                for notice in ("LICENSE", "ThirdPartyNotices.txt"):
+                    (notices / notice).write_text("license test fixture")
+                self.release.package(self.tag, target, lane, notices)
                 archives = list((lane / "dist").iterdir())
                 self.assertEqual(len(archives), 6)
                 for archive in archives:
                     name = archive.name.removesuffix(f"-{self.tag}-{target}.tar.gz")
                     with tarfile.open(archive) as tar:
-                        self.assertEqual(tar.getnames(), [name])
+                        expected = [name]
+                        if target == "x86_64-apple-darwin":
+                            expected += ["licenses/onnxruntime/LICENSE", "licenses/onnxruntime/ThirdPartyNotices.txt"]
+                        self.assertEqual(tar.getnames(), expected)
                         member = tar.getmember(name)
                         self.assertTrue(member.isfile())
                         self.assertEqual(member.mode & 0o777, 0o755)
@@ -152,6 +159,12 @@ class ReleaseInventoryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "missing regular executable"):
             self.release.package(self.tag, target, self.root)
         self.assertEqual(list(self.dist.iterdir()), [])
+
+    def test_intel_packaging_refuses_missing_license_notices(self):
+        with self.assertRaisesRegex(ValueError, "requires ONNX Runtime license notices"):
+            self.release.package(self.tag, "x86_64-apple-darwin", self.root)
+        with self.assertRaisesRegex(ValueError, "missing regular ONNX Runtime notice"):
+            self.release.package(self.tag, "x86_64-apple-darwin", self.root, self.root / "absent")
 
     def test_format_guard_rejects_every_wrong_architecture_and_universal_binary(self):
         for target in self.release.TARGETS:
