@@ -48,6 +48,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod effect;
 mod enforce;
 mod er;
 mod error;
@@ -58,6 +59,12 @@ mod mission;
 mod project;
 mod sign;
 
+pub use effect::{
+    AxisScale, CommitOutcome, CostAxis, EffectBucketDescriptor, EffectBucketRegistry, EffectClass,
+    EffectLedger, EffectUnit, LedgerError, REGISTRY_EFFECT_CLASSES, REGISTRY_VERSION,
+    RegistryDescriptor, RegistryError, Reservation, effect_bucket_registry, normalize_effect_class,
+    project_budget_remaining,
+};
 pub use enforce::{
     EnforceAction, EnforceMode, EnforceOp, EnforcementAttach, EnforcementProfile, OpPolicy,
     RecordingAttach,
