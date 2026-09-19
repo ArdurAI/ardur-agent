@@ -435,7 +435,11 @@ impl Provider for GatedMock {
     }
 }
 
-fn gated_provider(started: &Arc<AtomicBool>, release: &Arc<AtomicBool>, cents: u64) -> Arc<dyn Provider + Send + Sync> {
+fn gated_provider(
+    started: &Arc<AtomicBool>,
+    release: &Arc<AtomicBool>,
+    cents: u64,
+) -> Arc<dyn Provider + Send + Sync> {
     Arc::new(GatedMock {
         started: Arc::clone(started),
         release: Arc::clone(release),
