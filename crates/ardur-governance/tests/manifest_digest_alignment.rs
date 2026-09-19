@@ -199,3 +199,52 @@ fn a_descriptor_pin_is_a_stronger_distinct_digest() {
         "descriptor-less entries must hash identically to the canonical form"
     );
 }
+
+/// Regression for PR #558 review: without domain separation, a single
+/// descriptor-pinned entry `("a", Some("b"))` hashed to exactly the bytes of
+/// the two-entry id-only manifest `["a", "b"]` — a registry swap the §9.6
+/// drift check could not detect. The descriptor-pinned family must be
+/// unreachable from ANY id-only input, and `None` vs `Some("")` must stay
+/// distinct inside it.
+#[test]
+fn descriptor_pinned_entries_cannot_collide_with_an_id_only_manifest() {
+    let pinned = tool_manifest_digest_of(&[ToolManifestEntry {
+        id: "a".into(),
+        descriptor_digest: Some("b".into()),
+    }]);
+    let two_ids = tool_manifest_digest(&["a".into(), "b".into()]);
+    assert_ne!(
+        pinned, two_ids,
+        "a descriptor pin must not masquerade as a second id-only entry"
+    );
+
+    let mixed_none = tool_manifest_digest_of(&[
+        ToolManifestEntry {
+            id: "a".into(),
+            descriptor_digest: None,
+        },
+        ToolManifestEntry {
+            id: "b".into(),
+            descriptor_digest: Some("c".into()),
+        },
+    ]);
+    assert_ne!(
+        mixed_none, two_ids,
+        "a mixed list must not collide with the id-only family either"
+    );
+
+    let none = tool_manifest_digest_of(&[ToolManifestEntry {
+        id: "a".into(),
+        descriptor_digest: None,
+    }]);
+    let empty = tool_manifest_digest_of(&[ToolManifestEntry {
+        id: "a".into(),
+        descriptor_digest: Some(String::new()),
+    }]);
+    assert_eq!(
+        none,
+        tool_manifest_digest(&["a".into()]),
+        "all-None stays canonical"
+    );
+    assert_ne!(none, empty, "`None` and `Some(\"\")` are distinct pins");
+}

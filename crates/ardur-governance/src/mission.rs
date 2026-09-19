@@ -398,25 +398,36 @@ pub struct ToolManifestEntry {
 /// # Alignment contract (INTER-01 / #537)
 ///
 /// An entry WITHOUT a descriptor digest contributes exactly its canonical
-/// id bytes, so an all-`None` entry list hashes identically to
-/// [`ardur_core_types::tool_manifest_digest`] — the digest the ObservedEvent
-/// emitter produces, and the digest [`author_mission_declaration`] publishes.
-/// An entry WITH a descriptor is a strictly stronger pin and hashes
-/// differently by design: do not publish a descriptor-pinned digest where an
-/// id-only observation will be compared against it, or §9.6 will read the
-/// strengthening as drift. (`None` and `Some("")` are deliberately distinct.)
+/// id bytes, so an all-`None` entry list IS the canonical digest — the one
+/// the ObservedEvent emitter produces and [`author_mission_declaration`]
+/// publishes — by literal delegation, not by parallel construction.
+///
+/// A list with ANY descriptor-bearing entry is a different, domain-separated
+/// digest family: the payload carries a family tag, and each entry a presence
+/// byte, so no descriptor-pinned payload can collide with any id-only payload
+/// (without the tag, `[("a", Some("b"))]` and the id-only `["a","b"]` hashed
+/// identically — an undetectable registry swap, found on PR #558 review).
+/// `None` and `Some("")` stay distinct inside the family. A descriptor-pinned
+/// digest is strictly stronger and must not be published where an id-only
+/// observation will be compared against it, or §9.6 reads it as drift.
 #[must_use]
 pub fn tool_manifest_digest_of(entries: &[ToolManifestEntry]) -> String {
+    if entries.iter().all(|e| e.descriptor_digest.is_none()) {
+        let ids: Vec<String> = entries.iter().map(|e| e.id.clone()).collect();
+        return ardur_core_types::tool_manifest_digest(&ids);
+    }
     let unique: BTreeSet<&ToolManifestEntry> = entries.iter().collect();
-    let mut payload: Vec<u8> = Vec::new();
+    let mut payload: Vec<u8> = b"ardur.tool-manifest.descriptor-pinned.v1\0".to_vec();
     for entry in unique {
-        // Identical to the canonical encoding: a descriptor-less entry must
-        // be indistinguishable from the id-only form the emitter hashes.
         payload.extend_from_slice(&(entry.id.len() as u64).to_be_bytes());
         payload.extend_from_slice(entry.id.as_bytes());
-        if let Some(descriptor) = &entry.descriptor_digest {
-            payload.extend_from_slice(&(descriptor.len() as u64).to_be_bytes());
-            payload.extend_from_slice(descriptor.as_bytes());
+        match &entry.descriptor_digest {
+            Some(descriptor) => {
+                payload.push(0x01);
+                payload.extend_from_slice(&(descriptor.len() as u64).to_be_bytes());
+                payload.extend_from_slice(descriptor.as_bytes());
+            }
+            None => payload.push(0x00),
         }
     }
     format!("sha-256:{}", sha256_hex(&payload))
