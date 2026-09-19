@@ -65,7 +65,7 @@ fn registry_descriptor_is_pinned_and_self_describing() {
         vec![
             "tokens_in".to_string(),
             "tokens_out".to_string(),
-            "milli_attention".to_string()
+            "attention_score".to_string()
         ],
         "exactly the three CostTuple axes with a normative bucket contribution"
     );
@@ -685,4 +685,225 @@ fn budget_remaining_projection_rejects_keys_outside_the_registry() {
             "the error names `{invented}`: {err}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// 8. Review guards (PR #559 threads 0-6): each fix carries its own test.
+// ---------------------------------------------------------------------------
+
+/// Thread 0: a sparse reservation must NOT silently ignore usage that lands
+/// in a class it does not hold — the settle is refused, nothing charged.
+#[test]
+fn usage_in_an_unheld_class_is_refused_not_ignored() {
+    let mut ledger = fresh_ledger(100);
+    let reservation = ledger
+        .reserve(&steps(&[(EffectClass::Exec, 2)]))
+        .expect("reserve exec only");
+    let spilling = CostTuple {
+        tokens_in: 5, // read usage the exec-only reservation never held
+        ..CostTuple::ZERO
+    };
+    let err = ledger
+        .commit(&reservation, &spilling)
+        .expect_err("unheld read usage must fail the settle");
+    assert_eq!(err.class().unwrap(), "read");
+    ledger.audit().expect("a refused settle mutates nothing");
+    // The reservation is still live and settles cleanly on its own class.
+    let ok = ledger
+        .commit(
+            &reservation,
+            &CostTuple {
+                attention_score: 1_200,
+                ..CostTuple::ZERO
+            },
+        )
+        .expect("clean settle after the refusal");
+    assert_eq!(ok.charged[&EffectClass::Exec], 1);
+}
+
+/// Thread 3: network / external_send (no native axis) can NEVER settle via
+/// CostTuple — and DO charge via commit_classified.
+#[test]
+fn emitter_classified_classes_settle_only_through_classified_counts() {
+    let mut ledger = fresh_ledger(100);
+    let reservation = ledger
+        .reserve(&steps(&[(EffectClass::Network, 3)]))
+        .expect("reserve network");
+    // CostTuple settle must refuse: projected network usage is always 0 and
+    // the whole hold would refund — unbounded free usage.
+    let err = ledger
+        .commit(&reservation, &CostTuple::ZERO)
+        .expect_err("a no-native-axis class cannot settle via CostTuple");
+    assert_eq!(err.class().unwrap(), "network");
+    // The classified path charges the observed steps.
+    let outcome = ledger
+        .commit_classified(&reservation, &steps(&[(EffectClass::Network, 2)]))
+        .expect("classified settle");
+    assert_eq!(outcome.charged[&EffectClass::Network], 2);
+    assert_eq!(outcome.refunded[&EffectClass::Network], 1);
+    assert_eq!(ledger.consumed(EffectClass::Network), 2);
+    ledger.audit().expect("conservation holds");
+}
+
+/// Thread 3 negative: classified usage may not exceed the hold either.
+#[test]
+fn classified_overrun_is_refused() {
+    let mut ledger = fresh_ledger(100);
+    let reservation = ledger
+        .reserve(&steps(&[(EffectClass::ExternalSend, 2)]))
+        .expect("reserve");
+    assert!(
+        ledger
+            .commit_classified(&reservation, &steps(&[(EffectClass::ExternalSend, 3)]))
+            .is_err()
+    );
+    ledger.audit().expect("refused overrun mutates nothing");
+}
+
+/// Thread 4: a ledger carved under a versioned alternative registry settles
+/// under THAT registry, never the global v1 table.
+#[test]
+fn a_ledger_settles_under_the_registry_it_was_built_with() {
+    // Build the ×2 exec mapping (two steps per 1,000 milli-attention).
+    let mut descriptors = effect_bucket_registry().descriptor_list();
+    for descriptor in &mut descriptors {
+        if descriptor.class == EffectClass::Exec {
+            descriptor.axes.insert(
+                ardur_governance::CostAxis::MilliAttention,
+                ardur_governance::AxisScale {
+                    numerator: 2,
+                    denominator: 1_000,
+                },
+            );
+        }
+    }
+    let alternative =
+        EffectBucketRegistry::from_descriptors("effect-bucket-registry.test-x2", descriptors)
+            .expect("well-formed");
+
+    let ceilings = steps(&[(EffectClass::Exec, 10)]);
+    let mut ledger = EffectLedger::with_registry(&ceilings, alternative);
+    let reservation = ledger
+        .reserve(&steps(&[(EffectClass::Exec, 3)]))
+        .expect("reserve 3 under the ×2 mapping");
+    // 1,500 milli ×2/1000 = 3 steps exactly under the alternative; v1
+    // would floor it to 1 and refund 2 — the drift the thread describes.
+    let outcome = ledger
+        .commit(
+            &reservation,
+            &CostTuple {
+                attention_score: 1_500,
+                ..CostTuple::ZERO
+            },
+        )
+        .expect("settles under the ledger's own registry");
+    assert_eq!(outcome.charged[&EffectClass::Exec], 3);
+    assert_eq!(outcome.refunded[&EffectClass::Exec], 0);
+}
+
+/// Thread 1: a serialized registry missing a class (or with a zero scale)
+/// must fail deserialization, not project everything to zero.
+#[test]
+fn a_corrupt_serialized_registry_is_rejected_fail_closed() {
+    let registry = effect_bucket_registry();
+    let mut value = serde_json::to_value(&registry).expect("serializes");
+    value["descriptors"]
+        .as_object_mut()
+        .expect("a map")
+        .remove("exec");
+    let err = serde_json::from_value::<ardur_governance::EffectBucketRegistry>(value)
+        .expect_err("a registry missing a class must not deserialize");
+    assert!(
+        err.to_string().to_lowercase().contains("missing"),
+        "the error names the missing class: {err}"
+    );
+
+    // Zero denominator: floor would return u64::MAX on overflow — refuse.
+    let mut zeroed = serde_json::to_value(&registry).expect("serializes");
+    let mut found = false;
+    for (_, descriptor) in zeroed["descriptors"]
+        .as_object_mut()
+        .expect("a map")
+        .iter_mut()
+    {
+        if let Some(axes) = descriptor["axes"].as_object_mut() {
+            for (_, scale) in axes.iter_mut() {
+                if scale["denominator"] == serde_json::json!(1_000) && !found {
+                    scale["denominator"] = serde_json::json!(0);
+                    found = true;
+                }
+            }
+        }
+    }
+    assert!(found, "fixture must actually corrupt one scale");
+    assert!(
+        serde_json::from_value::<ardur_governance::EffectBucketRegistry>(zeroed).is_err(),
+        "a zero denominator must not deserialize"
+    );
+}
+
+/// Thread 2: recorded holds must equal the exact sum of live reservations —
+/// both directions of the mismatch are corrupt states.
+#[test]
+fn holds_must_equal_the_exact_sum_of_live_reservations() {
+    let mut ledger = fresh_ledger(10);
+    let _ = ledger
+        .reserve(&steps(&[(EffectClass::Read, 4)]))
+        .expect("reserve");
+    let mut value = serde_json::to_value(&ledger).expect("serializes");
+
+    // Direction A: holds above the live sum (budget locked with no owner).
+    value["holds"]["read"] = serde_json::json!(5);
+    let err = serde_json::from_value::<EffectLedger>(value.clone())
+        .expect_err("holds above the live sum is corrupt");
+    assert!(
+        err.to_string().to_lowercase().contains("conserve")
+            || err.to_string().to_lowercase().contains("corrupt"),
+        "the error names the corruption: {err}"
+    );
+
+    // Direction B: holds below the live sum (settlement would underflow).
+    let mut value2 = serde_json::to_value(&ledger).expect("serializes");
+    value2["holds"]["read"] = serde_json::json!(3);
+    assert!(serde_json::from_value::<EffectLedger>(value2).is_err());
+}
+
+/// Thread 6: settled history must not grow without bound — the serialized
+/// form stays constant-size as steps settle.
+#[test]
+fn settled_reservations_do_not_accumulate_in_serialized_state() {
+    let mut ledger = fresh_ledger(1_000);
+    for i in 0..50 {
+        let reservation = ledger
+            .reserve(&steps(&[(EffectClass::Read, 1)]))
+            .expect("reserve");
+        ledger
+            .commit(
+                &reservation,
+                &CostTuple {
+                    tokens_in: 1,
+                    ..CostTuple::ZERO
+                },
+            )
+            .expect("commit");
+        let _ = i;
+    }
+    let serialized = serde_json::to_value(&ledger).expect("serializes");
+    let live = serialized["live"].as_object().expect("live map");
+    assert!(
+        live.is_empty(),
+        "settled reservations must not linger in live state: {live:?}"
+    );
+    assert!(
+        !serialized.to_string().contains("res-"),
+        "serialized state must not accumulate reservation ids: {}",
+        serialized.to_string().len()
+    );
+    // Replay protection is structural: the id is gone, so a replayed settle
+    // hits UnknownReservation.
+    let replay = ardur_governance::Reservation {
+        id: "res-1".to_string(),
+        amounts: steps(&[(EffectClass::Read, 1)]),
+    };
+    assert!(ledger.commit(&replay, &CostTuple::ZERO).is_err());
 }

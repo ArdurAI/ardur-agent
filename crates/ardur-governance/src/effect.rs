@@ -124,7 +124,9 @@ pub enum CostAxis {
     Cents,
     /// Wall-clock milliseconds.
     WallMs,
-    /// Milli-attention units.
+    /// Milli-attention units (the `CostTuple` field is spelled
+    /// `attention_score`; the descriptor carries that canonical field name
+    /// so descriptor-driven consumers find the serialized field).
     MilliAttention,
 }
 
@@ -137,7 +139,7 @@ impl CostAxis {
             CostAxis::TokensOut => "tokens_out",
             CostAxis::Cents => "cents",
             CostAxis::WallMs => "wall_ms",
-            CostAxis::MilliAttention => "milli_attention",
+            CostAxis::MilliAttention => "attention_score",
         }
     }
 
@@ -224,10 +226,31 @@ pub enum RegistryError {
 /// pinned v1 table) or [`EffectBucketRegistry::from_descriptors`] (a versioned
 /// alternative table — descriptor changes must carry a new version, never
 /// mutate v1 in place).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct EffectBucketRegistry {
     version: String,
     descriptors: BTreeMap<EffectClass, EffectBucketDescriptor>,
+}
+
+/// Deserialize routes through [`EffectBucketRegistry::from_descriptors`]: a
+/// derived impl would accept a hand-edited table with a missing class or a
+/// zero denominator (`floor` then returns `u64::MAX` and silently corrupts
+/// accounting). Decoded registries enforce the same invariants as the
+/// public constructor.
+impl<'de> Deserialize<'de> for EffectBucketRegistry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Raw {
+            version: String,
+            descriptors: BTreeMap<EffectClass, EffectBucketDescriptor>,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        EffectBucketRegistry::from_descriptors(raw.version, raw.descriptors.into_values().collect())
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 impl EffectBucketRegistry {
@@ -534,9 +557,40 @@ pub enum LedgerError {
         reserved: u64,
     },
     /// The reservation id is unknown or already settled (duplicate replay
-    /// / restart protection).
+    /// / restart protection — consuming the id from `live` is the whole
+    /// mechanism; a settle is one-shot by construction).
     #[error("reservation `{0}` is unknown or already settled")]
     UnknownReservation(String),
+    /// Actual usage landed in a class the reservation does not hold.
+    #[error(
+        "unheld usage on `{class}`: {actual} steps projected but the reservation \
+         holds none — the caller reserved the wrong classes"
+    )]
+    UnheldUsage {
+        /// The class that saw unheld usage.
+        class: String,
+        /// Projected steps.
+        actual: u64,
+    },
+    /// The held class cannot be observed through a CostTuple settle.
+    #[error(
+        "class `{class}` has no native CostTuple axis; settle it via \
+         commit_classified with emitter-observed step counts"
+    )]
+    UnobservableViaCostTuple {
+        /// The class that requires a classified settle.
+        class: String,
+    },
+    /// Recorded holds do not equal the sum of live reservations.
+    #[error("corrupt ledger: `{class}` holds {held} but live reservations sum to {live}")]
+    HoldMismatch {
+        /// The class whose holds and live sums disagree.
+        class: String,
+        /// Recorded hold total.
+        held: u64,
+        /// Sum of live reservation amounts.
+        live: u64,
+    },
 }
 
 impl LedgerError {
@@ -546,7 +600,10 @@ impl LedgerError {
         match self {
             LedgerError::OverReserve { class, .. }
             | LedgerError::NoCeiling { class }
-            | LedgerError::Overrun { class, .. } => Some(class),
+            | LedgerError::Overrun { class, .. }
+            | LedgerError::UnheldUsage { class, .. }
+            | LedgerError::UnobservableViaCostTuple { class }
+            | LedgerError::HoldMismatch { class, .. } => Some(class),
             LedgerError::UnknownReservation(_) => None,
         }
     }
@@ -596,7 +653,11 @@ pub struct EffectLedger {
     escrowed: BTreeMap<EffectClass, u64>,
     holds: BTreeMap<EffectClass, u64>,
     live: BTreeMap<String, BTreeMap<EffectClass, u64>>,
-    settled: std::collections::BTreeSet<String>,
+    /// The registry this ledger settles under — reservations and commits
+    /// must project through the SAME mapping (a ledger carved under an
+    /// alternative versioned table must not settle under v1).
+    #[serde(default = "effect_bucket_registry")]
+    registry: EffectBucketRegistry,
     serial: u64,
 }
 
@@ -623,8 +684,21 @@ impl EffectLedger {
             escrowed: BTreeMap::new(),
             holds: BTreeMap::new(),
             live: BTreeMap::new(),
-            settled: std::collections::BTreeSet::new(),
+            registry: effect_bucket_registry(),
             serial: next_serial(),
+        }
+    }
+
+    /// New ledger under an explicitly selected (versioned) registry —
+    /// reservations and settlements then both project through it.
+    #[must_use]
+    pub fn with_registry(
+        ceilings: &BTreeMap<EffectClass, u64>,
+        registry: EffectBucketRegistry,
+    ) -> Self {
+        EffectLedger {
+            registry,
+            ..EffectLedger::new(ceilings)
         }
     }
 
@@ -706,11 +780,79 @@ impl EffectLedger {
         let held = self
             .live
             .get(&reservation.id)
-            .ok_or_else(|| LedgerError::UnknownReservation(reservation.id.clone()))?;
-        let projected = effect_bucket_registry().project_cost_tuple(actuals);
+            .ok_or_else(|| LedgerError::UnknownReservation(reservation.id.clone()))?
+            .clone();
+        let projected = self.registry.project_cost_tuple(actuals);
+        // Usage in a class the reservation does NOT hold is refused, not
+        // silently uncharged: a sparse reservation plus a CostTuple that
+        // spills into other buckets must fail closed (the caller reserved
+        // the wrong classes).
+        for (&class, &steps) in &projected {
+            if steps > 0 && !held.contains_key(&class) {
+                return Err(LedgerError::UnheldUsage {
+                    class: class.to_string(),
+                    actual: steps,
+                });
+            }
+        }
+        // Classes with no native axis (`network`, `external_send` in v1)
+        // cannot be observed through a CostTuple at all; settling them here
+        // would ALWAYS refund the whole hold — unbounded free usage. They
+        // must settle through [`EffectLedger::commit_classified`] with the
+        // emitter-observed step counts.
+        for &class in held.keys() {
+            let descriptor_covered = self
+                .registry
+                .get(&class.to_string())
+                .is_some_and(|d| !d.axes.is_empty());
+            if !descriptor_covered {
+                return Err(LedgerError::UnobservableViaCostTuple {
+                    class: class.to_string(),
+                });
+            }
+        }
+        self.settle(reservation.id.clone(), held, projected)
+    }
+
+    /// Settle a reservation with emitter-classified per-class step counts —
+    /// the ONLY path that can charge classes with no native CostTuple axis
+    /// (`network`, `external_send` in v1). Steps must not exceed the hold.
+    pub fn commit_classified(
+        &mut self,
+        reservation: &Reservation,
+        classified: &BTreeMap<EffectClass, u64>,
+    ) -> Result<CommitOutcome, LedgerError> {
+        let held = self
+            .live
+            .get(&reservation.id)
+            .ok_or_else(|| LedgerError::UnknownReservation(reservation.id.clone()))?
+            .clone();
+        // Classified usage outside the hold is refused exactly like a
+        // CostTuple spill (thread-symmetric fail-closed).
+        for (&class, &steps) in classified {
+            if !held.contains_key(&class) && steps > 0 {
+                return Err(LedgerError::UnheldUsage {
+                    class: class.to_string(),
+                    actual: steps,
+                });
+            }
+        }
+        let projected = held
+            .keys()
+            .map(|&class| (class, classified.get(&class).copied().unwrap_or(0)))
+            .collect();
+        self.settle(reservation.id.clone(), held, projected)
+    }
+
+    fn settle(
+        &mut self,
+        id: String,
+        held: BTreeMap<EffectClass, u64>,
+        projected: BTreeMap<EffectClass, u64>,
+    ) -> Result<CommitOutcome, LedgerError> {
         let mut charged = BTreeMap::new();
         let mut refunded = BTreeMap::new();
-        for (&class, &hold) in held {
+        for (&class, &hold) in &held {
             let actual = projected.get(&class).copied().unwrap_or(0);
             if actual > hold {
                 return Err(LedgerError::Overrun {
@@ -726,8 +868,7 @@ impl EffectLedger {
             *self.holds.entry(class).or_insert(0) -= charge + refunded[&class];
             *self.consumed.entry(class).or_insert(0) += charge;
         }
-        self.live.remove(&reservation.id);
-        self.settled.insert(reservation.id.clone());
+        self.live.remove(&id);
         Ok(CommitOutcome { charged, refunded })
     }
 
@@ -746,7 +887,6 @@ impl EffectLedger {
             *self.holds.entry(class).or_insert(0) -= amount;
         }
         self.live.remove(&reservation.id);
-        self.settled.insert(reservation.id.clone());
         Ok(refunded)
     }
 
@@ -805,12 +945,25 @@ impl EffectLedger {
                 });
             }
         }
-        // Every live reservation's amounts are exactly backed by holds.
-        for (id, amounts) in &self.live {
+        // Holds must equal the EXACT sum of live reservation amounts per
+        // class. `holds > sum(live)` permanently locks budget no reservation
+        // can release; `holds < sum(live)` underflows at settlement. Both
+        // are corrupt states only a tampered serialization can produce.
+        let mut live_sums: BTreeMap<EffectClass, u64> = BTreeMap::new();
+        for amounts in self.live.values() {
             for (&class, &amount) in amounts {
-                if self.holds.get(&class).copied().unwrap_or(0) < amount {
-                    return Err(LedgerError::UnknownReservation(id.clone()));
-                }
+                *live_sums.entry(class).or_insert(0) += amount;
+            }
+        }
+        for class in REGISTRY_EFFECT_CLASSES {
+            let hold = self.holds.get(&class).copied().unwrap_or(0);
+            let live_sum = live_sums.get(&class).copied().unwrap_or(0);
+            if hold != live_sum {
+                return Err(LedgerError::HoldMismatch {
+                    class: class.to_string(),
+                    held: hold,
+                    live: live_sum,
+                });
             }
         }
         Ok(())
@@ -833,7 +986,8 @@ impl<'de> Deserialize<'de> for EffectLedger {
             escrowed: BTreeMap<EffectClass, u64>,
             holds: BTreeMap<EffectClass, u64>,
             live: BTreeMap<String, BTreeMap<EffectClass, u64>>,
-            settled: std::collections::BTreeSet<String>,
+            #[serde(default = "effect_bucket_registry")]
+            registry: EffectBucketRegistry,
             #[serde(default = "next_serial")]
             serial: u64,
         }
@@ -844,7 +998,7 @@ impl<'de> Deserialize<'de> for EffectLedger {
             escrowed: raw.escrowed,
             holds: raw.holds,
             live: raw.live,
-            settled: raw.settled,
+            registry: raw.registry,
             serial: raw.serial,
         };
         ledger.audit().map_err(|e| {
