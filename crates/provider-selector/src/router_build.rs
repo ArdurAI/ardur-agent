@@ -193,7 +193,7 @@ fn build_entry_instances(
 
     // The pool for this backend, env first. `PooledKey::expose` is the single
     // point where stored key material leaves its redacted wrapper.
-    let pool: Vec<String> = if !env_keys.is_empty() {
+    let mut pool: Vec<String> = if !env_keys.is_empty() {
         env_keys
     } else {
         table
@@ -202,6 +202,21 @@ fn build_entry_instances(
             .map(|keys| keys.iter().map(|k| k.expose().to_string()).collect())
             .unwrap_or_default()
     };
+
+    // A duplicated key is ONE credential: giving it two indices would let an
+    // `Unauthorized` advance "to the next credential" and resend the very key
+    // that was just rejected. Dedupe by value (first occurrence wins), loudly.
+    let before = pool.len();
+    let mut seen = std::collections::HashSet::new();
+    pool.retain(|key| seen.insert(key.clone()));
+    if pool.len() != before {
+        tracing::warn!(
+            backend,
+            dropped = before - pool.len(),
+            "[router] duplicate key value(s) in the credential pool ignored; \
+             each distinct key gets exactly one pool slot"
+        );
+    }
 
     if pool.is_empty() {
         // Today's behavior, unchanged: one instance on the ambient credential
@@ -218,10 +233,16 @@ fn build_entry_instances(
                 OpenRouterConfig::new(key.clone()),
                 model.clone(),
             )),
-            ProviderKind::OpenAiCompat => Arc::new(OpenAiCompatProvider::new(
-                OpenAiCompatConfig::new(key.clone()),
-                model.clone(),
-            )),
+            ProviderKind::OpenAiCompat => {
+                // The keyed constructor that PRESERVES the operator's
+                // endpoint/timeout env: a pooled key must land on the same
+                // service a direct selection would use, never silently on the
+                // public OpenAI default.
+                Arc::new(OpenAiCompatProvider::new(
+                    OpenAiCompatConfig::from_env_with_key(key.clone())?,
+                    model.clone(),
+                ))
+            }
             // `keyed` was checked above; reaching another kind here is a bug in
             // this function, not an operator error.
             ProviderKind::Ollama

@@ -46,6 +46,13 @@ impl StubProvider {
         })
     }
 
+    fn streaming(id: &'static str, script: Vec<StubStep>) -> Arc<Self> {
+        let mut provider = Self::new(id, script);
+        // Arc is freshly minted above, so this is the only reference.
+        Arc::get_mut(&mut provider).expect("unique").streaming = true;
+        provider
+    }
+
     fn calls(&self) -> usize {
         self.calls.load(Ordering::SeqCst)
     }
@@ -847,5 +854,46 @@ async fn router_failover_path_survives_the_instrumented_wrapper() {
         provider.name(),
         "primary->backup",
         "the receipt-visible name must carry the failover path through the wrapper"
+    );
+}
+
+#[tokio::test]
+async fn router_supports_streaming_when_any_entry_streams() {
+    // A streaming entry anywhere in the lanes must surface through the router:
+    // the dispatcher prefers stream() on this signal, and entries without a
+    // native stream still answer via the replay fallback, so advertising it
+    // is safe for non-streaming lanes too.
+    let plain = StubProvider::new("plain", vec![StubStep::Ok("x")]);
+    let capable = StubProvider::streaming("capable", vec![StubStep::Ok("y")]);
+    let router = RouterProvider::new(
+        "default",
+        vec![(
+            "default".to_string(),
+            vec![
+                entry("plain", "m1", plain, 0, None),
+                entry("capable", "m2", capable, 0, None),
+            ],
+        )],
+        no_overrides(),
+    )
+    .expect("valid router");
+    assert!(
+        router.supports_streaming(),
+        "a streaming entry behind a non-streaming default must still advertise"
+    );
+
+    let quiet = StubProvider::new("quiet", vec![StubStep::Ok("z")]);
+    let router = RouterProvider::new(
+        "default",
+        vec![(
+            "default".to_string(),
+            vec![entry("quiet", "m1", quiet, 0, None)],
+        )],
+        no_overrides(),
+    )
+    .expect("valid router");
+    assert!(
+        !router.supports_streaming(),
+        "all-non-streaming lanes must not advertise"
     );
 }

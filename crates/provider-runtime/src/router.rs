@@ -598,12 +598,13 @@ impl Provider for RouterProvider {
     }
 
     fn supports_streaming(&self) -> bool {
-        // The entry expected to serve: the default lane's first link. Entries
-        // without a native stream fall back to the trait's replay impl either
-        // way, so this is a delivery-quality hint, not a capability gate.
-        self.entries[self.default_lane[0]]
-            .provider
-            .supports_streaming()
+        // True when ANY entry across the lanes streams natively. The
+        // dispatcher reads this to prefer `stream()`; entries without a
+        // native stream still answer via the trait's replay fallback, so a
+        // request routed to a non-streaming lane loses nothing, while a
+        // request routed to a streaming lane is no longer denied incremental
+        // delivery by an unrelated default entry.
+        self.entries.iter().any(|e| e.provider.supports_streaming())
     }
 
     fn rate_card(&self) -> &RateCard {

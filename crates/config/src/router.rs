@@ -141,19 +141,30 @@ pub fn default_config_path() -> Option<PathBuf> {
 /// document that does not parse as TOML also yields `Ok(None)` *with a loud
 /// warning*: the CLI's historical flat reader tolerates files a strict parser
 /// rejects, and aborting boot here would break operators who never asked for
-/// a router. A present-but-malformed `[router]` table is the opposite case —
-/// the operator explicitly configured routing — so it is a typed
-/// [`ConfigError::InvalidValue`] that aborts boot rather than silently
-/// running without the intended failover.
+/// a router. The exception is a document that *declares router intent* (a
+/// `[router]`/`[router.*]` header line) but fails to parse: that is a broken
+/// routing configuration, not a router-free file, and boot aborts with a
+/// typed error rather than silently running without the intended failover. A
+/// present-but-malformed `[router]` table is likewise a typed
+/// [`ConfigError::InvalidValue`].
 ///
 /// # Errors
 ///
 /// Returns [`ConfigError::InvalidValue`] when a present `[router]` table fails
-/// schema parsing (unknown fields, wrong types, missing `default`/`lanes`).
+/// schema parsing (unknown fields, wrong types, missing `default`/`lanes`),
+/// when a router-declaring document is not valid TOML, or when a
+/// `credential_pools` value is not an array — that last message is sanitized
+/// to name the backend only, since the deserializer's own error would quote
+/// the malformed key value.
 pub fn router_table_from_str(contents: &str) -> Result<Option<RouterTable>, ConfigError> {
     let document: toml::Value = match toml::from_str(contents) {
         Ok(document) => document,
         Err(e) => {
+            if declares_router_intent(contents) {
+                return Err(ConfigError::InvalidValue(format!(
+                    "config declares a [router] table but the file is not valid TOML: {e}"
+                )));
+            }
             tracing::warn!(
                 error = %e,
                 "config file is not valid TOML; ignoring any [router] table and \
@@ -165,11 +176,38 @@ pub fn router_table_from_str(contents: &str) -> Result<Option<RouterTable>, Conf
     let Some(table) = document.get("router") else {
         return Ok(None);
     };
+    // Sanitize pool shape BEFORE the schema parse: a scalar pool value
+    // (`anthropic = "sk-..."`) makes the deserializer's `invalid type`
+    // message quote the key material verbatim. Reject it here naming only
+    // the backend.
+    if let Some(pools) = table
+        .get("credential_pools")
+        .and_then(toml::Value::as_table)
+    {
+        for (backend, value) in pools {
+            if !value.is_array() {
+                return Err(ConfigError::InvalidValue(format!(
+                    "[router].credential_pools.{backend} must be an array of key strings"
+                )));
+            }
+        }
+    }
     let parsed: RouterTable = table
         .clone()
         .try_into()
         .map_err(|e| ConfigError::InvalidValue(format!("invalid [router] table in config: {e}")))?;
     Ok(Some(parsed))
+}
+
+/// Does the raw text declare router intent? A comment-stripped line whose
+/// trim starts with a `[router]` or `[router.*]` header. Only consulted when
+/// strict TOML parsing has already failed, to distinguish "file the flat
+/// reader tolerates" from "broken routing configuration".
+fn declares_router_intent(contents: &str) -> bool {
+    contents.lines().any(|raw| {
+        let line = raw.split('#').next().unwrap_or("").trim();
+        line.starts_with("[router]") || line.starts_with("[router.")
+    })
 }
 
 /// Load the `[router]` table from a config file on disk.
@@ -266,6 +304,63 @@ anthropic = ["sk-ant-alpha", "sk-ant-beta"]
         assert_eq!(
             router_table_from_str("this is = not = toml = at all = [[[").expect("tolerated"),
             None
+        );
+    }
+
+    #[test]
+    fn router_declaring_document_with_syntax_errors_aborts_boot() {
+        // An explicit [router] section with a TOML syntax error (here an
+        // unterminated model string) is a BROKEN ROUTING CONFIGURATION, not
+        // a router-free file: boot must fail loudly, never silently take the
+        // single-provider path and bypass the intended failover.
+        let doc = "[router]\ndefault = \"standard\"\n\n[[router.lanes.standard]]\nbackend = \"ollama\"\nmodel = \"llama3.3\n";
+        let err =
+            router_table_from_str(doc).expect_err("router intent + syntax error = boot error");
+        let msg = err.to_string();
+        assert!(msg.contains("[router]"), "{msg}");
+        assert!(msg.contains("not valid TOML"), "{msg}");
+    }
+
+    #[test]
+    fn commented_out_router_header_is_not_intent() {
+        // A commented header in an otherwise unparseable file stays on the
+        // tolerant path — the operator did not declare routing.
+        assert_eq!(
+            router_table_from_str("# [router]\nthis is = [[[").expect("tolerated"),
+            None
+        );
+    }
+
+    #[test]
+    fn scalar_credential_pool_is_rejected_without_quoting_the_key() {
+        let fixture = "sk-scalar-FIXTURE-77c1-secret";
+        let doc = format!(
+            "[router]\ndefault = \"standard\"\nlanes = {{ standard = [ {{ backend = \"anthropic\", model = \"m\" }} ] }}\n\
+             [router.credential_pools]\nanthropic = \"{fixture}\"\n"
+        );
+        let err = router_table_from_str(&doc).expect_err("scalar pool must error");
+        let msg = err.to_string();
+        // Must-match: the backend is named so the operator can find the key.
+        assert!(msg.contains("anthropic"), "{msg}");
+        assert!(msg.contains("array"), "{msg}");
+        // Must-NOT-match: the malformed VALUE never enters the message
+        // (toml's own invalid-type error would quote it verbatim).
+        assert!(!msg.contains(fixture), "key material leaked: {msg}");
+        assert!(!msg.contains("sk-scalar"), "key prefix leaked: {msg}");
+    }
+
+    #[test]
+    fn pool_array_with_a_non_string_element_does_not_leak_siblings() {
+        let fixture = "sk-sibling-FIXTURE-991e-secret";
+        let doc = format!(
+            "[router]\ndefault = \"standard\"\nlanes = {{ standard = [ {{ backend = \"anthropic\", model = \"m\" }} ] }}\n\
+             [router.credential_pools]\nanthropic = [ \"{fixture}\", 42 ]\n"
+        );
+        let err = router_table_from_str(&doc).expect_err("non-string element must error");
+        let msg = err.to_string();
+        assert!(
+            !msg.contains(fixture),
+            "a sibling's key material leaked via the element error: {msg}"
         );
     }
 

@@ -24,6 +24,8 @@ const MANAGED_ENV: &[&str] = &[
     "OPENROUTER_API_KEY",
     "OPENAI_COMPAT_API_KEY",
     "OPENAI_API_KEY",
+    "OPENAI_COMPAT_BASE_URL",
+    "OPENAI_COMPAT_TIMEOUT_SECS",
 ];
 
 struct EnvGuard {
@@ -326,4 +328,59 @@ fn empty_lanes_map_aborts_boot() {
         .err()
         .expect("must fail");
     assert!(err.to_string().contains("standard"), "{err}");
+}
+
+#[test]
+#[serial]
+fn pooled_openai_compat_entries_keep_the_operators_endpoint_env() {
+    // A pooled key must land on the SAME service a direct selection would
+    // use. The sharpest observable proof is the validator: a non-loopback
+    // HTTP base URL is rejected at build time — if the pooled path built its
+    // config with plain `new(key)` (dropping env), no error would occur and
+    // the key would head for the public OpenAI default instead.
+    let (_guard, home) = EnvGuard::fresh();
+    write_config(
+        home.path(),
+        "[router]\ndefault = \"standard\"\n\
+         lanes = { standard = [ { backend = \"openai-compat\", model = \"gpt-test\" } ] }\n",
+    );
+    EnvGuard::set("ARDUR_OPENAI_COMPAT_KEYS", "sk-pooled-1,sk-pooled-2");
+    EnvGuard::set("OPENAI_COMPAT_BASE_URL", "http://example.com/v1");
+    let err = from_env(ModelId::new("test-model"))
+        .err()
+        .expect("non-loopback HTTP base URL must fail validation");
+    assert!(err.to_string().contains("OPENAI_COMPAT_BASE_URL"), "{err}");
+
+    // And the valid form builds: loopback HTTP is the documented local-test
+    // exception, so the pool constructs and expands.
+    EnvGuard::set("OPENAI_COMPAT_BASE_URL", "http://127.0.0.1:9/v1");
+    EnvGuard::set("OPENAI_COMPAT_TIMEOUT_SECS", "7");
+    let table = ardur_config::load_router_table(&home.path().join(".ardur/config.toml"))
+        .expect("loads")
+        .expect("present");
+    let router = build_router_provider(&table).expect("builds with loopback endpoint");
+    assert_eq!(router.lane_len("standard"), Some(2));
+}
+
+#[test]
+#[serial]
+fn duplicate_pool_keys_are_deduplicated_before_indexing() {
+    // The same key twice is ONE credential: indexing both would let an
+    // `Unauthorized` "rotate" onto the very key that was just rejected.
+    let (_guard, home) = EnvGuard::fresh();
+    write_config(
+        home.path(),
+        "[router]\ndefault = \"standard\"\n\
+         lanes = { standard = [ { backend = \"anthropic\", model = \"m\" } ] }\n",
+    );
+    EnvGuard::set("ARDUR_ANTHROPIC_KEYS", "sk-same,sk-same,sk-other");
+    let table = ardur_config::load_router_table(&home.path().join(".ardur/config.toml"))
+        .expect("loads")
+        .expect("present");
+    let router = build_router_provider(&table).expect("builds");
+    assert_eq!(
+        router.lane_len("standard"),
+        Some(2),
+        "two DISTINCT keys, not three slots"
+    );
 }

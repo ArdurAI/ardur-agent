@@ -131,8 +131,22 @@ impl OpenAiCompatConfig {
         let Some(key) = first_nonempty_env([API_KEY_ENV, OPENAI_API_KEY_ENV]) else {
             return Err(ProviderError::Unauthorized);
         };
+        Self::from_env_with_key(key)
+    }
 
-        let mut config = Self::new(key);
+    /// Resolve every non-secret environment setting (base URL validation,
+    /// request timeout) around a caller-supplied key. This is the keyed
+    /// constructor credential pools use: a pooled key must land on the SAME
+    /// endpoint and timeout a direct `from_env` selection would use — never
+    /// silently on the public OpenAI default.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same [`ProviderError`]s [`from_env`](Self::from_env)
+    /// raises for malformed `OPENAI_COMPAT_BASE_URL` /
+    /// `OPENAI_COMPAT_TIMEOUT_SECS` values.
+    pub fn from_env_with_key(api_key: impl Into<String>) -> Result<Self, ProviderError> {
+        let mut config = Self::new(api_key);
         if let Some(base_url) = nonempty_env(BASE_URL_ENV) {
             validate_base_url(&base_url)?;
             config = config.base_url(base_url);
