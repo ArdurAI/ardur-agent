@@ -93,6 +93,38 @@ struct DelegatingProvider {
     rate_card: RateCard,
 }
 
+/// The inner supervised child's provider: every round is a terminal Stop
+/// completion. Unlike the outer DelegatingProvider (whose finish reason is
+/// keyed on message roles the child transcript never produces), this one
+/// guarantees the "completed" outcome the delegation assertions require.
+struct AlwaysCompletedProvider;
+
+#[async_trait]
+impl Provider for AlwaysCompletedProvider {
+    async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
+        Ok(CompletionResponse {
+            content: "child probe completed".to_string(),
+            finish_reason: FinishReason::Stop,
+            usage: Usage::default(),
+            cost: CostTuple::default(),
+            raw_provider_response: None,
+        })
+    }
+
+    fn id(&self) -> ProviderId {
+        ProviderId("always-completed-probe".to_string())
+    }
+
+    fn supports_streaming(&self) -> bool {
+        false
+    }
+
+    fn rate_card(&self) -> &RateCard {
+        static CARD: std::sync::OnceLock<RateCard> = std::sync::OnceLock::new();
+        CARD.get_or_init(RateCard::anthropic_2026_q2_v1)
+    }
+}
+
 impl DelegatingProvider {
     fn response(req: &CompletionRequest) -> CompletionResponse {
         let finish_reason = if req
@@ -220,11 +252,9 @@ async fn late_denial(streaming: bool) -> RuntimeError {
     // inner supervised child (guarantees "completed", no creds, no subprocess).
     // Outer FusedRuntime keeps its own counter instance for the call-count
     // assertions.
-    let child_provider_for_delegate = Arc::new(DelegatingProvider {
-        complete_calls: AtomicUsize::new(0),
-        stream_calls: AtomicUsize::new(0),
-        rate_card: RateCard::anthropic_2026_q2_v1(),
-    });
+    let child_provider_for_delegate: Arc<dyn Provider + Send + Sync> = Arc::new(
+        AlwaysCompletedProvider,
+    );
     let delegate = DelegateTaskTool::with_deny_list_and_provider(
         root,
         AUDIENCE,
