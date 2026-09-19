@@ -459,7 +459,7 @@ impl AppState {
         };
         let tools = Arc::new(
             crate::assemble_tool_registry(
-                provider.id().0.clone(),
+                provider.clone(),
                 memory_label,
                 &config.skills_dirs,
                 &config.mcp_remote_servers,

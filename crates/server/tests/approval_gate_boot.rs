@@ -43,7 +43,9 @@ async fn assemble_with_shell() -> ToolRegistry {
         ..BuiltinOpts::default()
     };
     assemble_tool_registry(
-        "stub",
+        std::sync::Arc::new(ardur_provider_runtime::AnthropicProvider::stub(
+            ardur_provider_runtime::ModelId::new("stub"),
+        )) as std::sync::Arc<dyn ardur_provider_runtime::Provider>,
         "in-memory",
         &[] as &[PathBuf],
         &[],

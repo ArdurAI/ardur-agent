@@ -79,7 +79,9 @@ async fn voice_transcribe_is_registered_when_a_whisper_key_is_present() {
     _env.set("OPENAI_WHISPER_API_KEY", "sk-test-whisper-key");
 
     let registry = assemble_tool_registry::<&str>(
-        "stub",
+        std::sync::Arc::new(ardur_provider_runtime::AnthropicProvider::stub(
+            ardur_provider_runtime::ModelId::new("stub"),
+        )) as std::sync::Arc<dyn ardur_provider_runtime::Provider>,
         "in-memory",
         &[],
         &[],
@@ -101,7 +103,9 @@ async fn voice_transcribe_falls_back_to_the_general_openai_key() {
     _env.set("OPENAI_API_KEY", "sk-test-general-key");
 
     let registry = assemble_tool_registry::<&str>(
-        "stub",
+        std::sync::Arc::new(ardur_provider_runtime::AnthropicProvider::stub(
+            ardur_provider_runtime::ModelId::new("stub"),
+        )) as std::sync::Arc<dyn ardur_provider_runtime::Provider>,
         "in-memory",
         &[],
         &[],
@@ -122,7 +126,9 @@ async fn voice_transcribe_is_absent_without_any_key() {
     let _env = EnvGuard::capture();
 
     let registry = assemble_tool_registry::<&str>(
-        "stub",
+        std::sync::Arc::new(ardur_provider_runtime::AnthropicProvider::stub(
+            ardur_provider_runtime::ModelId::new("stub"),
+        )) as std::sync::Arc<dyn ardur_provider_runtime::Provider>,
         "in-memory",
         &[],
         &[],
@@ -152,7 +158,9 @@ async fn voice_transcribe_is_skipped_not_panicking_on_an_invalid_base_url_overri
     _env.set("OPENAI_WHISPER_BASE_URL", "http://whisper.example.com");
 
     let registry = assemble_tool_registry::<&str>(
-        "stub",
+        std::sync::Arc::new(ardur_provider_runtime::AnthropicProvider::stub(
+            ardur_provider_runtime::ModelId::new("stub"),
+        )) as std::sync::Arc<dyn ardur_provider_runtime::Provider>,
         "in-memory",
         &[],
         &[],
