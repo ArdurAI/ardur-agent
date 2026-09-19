@@ -96,9 +96,11 @@ class GitHubSecurityWorkflowTests(unittest.TestCase):
 
         self.assertIn("sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6", release)
         self.assertIn("cosign sign-blob --yes", release)
-        self.assertIn("--output-signature", release)
-        self.assertIn("--output-certificate", release)
+        # Cosign v3 emits the self-contained bundle, not detached .sig/.pem.
+        self.assertNotIn("--output-signature", release)
+        self.assertNotIn("--output-certificate", release)
         self.assertIn("--bundle", release)
+        self.assertIn("cosign verify-blob", release)
 
         self.assertIn("gh release upload", release)
         self.assertIn("--clobber", release)

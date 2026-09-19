@@ -1,9 +1,6 @@
-# Release supply-chain gate for ARD-309.
-#
-# Release publication must produce SBOMs, checksums, signed provenance, and
-# signed release assets. PR-facing security gates live in ci.yml; Docker image
-# SBOM/Trivy/provenance gates live in docker.yml.
-
+# Release supply-chain gate for ARD-309 and #532 P0.
+# All native lanes must succeed before any release assets are uploaded.
+# Docker image SBOM/Trivy/provenance gates remain in docker.yml.
 name: release-supply-chain
 
 on:
@@ -11,9 +8,7 @@ on:
     types: [published]
 
 permissions:
-  contents: write
-  id-token: write
-  attestations: write
+  contents: read
 
 concurrency:
   group: release-supply-chain-${{ github.event.release.tag_name }}
@@ -21,45 +16,110 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  RUSTUP_TOOLCHAIN: 1.98.1
   RELEASE_TAG: ${{ github.event.release.tag_name }}
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
-  release-artifacts:
-    name: release-sbom-sign
-    runs-on: ubuntu-latest
+  build-release:
+    name: release-build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 90
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # Standard public runners, verified against GitHub's hosted-runner docs.
+        # macOS is thin, without Developer ID/notarization (owner decision #532).
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+          - target: aarch64-apple-darwin
+            os: macos-15
+    env:
+      TARGET: ${{ matrix.target }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
-          ref: ${{ env.RELEASE_TAG }}
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Provision pinned static ONNX Runtime for Intel macOS
+        if: matrix.target == 'x86_64-apple-darwin'
+        run: python3 scripts/release_onnxruntime.py prepare --directory "${RUNNER_TEMP}/release-onnxruntime"
+
+      - name: Verify Intel static library architecture
+        if: matrix.target == 'x86_64-apple-darwin'
+        run: test "$(lipo -archs "${ORT_LIB_PATH}/libonnxruntime.a")" = x86_64
 
       - name: Install pinned Rust toolchain
-        run: rustup toolchain install 1.98.1 --profile minimal
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal --target "${TARGET}"
+          rustc -vV
+          test "$(rustc -vV | awk '/^host:/ {print $2}')" = "${TARGET}"
 
       - name: Build release binaries
+        run: cargo build --workspace --bins --release --locked --target "${TARGET}"
+
+      - name: Package exactly six target binaries
+        run: python3 scripts/release_artifacts.py package --tag "${RELEASE_TAG}" --target "${TARGET}"
+
+      - name: Smoke packaged CLI on its native runner
         run: |
-          set -euo pipefail
-          mkdir -p dist
-          cargo build --workspace --bins --release --locked
+          mkdir smoke
+          tar -xzf "dist/ardur-${RELEASE_TAG}-${TARGET}.tar.gz" -C smoke
+          file smoke/ardur
+          ./smoke/ardur --version
 
-          mapfile -d '' bins < <(find target/release -maxdepth 1 -type f -perm -111 -print0 | sort -z)
-          if [ "${#bins[@]}" -eq 0 ]; then
-            echo "::error::no executable release binaries found under target/release"
-            exit 1
-          fi
+      - name: Stage target archives
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          archive: true
+          overwrite: true
+          retention-days: 7
 
-          for bin in "${bins[@]}"; do
-            name="$(basename "${bin}")"
-            package_dir="dist/${name}-${RELEASE_TAG}-x86_64-unknown-linux-gnu"
-            mkdir -p "${package_dir}"
-            cp "${bin}" "${package_dir}/${name}"
-            tar -C "${package_dir}" -czf "${package_dir}.tar.gz" "${name}"
-            rm -rf "${package_dir}"
-          done
+  release-artifacts:
+    name: release-sbom-sign
+    needs: build-release
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+          persist-credentials: false
 
-          find dist -maxdepth 1 -type f -name '*.tar.gz' -print | sort
+      - name: Collect all target archives
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+          digest-mismatch: error
 
+      - name: Require the complete archive matrix
+        run: python3 scripts/release_artifacts.py check --tag "${RELEASE_TAG}" --stage archives
+
+      # Preserve the existing single release-level workspace SBOM, not one per
+      # binary/target. Disable the action's otherwise automatic early upload.
       - name: Generate release SPDX SBOM
         uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
@@ -67,15 +127,18 @@ jobs:
           format: spdx-json
           output-file: dist/ardur-agent-${{ env.RELEASE_TAG }}.spdx.json
           upload-artifact: false
+          upload-release-assets: false
+
+      - name: Record the Intel native dependency in the release SBOM
+        run: python3 scripts/release_onnxruntime.py sbom "dist/ardur-agent-${RELEASE_TAG}.spdx.json"
+
+      - name: Require all unsigned release payloads
+        run: python3 scripts/release_artifacts.py check --tag "${RELEASE_TAG}" --stage unsigned
 
       - name: Generate SHA256SUMS
         run: |
-          set -euo pipefail
           cd dist
-          find . -maxdepth 1 -type f ! -name 'SHA256SUMS' -print0 \
-            | sort -z \
-            | xargs -0 sha256sum \
-            > SHA256SUMS
+          sha256sum -- *.tar.gz *.spdx.json > SHA256SUMS
           cat SHA256SUMS
 
       - name: Attest release artifact provenance
@@ -90,28 +153,29 @@ jobs:
         env:
           COSIGN_EXPERIMENTAL: "1"
         run: |
-          set -euo pipefail
           cd dist
-          shopt -s nullglob
           release_assets=( *.tar.gz *.spdx.json SHA256SUMS )
-          if [ "${#release_assets[@]}" -eq 0 ]; then
-            echo "::error::no release assets found to sign"
-            exit 1
-          fi
-
           for artifact in "${release_assets[@]}"; do
             cosign sign-blob --yes \
-              --output-signature "${artifact}.sig" \
-              --output-certificate "${artifact}.pem" \
               --bundle "${artifact}.bundle" \
               "${artifact}"
           done
 
-          find . -maxdepth 1 -type f -print | sort
+      - name: Verify complete signing and checksum parity
+        run: |
+          python3 scripts/release_artifacts.py check --tag "${RELEASE_TAG}" --stage signed
+          cd dist
+          sha256sum --check SHA256SUMS
+          release_assets=( *.tar.gz *.spdx.json SHA256SUMS )
+          for artifact in "${release_assets[@]}"; do
+            cosign verify-blob \
+              --bundle "${artifact}.bundle" \
+              --certificate-identity "https://github.com/${GITHUB_WORKFLOW_REF}" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              "${artifact}"
+          done
 
       - name: Upload release assets
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          gh release upload "${RELEASE_TAG}" dist/* --repo "${GITHUB_REPOSITORY}" --clobber
+        run: gh release upload "${RELEASE_TAG}" dist/* --repo "${GITHUB_REPOSITORY}" --clobber
