@@ -679,6 +679,25 @@ impl<P: Provider + ?Sized + 'static> ChildSupervisor<P> {
                             };
                         }
 
+                        // A tool request is not a terminal answer either: the
+                        // child runtime has no tool surface, so "Completed"
+                        // here would report success on a nonterminal finish
+                        // reason. Fail closed instead of looping on fake
+                        // progress (empty-content continuation below stays for
+                        // genuine stop-with-no-text retriable continuations).
+                        if let FinishReason::ToolUse(calls) = &response.finish_reason {
+                            spec.reservation.settle();
+                            return ChildOutcome::Failed {
+                                reason: format!(
+                                    "child round requested {} tool call(s); the child runtime \
+                                     has no tool surface",
+                                    calls.len()
+                                ),
+                                rounds,
+                                cost: total_cost,
+                            };
+                        }
+
                         if !response.content.trim().is_empty() {
                             spec.reservation.settle();
                             return ChildOutcome::Completed {

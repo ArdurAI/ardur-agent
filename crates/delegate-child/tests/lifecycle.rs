@@ -34,6 +34,7 @@ struct MockProvider {
     cents_per_call: u64,
     fail_with: Option<ProviderErrorKind>,
     finish_error: Option<String>,
+    finish_tool_use: bool,
     rate_card: RateCard,
 }
 
@@ -52,6 +53,7 @@ impl MockProvider {
             cents_per_call: 1,
             fail_with: None,
             finish_error: None,
+            finish_tool_use: false,
             rate_card: RateCard {
                 version_id: "mock-test-v1".into(),
                 cents_per_1k_input: 0.0,
@@ -83,6 +85,12 @@ impl MockProvider {
         self
     }
 
+    /// Finish with a tool request instead of a terminal answer.
+    fn finishing_with_tool_use(mut self) -> Self {
+        self.finish_tool_use = true;
+        self
+    }
+
     fn counter(&self) -> Arc<AtomicU32> {
         Arc::clone(&self.dispatches)
     }
@@ -100,9 +108,13 @@ impl Provider for MockProvider {
             }
             None => Ok(CompletionResponse {
                 content: self.reply.clone(),
-                finish_reason: match &self.finish_error {
-                    Some(msg) => FinishReason::Error(msg.clone()),
-                    None => FinishReason::Stop,
+                finish_reason: if self.finish_tool_use {
+                    FinishReason::ToolUse(Vec::new())
+                } else {
+                    match &self.finish_error {
+                        Some(msg) => FinishReason::Error(msg.clone()),
+                        None => FinishReason::Stop,
+                    }
                 },
                 usage: Usage {
                     tokens_in: 10,
@@ -708,5 +720,33 @@ async fn a_completed_round_is_accounted_even_when_a_cancel_arrives_together() {
             matches!(outcome, ChildOutcome::Cancelled { .. }),
             "otherwise it must be an honest cancellation, got {outcome:?}"
         );
+    }
+}
+
+/// A tool request is not a terminal answer: the child runtime has no tool
+/// surface, so a ToolUse finish must fail closed with a typed failure —
+/// never report Completed on a nonterminal finish reason (content alone is
+/// not success).
+#[tokio::test(flavor = "multi_thread")]
+async fn tool_use_finish_is_a_typed_failure_not_completion() {
+    let provider =
+        Arc::new(MockProvider::new("I will now call a tool for you").finishing_with_tool_use());
+    let sup = ChildSupervisor::new(Arc::clone(&provider), Box::new(HashSetDenyList::new()));
+    let reservation = ParentBudget::new(100)
+        .reserve(10)
+        .expect("reservation fits");
+    let child = sup
+        .spawn(spec("use tools please", reservation, 4))
+        .await
+        .expect("spawn");
+    match child.join().await {
+        Ok(ChildOutcome::Failed { reason, rounds, .. }) => {
+            assert_eq!(rounds, 1, "exactly one billed round");
+            assert!(
+                reason.contains("tool call"),
+                "failure must name the tool request, got: {reason}"
+            );
+        }
+        other => panic!("ToolUse finish must be Failed, got {other:?}"),
     }
 }
