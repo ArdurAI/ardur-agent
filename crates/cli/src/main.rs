@@ -3723,7 +3723,7 @@ fn channel_activation_env(channel_type: &str) -> Option<&'static [&'static str]>
         ]),
         // Slack is auto-detected on SLACK_BOT_TOKEN: there is no
         // ARDUR_CHANNEL_SLACK switch, and a partial config fails closed.
-        "slack" => Some(&["SLACK_BOT_TOKEN", "SLACK_SIGNING_SECRET", "SLACK_APP_TOKEN"]),
+        "slack" => Some(&["SLACK_BOT_TOKEN", "SLACK_SIGNING_SECRET", "SLACK_APP_ID"]),
         _ => None,
     }
 }

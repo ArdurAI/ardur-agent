@@ -125,6 +125,15 @@ fn printed_activation_variables_are_the_ones_the_server_requires() {
                 "MATRIX_ACCESS_TOKEN",
             ],
         ),
+        // Slack has no ARDUR_CHANNEL_SLACK switch: it is auto-detected on
+        // SLACK_BOT_TOKEN, and a partial config fails closed. Omitting it here
+        // is how SLACK_APP_TOKEN (a variable the server never reads) reached
+        // review: a guard covering three of four channels lets the fourth
+        // drift silently.
+        (
+            "slack",
+            &["SLACK_BOT_TOKEN", "SLACK_SIGNING_SECRET", "SLACK_APP_ID"],
+        ),
     ];
 
     for (channel_type, vars) in expected {
@@ -149,9 +158,19 @@ fn printed_activation_variables_are_the_ones_the_server_requires() {
             // ...and the server must actually read it, or the instruction is
             // fiction again in a new spelling.
             let name = var.split('=').next().expect("non-empty");
+            // A bare textual mention could be a comment or an unrelated string.
+            // Require the variable to appear in an actual lookup, which is what
+            // makes the instruction true.
+            let looked_up = [
+                format!("require(\"{name}\")"),
+                format!("optional(\"{name}\")"),
+            ]
+            .iter()
+            .any(|needle| server_config.contains(needle.as_str()));
             assert!(
-                server_config.contains(&format!("\"{name}\"")),
-                "the CLI prints {name}, but the server config never mentions it"
+                looked_up,
+                "the CLI prints {name}, but the server never looks it up - \
+                 that is the gh#521 failure in a new spelling"
             );
         }
 
