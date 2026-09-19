@@ -359,7 +359,7 @@ async fn direct_reconciliation_reauthenticates_receipts_loaded_after_boot() {
 }
 
 #[test]
-fn load_persisted_chain_drops_and_truncates_torn_trailing_line() {
+fn load_persisted_chain_refuses_torn_tail_without_mutating_receipt_evidence() {
     let root = support::tempdir().expect("tempdir");
     let receipt_log = root.path().join("receipts.jsonl");
     let key = support::receipt_key();
@@ -387,12 +387,13 @@ fn load_persisted_chain_drops_and_truncates_torn_trailing_line() {
     std::fs::write(&receipt_log, format!("{valid_prefix}partial-jws-fragment"))
         .expect("write torn log");
 
-    let chain = load_persisted_chain(&receipt_log).expect("torn tail is ignored");
-    assert_eq!(chain.len(), 1, "only the complete receipt is loaded");
-    verify_persisted_chain(&chain).expect("remaining chain is valid");
+    assert!(matches!(
+        load_persisted_chain(&receipt_log),
+        Err(ReceiptChainError::Malformed(_))
+    ));
     assert_eq!(
-        std::fs::read_to_string(&receipt_log).expect("read repaired log"),
-        valid_prefix,
-        "the malformed unterminated tail is truncated before the next append"
+        std::fs::read_to_string(&receipt_log).unwrap(),
+        format!("{valid_prefix}partial-jws-fragment"),
+        "read-only inspection must not erase an ambiguous receipt append"
     );
 }

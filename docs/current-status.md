@@ -9,7 +9,7 @@ implementation inventory for `v0.2.0`, not a claim that the open follow-ups
 below have shipped. “Available” distinguishes shipped binary wiring from
 library-only surfaces; a partial slice does not close its larger feature.
 
-## Unreleased E4.2 runtime settlement integration
+## Unreleased E4.2–E4.3 runtime settlement and receipt ownership
 
 The fused library now uses the real owned budget capability and bounded file
 settlement store for submit and streaming turns. A configured receipt log is
@@ -32,8 +32,20 @@ and inspectable through the retained supervisor. Library embedders still must
 retain `settlement_supervisor()` and drive `drain_pending` with their journal.
 Generic append errors remain ambiguous and close admission; only a typed,
 backend-proven nonapplication permits compensation. Receipt ambiguity retains the
-exact signed candidate and actual application. Legacy reconciliation excludes
-modern settlement receipts rather than synthesizing assistant output for them.
+exact signed candidate and actual application. Modern recovery uses the persisted
+`journal_owner` independently of `request_session`, under the receipt path/public
+signer identity bound to the leased settlement root. It authenticates the entire
+chain and each committed binding before adding an explicit `[reconciled]` marker
+for a missing definite final answer. Original text is not reconstructed.
+Non-final rounds can recover receipt-bound, observed successful tools as
+`ToolInvocation` audit entries, never as assistant completions. Failed, unknown,
+not-invoked, cancelled and control outcomes do not become final answers. Genuine
+legacy orphan recovery remains session-scoped; a shared signer alone never
+establishes ownership. Modern receipts are never removed by legacy truncation.
+Dry runs do not write, and repeated sweeps append no duplicate recovered entries.
+Live sweeps refuse while a turn still owns its receipt/journal projection rather
+than creating a duplicate answer in that gap. Legacy recovery honors the configured
+completion verb while excluding known cancellation and control receipt verbs.
 
 Limits: four live/backlog slots, one economic execution, 64 retained snapshots,
 five rounds, eight tools per round, 256 KiB snapshots and 16 KiB receipt candidates.
@@ -44,8 +56,12 @@ real router/SSE-body abandonment after nonzero usage (including the saturated
 16-event forwarder), worker-owned drain, healthy JSON continuation, same-identity
 server reopen, and fresh-process runtime reopen of acknowledged versus ambiguous
 projection state. The fresh budget is unchanged, prior ambiguity remains closed,
-and no assistant/accounting events are invented or truncated. These are bounded
-controls, not an all-yield/death/restart-repair proof.
+and only definite missing answer markers/successful-tool audits are recovered.
+The recoverable model does not recreate original prompts/text, retry ambiguous
+cost projections, or resolve prepared/unresolved receipt candidates. Healing a
+transcript does not clear prior-epoch projection/application quarantine, live
+panic/receipt uncertainty, or replay debits/refunds against a fresh budget.
+These are bounded controls, not an all-yield/death/restart-repair proof.
 
 Caller-cost consumers keep `OperatorExpense` separate, deduplicate repeated
 reservation projections, and accept legacy `CostFinalized` without `reason`.
@@ -54,9 +70,28 @@ without counting the completion projection twice. Server receipt statistics use
 the authenticated chain; admin consumer tests use explicit synthetic fixtures,
 not a claim of dashboard signature verification.
 
+HTTP reply tools and cost are correlated from the returned final receipt to one
+stable settlement `TurnId` and all its authenticated round bindings, including
+same-session overlap. Reply cost is the whole-turn receipt sum; each signed
+receipt remains round-local. There is still one runtime, budget ledger and commit
+coordinator; the server worker remains serial (no worker pool).
+
+Runtime boot owns the existing stable `.settlements/writer.lock` before caching
+its writable receipt tail. First adoption authenticates existing legacy bytes
+without mutation before creating an identity binding, so a rejected signing key
+cannot pin the log. The authoritative tail is always re-read and authenticated
+under the lease; no preflight tail is reused. Standalone control writers (including
+CLI approvals and grants) use that same lease and refuse overlap before receipt,
+approval-decision or grant-ledger mutation.
+A retained supervisor keeps ownership after runtime shutdown until the actual
+owner is released; read-only receipt inspection stays available. Receipt readers
+no longer truncate unterminated tails: torn/ambiguous evidence is retained and
+fails closed, including during dry-run reconciliation. Trusted, private, no-follow
+namespace assumptions and the existing signer/issuer formats are unchanged.
+
 Still unimplemented: generic ambiguous receipt/journal acknowledgement repair,
-completion-transcript reconstruction/shared-writer association (E4.3), arbitrary
-process-death losslessness, finite shutdown under blocked nonpreemptible I/O
+original completion-text reconstruction, arbitrary process-death losslessness,
+finite shutdown under blocked nonpreemptible I/O
 (E4.5), and non-host/ACL durability proof. Last-supervisor/process destruction with
 unresolved work is outside the supervised failure model, not safe shutdown.
 This section describes unreleased source, not release or broad CI-parity evidence.

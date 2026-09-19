@@ -1285,10 +1285,8 @@ struct Processor {
     issuer: BiscuitCapTokenIssuer,
     cap_budget_remaining: u64,
     tool_allowlist: Vec<String>,
-    /// The append-only receipt-chain log the fused runtime writes to. Read
-    /// before/after an HTTP turn to recover the tools it called (the worker is
-    /// single-threaded, so the receipts appended across one `submit` belong to
-    /// exactly that turn).
+    /// The one append-only receipt log, authenticated through the shared cache.
+    /// Turn membership comes from authoritative settlement bindings, not offsets.
     receipt_log: PathBuf,
     /// The JWKS derived from the configured receipt signing key, used to
     /// authenticate the receipt chain before reading tool-call data.
@@ -1485,13 +1483,6 @@ impl Processor {
             }
         };
 
-        // Bracket the turn's receipts: the worker is single-threaded and runs one
-        // turn at a time, so every receipt appended between this snapshot and the
-        // post-submit read belongs to this turn. The final receipt carries no tool
-        // calls (it is the no-tool answer that terminates the loop); the tools ride
-        // on the earlier tool-use iterations, which this window captures.
-        let receipts_before = self.receipt_count();
-
         // #359 commit gate: hand the turn pipeline a synchronous probe over the
         // caller-liveness flag. The flag flips in the dropping thread the moment
         // the caller's future is dropped (turn timeout / hang-up), so the gate
@@ -1553,8 +1544,14 @@ impl Processor {
 
         let outcome = match submit_result {
             Ok(result) => {
+                let (tools_called, cost) = match self.turn_evidence(session_id, &result) {
+                    Ok(evidence) => evidence,
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                        return;
+                    }
+                };
                 self.security_metrics.record_ok();
-                let tools_called = self.tools_called_since(receipts_before);
                 tracing::info!(
                     session_id = %session_id.0,
                     receipt_id = %result.receipt_id.0,
@@ -1564,9 +1561,9 @@ impl Processor {
                 Ok(ChatTurnOutcome {
                     session_id,
                     reply: result.response.content,
-                    tokens_in: result.cost.tokens_in,
-                    tokens_out: result.cost.tokens_out,
-                    cents: result.cost.cents,
+                    tokens_in: cost.tokens_in,
+                    tokens_out: cost.tokens_out,
+                    cents: cost.cents,
                     tools_called,
                     receipt_id: result.receipt_id.0.to_string(),
                 })
@@ -1659,50 +1656,85 @@ impl Processor {
         }
     }
 
-    /// The number of receipts currently persisted in the chain log (`0` if the
-    /// log is absent or unreadable). Brackets a turn's receipts for
-    /// [`tools_called_since`](Self::tools_called_since).
-    fn receipt_count(&self) -> usize {
-        self.receipt_cache
-            .load(&self.receipt_log, &self.receipt_jwks)
-            .ok()
-            .and_then(|chain| chain.verified().then_some(chain.len()))
-            .unwrap_or(0)
-    }
-
-    /// The tool names recorded on every receipt appended after index `before` —
-    /// the tools this turn's provider iterations invoked, in receipt order.
-    fn tools_called_since(&self, before: usize) -> Vec<String> {
-        match self
-            .receipt_cache
-            .load(&self.receipt_log, &self.receipt_jwks)
-        {
-            Ok(loaded) => {
-                if let Some(error) = loaded.verify_error() {
-                    tracing::warn!(
-                        error,
-                        "receipt chain verification failed; discarding tool-call data"
-                    );
-                    return Vec::new();
-                }
-                loaded
+    /// Correlate the final receipt to ONE authoritative TurnId, then authenticate
+    /// all its round bindings through the shared verified cache. A request session
+    /// can have overlapping turns; neither a session nor a global suffix is an ID.
+    fn turn_evidence(
+        &self,
+        session: SessionId,
+        result: &ardur_runtime::SubmitResult,
+    ) -> Result<(Vec<String>, ardur_runtime::CostTuple), RuntimeError> {
+        use ardur_session_journals::settlement::{
+            SettlementDecision, SettlementPhase, TurnTerminal,
+        };
+        let evidence = || -> anyhow::Result<_> {
+            let snapshots = self.runtime.settlement_supervisor().durable_snapshots()?;
+            let turns: Vec<_> = snapshots
+                .iter()
+                .map(|s| s.turn())
+                .filter(|t| t.terminal == TurnTerminal::FinalAnswer(result.receipt_id))
+                .collect();
+            let [turn] = turns.as_slice() else {
+                anyhow::bail!("final receipt has no unique turn owner");
+            };
+            anyhow::ensure!(
+                turn.request_session == session,
+                "turn request attribution mismatch"
+            );
+            let chain = self
+                .receipt_cache
+                .load(&self.receipt_log, &self.receipt_jwks)?;
+            anyhow::ensure!(chain.verified(), "turn receipt chain authentication failed");
+            let mut tools = Vec::new();
+            let mut cost = ardur_runtime::CostTuple::default();
+            let mut seen = HashSet::new();
+            for round in &turn.rounds {
+                let SettlementPhase::Settled {
+                    receipt: Some(binding),
+                    application,
+                } = &round.phase
+                else {
+                    anyhow::bail!("completed turn has an unsettled round");
+                };
+                anyhow::ensure!(
+                    matches!(round.decision, Some(SettlementDecision::Completion { .. })),
+                    "completed turn has a non-completion round"
+                );
+                anyhow::ensure!(
+                    seen.insert(binding.receipt_id),
+                    "duplicate turn receipt binding"
+                );
+                let receipts: Vec<_> = chain
                     .receipts()
                     .iter()
-                    .skip(before)
-                    .flat_map(|receipt| {
-                        receipt
-                            .body
-                            .tool_calls
-                            .iter()
-                            .map(|call| call.tool_name.clone())
-                    })
-                    .collect()
+                    .filter(|r| r.body.receipt_id == binding.receipt_id.0)
+                    .collect();
+                let [receipt] = receipts.as_slice() else {
+                    anyhow::bail!("bound turn receipt missing or duplicated");
+                };
+                anyhow::ensure!(
+                    ardur_receipt::Sha256Digest::of(receipt.jws_compact.as_bytes())
+                        == binding.jws_digest
+                        && receipt.body.session_id == Some(session.0)
+                        && receipt.body.subject == turn.verified_subject
+                        && receipt.body.cap_token_id == turn.cap_token_id
+                        && receipt.body.cost == application.requested_debit,
+                    "turn receipt binding mismatch"
+                );
+                cost = cost
+                    .checked_add(&receipt.body.cost)
+                    .ok_or_else(|| anyhow::anyhow!("turn cost overflow"))?;
+                tools.extend(receipt.body.tool_calls.iter().map(|c| c.tool_name.clone()));
             }
-            Err(e) => {
-                tracing::warn!(error = %e, "reading receipt chain for tools_called");
-                Vec::new()
-            }
-        }
+            // SubmitResult is already whole-turn cost. Never rewrite the final
+            // round receipt to that total (which would double count earlier rounds).
+            anyhow::ensure!(
+                cost == result.cost,
+                "whole-turn cost disagrees with receipts"
+            );
+            Ok((tools, cost))
+        };
+        evidence().map_err(RuntimeError::Internal)
     }
 
     /// Post `text` to `channel`, routing to the backend the turn originated on.
@@ -2190,6 +2222,8 @@ fn create_private(keys_dir: &Path, name: &str, contents: &str) -> std::io::Resul
 
 #[cfg(test)]
 mod late_delegation_denial_tests;
+#[cfg(test)]
+mod turn_attribution_tests;
 
 #[cfg(test)]
 mod tests {

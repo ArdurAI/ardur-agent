@@ -45,6 +45,9 @@ pub enum ReceiptChainError {
     /// The authoritative settlement store could not be established.
     #[error("settlement initialization failed: {0}")]
     Settlement(#[from] crate::settlement::SettlementError),
+    /// The shared lifetime writer lease or its bound identity could not be established.
+    #[error("receipt writer ownership: {0}")]
+    Writer(#[from] ardur_session_journals::settlement::SettlementStoreError),
     /// The receipt-log file could not be read.
     #[error("receipt log i/o error: {0}")]
     Io(#[from] std::io::Error),
@@ -95,7 +98,13 @@ pub enum ReceiptChainError {
 /// cache under a commit lock, safe under concurrent turns), this re-reads
 /// the whole persisted chain on every call to find the parent hash — the
 /// right tradeoff for an infrequent one-shot CLI invocation with no
-/// concurrent writer to race against, not for a hot path.
+/// concurrent writer to race against, not for a hot path. The shared settlement
+/// lease is acquired before caching a writable tail or mutating the log and held
+/// through fsync. First adoption has a read-only authentication preflight so a
+/// rejected key cannot create a durable identity binding; the tail is then read
+/// and authenticated again under the lease, never reused from that preflight.
+/// A live runtime (including a retained supervisor) causes a typed writer-busy
+/// error; callers must release it before using this standalone CLI path.
 ///
 /// # Errors
 /// [`ReceiptChainError::Io`]/[`Malformed`](ReceiptChainError::Malformed) if
@@ -113,29 +122,128 @@ pub fn mint_control_receipt(
     cost: CostTuple,
     issued_at_ms: u64,
 ) -> Result<ReceiptBody, ReceiptChainError> {
-    let chain = load_persisted_chain(log_path)?;
-    let parent_hash = chain
-        .last()
-        .map(|r| Sha256Digest::of(r.jws_compact.as_bytes()));
-    let body = ReceiptBody {
-        receipt_id: uuid::Uuid::new_v4(),
-        parent_hash,
+    ControlReceiptWriter::open(log_path, receipt_key)?.mint(
         verb,
-        issued_at: UnixTsMillis(issued_at_ms),
+        payload_digest,
         subject,
         cap_token_id,
-        payload_digest,
         session_id,
         cost,
-        tool_calls: Vec::new(),
-        provider: None,
-    };
-    let signed = ReceiptSigner::sign(body, receipt_key)
-        .map_err(|e| ReceiptChainError::SignFailed(e.to_string()))?;
-    let mut file = open_append_no_follow(log_path)?;
-    writeln!(file, "{}", signed.jws_compact())?;
-    file.sync_all()?;
-    Ok(signed.body().clone())
+        issued_at_ms,
+    )
+}
+
+/// Exclusive one-shot control writer. Acquire before a CLI decision mutates its
+/// state. Consumed by `mint`, so no independent or concurrent cached tails exist.
+/// Internal runtime writers already own this lease and must not reacquire it.
+pub struct ControlReceiptWriter {
+    log: std::path::PathBuf,
+    key: Es256SigningKey,
+    parent_hash: Option<Sha256Digest>,
+    _lease: ardur_session_journals::settlement::FileSettlementStore,
+}
+impl ControlReceiptWriter {
+    /// Acquire the SAME stable lease as the runtime and authenticate the chain
+    /// before returning. Writer contention is refused, never queued.
+    pub fn open(log: &Path, key: &Es256SigningKey) -> Result<Self, ReceiptChainError> {
+        let log = if log.is_absolute() {
+            log.to_path_buf()
+        } else {
+            std::env::current_dir()?.join(log)
+        };
+        let (root, identity) = writer_identity(&log, key)?;
+        let lease = ardur_session_journals::settlement::FileSettlementStore::open(
+            &root,
+            identity,
+            crate::settlement::LIMITS,
+        )?;
+        let chain = load_persisted_chain(&log)?;
+        verify_persisted_chain_with_jwks(&chain, &Jwks::from_public_key(&key.public_key()))?;
+        let parent_hash = chain
+            .last()
+            .map(|r| Sha256Digest::of(r.jws_compact.as_bytes()));
+        Ok(Self {
+            log,
+            key: key.clone(),
+            parent_hash,
+            _lease: lease,
+        })
+    }
+
+    /// Sign and append one control receipt, holding ownership through durability.
+    #[allow(clippy::too_many_arguments)]
+    pub fn mint(
+        self,
+        verb: VerbObject,
+        payload_digest: Sha256Digest,
+        subject: HolderId,
+        cap_token_id: TokenId,
+        session_id: Option<uuid::Uuid>,
+        cost: CostTuple,
+        issued_at_ms: u64,
+    ) -> Result<ReceiptBody, ReceiptChainError> {
+        let body = ReceiptBody {
+            receipt_id: uuid::Uuid::new_v4(),
+            parent_hash: self.parent_hash,
+            verb,
+            issued_at: UnixTsMillis(issued_at_ms),
+            subject,
+            cap_token_id,
+            payload_digest,
+            session_id,
+            cost,
+            tool_calls: Vec::new(),
+            provider: None,
+        };
+        let signed = ReceiptSigner::sign(body, &self.key)
+            .map_err(|e| ReceiptChainError::SignFailed(e.to_string()))?;
+        let mut file = open_append_no_follow(&self.log)?;
+        writeln!(file, "{}", signed.jws_compact())?;
+        file.sync_all()?;
+        #[cfg(unix)]
+        open_parent_directory_no_follow(&self.log)?.sync_all()?;
+        #[cfg(not(unix))]
+        std::fs::File::open(self.log.parent().expect("validated writer parent"))?.sync_all()?;
+        Ok(signed.body().clone())
+    }
+}
+
+/// One receipt log has one existing settlement namespace and public signer identity.
+/// Both runtime and one-shot writers use its lifetime lease; no independent tails.
+pub(crate) fn writer_identity(
+    log: &Path,
+    key: &Es256SigningKey,
+) -> Result<
+    (
+        std::path::PathBuf,
+        ardur_session_journals::settlement::ReceiptIdentity,
+    ),
+    ReceiptChainError,
+> {
+    let mut name = log
+        .file_name()
+        .ok_or(ReceiptChainError::SettlementLogRequired)?
+        .to_os_string();
+    name.push(".settlements");
+    let root = log.with_file_name(name);
+    // Reject an incompatible signer before creating a new persistent binding.
+    // This is only a read-only preflight, not an authoritative tail observation:
+    // both callers must re-read/authenticate after acquiring the writer lease.
+    if !root.join("format.json").try_exists()? {
+        let chain = load_persisted_chain(log)?;
+        verify_persisted_chain_with_jwks(&chain, &Jwks::from_public_key(&key.public_key()))?;
+    }
+    let signer = Sha256Digest::of(
+        &serde_json::to_vec(&Jwks::from_public_key(&key.public_key()))
+            .map_err(|e| ReceiptChainError::Malformed(e.to_string()))?,
+    );
+    Ok((
+        root,
+        ardur_session_journals::settlement::ReceiptIdentity {
+            receipt_log: log.to_path_buf(),
+            signer,
+        },
+    ))
 }
 
 /// Decode the [`ReceiptBody`] out of a compact JWS's payload (middle) segment.
@@ -368,10 +476,10 @@ pub(crate) fn replace_receipt_log_no_follow(path: &Path, body: &[u8]) -> std::io
 }
 
 /// Load every persisted receipt from `path`, in append (chain) order. A missing
-/// file is an empty chain (no turns have been receipted yet). A single malformed
-/// unterminated tail is treated as a torn write from a crash: it is dropped and
-/// the file is truncated back to the last complete line so future appends cannot
-/// concatenate onto corrupt bytes.
+/// file is an empty chain (no turns have been receipted yet). This is read-only:
+/// a malformed unterminated tail is refused and retained, never truncated by a
+/// reader or dry-run reconciler. A torn append may be authoritative evidence of
+/// an unresolved settlement and must not silently become proof of absence.
 pub fn load_persisted_chain(
     path: impl AsRef<Path>,
 ) -> Result<Vec<PersistedReceipt>, ReceiptChainError> {
@@ -384,15 +492,10 @@ pub fn load_persisted_chain(
     let mut raw = String::new();
     file.read_to_string(&mut raw)?;
     let (chain, torn_tail_start) = parse_receipt_lines(&raw)?;
-    if let Some(offset) = torn_tail_start {
-        tracing::warn!(
-            path = %path.display(),
-            truncate_at = offset,
-            "dropping torn trailing receipt-log line"
-        );
-        let file = open_regular_no_follow(path, true)?;
-        file.set_len(offset as u64)?;
-        file.sync_all()?;
+    if torn_tail_start.is_some() {
+        return Err(ReceiptChainError::Malformed(
+            "unterminated receipt tail; evidence retained".into(),
+        ));
     }
     Ok(chain)
 }
@@ -402,28 +505,20 @@ fn parse_receipt_lines(
 ) -> Result<(Vec<PersistedReceipt>, Option<usize>), ReceiptChainError> {
     let mut chain = Vec::new();
     let mut offset = 0;
-    for (line_index, segment) in raw.split_inclusive('\n').enumerate() {
+    for segment in raw.split_inclusive('\n') {
         let segment_start = offset;
         offset += segment.len();
+        if !segment.ends_with('\n') {
+            return Ok((chain, Some(segment_start)));
+        }
         let line = segment.strip_suffix('\n').unwrap_or(segment);
         if line.trim().is_empty() {
             continue;
         }
-        match decode_body(line) {
-            Ok(body) => chain.push(PersistedReceipt {
-                jws_compact: line.to_string(),
-                body,
-            }),
-            Err(err) if !segment.ends_with('\n') && offset == raw.len() => {
-                tracing::warn!(
-                    line_index,
-                    error = %err,
-                    "ignoring malformed trailing receipt-log line"
-                );
-                return Ok((chain, Some(segment_start)));
-            }
-            Err(err) => return Err(err),
-        }
+        chain.push(PersistedReceipt {
+            jws_compact: line.to_string(),
+            body: decode_body(line)?,
+        });
     }
     Ok((chain, None))
 }
