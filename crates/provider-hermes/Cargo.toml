@@ -37,6 +37,9 @@ async-trait = { workspace = true }
 tokio = { workspace = true }
 # Decoding the newline-delimited stream-json events Hermes writes to stdout.
 serde_json = { workspace = true }
+# Secret-shaped redaction for child stderr / result.error before they
+# enter ProviderError (AGENTS.md: never print/store secret values).
+ardur-session-journals = { workspace = true }
 
 [dev-dependencies]
 # The async `complete` calls need a runtime to poll them.
