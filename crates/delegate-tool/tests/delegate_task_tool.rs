@@ -384,9 +384,12 @@ async fn real_child_turn_completes() {
 
 /// A provider whose round blocks until released, so tests can observe a live
 /// in-flight child deterministically instead of racing wall-clock timing.
+/// Release is a polled flag, NOT a Notify: `notify_waiters` only wakes
+/// already-registered waiters, so a second round started after the notify
+/// would hang forever.
 struct GatedMock {
     started: Arc<AtomicBool>,
-    release: Arc<tokio::sync::Notify>,
+    release: Arc<AtomicBool>,
     cents: u64,
 }
 
@@ -394,7 +397,9 @@ struct GatedMock {
 impl Provider for GatedMock {
     async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
         self.started.store(true, Ordering::SeqCst);
-        self.release.notified().await;
+        while !self.release.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
         Ok(CompletionResponse {
             content: "gated reply".to_string(),
             finish_reason: FinishReason::Stop,
@@ -430,11 +435,7 @@ impl Provider for GatedMock {
     }
 }
 
-fn gated_provider(
-    started: &Arc<AtomicBool>,
-    release: &Arc<tokio::sync::Notify>,
-    cents: u64,
-) -> Arc<dyn Provider + Send + Sync> {
+fn gated_provider(started: &Arc<AtomicBool>, release: &Arc<AtomicBool>, cents: u64) -> Arc<dyn Provider + Send + Sync> {
     Arc::new(GatedMock {
         started: Arc::clone(started),
         release: Arc::clone(release),
@@ -473,7 +474,7 @@ async fn dropped_future_not_detached() {
     // work's accounting must survive in the settlements buffer — a dropped
     // future is not termination, and undelivered cost is not zero cost.
     let started = Arc::new(AtomicBool::new(false));
-    let release = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(AtomicBool::new(false));
     let provider = gated_provider(&started, &release, 25);
     let (token, root) = parent_token(&["chat.submit"], 10_000);
     let tool = Arc::new(DelegateTaskTool::with_provider(root, AUDIENCE, provider));
@@ -485,7 +486,7 @@ async fn dropped_future_not_detached() {
     wait_for_start(&started).await;
     waiter.abort();
 
-    release.notify_waiters();
+    release.store(true, Ordering::SeqCst);
     let settled = wait_for_settlement(&tool).await;
     assert_eq!(
         settled.len(),
@@ -509,7 +510,7 @@ async fn permit_lifetime_vs_cancelled_waiter() {
     // not release capacity while the provider worker still runs. A second call
     // is denied until real termination, then admitted.
     let started = Arc::new(AtomicBool::new(false));
-    let release = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(AtomicBool::new(false));
     let provider = gated_provider(&started, &release, 25);
     let (token, root) = parent_token(&["chat.submit"], 10_000);
     let tool = Arc::new(DelegateTaskTool::with_max_concurrency(
@@ -543,7 +544,7 @@ async fn permit_lifetime_vs_cancelled_waiter() {
     );
 
     // Real termination releases the permit.
-    release.notify_waiters();
+    release.store(true, Ordering::SeqCst);
     let _ = wait_for_settlement(&tool).await;
     let second = tool
         .invoke(
@@ -562,7 +563,7 @@ async fn reservation_refusal_typed() {
     // 100-cent delegation is refused with a typed denial rather than silently
     // double-spending one allowance.
     let started = Arc::new(AtomicBool::new(false));
-    let release = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(AtomicBool::new(false));
     let provider = gated_provider(&started, &release, 25);
     let (token, root) = parent_token(&["chat.submit"], 10_000);
     let tool = Arc::new(
@@ -600,16 +601,18 @@ async fn reservation_refusal_typed() {
     }
 
     // Settlement returns the unspent allowance; a later delegation fits again.
-    release.notify_waiters();
+    release.store(true, Ordering::SeqCst);
     let first = waiter
         .await
         .expect("first waiter task panicked")
         .expect("first completes");
     assert_eq!(first.content["outcome"], "completed");
+    // After the first child settles its actual spend (25 from the gated mock),
+    // 75 remains in the shared 100-cent ledger. Request a budget that fits.
     let second = tool
         .invoke(
             &ctx_with(token, InvocationId::new()),
-            json!({ "goal": "fits now" }),
+            json!({ "goal": "fits now", "max_cost_cents": 50 }),
         )
         .await
         .expect("unspent allowance released at settlement funds a later delegation");
