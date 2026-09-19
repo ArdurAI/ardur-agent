@@ -160,6 +160,16 @@ impl Provider for InstrumentedProvider {
         self.inner.id()
     }
 
+    fn name(&self) -> String {
+        // A decorator must stay transparent: the inner provider's name feeds
+        // the receipt's `provider` field, and for dynamic providers (the
+        // model router) it carries per-call truth — the backend that served
+        // and any failover path. Falling back to the trait's default
+        // (`id().0`) would freeze that to a static string and hide failovers
+        // from receipts.
+        self.inner.name()
+    }
+
     fn supports_streaming(&self) -> bool {
         self.inner.supports_streaming()
     }

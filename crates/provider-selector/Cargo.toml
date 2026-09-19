@@ -45,8 +45,15 @@ ardur-provider-claude-cli = { workspace = true }
 # `ARDUR_PROVIDER=prime` (alias `prime-agent`). Driven over prime-agent's RPC
 # mode; credentials live inside prime-agent, not here.
 ardur-provider-prime = { workspace = true }
+# The `[router]` config table (#411 / #531 D0) the router branch parses at
+# boot; sits below every provider crate, so no cycle is closed.
+ardur-config = { workspace = true }
+# Boot-time router/superseded/pool-ignored warnings.
+tracing = { workspace = true }
 
 [dev-dependencies]
 # Serial test execution for env-mutating integration tests (selector_env) —
 # prevents races on process-global environment variables.
 serial_test = { workspace = true }
+# Router-wiring tests write fixture config files into a scratch HOME.
+tempfile = { workspace = true }

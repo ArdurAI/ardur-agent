@@ -40,6 +40,8 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod router_build;
+
 use std::fmt;
 use std::sync::Arc;
 
@@ -226,12 +228,22 @@ pub fn select(selector: Option<&str>, model: ModelId) -> Result<Arc<dyn Provider
 /// This is the boot entry point the CLI and server call in place of the old
 /// hard-coded `AnthropicProvider::from_env`.
 ///
+/// When a `[router]` table is present in `~/.ardur/config.toml` (and
+/// [`router_build::ROUTER_ENV`] is not `off`), the model router
+/// (#411 / #531 D0) is built from it and returned instead: provider selection
+/// then happens per request, across the table's lanes. An absent table — or
+/// the kill-switch — reproduces the historical single-provider path exactly.
+///
 /// # Errors
 ///
-/// Returns [`ProviderError`] when the selected backend cannot be built from the
-/// environment (e.g. a missing API key), or when `ARDUR_PROVIDER` is set to an
-/// unrecognized value.
+/// Returns [`ProviderError`] when the selected backend cannot be built from
+/// the environment (e.g. a missing API key), when `ARDUR_PROVIDER` is set to
+/// an unrecognized value, or when a configured router table is invalid
+/// (unknown backend, missing default lane, unreadable config file).
 pub fn from_env(model: ModelId) -> Result<Arc<dyn Provider>, ProviderError> {
+    if let Some(router) = router_build::router_from_env()? {
+        return Ok(router);
+    }
     let raw = std::env::var(SELECTOR_ENV).ok();
     select(raw.as_deref(), model)
 }
