@@ -21,13 +21,15 @@ repository.workspace = true
 [dependencies]
 # Shared value types the projection speaks in (CostTuple for budget deltas).
 ardur-runtime = { workspace = true }
+# The canonical tool-manifest digest (INTER-01 / #537): the emitter and the
+# Mission Declaration author must produce identical bytes for §9.6, so both
+# delegate to the leaf crate's single implementation.
+ardur-core-types = { workspace = true }
 # ObservedEvent serialization: the plane consumes JSON per the spec's field set.
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 # Stable event identifiers.
 uuid = { workspace = true, features = ["v4", "serde"] }
-# SHA-256 for the manifest digest and normalized-envelope hashing.
-sha2 = { workspace = true }
 # Structured warnings when an event is emitted with degraded visibility.
 tracing = { workspace = true }
 

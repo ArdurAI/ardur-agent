@@ -50,7 +50,6 @@ use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 /// The verifier's three-valued verdict (§5).
 ///
@@ -634,26 +633,18 @@ impl ObservedEventBuilder {
 /// Entries are sorted before hashing so the digest is order-independent: a
 /// registry that enumerates its tools in a different order is the *same*
 /// manifest, and must not read as drift (§9.6 would otherwise fire spuriously).
+///
+/// This delegates to [`ardur_core_types::tool_manifest_digest`] — the ONE
+/// canonical implementation the Mission Declaration author also uses
+/// (INTER-01 / #537 / F8). The §9.6 check compares the observed digest against
+/// the MD's declared digest by plain string equality, so the two call sites
+/// must produce identical bytes, including the schema-pinned `sha-256:`
+/// prefix. Before the alignment this function returned unprefixed hex while
+/// the MD author hashed (id, descriptor) field pairs: an unchanged registry
+/// compared as manifest drift.
 #[must_use]
 pub fn manifest_digest(tool_ids: &[String]) -> String {
-    let mut sorted: Vec<&String> = tool_ids.iter().collect();
-    sorted.sort();
-    sorted.dedup();
-    let mut hasher = Sha256::new();
-    for id in sorted {
-        // LENGTH-PREFIX, not a separator. A NUL delimiter collides the moment an
-        // identifier can contain one: ["file.read", "shell.run"] and the single
-        // id "file.read\0shell.run" feed identical bytes to SHA-256, so a
-        // substituted registry would hash to the declared manifest and §9.6
-        // would never fire. Tool ids come from remote/skill registration, so
-        // that content is not fully under this crate's control.
-        hasher.update((id.len() as u64).to_be_bytes());
-        hasher.update(id.as_bytes());
-    }
-    // sha2 0.11's output array does not implement `LowerHex`, so hex-encode
-    // explicitly — the same idiom the governance crate's `to_hex` uses.
-    let digest: [u8; 32] = hasher.finalize().into();
-    digest.iter().map(|b| format!("{b:02x}")).collect()
+    ardur_core_types::tool_manifest_digest(tool_ids)
 }
 
 /// Milliseconds since the Unix epoch.
