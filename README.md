@@ -46,7 +46,9 @@ skills, OpenTelemetry, and the HTTP surface — lives in **[RUN.md](RUN.md)**.
 For the current implementation inventory, see
 **[docs/current-status.md](docs/current-status.md)**. Fresh-install validation
 (offline stub, one live provider, private Slack) is
-**[docs/fresh-machine.md](docs/fresh-machine.md)**.
+**[docs/fresh-machine.md](docs/fresh-machine.md)**. Prebuilt release targets,
+Sigstore/checksum verification, and macOS Gatekeeper guidance are in
+**[docs/releases.md](docs/releases.md)**.
 
 ## Agent Bootstrap
 
