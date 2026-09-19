@@ -252,9 +252,8 @@ async fn late_denial(streaming: bool) -> RuntimeError {
     // inner supervised child (guarantees "completed", no creds, no subprocess).
     // Outer FusedRuntime keeps its own counter instance for the call-count
     // assertions.
-    let child_provider_for_delegate: Arc<dyn Provider + Send + Sync> = Arc::new(
-        AlwaysCompletedProvider,
-    );
+    let child_provider_for_delegate: Arc<dyn Provider + Send + Sync> =
+        Arc::new(AlwaysCompletedProvider);
     let delegate = DelegateTaskTool::with_deny_list_and_provider(
         root,
         AUDIENCE,
