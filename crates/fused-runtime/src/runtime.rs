@@ -2018,7 +2018,8 @@ impl FusedRuntime {
     ///   (under [`AppendSyntheticJournal`](ReconciliationStrategy::AppendSyntheticJournal))
     ///   appended to.
     /// - [`ReconciliationError::Io`] if rewriting a truncated log fails.
-    /// - [`ReconciliationError::Undecidable`] if
+    /// - [`ReconciliationError::Undecidable`] while a live turn still owns its
+    ///   receipt/journal projection, or if
     ///   [`TruncateOrphans`](ReconciliationStrategy::TruncateOrphans) is asked to
     ///   drop a non-suffix orphan (one a later journaled receipt chains onto),
     ///   which would break the hash chain.
@@ -2039,6 +2040,15 @@ impl FusedRuntime {
             });
         };
 
+        // A committed receipt can precede its still-live journal projection.
+        // Refuse rather than wait on a running turn, and prevent new admission
+        // through the sweep. Final observational hooks do not hold this permit.
+        let _idle_projection =
+            self.economic_admission
+                .try_lock()
+                .map_err(|_| ReconciliationError::Undecidable {
+                    reason: "receipt reconciliation requires idle turn projection".into(),
+                })?;
         // Also serialize against internal control receipts and concurrent sweeps.
         let _commit = self.commit_lock.lock().await;
         let chain = load_persisted_chain(receipt_log)?;
@@ -2090,7 +2100,11 @@ impl FusedRuntime {
                 && !journaled.contains(&receipt.body.receipt_id)
                 && !modern_receipts.contains(&receipt.body.receipt_id)
                 // Genuine legacy completions only; a control receipt is not an answer.
-                && receipt.body.verb.as_str() == "llm.completion.minted.v1"
+                && receipt.body.verb == self.verb
+                && !matches!(receipt.body.verb.as_str(),
+                    CANCELLED_VERB | "approval.propose.created.v1"
+                    | "approval.approve.accepted.v1" | "approval.reject.accepted.v1"
+                    | "tool.grant.allow.v1")
             })
             .map(|(i, _)| i)
             .collect();

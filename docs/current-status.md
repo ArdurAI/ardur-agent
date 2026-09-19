@@ -43,6 +43,9 @@ not-invoked, cancelled and control outcomes do not become final answers. Genuine
 legacy orphan recovery remains session-scoped; a shared signer alone never
 establishes ownership. Modern receipts are never removed by legacy truncation.
 Dry runs do not write, and repeated sweeps append no duplicate recovered entries.
+Live sweeps refuse while a turn still owns its receipt/journal projection rather
+than creating a duplicate answer in that gap. Legacy recovery honors the configured
+completion verb while excluding known cancellation and control receipt verbs.
 
 Limits: four live/backlog slots, one economic execution, 64 retained snapshots,
 five rounds, eight tools per round, 256 KiB snapshots and 16 KiB receipt candidates.
@@ -77,8 +80,9 @@ Runtime boot owns the existing stable `.settlements/writer.lock` before caching
 its writable receipt tail. First adoption authenticates existing legacy bytes
 without mutation before creating an identity binding, so a rejected signing key
 cannot pin the log. The authoritative tail is always re-read and authenticated
-under the lease; no preflight tail is reused. Standalone control writers (including CLI approvals)
-use that same lease and refuse overlap before receipt or approval-decision mutation.
+under the lease; no preflight tail is reused. Standalone control writers (including
+CLI approvals and grants) use that same lease and refuse overlap before receipt,
+approval-decision or grant-ledger mutation.
 A retained supervisor keeps ownership after runtime shutdown until the actual
 owner is released; read-only receipt inspection stays available. Receipt readers
 no longer truncate unterminated tails: torn/ambiguous evidence is retained and

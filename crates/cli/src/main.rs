@@ -2218,6 +2218,11 @@ fn run_grant(args: GrantArgs) -> Result<(), CliError> {
             // Materialize the state tree so `receipts/` and `keys/` exist before
             // we chain a receipt into them.
             dirs.create()?;
+            // Acquire the same lifetime lease as runtimes and approval writers
+            // before recording any grant decision or mutating its ledger.
+            let key = dirs.load_or_create_receipt_key()?;
+            let writer = ardur_fused_runtime::ControlReceiptWriter::open(&dirs.receipt_log(), &key)
+                .map_err(|e| CliError::State(format!("grant receipt writer: {e}")))?;
 
             let subject = dirs.local_subject();
             let granted_at_ms = unix_now_ms();
@@ -2229,7 +2234,7 @@ fn run_grant(args: GrantArgs) -> Result<(), CliError> {
                 "subject": subject,
                 "granted_at_ms": granted_at_ms,
             });
-            let receipt_id = append_grant_receipt(&dirs, &subject, granted_at_ms, &payload)?;
+            let receipt_id = append_grant_receipt(writer, &subject, granted_at_ms, &payload)?;
 
             // Append the grant to the durable operator ledger.
             let mut grants = read_grants(&dirs)?;
@@ -2276,77 +2281,44 @@ fn run_grant(args: GrantArgs) -> Result<(), CliError> {
 }
 
 /// Build, sign, and chain a `tool.grant.allow.v1` receipt committing to `payload`
-/// (by SHA-256 digest), returning the new receipt id. The receipt links onto the
-/// existing `~/.ardur/receipts/chain.jsonl` tail and is signed with the same
-/// ES256 key the chat runtime uses, so `ardur receipts verify` stays green.
+/// (by SHA-256 digest), returning the new receipt id. Consume the writer acquired
+/// before the decision so the authenticated chain tail stays exclusively owned
+/// through the durable append, using the same ES256 key as the chat runtime.
 fn append_grant_receipt(
-    dirs: &StateDirs,
+    writer: ardur_fused_runtime::ControlReceiptWriter,
     subject: &str,
     issued_at_ms: u64,
     payload: &serde_json::Value,
 ) -> Result<uuid::Uuid, CliError> {
-    let signing_key = dirs.load_or_create_receipt_key()?;
-    let receipt_log = dirs.receipt_log();
-
-    // Link onto the current chain tail (genesis when the chain is empty). The
-    // parent hash is SHA-256 of the prior receipt's compact JWS — exactly what
-    // the chain verifier recomputes.
-    let chain = ardur_fused_runtime::load_persisted_chain(&receipt_log)
-        .map_err(|e| CliError::State(format!("loading receipt chain: {e}")))?;
-    let parent_hash = chain
-        .last()
-        .map(|tail| ardur_receipt::Sha256Digest::of(tail.jws_compact.as_bytes()));
-
     let payload_bytes = serde_json::to_vec(payload).expect("grant receipt payload serializes");
-    let body = ardur_receipt::ReceiptBody {
-        receipt_id: uuid::Uuid::new_v4(),
-        parent_hash,
-        verb: ardur_receipt::VerbObject::new("tool.grant.allow.v1")
-            .map_err(|e| CliError::State(format!("invalid grant verb: {e}")))?,
-        issued_at: ardur_receipt::UnixTsMillis(issued_at_ms),
-        subject: ardur_receipt::HolderId(subject.to_string()),
-        // Operator grants are not made under a session cap-token; use a fixed
-        // sentinel token id (a stable, self-documenting UUID) rather than
-        // borrowing a turn's token id. `TokenId` is a `Uuid` newtype (H5), so a
-        // 16-byte ASCII label stands in for the absent session token.
-        cap_token_id: ardur_receipt::TokenId(uuid::Uuid::from_bytes(*b"ardur-op-grant!!")),
-        payload_digest: ardur_receipt::Sha256Digest::of(&payload_bytes),
-        session_id: None,
-        // A grant costs nothing — it is an authorization record, not a turn.
-        cost: ardur_receipt::CostTuple {
-            tokens_in: 0,
-            tokens_out: 0,
-            cents: 0,
-            wall_ms: 0,
-            attention_score: 0,
-        },
-        tool_calls: Vec::new(),
-        provider: None,
-    };
-    let receipt_id = body.receipt_id;
-    let signed = ardur_receipt::ReceiptSigner::sign(body, &signing_key)
-        .map_err(|e| CliError::State(format!("signing grant receipt: {e}")))?;
-
-    append_receipt_line(&receipt_log, signed.jws_compact())?;
-    Ok(receipt_id)
-}
-
-/// Append one compact-JWS receipt line to the chain log, preserving the
-/// newline-delimited format `load_persisted_chain` reads. Rewrites the file
-/// atomically (the local chain is small) rather than opening in append mode, so
-/// a crash mid-write cannot leave a torn tail.
-fn append_receipt_line(receipt_log: &Path, jws_compact: &str) -> Result<(), CliError> {
-    let mut contents = match read_string_no_follow(receipt_log) {
-        Ok(existing) => existing,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(e) => return Err(CliError::Io(e)),
-    };
-    if !contents.is_empty() && !contents.ends_with('\n') {
-        contents.push('\n');
-    }
-    contents.push_str(jws_compact);
-    contents.push('\n');
-    write_private_file_atomic_no_follow(receipt_log, contents.as_bytes()).map_err(CliError::Io)
+    let receipt = writer
+        .mint(
+            ardur_receipt::VerbObject::new("tool.grant.allow.v1")
+                .map_err(|e| CliError::State(format!("invalid grant verb: {e}")))?,
+            ardur_receipt::Sha256Digest::of(&payload_bytes),
+            ardur_receipt::HolderId(subject.to_string()),
+            // Operator grants are not made under a session cap-token; preserve
+            // the fixed sentinel token id rather than borrowing a turn's id.
+            ardur_receipt::TokenId(uuid::Uuid::from_bytes(*b"ardur-op-grant!!")),
+            None,
+            // A grant costs nothing: it is an authorization record, not a turn.
+            ardur_receipt::CostTuple {
+                tokens_in: 0,
+                tokens_out: 0,
+                cents: 0,
+                wall_ms: 0,
+                attention_score: 0,
+            },
+            issued_at_ms,
+        )
+        .map_err(|e| match e {
+            ardur_fused_runtime::ReceiptChainError::Io(e) => CliError::Io(e),
+            ardur_fused_runtime::ReceiptChainError::SignFailed(e) => {
+                CliError::State(format!("signing grant receipt: {e}"))
+            }
+            other => CliError::State(format!("grant receipt mint failed: {other}")),
+        })?;
+    Ok(receipt.receipt_id)
 }
 
 // ---------------------------------------------------------------------------
