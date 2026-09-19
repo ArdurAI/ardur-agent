@@ -165,6 +165,20 @@ pub struct StepContext<'a> {
     pub evidence_level: EvidenceLevel,
     /// Preceding receipt in this lineage (`None` at the root).
     pub parent: Option<&'a SignedExecutionReceipt>,
+    /// Remaining budget per effect-class bucket, keyed by the SHARED
+    /// effect-bucket registry vocabulary (#545). When supplied, this is the
+    /// `budget_remaining` the ER carries — validated through
+    /// [`crate::effect_bucket_registry`], so a key outside the normative
+    /// five-class namespace fails projection instead of reaching a verifier
+    /// as an invented bucket.
+    ///
+    /// `None` (the legacy form) keeps the cap-token's single economic scalar
+    /// under the `cost` key. That key is NOT a normative bucket: §5.4
+    /// requires lineage budgets in the effect-class namespace, so a receipt
+    /// with `cost` alone carries no MIC-State budget claim — it is an
+    /// economic axis, per #545's "native cents/tokens remain separate
+    /// economic axes" rule.
+    pub per_class_budget_remaining: Option<&'a BTreeMap<String, u64>>,
 }
 
 /// Project a governed step into an [`ExecutionReceipt`]. `grant_id` is the
@@ -243,8 +257,19 @@ pub fn project_execution_receipt(
         ),
     };
 
-    let mut budget_remaining = BTreeMap::new();
-    budget_remaining.insert("cost".to_string(), claims.budget_remaining);
+    let budget_remaining = match &step.per_class_budget_remaining {
+        Some(per_class) => crate::effect::project_budget_remaining(
+            per_class,
+            &crate::effect::effect_bucket_registry(),
+        )?,
+        None => {
+            // Legacy economic scalar: NOT a normative bucket (§5.4) — see
+            // StepContext::per_class_budget_remaining. Retained because the
+            // cap-token budget is one axis and inventing five buckets from
+            // it would be the opposite dishonesty.
+            BTreeMap::from([("cost".to_string(), claims.budget_remaining)])
+        }
+    };
 
     let policy_decisions = vec![PolicyDecision {
         backend: "cap-token".to_string(),

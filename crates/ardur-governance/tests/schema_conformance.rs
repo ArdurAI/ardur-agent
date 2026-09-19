@@ -337,6 +337,43 @@ fn the_native_chain_field_is_a_hex_sha256_of_the_previous_jwt() {
 
 #[test]
 #[ignore = "requires the governance-plane schema on disk"]
+fn a_registry_projected_budget_remaining_map_is_schema_legal() {
+    // #545: when the ER adapter projects per-class budgets through the
+    // shared registry, the resulting budget_remaining keys must satisfy the
+    // schema's propertyNames pattern — the normative class names do, and an
+    // adapter that somehow emitted an invented name must be caught HERE,
+    // before an external verifier sees it.
+    let Some(schema) = load_schema() else { return };
+    let mut receipt = compliant_receipt();
+    receipt.budget_remaining = [
+        ("read".to_string(), 40),
+        ("write".to_string(), 0),
+        ("network".to_string(), 3),
+        ("exec".to_string(), 7),
+        ("external_send".to_string(), 1),
+    ]
+    .into_iter()
+    .collect();
+    if let Err(errors) = validate(&schema, &receipt) {
+        panic!("registry-keyed budget_remaining failed schema validation: {errors:#?}");
+    }
+
+    // The negative control: an invented key violates the propertyNames
+    // charset/shape only if the schema forbids it — the pattern
+    // `^[A-Za-z0-9._:-]{1,64}$` admits any such string, so the GUARD is the
+    // registry check at projection time (pinned in effect_registry.rs).
+    // What the schema DOES require: non-negative integer values.
+    let mut negative = compliant_receipt();
+    negative.budget_remaining = [("bad key!".to_string(), 1)].into_iter().collect();
+    // `bad key!` contains a space and `!` — outside the propertyNames charset.
+    // Our validator does not implement propertyNames; assert the guard that
+    // does: the registry rejects the key.
+    assert!(ardur_governance::EffectClass::from_wire("bad key!").is_none());
+    let _ = negative;
+}
+
+#[test]
+#[ignore = "requires the governance-plane schema on disk"]
 fn an_absent_required_key_is_reported_even_for_nullable_parent_fields() {
     // A null VALUE is legal at the chain root; an ABSENT KEY is not. Exempting
     // absence too would hide serialization drift that drops the field which

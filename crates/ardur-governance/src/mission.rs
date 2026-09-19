@@ -36,6 +36,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
+use crate::effect::REGISTRY_EFFECT_CLASSES;
 use crate::hash::sha256_hex;
 use crate::jcs;
 
@@ -149,6 +150,13 @@ pub enum MissionAuthoringError {
     /// The declaration could not be canonicalized for hashing.
     #[error("canonicalizing the mission payload failed: {0}")]
     Canonicalization(String),
+    /// A budget key is not an effect-bucket registry class (#545).
+    #[error(
+        "budget key `{0}` is not one of the five effect-bucket registry classes \
+         (read/write/network/exec/external_send); nonportable bucket names \
+         cannot declare lineage budgets"
+    )]
+    UnknownBudgetClass(String),
 }
 
 /// A resource policy: which family, which pattern, what sensitivity.
@@ -511,6 +519,21 @@ pub fn author_mission_declaration(
 
     if tools.is_empty() {
         return Err(MissionAuthoringError::NoGrantedTools);
+    }
+
+    // #545 / GOV-06: budget keys outside the shared effect-bucket registry
+    // are refused. `tokens`, `cost`, `egress`, `tool_exec` — the D1 adapter
+    // vocabularies — would declare lineage budgets no verifier can normalize
+    // (§5.4: the buckets MUST use the MD effect-class namespace), and the
+    // pre-#545 author silently DROPPED them into zeroed classes: a budget
+    // the operator believes they set was never set at all.
+    for key in budgets.keys() {
+        if !REGISTRY_EFFECT_CLASSES
+            .iter()
+            .any(|class| class.as_str() == key)
+        {
+            return Err(MissionAuthoringError::UnknownBudgetClass(key.clone()));
+        }
     }
 
     // JCS preserves array order, so ledger record order would otherwise change

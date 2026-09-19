@@ -178,14 +178,19 @@ jobs:
           ARDUR_MD_SCHEMA: ${{ runner.temp }}/specs/mission-declaration-v0.1.schema.json
         run: |
           set -euo pipefail
-          out="$(cargo test -p ardur-governance --test schema_conformance -- --ignored --nocapture 2>&1)"
-          echo "$out"
-          # A skip here would mean the schemas were not found and the job
-          # certified nothing — treat it as a failure, not a pass.
-          if grep -q "SKIPPED" <<<"$out"; then
-            echo "::error::schema tests skipped; the schema was not found"
-            exit 1
-          fi
+          # #545: the effect-bucket registry suites validate against the same
+          # pinned schemas (class namespace, budget_remaining keys, authored
+          # MD budget rules) and must not skip either.
+          for suite in schema_conformance effect_schema_conformance; do
+            out="$(cargo test -p ardur-governance --test "$suite" -- --ignored --nocapture 2>&1)"
+            echo "$out"
+            # A skip here would mean the schemas were not found and the job
+            # certified nothing — treat it as a failure, not a pass.
+            if grep -q "SKIPPED" <<<"$out"; then
+              echo "::error::$suite skipped; the schema was not found"
+              exit 1
+            fi
+          done
 
   qdrant-integration:
     # §7.0 Phase 2: the durable/hybrid Qdrant memory backend needs a live Qdrant,

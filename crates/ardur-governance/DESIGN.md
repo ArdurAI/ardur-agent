@@ -73,7 +73,26 @@ Mapping decisions (all in code, all tested):
 - **`grant_id` = cap-token `VerifiedClaims.token_id`** (UUIDv4 satisfies ER
   `idString`). `actor` = `subject` (SPIFFE-style URI; a naming convention, not
   an attested SVID — see `SECURITY.md`). `budget_remaining` =
-  `{"cost": <remaining>}`.
+  `{"cost": <remaining>}` on the legacy path; #545 adds the registry path —
+  `StepContext::per_class_budget_remaining` projects per-class keys through
+  the shared effect-bucket registry (`src/effect.rs`), where a key outside
+  the normative five-class namespace fails projection.
+- **Effect-bucket registry (#545 / GOV-06 / D1).** ONE versioned table
+  (`effect-bucket-registry.v1`, `src/effect.rs`) maps the native
+  `CostTuple` axes onto the normative MIC effect classes and is shared by
+  the MD author (budget keys must be registry classes), the emitter
+  vocabulary (`normalize_effect_class` covers the §6.2 side-effect
+  taxonomy; cross-crate agreement pinned against
+  `ardur-observed-events`), and the ER adapter (`budget_remaining` keys).
+  Native `cents` and `wall_ms` stay ECONOMIC axes — zero bucket
+  contribution — and no owner-selected cost control changes. Units are
+  steps, rounding is floor (never ceil: no invented usage), reservation/
+  commit/refund/fail conserve, sibling carves bound children by their own
+  ceilings (§5.5/§9.4), replayed settles and corrupt serialized ledgers
+  are refused, and a descriptor change must carry a new version. Mapping:
+  `read ← tokens_in (1/1)`, `write ← tokens_out (1/1)`,
+  `exec ← milli_attention (1/1000)`; `network` and `external_send` have
+  no native axis in v1 (emitter-classified steps only).
 - **Verdict/denial mapping** follows verifier-contract §9 fail-closed table:
   cap-token `Expired`/`AudienceMismatch`/`ToolNotAllowed` → `violation` +
   `policy_denied`; `BudgetExhausted` → `violation` + `budget_exhausted`;

@@ -103,6 +103,7 @@ fn compliant_tool_call_projects_a_verifiable_execution_receipt_chain() {
             ttl_secs: 300,
             evidence_level: EvidenceLevel::SelfSigned,
             parent: None,
+            per_class_budget_remaining: None,
         },
     )
     .expect("project root ER");
@@ -139,6 +140,7 @@ fn compliant_tool_call_projects_a_verifiable_execution_receipt_chain() {
             ttl_secs: 300,
             evidence_level: EvidenceLevel::SelfSigned,
             parent: Some(&signed0),
+            per_class_budget_remaining: None,
         },
     )
     .expect("project child ER");
@@ -240,6 +242,7 @@ fn denied_tool_call_projects_a_violation_receipt_with_denial_vocabulary() {
             ttl_secs: 300,
             evidence_level: EvidenceLevel::SelfSigned,
             parent: None,
+            per_class_budget_remaining: None,
         },
     )
     .expect("project violation ER");
@@ -395,6 +398,7 @@ fn attenuated_grant_narrows_the_receipt_and_enforcement_authority() {
             ttl_secs: 300,
             evidence_level: EvidenceLevel::SelfSigned,
             parent: None,
+            per_class_budget_remaining: None,
         },
     )
     .unwrap();
@@ -444,5 +448,79 @@ fn a_missing_proof_and_a_wrong_key_stay_distinguishable() {
         code(&missing),
         code(&wrong),
         "collapsing these hides a stolen-token signal behind a config error"
+    );
+}
+
+// #545 / GOV-06: the ER adapter path projects per-class budget_remaining
+// through the SHARED effect-bucket registry — the same table the MD author
+// declares under — and refuses invented bucket names at projection time.
+#[test]
+fn registry_budgets_flow_through_the_er_adapter_path() {
+    let (claims, _token) = issue_and_verify("shell.run", vec!["shell.run".to_string()], 1000, 10);
+    let claims = claims.expect("cap-token verifies");
+
+    let args = json!({ "cmd": "ls", "args": ["-la"], "cwd": "/work" });
+    let call = ToolInvocation {
+        tool: "shell.run",
+        action_class: ActionClass::Read,
+        target: "/work",
+        resource_family: "filesystem",
+        side_effect_class: SideEffectClass::None,
+        arguments: &args,
+    };
+
+    let per_class: BTreeMap<String, u64> = [("read".to_string(), 40), ("exec".to_string(), 7)]
+        .into_iter()
+        .collect();
+
+    let er = project_execution_receipt(
+        &claims,
+        &call,
+        &AuthOutcome::Compliant,
+        &StepContext {
+            verifier_id: VERIFIER_ID,
+            iss: VERIFIER_ID,
+            trace_id: TRACE_ID,
+            run_nonce: RUN_NONCE,
+            step_id: "step-reg-0",
+            timestamp_millis: 1_700_000_000_000,
+            ttl_secs: 300,
+            evidence_level: EvidenceLevel::SelfSigned,
+            parent: None,
+            per_class_budget_remaining: Some(&per_class),
+        },
+    )
+    .expect("projects with registry budgets");
+
+    assert_eq!(er.budget_remaining.get("read"), Some(&40));
+    assert_eq!(er.budget_remaining.get("exec"), Some(&7));
+    assert!(
+        !er.budget_remaining.contains_key("cost"),
+        "the registry path replaces the legacy economic `cost` key"
+    );
+
+    // An invented bucket name is refused at PROJECTION, never signed.
+    let invented: BTreeMap<String, u64> = [("egress".to_string(), 1)].into_iter().collect();
+    let err = project_execution_receipt(
+        &claims,
+        &call,
+        &AuthOutcome::Compliant,
+        &StepContext {
+            verifier_id: VERIFIER_ID,
+            iss: VERIFIER_ID,
+            trace_id: TRACE_ID,
+            run_nonce: RUN_NONCE,
+            step_id: "step-reg-1",
+            timestamp_millis: 1_700_000_000_000,
+            ttl_secs: 300,
+            evidence_level: EvidenceLevel::SelfSigned,
+            parent: None,
+            per_class_budget_remaining: Some(&invented),
+        },
+    )
+    .expect_err("an invented bucket name must fail projection");
+    assert!(
+        err.to_string().contains("egress"),
+        "the error names the invented key: {err}"
     );
 }
