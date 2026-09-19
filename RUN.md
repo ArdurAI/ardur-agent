@@ -20,6 +20,16 @@ the originating Slack channel.
   default.
 - Docker + Docker Compose (local dev) or any Docker host (production).
 
+## Opt-in full-screen CLI chat
+
+`ARDUR_TUI=1 ardur chat` enters the M1 full-screen terminal consumer. This is
+an environment opt-in, not an `ardur tui` subcommand; unflagged chat keeps the
+rich REPL. It uses the same fused pipeline, policy, receipts and durable journal.
+Both input and output must be terminals. Approval prompts are informational;
+decisions stay in the existing `ardur approvals` commands outside the TUI.
+See [full-screen chat](docs/cli/tui-m1.md) for keys, honest status labels,
+`NO_COLOR`, terminal cleanup, display limits and focused tests.
+
 ## Selecting a provider
 
 Both `ardur-server` and the `ardur` CLI pick their model backend at boot from
