@@ -48,7 +48,7 @@
 //! | binary not found on `PATH` | [`Upstream`](ProviderError::Upstream) ("Hermes Agent CLI not installed …") |
 //! | no usable model / not logged in | [`Unauthorized`](ProviderError::Unauthorized) |
 //! | turn exceeded `request_timeout` | [`NetworkFailure`](ProviderError::NetworkFailure) (its docs name timeouts) |
-//! | non-zero exit / `result.error` | [`Upstream`](ProviderError::Upstream) (stderr / error verbatim) |
+//! | non-zero exit / `result.error` | [`Upstream`](ProviderError::Upstream) (stderr / error, secret-redacted) |
 //! | turn finished with empty text | [`Upstream`](ProviderError::Upstream) |
 //!
 //! # Not in this phase
@@ -79,6 +79,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
+use ardur_session_journals::{default_secret_patterns, redact_text};
 use ardur_provider_runtime::{
     CompletionRequest, CompletionResponse, FinishReason, ModelId, Provider, ProviderError,
     RateCard, Usage,
@@ -417,12 +418,19 @@ impl HermesProvider {
                     .as_deref()
                     .unwrap_or("hermes exited with a non-zero status")
             };
-            if looks_like_auth_error(detail) || looks_like_auth_error(&stderr_text) {
+            if looks_like_auth_error(detail)
+                || looks_like_auth_error(&stderr_text)
+                || parsed
+                    .error
+                    .as_deref()
+                    .is_some_and(looks_like_auth_error)
+            {
                 return Err(ProviderError::Unauthorized);
             }
             let code = status
                 .code()
                 .map_or_else(|| "signal".to_string(), |c| c.to_string());
+            let detail = redact_child_diagnostic(detail);
             return Err(ProviderError::Upstream(format!(
                 "hermes exited with status {code}: {detail}"
             )));
@@ -432,6 +440,7 @@ impl HermesProvider {
             if looks_like_auth_error(err) || looks_like_auth_error(&stderr_text) {
                 return Err(ProviderError::Unauthorized);
             }
+            let err = redact_child_diagnostic(err);
             return Err(ProviderError::Upstream(format!(
                 "hermes reported an error: {err}"
             )));
@@ -446,6 +455,7 @@ impl HermesProvider {
             if looks_like_auth_error(detail) {
                 return Err(ProviderError::Unauthorized);
             }
+            let detail = redact_child_diagnostic(detail);
             return Err(ProviderError::Upstream(format!(
                 "hermes result exit_code {}: {detail}",
                 parsed.exit_code.unwrap_or(-1)
@@ -559,6 +569,14 @@ async fn spawn_hermes(cmd: &mut tokio::process::Command) -> std::io::Result<toki
             Err(e) => return Err(e),
         }
     }
+}
+
+
+/// Strip secret-shaped substrings from a child diagnostic before it enters a
+/// [`ProviderError`]. Hermes (or a shim) may echo an API key in stderr / the
+/// stream-json `result.error`; AGENTS.md forbids surfacing those values.
+fn redact_child_diagnostic(detail: &str) -> String {
+    redact_text(detail, &default_secret_patterns())
 }
 
 /// Whether a child diagnostic describes a *credential* failure rather than a
@@ -730,6 +748,25 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn child_diagnostics_are_redacted_before_entering_upstream_errors() {
+        let raw = "rate limit exceeded for API key sk-abcdefghijklmnopqrstuvwxyz012345";
+        let redacted = redact_child_diagnostic(raw);
+        assert!(
+            !redacted.contains("sk-abcdefghijklmnopqrstuvwxyz012345"),
+            "secret must not survive redaction: {redacted}"
+        );
+        assert!(
+            redacted.contains("<REDACTED>"),
+            "expected redaction marker, got: {redacted}"
+        );
+        assert!(
+            redacted.contains("rate limit exceeded"),
+            "non-secret text must remain: {redacted}"
+        );
+    }
+
 
     #[test]
     fn request_model_wins_over_config_default() {

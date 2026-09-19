@@ -1138,6 +1138,7 @@ version = "0.0.1"
 dependencies = [
  "ardur-provider-runtime",
  "ardur-runtime",
+ "ardur-session-journals",
  "async-trait",
  "serde_json",
  "tempfile",
