@@ -66,12 +66,57 @@ pub fn render_markdown_with(src: &str, theme: &Theme, width: usize, osc8: bool) 
     render_doc(src, theme, width, style)
 }
 
+/// Adapt parsed text for a cell renderer before trusted styling is generated.
+/// The ordinary REPL path does not transform its AST or change its bytes.
+/// Mapping after parsing also covers entity-expanded controls and Unicode,
+/// without re-parsing decoded punctuation as Markdown syntax.
+pub(crate) fn render_markdown_for_cells(
+    src: &str,
+    theme: &Theme,
+    width: usize,
+    mut transform: impl FnMut(&str) -> String,
+) -> String {
+    render_doc_mapped(
+        src,
+        theme,
+        width,
+        LinkStyle::Parenthetical,
+        Some(&mut transform),
+    )
+}
+
 fn render_doc(src: &str, theme: &Theme, width: usize, links: LinkStyle) -> String {
+    render_doc_mapped(src, theme, width, links, None)
+}
+
+fn render_doc_mapped(
+    src: &str,
+    theme: &Theme,
+    width: usize,
+    links: LinkStyle,
+    mut transform: Option<&mut dyn FnMut(&str) -> String>,
+) -> String {
     let arena = Arena::new();
     let mut options = Options::default();
     options.extension.table = true;
     options.extension.strikethrough = true;
     let root = parse_document(&arena, src, &options);
+    if let Some(transform) = transform.as_mut() {
+        for node in root.descendants() {
+            match &mut node.data.borrow_mut().value {
+                NodeValue::Text(text) => *text = transform(text).into(),
+                NodeValue::Code(code) => code.literal = transform(&code.literal),
+                NodeValue::CodeBlock(code) => {
+                    code.literal = transform(&code.literal);
+                    code.info = transform(&code.info);
+                }
+                NodeValue::Link(link) | NodeValue::Image(link) => {
+                    link.url = transform(&link.url);
+                }
+                _ => {}
+            }
+        }
+    }
     let ctx = Ctx {
         theme,
         width: width.max(crate::util::MIN_WIDTH),

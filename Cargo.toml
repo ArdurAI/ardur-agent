@@ -120,6 +120,13 @@ features = [ "parsing", "default-syntaxes", "default-themes", "regex-fancy",]
 version = "0.29"
 default-features = false
 
+# 0.28 retains MSRV 1.74 and coexists with rustyline's unicode-width 0.2.
+# The backend uses crossterm 0.28; terminal events use the existing 0.29.
+[workspace.dependencies.ratatui]
+version = "0.28.1"
+default-features = false
+features = ["crossterm"]
+
 [workspace.dependencies.rmcp]
 version = "=3.2.0"
 default-features = false

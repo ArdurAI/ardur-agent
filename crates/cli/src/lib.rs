@@ -48,6 +48,7 @@ mod state;
 mod stream;
 mod theme;
 mod toolbox;
+mod tui;
 mod update;
 mod util;
 mod welcome;
@@ -293,6 +294,9 @@ impl ReplState {
 /// Run the interactive chat REPL: load config, wire the engine, register the
 /// slash-commands, and loop reading lines until `/quit`, EOF, or interrupt.
 pub fn run_chat(args: ChatArgs) -> Result<(), CliError> {
+    if tui::validate_env(&args)? {
+        return tui::run(args);
+    }
     // Telemetry: when `ARDUR_OTEL_ENABLED=true`, stand up the OpenTelemetry GenAI
     // pipeline (OTLP exporter + layered subscriber) so provider spans export to an
     // OTLP backend; otherwise install the plain stderr console subscriber. Only

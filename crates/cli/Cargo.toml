@@ -76,7 +76,10 @@ futures = { workspace = true }
 # lives in the workspace manifest.
 comrak = { workspace = true }
 syntect = { workspace = true }
-crossterm = { workspace = true }
+crossterm = { workspace = true, features = ["event-stream", "bracketed-paste"] }
+ratatui = { workspace = true }
+unicode-segmentation = "1.13.3"
+unicode-width = "0.2.2"
 
 anyhow = { workspace = true }
 async-trait = { workspace = true }

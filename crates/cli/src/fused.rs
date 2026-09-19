@@ -383,6 +383,16 @@ impl SettlementLifecycle {
     }
 }
 
+/// A borrowed event source: callers cannot retain or detach its owner.
+type FusedSource<'s> = std::pin::Pin<
+    &'s mut (
+                dyn futures::Stream<
+        Item = Result<ardur_fused_runtime::FusedEvent, ardur_runtime::RuntimeError>,
+    > + Send
+                    + 's
+            ),
+>;
+
 /// A FusedRuntime-backed chat substrate for one interactive session.
 pub struct FusedEngine {
     runtime: ardur_fused_runtime::FusedRuntime,
@@ -971,24 +981,57 @@ impl FusedEngine {
         out: &mut W,
         ctx: &crate::stream::RenderCtx<'_>,
     ) -> std::io::Result<StreamOutcome> {
+        self.consume_stream(messages, async |stream| {
+            drive_fused_turn(stream, out, ctx).await
+        })
+        .await
+    }
+
+    /// One owner for both terminal consumers. Only a pinned borrow escapes to
+    /// the consumer: the actual source is dropped before settlement is drained.
+    /// Callers must retain `settlements` outside any cancellable outer future.
+    pub(crate) async fn consume_stream<T>(
+        &self,
+        messages: &[ChatMessage],
+        consume: impl for<'s> AsyncFnOnce(FusedSource<'s>) -> std::io::Result<T>,
+    ) -> std::io::Result<T> {
         self.settlements
             .drain()
             .await
             .map_err(std::io::Error::other)?;
         let outcome = {
-            let stream = self.runtime.stream(SubmitRequest {
+            let source = self.runtime.stream(SubmitRequest {
                 messages: messages.to_vec(),
                 cap_token: self.cap_token.clone(),
                 session_id: self.session_id,
                 requested_provider: None,
             });
-            drive_fused_turn(stream, out, ctx).await
-        };
-
+            futures::pin_mut!(source);
+            consume(source).await
+        }; // the owning source, not just the pin, is gone here
+        let result = self.settlements.after(outcome, std::io::Error::other).await;
         if let Some(balance) = self.runtime.remaining_budget(&self.holder).await {
             self.remaining.store(balance.cents, Ordering::SeqCst);
         }
-        self.settlements.after(outcome, std::io::Error::other).await
+        result
+    }
+
+    /// Receipt notifications can lag durable commit. Rebuild from the journal
+    /// after the owning stream has dropped and drained, including on cancel or
+    /// output failure. Never promote display-only deltas into the next request.
+    pub(crate) async fn reconcile_history(
+        &self,
+        history: &mut Vec<ChatMessage>,
+    ) -> Result<(), CliError> {
+        self.settlements.drain().await?;
+        let entries = self
+            .settlements
+            .journal
+            .replay(self.session_id)
+            .await
+            .map_err(|_| CliError::State("could not reconcile durable chat history".into()))?;
+        *history = crate::journal_entries_to_history(&entries);
+        Ok(())
     }
 
     /// Run one chat turn over `messages` through the full fused pipeline, then
@@ -1240,6 +1283,61 @@ impl ardur_tool_registry::Tool for ArcTool {
 #[cfg(test)]
 mod grant_tooling_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn tui_cancel_between_durable_commit_and_receipt_keeps_history() {
+        use futures::StreamExt;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let dirs = StateDirs {
+            root: root.clone(),
+            memory: root.join("memory"),
+            journals: root.join("journals"),
+            receipts: root.join("receipts"),
+            keys: root.join("keys"),
+        };
+        dirs.create().unwrap();
+        dirs.write_starter_cedar_policy_if_absent().unwrap();
+        let engine = FusedEngine::new(&Config::default(), &dirs, 100)
+            .await
+            .unwrap();
+        let mut history = vec![ChatMessage::user("durable local turn")];
+        let outcome = engine
+            .consume_stream(&history, async |stream| {
+                let mut updates = crate::UpdateStream::new(stream);
+                while let Some(update) = updates.next().await {
+                    if matches!(
+                        update,
+                        crate::Update::StageEnd {
+                            stage: ardur_fused_runtime::StageKind::CostGateFinalize,
+                            ok: true
+                        }
+                    ) {
+                        let outcome = updates.into_outcome();
+                        assert!(outcome.receipt_ids.is_empty(), "stop before notification");
+                        assert!(!outcome.content.is_empty(), "provider really ran");
+                        return Ok(outcome);
+                    }
+                }
+                panic!("did not reach the committed, pre-notification boundary");
+            })
+            .await
+            .unwrap();
+        assert!(outcome.receipt_ids.is_empty());
+        engine.reconcile_history(&mut history).await.unwrap();
+        assert_eq!(
+            history.len(),
+            2,
+            "must read durable history, not receipt visibility"
+        );
+        assert_eq!(history[1].content, outcome.content);
+        let status = engine.settlement_supervisor().status();
+        assert!(
+            status.turns.is_empty() && status.busy.is_none() && status.executing.is_none(),
+            "owning stream must drop before drain: {status:?}"
+        );
+        engine.shutdown().await.unwrap();
+    }
 
     #[tokio::test]
     async fn broken_output_drains_owning_stream_before_returning_original_error() {
