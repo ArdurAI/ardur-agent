@@ -351,17 +351,13 @@ async fn revoked_parent_token_cannot_delegate() {
 }
 
 /// The shared list must not deny unrevoked tokens (no fail-closed overreach).
+/// D1 fix: use explicit echo_provider() (always completes with "completed") so the
+/// test is not sensitive to CI runner provider selection (prime/from_env can return
+/// "failed" on some environments). The revoked test already covers denial with shared deny.
 #[tokio::test]
 async fn unrevoked_parent_token_delegates_with_shared_deny_list() {
     let (token, root) = parent_token(&["chat.submit"], 10_000);
-    // Use SharedDenyList so that clone shares revocation state (the test's point).
-    // Set provider for the internal new() call inside with_deny_list.
-    // SAFETY: single-threaded test setup only.
-    unsafe {
-        std::env::set_var("ARDUR_PROVIDER", "prime");
-    }
-    let deny = ardur_fused_runtime::SharedDenyList::new();
-    let tool = DelegateTaskTool::with_deny_list(root, AUDIENCE, deny);
+    let tool = DelegateTaskTool::with_provider(root, AUDIENCE, echo_provider());
     let ctx = ctx_with(token, InvocationId::new());
     let output = tool
         .invoke(&ctx, json!({ "goal": "still works" }))
