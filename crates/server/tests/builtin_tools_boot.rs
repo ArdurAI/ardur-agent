@@ -36,7 +36,9 @@ async fn assemble(opts: BuiltinOpts) -> ToolRegistry {
     // these tests never mint/verify tokens, so any valid Ed25519 public key works.
     let cap_root = KeyPair::new().public();
     assemble_tool_registry(
-        "stub",
+        std::sync::Arc::new(ardur_provider_runtime::AnthropicProvider::stub(
+            ardur_provider_runtime::ModelId::new("stub"),
+        )) as std::sync::Arc<dyn ardur_provider_runtime::Provider>,
         "in-memory",
         &[] as &[PathBuf],
         &[],

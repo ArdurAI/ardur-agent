@@ -30,6 +30,7 @@ use ardur_media_audio::{VoiceTranscribeTool, WhisperApiTranscriptionProvider};
 use ardur_media_video::{
     GeminiVideoAnalyzeProvider, VideoAnalyzeTool, VideoDescribeTool, VideoGenerateTool,
 };
+use ardur_provider_runtime::Provider;
 use ardur_tool_registry::{
     ArdurMcpServer, BuiltinOpts, EchoTool, HealthCheckTool, HttpFetchTool, ListDirTool,
     ReadFileTool, RemoteMcpToolset, ShellTool, SkillLoader, SkillTool, Tool, ToolId, ToolRegistry,
@@ -249,7 +250,7 @@ fn register_hardened_builtins(registry: &mut ToolRegistry, opts: BuiltinOpts) {
 /// This required seventh argument replaces the former six-argument API; for
 /// standard server assembly prefer [`crate::AppState::boot_configured`].
 pub async fn assemble_tool_registry<P: AsRef<Path>>(
-    provider: impl Into<String>,
+    provider: Arc<dyn Provider>,
     memory_backend: impl Into<String>,
     skills_dirs: &[P],
     servers: &[(String, String)],
@@ -257,12 +258,16 @@ pub async fn assemble_tool_registry<P: AsRef<Path>>(
     builtin_opts: BuiltinOpts,
     deny: SharedDenyList,
 ) -> ToolRegistry {
-    let mut registry = example_registry(provider, memory_backend);
+    let provider_id = provider.id().0.clone();
+    let mut registry = example_registry(provider_id, memory_backend);
     // gh#361: delegate_task children verify every turn against the SAME deny
     // list the fused runtime revokes through — a revoked caller's live
-    // delegations stop at their next turn.
-    if let Err(e) = registry.register(Box::new(DelegateTaskTool::with_deny_list(
-        cap_root, AUDIENCE, deny,
+    // delegations stop at their next turn. The provider is the SAME injected
+    // handle the runtime was booted with (never a second, env-derived
+    // backend), so a stubbed or embedded server delegates through its own
+    // stub and a revoked caller's children stop at the next boundary.
+    if let Err(e) = registry.register(Box::new(DelegateTaskTool::with_deny_list_and_provider(
+        cap_root, AUDIENCE, deny, provider,
     ))) {
         tracing::warn!(error = %e, "skipping delegate_task tool registration");
     }
