@@ -31,6 +31,7 @@ upstream source, and carries its license text alongside the copied file.
 
 | Component | Relationship | Notes |
 | --- | --- | --- |
+| `crates/provider-hermes` | **Wrapped** (subprocess) | Spawns the `hermes` CLI in one-shot chat (`hermes chat --oneshot --query-file - --format stream-json`) with tools denied by default (`--toolsets ""`). No upstream source is copied. Protocol observed against Hermes Agent CLI docs (stream-json `result` event). |
 | Skill format (`SKILL.md`) | **Format compatibility** | Ardur's skill loader reads the same `SKILL.md` frontmatter + markdown layout, so an existing Hermes skills library can be consumed via `ARDUR_SKILLS_DIRS`. No upstream source is copied. |
 
 ---

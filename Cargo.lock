@@ -1133,6 +1133,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ardur-provider-hermes"
+version = "0.0.1"
+dependencies = [
+ "ardur-provider-runtime",
+ "ardur-runtime",
+ "ardur-session-journals",
+ "async-trait",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "ardur-provider-ollama"
 version = "0.0.1"
 dependencies = [
