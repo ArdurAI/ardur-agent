@@ -33,8 +33,7 @@ struct MockProvider {
     reply: String,
     cents_per_call: u64,
     fail_with: Option<ProviderErrorKind>,
-    finish_error: Option<String>,
-    finish_tool_use: bool,
+    finish_reason: FinishReason,
     rate_card: RateCard,
 }
 
@@ -52,8 +51,7 @@ impl MockProvider {
             reply: reply.to_string(),
             cents_per_call: 1,
             fail_with: None,
-            finish_error: None,
-            finish_tool_use: false,
+            finish_reason: FinishReason::Stop,
             rate_card: RateCard {
                 version_id: "mock-test-v1".into(),
                 cents_per_1k_input: 0.0,
@@ -81,13 +79,13 @@ impl MockProvider {
     /// Return content but end the turn with a provider-reported error, the
     /// shape that made content-only completion unsafe.
     fn finishing_with_error(mut self, msg: &str) -> Self {
-        self.finish_error = Some(msg.to_string());
+        self.finish_reason = FinishReason::Error(msg.to_string());
         self
     }
 
     /// Finish with a tool request instead of a terminal answer.
     fn finishing_with_tool_use(mut self) -> Self {
-        self.finish_tool_use = true;
+        self.finish_reason = FinishReason::ToolUse(Vec::new());
         self
     }
 
@@ -108,14 +106,7 @@ impl Provider for MockProvider {
             }
             None => Ok(CompletionResponse {
                 content: self.reply.clone(),
-                finish_reason: if self.finish_tool_use {
-                    FinishReason::ToolUse(Vec::new())
-                } else {
-                    match &self.finish_error {
-                        Some(msg) => FinishReason::Error(msg.clone()),
-                        None => FinishReason::Stop,
-                    }
-                },
+                finish_reason: self.finish_reason.clone(),
                 usage: Usage {
                     tokens_in: 10,
                     tokens_out: 5,
@@ -721,6 +712,77 @@ async fn a_completed_round_is_accounted_even_when_a_cancel_arrives_together() {
             "otherwise it must be an honest cancellation, got {outcome:?}"
         );
     }
+}
+
+async fn assert_max_tokens_is_failed(reply: &str) {
+    let mut provider = MockProvider::new(reply).cents(3);
+    provider.finish_reason = FinishReason::MaxTokens;
+    let provider = Arc::new(provider);
+    let counter = provider.counter();
+    let sup = ChildSupervisor::new(Arc::clone(&provider), Box::new(HashSetDenyList::new()));
+    let parent = ParentBudget::new(100);
+    let reservation = parent.reserve(10).expect("reservation fits");
+    let child = sup
+        .spawn(spec("bounded answer", reservation, 4))
+        .await
+        .expect("spawns");
+    let outcome = child.join().await.expect("worker joins");
+
+    match &outcome {
+        ChildOutcome::Failed { reason, .. } => assert!(
+            reason.contains("max_tokens"),
+            "must identify truncation, not an unrelated failure: {reason}"
+        ),
+        other => panic!("MaxTokens must fail, never complete or retry: {other:?}"),
+    }
+    assert_eq!(outcome.verb(), CHILD_CANCELLED_VERB);
+    assert_eq!(outcome.rounds(), 1);
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        1,
+        "no retry after truncation"
+    );
+    assert_eq!(
+        outcome.cost().cents,
+        3,
+        "the truncated round was still billed"
+    );
+    assert_eq!(
+        parent.available_cents(),
+        97,
+        "release only unspent allowance"
+    );
+}
+
+#[tokio::test]
+async fn max_tokens_with_partial_text_is_failed_with_actual_cost() {
+    assert_max_tokens_is_failed("unfinished answer").await;
+}
+
+#[tokio::test]
+async fn max_tokens_without_text_is_failed_without_retrying() {
+    assert_max_tokens_is_failed("").await;
+}
+
+#[tokio::test]
+async fn stop_sequence_with_text_remains_a_successful_completion() {
+    let mut provider = MockProvider::new("accepted answer").cents(3);
+    provider.finish_reason = FinishReason::StopSequence("END".into());
+    let sup = ChildSupervisor::new(Arc::new(provider), Box::new(HashSetDenyList::new()));
+    let parent = ParentBudget::new(100);
+    let child = sup
+        .spawn(spec("answer", parent.reserve(10).expect("fits"), 4))
+        .await
+        .expect("spawns");
+    let outcome = child.join().await.expect("worker joins");
+    assert!(
+        outcome.is_success(),
+        "an accepted stop stays valid: {outcome:?}"
+    );
+    assert_eq!(outcome.verb(), CHILD_COMPLETED_VERB);
+    assert_eq!(outcome.rounds(), 1);
+    assert_eq!(outcome.cost().cents, 3);
+    assert_eq!(parent.available_cents(), 97);
 }
 
 /// A tool request is not a terminal answer: the child runtime has no tool

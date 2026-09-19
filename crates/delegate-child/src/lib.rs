@@ -666,33 +666,26 @@ impl<P: Provider + ?Sized + 'static> ChildSupervisor<P> {
                             };
                         }
 
-                        // Content alone is not success. A provider can emit a
-                        // partial message and THEN fail; treating non-empty
-                        // text as completion turns a failed turn into a
-                        // successful child result carrying the success verb.
-                        if let FinishReason::Error(msg) = &response.finish_reason {
+                        // Only accepted terminal reasons may complete. A
+                        // truncated answer or unsupported tool request is not
+                        // success, even if it includes text. Keep this match
+                        // exhaustive so new provider reasons require a decision.
+                        let failure = match response.finish_reason {
+                            FinishReason::Stop | FinishReason::StopSequence(_) => None,
+                            FinishReason::MaxTokens => {
+                                Some("child round reached max_tokens before completion".to_string())
+                            }
+                            FinishReason::ToolUse(calls) => Some(format!(
+                                "child round requested {} tool call(s); the child runtime \
+                                 has no tool surface",
+                                calls.len()
+                            )),
+                            FinishReason::Error(msg) => Some(msg),
+                        };
+                        if let Some(reason) = failure {
                             spec.reservation.settle();
                             return ChildOutcome::Failed {
-                                reason: msg.clone(),
-                                rounds,
-                                cost: total_cost,
-                            };
-                        }
-
-                        // A tool request is not a terminal answer either: the
-                        // child runtime has no tool surface, so "Completed"
-                        // here would report success on a nonterminal finish
-                        // reason. Fail closed instead of looping on fake
-                        // progress (empty-content continuation below stays for
-                        // genuine stop-with-no-text retriable continuations).
-                        if let FinishReason::ToolUse(calls) = &response.finish_reason {
-                            spec.reservation.settle();
-                            return ChildOutcome::Failed {
-                                reason: format!(
-                                    "child round requested {} tool call(s); the child runtime \
-                                     has no tool surface",
-                                    calls.len()
-                                ),
+                                reason,
                                 rounds,
                                 cost: total_cost,
                             };
