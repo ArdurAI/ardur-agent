@@ -1372,6 +1372,15 @@ multi-turn provider worker. Acknowledged revocation blocks subsequent verifier
 checks; it does not cancel work whose check already passed. The admin approval
 cap-token gate retains its separately documented revocation limitation.
 
+D1 (real provider children, gh#490): `delegate_task` now spawns a
+ChildSupervisor-driven provider child (wired from delegate-child crate).
+Attenuated cap-token, CAS ParentBudget reservation before spawn, per-round
+action-boundary revocation/expiry/audience checks via TokenAuthority, actual
+CostTuple settlement on success/failure/cancel/revoke. Permit held for actual
+worker lifetime via driver task. Child success requires accepted FinishReason
+(not just non-empty content). See crates/delegate-tool and delegate-child for
+semantics. (steer/stop and harness children are D2/D3.)
+
 Embedding migration (intentional integration-branch API change):
 
 - `AppState::boot` now requires the shared deny handle as its fourth argument.

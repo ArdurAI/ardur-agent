@@ -191,7 +191,7 @@ async fn a_child_runs_to_completion_and_reports_its_text() {
     );
     assert_eq!(outcome.verb(), CHILD_COMPLETED_VERB);
     match outcome {
-        ChildOutcome::Completed { text, rounds } => {
+        ChildOutcome::Completed { text, rounds, .. } => {
             assert_eq!(text, "child answer");
             assert_eq!(rounds, 1, "one round was enough");
         }
@@ -289,8 +289,14 @@ async fn a_revoked_token_stops_the_child_at_the_next_action_boundary() {
 async fn revocation_is_distinct_from_cancellation() {
     // Both stop the child, but an operator must be able to tell "I stopped it"
     // from "its authority was withdrawn".
-    let cancelled = ChildOutcome::Cancelled { rounds: 2 };
-    let revoked = ChildOutcome::Revoked { rounds: 2 };
+    let cancelled = ChildOutcome::Cancelled {
+        rounds: 2,
+        cost: CostTuple::default(),
+    };
+    let revoked = ChildOutcome::Revoked {
+        rounds: 2,
+        cost: CostTuple::default(),
+    };
     assert_ne!(cancelled, revoked, "the two outcomes must not be conflated");
     assert_eq!(
         cancelled.verb(),
@@ -359,7 +365,7 @@ async fn an_exhausted_budget_stops_the_child_without_dispatching() {
     let outcome = child.join().await.expect("joins");
 
     assert!(
-        matches!(outcome, ChildOutcome::BudgetExhausted { rounds: 0 }),
+        matches!(outcome, ChildOutcome::BudgetExhausted { rounds: 0, .. }),
         "expected BudgetExhausted before any dispatch, got {outcome:?}"
     );
     assert_eq!(
@@ -437,18 +443,29 @@ async fn only_a_clean_completion_settles_as_completed() {
     assert_eq!(
         ChildOutcome::Completed {
             text: "x".into(),
-            rounds: 1
+            rounds: 1,
+            cost: CostTuple::default(),
         }
         .verb(),
         CHILD_COMPLETED_VERB
     );
     for unfinished in [
-        ChildOutcome::Cancelled { rounds: 1 },
-        ChildOutcome::Revoked { rounds: 1 },
-        ChildOutcome::BudgetExhausted { rounds: 1 },
+        ChildOutcome::Cancelled {
+            rounds: 1,
+            cost: CostTuple::default(),
+        },
+        ChildOutcome::Revoked {
+            rounds: 1,
+            cost: CostTuple::default(),
+        },
+        ChildOutcome::BudgetExhausted {
+            rounds: 1,
+            cost: CostTuple::default(),
+        },
         ChildOutcome::Failed {
             reason: "x".into(),
             rounds: 1,
+            cost: CostTuple::default(),
         },
     ] {
         assert_eq!(
@@ -547,7 +564,7 @@ async fn a_round_limit_is_not_reported_as_budget_exhaustion() {
     let outcome = child.join().await.expect("joins");
 
     assert!(
-        matches!(outcome, ChildOutcome::RoundLimitReached { rounds: 3 }),
+        matches!(outcome, ChildOutcome::RoundLimitReached { rounds: 3, .. }),
         "expected RoundLimitReached with funds remaining, got {outcome:?}"
     );
 }

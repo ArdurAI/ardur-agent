@@ -80,11 +80,15 @@ pub enum ChildOutcome {
         text: String,
         /// Rounds actually dispatched to the provider.
         rounds: u32,
+        /// Actual cost recorded via record_spend for truthful settlement.
+        cost: CostTuple,
     },
     /// Stopped because the caller asked it to stop.
     Cancelled {
         /// Rounds completed before the stop was observed.
         rounds: u32,
+        /// Actual cost recorded (partial).
+        cost: CostTuple,
     },
     /// Stopped because its capability token was revoked.
     ///
@@ -93,6 +97,8 @@ pub enum ChildOutcome {
     Revoked {
         /// Rounds completed before the revocation was observed.
         rounds: u32,
+        /// Actual cost recorded (partial).
+        cost: CostTuple,
     },
     /// Stopped because the next round could not fit in the reserved budget.
     ///
@@ -101,6 +107,8 @@ pub enum ChildOutcome {
     BudgetExhausted {
         /// Rounds completed before the budget ran out.
         rounds: u32,
+        /// Actual cost recorded (may be the last round that fit).
+        cost: CostTuple,
     },
     /// Stopped because it used up its permitted number of rounds.
     ///
@@ -110,6 +118,8 @@ pub enum ChildOutcome {
     RoundLimitReached {
         /// The limit that was hit.
         rounds: u32,
+        /// Actual cost recorded.
+        cost: CostTuple,
     },
     /// Stopped because its capability token failed verification.
     ///
@@ -123,6 +133,8 @@ pub enum ChildOutcome {
         reason: String,
         /// Rounds completed before authority lapsed.
         rounds: u32,
+        /// Actual cost recorded (partial).
+        cost: CostTuple,
     },
     /// The provider failed and the failure is preserved, not flattened.
     Failed {
@@ -130,6 +142,8 @@ pub enum ChildOutcome {
         reason: String,
         /// Rounds completed before the failure.
         rounds: u32,
+        /// Actual cost recorded (partial).
+        cost: CostTuple,
     },
 }
 
@@ -157,12 +171,26 @@ impl ChildOutcome {
     pub fn rounds(&self) -> u32 {
         match self {
             Self::Completed { rounds, .. }
-            | Self::Cancelled { rounds }
-            | Self::Revoked { rounds }
-            | Self::BudgetExhausted { rounds }
-            | Self::RoundLimitReached { rounds }
+            | Self::Cancelled { rounds, .. }
+            | Self::Revoked { rounds, .. }
+            | Self::BudgetExhausted { rounds, .. }
+            | Self::RoundLimitReached { rounds, .. }
             | Self::Unauthorized { rounds, .. }
             | Self::Failed { rounds, .. } => *rounds,
+        }
+    }
+
+    /// Actual cost recorded for this child (sum of per-round via record_spend).
+    #[must_use]
+    pub fn cost(&self) -> CostTuple {
+        match self {
+            Self::Completed { cost, .. }
+            | Self::Cancelled { cost, .. }
+            | Self::Revoked { cost, .. }
+            | Self::BudgetExhausted { cost, .. }
+            | Self::RoundLimitReached { cost, .. }
+            | Self::Unauthorized { cost, .. }
+            | Self::Failed { cost, .. } => *cost,
         }
     }
 
@@ -520,6 +548,7 @@ impl<P: Provider + ?Sized + 'static> ChildSupervisor<P> {
         let worker = tokio::spawn(async move {
             let mut rounds: u32 = 0;
             let mut transcript = spec.prompt.clone();
+            let mut total_cost = CostTuple::default();
 
             while rounds < spec.max_rounds {
                 // ACTION BOUNDARY. Each check makes the dispatch itself
@@ -529,13 +558,19 @@ impl<P: Provider + ?Sized + 'static> ChildSupervisor<P> {
                 // supposed to be bounded by.
                 if flag.load(Ordering::SeqCst) {
                     spec.reservation.settle();
-                    return ChildOutcome::Cancelled { rounds };
+                    return ChildOutcome::Cancelled {
+                        rounds,
+                        cost: total_cost,
+                    };
                 }
                 {
                     let deny = deny_list.lock().await;
                     if deny.is_revoked(&spec.token.revocation_ids()) {
                         spec.reservation.settle();
-                        return ChildOutcome::Revoked { rounds };
+                        return ChildOutcome::Revoked {
+                            rounds,
+                            cost: total_cost,
+                        };
                     }
                     // Revocation is not authorization. Re-verify expiry,
                     // audience and issuing root too, or a token that expired
@@ -545,7 +580,11 @@ impl<P: Provider + ?Sized + 'static> ChildSupervisor<P> {
                             verify_authority(auth, &spec.token, &**deny, per_round_cents)
                     {
                         spec.reservation.settle();
-                        return ChildOutcome::Unauthorized { reason: e, rounds };
+                        return ChildOutcome::Unauthorized {
+                            reason: e,
+                            rounds,
+                            cost: total_cost,
+                        };
                     }
                 }
                 // Admit the round against the larger of the declared envelope
@@ -560,7 +599,10 @@ impl<P: Provider + ?Sized + 'static> ChildSupervisor<P> {
                 };
                 if !spec.reservation.can_afford(&projected) {
                     spec.reservation.settle();
-                    return ChildOutcome::BudgetExhausted { rounds };
+                    return ChildOutcome::BudgetExhausted {
+                        rounds,
+                        cost: total_cost,
+                    };
                 }
 
                 let request = CompletionRequest::new(
@@ -588,7 +630,10 @@ impl<P: Provider + ?Sized + 'static> ChildSupervisor<P> {
 
                 let Some(result) = result else {
                     spec.reservation.settle();
-                    return ChildOutcome::Cancelled { rounds };
+                    return ChildOutcome::Cancelled {
+                        rounds,
+                        cost: total_cost,
+                    };
                 };
 
                 rounds += 1;
@@ -600,6 +645,11 @@ impl<P: Provider + ?Sized + 'static> ChildSupervisor<P> {
                         // against an estimate would let a cheap projection
                         // authorize an expensive round.
                         spec.reservation.record_spend(&response.cost);
+                        total_cost.cents += response.cost.cents;
+                        total_cost.tokens_in += response.cost.tokens_in;
+                        total_cost.tokens_out += response.cost.tokens_out;
+                        total_cost.wall_ms += response.cost.wall_ms;
+                        total_cost.attention_score += response.cost.attention_score;
 
                         // A provider may bill above the projection. That is the
                         // moment the hard bound is breached, so stop here
@@ -607,7 +657,10 @@ impl<P: Provider + ?Sized + 'static> ChildSupervisor<P> {
                         // is already overdrawn.
                         if spec.reservation.is_overdrawn() {
                             spec.reservation.settle();
-                            return ChildOutcome::BudgetExhausted { rounds };
+                            return ChildOutcome::BudgetExhausted {
+                                rounds,
+                                cost: total_cost,
+                            };
                         }
 
                         // Content alone is not success. A provider can emit a
@@ -619,6 +672,7 @@ impl<P: Provider + ?Sized + 'static> ChildSupervisor<P> {
                             return ChildOutcome::Failed {
                                 reason: msg.clone(),
                                 rounds,
+                                cost: total_cost,
                             };
                         }
 
@@ -627,6 +681,7 @@ impl<P: Provider + ?Sized + 'static> ChildSupervisor<P> {
                             return ChildOutcome::Completed {
                                 text: response.content,
                                 rounds,
+                                cost: total_cost,
                             };
                         }
                         transcript.push_str("\n(continue)");
@@ -639,6 +694,7 @@ impl<P: Provider + ?Sized + 'static> ChildSupervisor<P> {
                         return ChildOutcome::Failed {
                             reason: "unauthorized".to_string(),
                             rounds,
+                            cost: total_cost,
                         };
                     }
                     Err(e) => {
@@ -646,13 +702,17 @@ impl<P: Provider + ?Sized + 'static> ChildSupervisor<P> {
                         return ChildOutcome::Failed {
                             reason: e.to_string(),
                             rounds,
+                            cost: total_cost,
                         };
                     }
                 }
             }
 
             spec.reservation.settle();
-            ChildOutcome::RoundLimitReached { rounds }
+            ChildOutcome::RoundLimitReached {
+                rounds,
+                cost: total_cost,
+            }
         });
 
         Ok(ChildHandle {
@@ -688,7 +748,7 @@ impl<P: Provider + ?Sized + 'static> ChildSupervisor<P> {
         // Cancelled - so the caller, which knows why it stopped, restates it.
         // Work that genuinely finished first keeps its own truthful outcome.
         Ok(match outcome {
-            ChildOutcome::Cancelled { rounds } => ChildOutcome::Revoked { rounds },
+            ChildOutcome::Cancelled { rounds, cost } => ChildOutcome::Revoked { rounds, cost },
             settled => settled,
         })
     }

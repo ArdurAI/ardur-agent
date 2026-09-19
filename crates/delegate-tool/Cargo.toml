@@ -19,6 +19,9 @@ ardur-cap-token = { workspace = true }
 ardur-runtime = { workspace = true }
 ardur-cost-gate = { workspace = true }
 ardur-receipt = { workspace = true }
+ardur-delegate-child = { workspace = true }
+ardur-provider-runtime = { workspace = true }
+ardur-provider-selector = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
