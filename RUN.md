@@ -71,6 +71,85 @@ unless it targets loopback HTTP for local tests. The Ollama, Codex, and
 Claude-CLI backends need no credentials to wire — they fail later, per-turn, if
 the daemon/binary is unreachable or the CLI is not logged in.
 
+## Model router (task-class lanes, failover, credential pools)
+
+An optional in-process router (#411) sits between the runtime and the
+backends: each request runs against an ordered failover chain chosen by its
+task class, pooled credentials rotate on rate-limits, and operator
+`model_overrides` patch model pricing without waiting for a release. It is
+configured by a `[router]` table in `~/.ardur/config.toml` — when the table is
+absent, boot is byte-identical to the single-provider path above (the only
+cost is one config-file probe). `ARDUR_ROUTER=off` (also `0`/`false`) forces
+the single-provider path even with a table present. When the table IS
+present, the router owns provider selection and a set `ARDUR_PROVIDER` is
+superseded with a loud startup warning; the kill-switch is the escape hatch.
+
+```toml
+[router]
+default = "standard"            # required: the fallback lane
+
+# A lane is a task class mapped to an ordered chain of {backend, model}.
+# The request's model field is the task-class signal: set ARDUR_MODEL (or
+# `model` in config.toml) to a lane name to route onto it; anything else
+# falls back to the default lane (warned once per unknown class).
+[[router.lanes.standard]]
+backend = "anthropic"
+model = "claude-opus-4-8"
+
+[[router.lanes.standard]]       # second entry = failover target
+backend = "ollama"
+model = "llama3.3"
+
+[[router.lanes.code]]
+backend = "openrouter"
+model = "qwen/qwen3-coder"
+
+# Patch a model's metadata. Prices are millionths of a US cent per 1k
+# tokens; fields left out keep the provider's published values.
+[router.model_overrides."llama3.3"]
+context_window = 131072
+input_price_micros = 0          # local inference: free, stated explicitly
+output_price_micros = 0
+
+# Multiple keys per backend, rotated on 429 with a per-key cooldown.
+# The environment twin (ARDUR_ANTHROPIC_KEYS="sk-a,sk-b") wins when both
+# are set. Single-key setups behave exactly as before.
+[router.credential_pools]
+anthropic = ["sk-ant-...a", "sk-ant-...b"]
+```
+
+Semantics, stated plainly:
+
+- A turn tries the lane's entries in order and advances only on typed
+  retryable failures: rate-limit (`429`), transport/timeout, upstream `5xx`,
+  or an auth failure when a *different* credential follows in the chain.
+  Invalid requests, unknown models, and cost-ceiling rejections surface
+  immediately — failover never re-bills a request the next backend would
+  also reject. With several keys pooled on one backend, that backend's keys
+  are exhausted before failing over to the next backend.
+- **Receipt honesty.** The receipt's `provider` field records what actually
+  happened: `anthropic` when the first entry served (identical to today);
+  `anthropic->ollama` after a backend failover; `anthropic->anthropic#1`
+  after a credential rotation; `router:failed(...)` when the whole chain
+  failed. Cost-gate projection and receipted costs use the serving entry's
+  rate card with `model_overrides` applied (override cards carry a
+  `+override` version suffix, so priced provenance stays auditable).
+- **Failover is completion-path only.** A stream that fails *before its
+  first token* fails over like any other call; once tokens are flowing,
+  mid-stream errors pass through — there is no token-level failover, by
+  design (replaying a partial completion elsewhere would double-bill).
+- **Redaction.** Pooled key values never appear in logs, errors, receipts,
+  or `Debug` output — the pool stores render `[redacted]`, and the router
+  tracks credentials by backend + pool index only.
+- Boot is fail-closed on misconfiguration: an unknown backend, a missing
+  `default` lane, an empty lane chain, or an unreadable config file aborts
+  startup with a typed error naming the lane. A `model_overrides` key
+  matching no entry's model is a loud startup warning, never silent.
+- The router reads the default `~/.ardur/config.toml` path only; a config
+  file passed via the CLI's `--config` flag does not feed the router yet.
+  `context_window` overrides are parsed and exposed for the routing lanes
+  that land after D0; nothing consumes them at runtime today.
+
 ## Observability, health, metrics, and diagnostics
 
 Provider calls are wrapped once at the provider-runtime boundary with

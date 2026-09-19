@@ -48,6 +48,7 @@ mod provider;
 mod rate_card;
 mod registry;
 mod retry;
+mod router;
 mod stream;
 pub mod telemetry;
 mod types;
@@ -59,6 +60,10 @@ pub use provider::Provider;
 pub use rate_card::RateCard;
 pub use registry::ProviderRegistry;
 pub use retry::parse_retry_after_ms;
+pub use router::{
+    ChainEntry, CredentialId, ModelOverrideSpec, RATE_LIMIT_FALLBACK_COOLDOWN, RouterError,
+    RouterProvider, UNAUTHORIZED_CREDENTIAL_COOLDOWN,
+};
 pub use stream::{ProviderStream, StreamEvent};
 pub use telemetry::{TelemetryConfig, TelemetryError, init_genai_tracing, shutdown_genai_tracing};
 pub use types::{

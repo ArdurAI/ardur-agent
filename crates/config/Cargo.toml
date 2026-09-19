@@ -15,6 +15,10 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+# The `[router]` table (#411) is parsed with the real TOML parser; the CLI's
+# historical flat reader stays untouched and keeps tolerating unknown tables.
+toml = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
+tempfile = { workspace = true }

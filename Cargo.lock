@@ -543,8 +543,10 @@ dependencies = [
  "chrono",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.20",
  "tokio",
+ "toml",
  "tracing",
  "uuid",
 ]
@@ -1211,6 +1213,7 @@ dependencies = [
 name = "ardur-provider-selector"
 version = "0.0.1"
 dependencies = [
+ "ardur-config",
  "ardur-provider-claude-cli",
  "ardur-provider-codex",
  "ardur-provider-ollama",
@@ -1219,6 +1222,8 @@ dependencies = [
  "ardur-provider-prime",
  "ardur-provider-runtime",
  "serial_test",
+ "tempfile",
+ "tracing",
 ]
 
 [[package]]
