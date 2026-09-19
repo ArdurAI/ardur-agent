@@ -3698,6 +3698,49 @@ fn default_env_prefix(channel_type: &str, name: &str) -> String {
     format!("{}_{}", channel_type.to_uppercase(), sanitized)
 }
 
+/// Environment variables the SERVER actually reads to activate a channel.
+///
+/// These are the names `ardur-server` requires at boot (see
+/// `crates/server/src/config.rs`), not a prefix derived from the channel's
+/// name. The CLI's channel registry is local bookkeeping: the server does not
+/// read it, so a per-channel prefix would be an instruction nothing honours.
+///
+/// Returns `None` for an unrecognised channel type, so the CLI says nothing
+/// rather than inventing variable names for a channel it does not know.
+fn channel_activation_env(channel_type: &str) -> Option<&'static [&'static str]> {
+    match channel_type.to_ascii_lowercase().as_str() {
+        "telegram" => Some(&["ARDUR_CHANNEL_TELEGRAM=1", "TELEGRAM_BOT_TOKEN"]),
+        "discord" => Some(&[
+            "ARDUR_CHANNEL_DISCORD=1",
+            "DISCORD_BOT_TOKEN",
+            "DISCORD_APPLICATION_ID",
+        ]),
+        "matrix" => Some(&[
+            "ARDUR_CHANNEL_MATRIX=1",
+            "MATRIX_HOMESERVER_URL",
+            "MATRIX_USER_ID",
+            "MATRIX_ACCESS_TOKEN",
+        ]),
+        // Slack is auto-detected on SLACK_BOT_TOKEN: there is no
+        // ARDUR_CHANNEL_SLACK switch, and a partial config fails closed.
+        "slack" => Some(&["SLACK_BOT_TOKEN", "SLACK_SIGNING_SECRET", "SLACK_APP_ID"]),
+        _ => None,
+    }
+}
+
+/// Render the activation instruction printed by `channel add` and `channel show`.
+fn channel_activation_note(channel_type: &str) -> String {
+    match channel_activation_env(channel_type) {
+        Some(vars) => format!(
+            "To activate, set: {}. The server reads these directly; this record is local bookkeeping.",
+            vars.join(", ")
+        ),
+        None => format!(
+            "Unknown channel type {channel_type:?}: no activation variables are known for it."
+        ),
+    }
+}
+
 /// Run `ardur channel` subcommands.
 fn run_channel(args: ChannelArgs) -> Result<(), CliError> {
     let root = StateDirs::resolve()?.root;
@@ -3711,16 +3754,22 @@ fn run_channel(args: ChannelArgs) -> Result<(), CliError> {
                 println!("no channels configured");
             } else {
                 println!(
-                    "{NAME: <12} {TYPE: <10} {STATUS: <10} ENV_PREFIX",
+                    "{NAME: <12} {TYPE: <10} {STATUS: <10} ACTIVATION",
                     NAME = "NAME",
                     TYPE = "TYPE",
                     STATUS = "STATUS"
                 );
                 for r in &records {
+                    // `enabled` is this record's own flag; it does not gate the
+                    // server, which activates channels from the environment.
                     let status = if r.enabled { "enabled" } else { "disabled" };
+                    let activation = match channel_activation_env(&r.channel_type) {
+                        Some(vars) => vars.join(" "),
+                        None => "unknown channel type".to_string(),
+                    };
                     println!(
                         "{: <12} {: <10} {: <10} {}",
-                        r.name, r.channel_type, status, r.env_prefix
+                        r.name, r.channel_type, status, activation
                     );
                 }
             }
@@ -3738,10 +3787,7 @@ fn run_channel(args: ChannelArgs) -> Result<(), CliError> {
                 enabled: true,
                 created_at: now,
                 env_prefix: default_env_prefix(&channel_type, &name),
-                notes: format!(
-                    "Set {prefix}_TOKEN (and any required IDs) to activate this channel.",
-                    prefix = default_env_prefix(&channel_type, &name)
-                ),
+                notes: channel_activation_note(&channel_type),
             };
             write_private_file_atomic_no_follow(
                 &path,
@@ -3750,7 +3796,20 @@ fn run_channel(args: ChannelArgs) -> Result<(), CliError> {
                     .as_bytes(),
             )?;
             println!("added channel {name} ({channel_type})");
-            println!("  env prefix: {}", record.env_prefix);
+            match channel_activation_env(&channel_type) {
+                Some(vars) => {
+                    println!("  to activate, set:");
+                    for var in vars {
+                        println!("    {var}");
+                    }
+                    println!(
+                        "  (the server reads these directly; this record is local bookkeeping)"
+                    );
+                }
+                None => println!(
+                    "  unknown channel type {channel_type:?}: no activation variables are known"
+                ),
+            }
         }
         ChannelAction::Show { name } => {
             let records = read_channels(&root)?;
