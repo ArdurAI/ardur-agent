@@ -764,6 +764,7 @@ dependencies = [
  "ardur-cedar-policy",
  "ardur-cost-gate",
  "ardur-fused-runtime",
+ "ardur-governance",
  "ardur-hooks-openclaw-compat",
  "ardur-injection-defense",
  "ardur-lifecycle-hooks",

@@ -60,6 +60,18 @@
 //! five rounds, eight tools per round, 256 KiB records and 16 KiB receipt candidates.
 //! There is no eviction, background worker or persistent budget database.
 //!
+//! # Governance ER mirror (#502 Seam B7, Phase 1 — opt-in)
+//!
+//! [`FusedRuntimeBuilder::with_governance`] wires an
+//! [`ardur_governance::GovernanceEmitter`] into the commit decision: every round
+//! whose native receipt durably commits is mirrored as a signed Ardur Execution
+//! Receipt (see [`crate::governance`] and the shipped
+//! [`ErMirrorEmitter`](crate::ErMirrorEmitter) file-backed implementation).
+//! Abandoned / cancelled turns mint no ER, the default (no emitter configured)
+//! is byte-identical to the pre-B7 runtime, and a mirror failure never un-commits
+//! a round. Phase 1 mirrors round-level chat admission only; per-tool effect
+//! classification needs #543's durable per-event evidence and stays out.
+//!
 //! # Streaming (§6.0c)
 //!
 //! [`FusedRuntime::stream`](FusedRuntime::stream) is the progressive sibling of
@@ -101,6 +113,7 @@
 #![warn(missing_docs)]
 
 mod builder;
+mod governance;
 mod receipt_cache;
 mod receipts;
 mod reconcile;
@@ -110,6 +123,7 @@ mod shared;
 pub mod streaming;
 
 pub use builder::FusedRuntimeBuilder;
+pub use governance::ErMirrorEmitter;
 pub use receipt_cache::{LoadedReceiptChain, ReceiptCacheStats, VerifiedReceiptCache};
 pub use receipts::{
     ControlReceiptWriter, PersistedReceipt, ReceiptChainError, load_persisted_chain,

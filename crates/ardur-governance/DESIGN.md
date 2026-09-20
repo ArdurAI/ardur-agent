@@ -112,15 +112,20 @@ Mapping decisions (all in code, all tested):
   NetConnect; absent ⇒ `Deny`) into an Ardur `DaemonApplyPolicyRequest`, so the
   kernel enforces the *same* authority the tool-call gate already applied.
 
-### Wiring into the runtime (proposed, not landed here)
+### Wiring into the runtime (landed — #502 Seam B7, Phase 1)
 
-The prototype exercises the seam through the real `ardur-receipt`/`ardur-cap-token`
-public APIs. To make a running agent emit ERs, add one opt-in builder setter
-(`FusedRuntimeBuilder::with_governance(Arc<dyn GovernanceEmitter>)`) invoked at
-the existing receipt-mint point (`runtime.rs:1263-1352`), passing the already
--computed `VerifiedClaims` + tool-call record. This is intentionally left out of
-this PR to avoid colliding with the ~30 in-flight fused-runtime lanes; it is a
-small follow-up once this crate lands.
+The prototype exercised the seam through the real `ardur-receipt`/`ardur-cap-token`
+public APIs; the runtime wiring landed as the B7 integration PR:
+`FusedRuntimeBuilder::with_governance(Arc<dyn GovernanceEmitter>)` is the
+opt-in setter, and the emitter is invoked at the commit decision — inside the
+commit lock, immediately after the native receipt append — so abandoned /
+cancelled turns mint no ER (Phase 1 semantics; the terminal cancellation
+marker is deliberately not mirrored). The shipped file-backed implementation
+is `ardur_fused_runtime::ErMirrorEmitter`, which signs with the same P-256
+custody as native receipts and chains signed ERs into a
+`governance/er-chain.jsonl` mirror log (one line per committed round,
+verified and resumed across restarts). Per-tool effect classification and
+durable pre-effect evidence remain #543 and stay out of Phase 1.
 
 ## 4. Cross-repo dependencies (Ardur-side vs agent-side)
 

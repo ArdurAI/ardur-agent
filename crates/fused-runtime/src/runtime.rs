@@ -28,6 +28,7 @@ use ardur_cost_gate::{
     ModelId as GateModelId, ProviderId as GateProviderId, Sha256Digest as GateSha256,
     TokenId as GateTokenId,
 };
+use ardur_governance::{ErRoundFacts, GovernanceEmitter, MirroredToolCall};
 use ardur_injection_defense::{ContentSource, FilterRegistry, ScannableContent, Verdict};
 use ardur_lifecycle_hooks::{
     ErrorCtx, HookError, HookRegistry, LifecyclePhase, PostReceiptCtx, PreSubmitCtx,
@@ -271,6 +272,11 @@ pub struct FusedRuntime {
     /// a tool call carrying them may proceed, even once the cap-token/cedar
     /// checks already allow it. Empty (the builder default) gates nothing.
     pub(crate) approval_gated_capabilities: HashSet<String>,
+    /// #502 Seam B7 (Phase 1) — the opt-in governance emitter mirrored at the
+    /// commit decision. `None` (the builder default) leaves the turn path
+    /// untouched; `Some` receives only committed rounds, under the commit
+    /// lock, immediately after the native receipt append.
+    pub(crate) governance: Option<Arc<dyn GovernanceEmitter>>,
 }
 
 /// Which cost predicate a control-plane receipt verifies under.
@@ -1858,6 +1864,7 @@ impl FusedRuntime {
         &self,
         reservation: &mut RuntimeReservation<'_>,
         body: ReceiptBody,
+        claims: &VerifiedClaims,
         final_answer: bool,
         iteration: u32,
         req: &SubmitRequest,
@@ -1933,6 +1940,55 @@ impl FusedRuntime {
                 .map_err(settlement_error)?;
             if let Some(handshake) = committed {
                 handshake.finish_persist();
+            }
+            // #502 Seam B7 (Phase 1): mirror the committed round to the
+            // opt-in governance emitter, still under the commit lock so a
+            // file-backed mirror chains without forking. This is the ONLY
+            // mirror point: every abandoned / cancelled path returns before
+            // `commit_round`, and the terminal cancellation marker
+            // (`record_turn_cancellation`) deliberately does not mirror —
+            // a cancelled turn must mint no ER. The native receipt is
+            // already durable at this point, so a mirror failure cannot
+            // un-commit the round: it is logged (a missing ER reads
+            // downstream as `insufficient_evidence`, never compliance) and
+            // the turn proceeds.
+            if let Some(emitter) = &self.governance {
+                let mirrored = signed.body().tool_calls.iter().map(|tc| MirroredToolCall {
+                    call_id: tc.call_id.clone(),
+                    tool_name: tc.tool_name.clone(),
+                    arguments_digest: tc.arguments_digest.to_hex(),
+                    output_digest: tc.output_digest.to_hex(),
+                    cost: tc.cost,
+                });
+                let mirrored: Vec<MirroredToolCall> = mirrored.collect();
+                let trace_id = signed
+                    .body()
+                    .session_id
+                    .map(|s| s.to_string())
+                    .unwrap_or_default();
+                let step_id = signed.body().receipt_id.to_string();
+                let provider_name = signed.body().provider.clone().unwrap_or_default();
+                let facts = ErRoundFacts {
+                    claims,
+                    trace_id: &trace_id,
+                    step_id: &step_id,
+                    timestamp_millis: signed.body().issued_at.0,
+                    tool: &self.tool,
+                    provider: &provider_name,
+                    tool_calls: &mirrored,
+                    // The conservative round-level side-effect fact: the
+                    // journal (when configured) appended this round's
+                    // transcript entries — actual persistence, not tool count.
+                    persisted_transcript: self.journal.is_some(),
+                };
+                if let Err(err) = emitter.mirror_committed_round(&facts) {
+                    tracing::warn!(
+                        session_id = %trace_id,
+                        receipt_id = %step_id,
+                        error = %err,
+                        "governance ER mirror failed; native receipt remains the source of truth"
+                    );
+                }
             }
             signed
         }; // no commit lock across projection, hooks or outward yields
@@ -3190,6 +3246,7 @@ impl FusedRuntime {
                 .commit_round(
                     &mut reservation,
                     body,
+                    &claims,
                     !wants_tools,
                     iteration,
                     &req,
@@ -3933,7 +3990,7 @@ impl FusedRuntime {
                     tool_calls: tool_receipts, provider: Some(self.provider.name()),
                 };
                 let (signed, receipt) = match self.commit_round(reservation.as_mut().expect("held"), body,
-                    !wants_tools, iteration, &req, &response, None, None).await {
+                    &claims, !wants_tools, iteration, &req, &response, None, None).await {
                     Ok(result) => result,
                     Err(err) => {
                         self.fire_error(session_id, LifecyclePhase::Receipt, &err).await;
