@@ -1,9 +1,11 @@
 # ardur-fused-runtime — the Phase-2 single entry point that fuses every Phase-1
-# substrate crate behind one `ChatRuntime::submit`.
+# substrate crate behind one `ChatRuntime::submit` call.
 #
 # It sits at the *top* of the dependency graph: it depends on cap-token, cedar,
 # cost-gate, lifecycle-hooks, provider-runtime, receipt, memory, and
-# session-journals, and no substrate crate depends back on it. This is why the
+# session-journals, and no substrate crate depends back on it. The opt-in
+# governance ER mirror (#502 Seam B7) likewise depends on `ardur-governance`
+# from here — one direction, behind `with_governance`. This is why the
 # fusion lives in its own crate rather than inside any single §X.Y plan-family's
 # crate (`ardur-lifecycle-hooks`'s `HookedRuntime` wires only provider→receipt→
 # memory, and mints genesis-only receipts) — see the crate-root docs for the
@@ -58,6 +60,9 @@ ardur-hooks-openclaw-compat = { workspace = true }
 # ARD-139 propose-half — the shared on-disk approval-card store a gated tool
 # call proposes into (and checks for an already-decided card in).
 ardur-approvals = { workspace = true }
+# #502 Seam B7 (Phase 1) — the opt-in governance ER mirror: the
+# GovernanceEmitter seam + ER projection/signing behind with_governance.
+ardur-governance = { workspace = true }
 
 async-trait = { workspace = true }
 anyhow = { workspace = true }

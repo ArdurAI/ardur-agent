@@ -55,6 +55,7 @@ mod error;
 mod grant;
 mod hash;
 mod jcs;
+pub mod mirror;
 mod mission;
 mod project;
 mod sign;
@@ -75,6 +76,7 @@ pub use er::{
 };
 pub use error::GovernanceError;
 pub use grant::{GrantDescriptor, MissionRef};
+pub use mirror::{ErRoundFacts, GovernanceEmitter, MirroredToolCall};
 pub use mission::{
     BudgetPair, DelegationPolicy, EFFECT_CLASSES, EffectPolicy, FlowPolicy, GovernedMemoryStore,
     GrantRecord, LineageBudgets, MissionAuthoringError, MissionDeclaration, MissionIdentity,

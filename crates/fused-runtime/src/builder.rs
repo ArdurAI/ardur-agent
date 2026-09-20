@@ -27,6 +27,7 @@ use ardur_cost_gate::{
     Clock, CostEnvelope, CostTuple as GateCostTuple, HolderId as GateHolderId,
     InMemoryCostAdmissionGate, SystemClock,
 };
+use ardur_governance::GovernanceEmitter;
 use ardur_hooks_openclaw_compat::{OpenClawHookConfig, OpenClawHookRegistryExt};
 use ardur_injection_defense::FilterRegistry;
 use ardur_lifecycle_hooks::HookRegistry;
@@ -160,6 +161,7 @@ pub struct FusedRuntimeBuilder {
     stream_content_max_bytes: usize,
     approvals: Option<ApprovalStore>,
     approval_gated_capabilities: HashSet<String>,
+    governance: Option<Arc<dyn GovernanceEmitter>>,
 }
 
 impl FusedRuntimeBuilder {
@@ -211,6 +213,7 @@ impl FusedRuntimeBuilder {
             stream_content_max_bytes: default_stream_content_max_bytes(),
             approvals: None,
             approval_gated_capabilities: HashSet::new(),
+            governance: None,
         }
     }
 
@@ -466,6 +469,27 @@ impl FusedRuntimeBuilder {
         }
     }
 
+    /// **#502 Seam B7 (Phase 1)** — opt in to governance Execution-Receipt
+    /// mirroring. When set, every round whose native receipt durably commits
+    /// is handed to `emitter`
+    /// ([`GovernanceEmitter::mirror_committed_round`](ardur_governance::GovernanceEmitter))
+    /// under the commit lock, right after the native append — so abandoned /
+    /// cancelled turns (which never reach the commit decision) mint no ER.
+    ///
+    /// The default (`None`) leaves the runtime's behaviour byte-identical to
+    /// before this seam existed: binary allow/deny, no mirror writes, no
+    /// `ardur-governance` projection on the turn path.
+    ///
+    /// The runtime ships [`ErMirrorEmitter`](crate::ErMirrorEmitter) as the
+    /// file-backed implementation: it chains signed ERs under the operator's
+    /// data dir (`governance/er-chain.jsonl`) using the same P-256 custody as
+    /// the native receipt chain.
+    #[must_use]
+    pub fn with_governance(mut self, emitter: Arc<dyn GovernanceEmitter>) -> Self {
+        self.governance = Some(emitter);
+        self
+    }
+
     /// Share an externally-held deny-list (so the caller can revoke through its
     /// own handle too). By default the runtime owns a fresh one, reachable via
     /// [`FusedRuntime::revoke_cap_token`].
@@ -670,6 +694,7 @@ impl FusedRuntimeBuilder {
             stream_content_max_bytes: self.stream_content_max_bytes,
             approvals: self.approvals,
             approval_gated_capabilities: self.approval_gated_capabilities,
+            governance: self.governance,
         })
     }
 

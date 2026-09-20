@@ -38,6 +38,12 @@ pub enum GovernanceError {
     #[error("key custody failed: {0}")]
     Key(String),
 
+    /// A mirror-log (or other governance artifact) could not be read, created,
+    /// or durably appended. Surfaced to the operator log; the native receipt
+    /// chain remains the source of truth.
+    #[error("governance i/o failed: {0}")]
+    Io(String),
+
     /// Kernel enforcement is unavailable on this platform/target (true BPF-LSM
     /// deny is Linux + managed-cgroup only). Carries the reason for audit.
     #[error("enforcement unavailable: {0}")]

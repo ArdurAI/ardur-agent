@@ -111,6 +111,23 @@ impl SignedExecutionReceipt {
     pub fn receipt_hash(&self) -> String {
         sha256_hex(self.jws_compact.as_bytes())
     }
+
+    /// Reassemble from a compact JWS plus the claim set a verifier already
+    /// decoded from it (via [`ErVerifier::verify_compact`]). Chain
+    /// verification is read-only; this constructor exists so a caller can
+    /// feed a verified persisted mirror log into [`verify_er_chain`] without
+    /// re-verifying each line twice.
+    ///
+    /// The caller must supply claims actually decoded from `jws_compact` —
+    /// this constructor trusts them (it exists on the verified side of the
+    /// API, after signature verification).
+    #[must_use]
+    pub fn from_parts(jws_compact: String, receipt: ExecutionReceipt) -> Self {
+        Self {
+            jws_compact,
+            receipt,
+        }
+    }
 }
 
 /// Signs [`ExecutionReceipt`] claim sets into [`SignedExecutionReceipt`]s.
