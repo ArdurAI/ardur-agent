@@ -101,6 +101,8 @@ const MAX_RETAINED_EVENTS: usize = 2_000;
 /// Upper bound on captured stderr bytes, so a child spewing diagnostics cannot
 /// grow memory without limit.
 const MAX_STDERR_BYTES: usize = 64 * 1024;
+/// Upper bound on captured stdout bytes while draining the child.
+const MAX_STDOUT_BYTES: usize = 8 * 1024 * 1024;
 /// Maximum spawn retries when Linux returns `ETXTBSY` ("Text file busy"). See
 /// [`spawn_hermes`] for why the retry exists.
 const SPAWN_ETXTBSY_RETRIES: u32 = 6;
@@ -227,6 +229,8 @@ struct TurnOutcome {
     usage: Usage,
     /// Retained event lines, as the audit body.
     events: Vec<serde_json::Value>,
+    /// Model Hermes actually served (from the stream-json `init` event).
+    served_model: Option<String>,
 }
 
 #[async_trait]
@@ -237,6 +241,16 @@ impl Provider for HermesProvider {
             return Err(ProviderError::InvalidRequest(
                 "hermes requires a non-empty prompt".into(),
             ));
+        }
+        // `hermes chat --oneshot` has no per-completion output-token flag. A
+        // nonzero ceiling would be silently ignored and could over-generate /
+        // over-bill vs the caller's authorized max_tokens — fail closed.
+        // Pass 0 to acknowledge the ceiling is delegated to Hermes' own config.
+        if req.max_tokens > 0 {
+            return Err(ProviderError::InvalidRequest(format!(
+                "hermes chat --oneshot cannot enforce max_tokens={}; pass 0 to delegate the output ceiling to Hermes' configured limit",
+                req.max_tokens
+            )));
         }
 
         let model = self.chosen_model(&req.model);
@@ -262,12 +276,25 @@ impl Provider for HermesProvider {
             attention_score: 0,
         };
 
+        let mut raw = serde_json::Map::new();
+        if let Some(model) = outcome
+            .served_model
+            .as_deref()
+            .or(model.as_deref())
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+        {
+            raw.insert("model".into(), serde_json::Value::String(model.to_string()));
+        }
+        raw.insert("events".into(), serde_json::Value::Array(outcome.events));
+
         Ok(CompletionResponse {
             content: outcome.content,
             finish_reason: FinishReason::Stop,
             usage: outcome.usage,
             cost,
-            raw_provider_response: Some(serde_json::Value::Array(outcome.events)),
+            // Object shape so `response_model_attr` can read `.get("model")`.
+            raw_provider_response: Some(serde_json::Value::Object(raw)),
         })
     }
 
@@ -396,7 +423,20 @@ impl HermesProvider {
                         "reading hermes stdout: {e}"
                     )));
                 }
-                Ok(n) => stdout_buf.extend_from_slice(&chunk[..n]),
+                Ok(n) => {
+                    if stdout_buf.len() >= MAX_STDOUT_BYTES {
+                        return Err(ProviderError::Upstream(format!(
+                            "hermes stdout exceeded the {MAX_STDOUT_BYTES}-byte bound"
+                        )));
+                    }
+                    let room = MAX_STDOUT_BYTES - stdout_buf.len();
+                    stdout_buf.extend_from_slice(&chunk[..n.min(room)]);
+                    if n > room {
+                        return Err(ProviderError::Upstream(format!(
+                            "hermes stdout exceeded the {MAX_STDOUT_BYTES}-byte bound"
+                        )));
+                    }
+                }
             }
         }
         let stdout_text = String::from_utf8_lossy(&stdout_buf).into_owned();
@@ -418,29 +458,32 @@ impl HermesProvider {
                     .as_deref()
                     .unwrap_or("hermes exited with a non-zero status")
             };
+            // Classify stderr and in-band result.error independently so an
+            // unrelated stderr warning cannot mask an auth/rate-limit result.
             if looks_like_auth_error(detail)
                 || looks_like_auth_error(&stderr_text)
                 || parsed.error.as_deref().is_some_and(looks_like_auth_error)
             {
                 return Err(ProviderError::Unauthorized);
             }
-            let code = status
-                .code()
-                .map_or_else(|| "signal".to_string(), |c| c.to_string());
-            let detail = redact_child_diagnostic(detail);
-            return Err(ProviderError::Upstream(format!(
-                "hermes exited with status {code}: {detail}"
-            )));
+            if looks_like_rate_limit(detail)
+                || looks_like_rate_limit(&stderr_text)
+                || parsed.error.as_deref().is_some_and(looks_like_rate_limit)
+            {
+                return Err(ProviderError::RateLimited { retry_after_ms: 0 });
+            }
+            let code = status.code();
+            return Err(classify_child_failure(detail, code.map(i64::from)));
         }
 
         if let Some(err) = parsed.error.as_deref() {
             if looks_like_auth_error(err) || looks_like_auth_error(&stderr_text) {
                 return Err(ProviderError::Unauthorized);
             }
-            let err = redact_child_diagnostic(err);
-            return Err(ProviderError::Upstream(format!(
-                "hermes reported an error: {err}"
-            )));
+            if looks_like_rate_limit(err) || looks_like_rate_limit(&stderr_text) {
+                return Err(ProviderError::RateLimited { retry_after_ms: 0 });
+            }
+            return Err(classify_child_failure(err, None));
         }
 
         if parsed.exit_code.is_some_and(|c| c != 0) {
@@ -449,14 +492,13 @@ impl HermesProvider {
                 .as_deref()
                 .or_else(|| Some(stderr_text.trim()).filter(|s| !s.is_empty()))
                 .unwrap_or("hermes result carried a non-zero exit_code");
-            if looks_like_auth_error(detail) {
+            if looks_like_auth_error(detail) || looks_like_auth_error(&stderr_text) {
                 return Err(ProviderError::Unauthorized);
             }
-            let detail = redact_child_diagnostic(detail);
-            return Err(ProviderError::Upstream(format!(
-                "hermes result exit_code {}: {detail}",
-                parsed.exit_code.unwrap_or(-1)
-            )));
+            if looks_like_rate_limit(detail) || looks_like_rate_limit(&stderr_text) {
+                return Err(ProviderError::RateLimited { retry_after_ms: 0 });
+            }
+            return Err(classify_child_failure(detail, parsed.exit_code));
         }
 
         if parsed.content.trim().is_empty() {
@@ -472,6 +514,7 @@ impl HermesProvider {
             content: parsed.content,
             usage: parsed.usage,
             events: parsed.events,
+            served_model: parsed.served_model,
         })
     }
 }
@@ -483,6 +526,8 @@ struct ParsedOutput {
     exit_code: Option<i64>,
     error: Option<String>,
     events: Vec<serde_json::Value>,
+    /// Model from the stream-json `system`/`init` event, when present.
+    served_model: Option<String>,
 }
 
 /// Parse the JSONL event stream Hermes writes to stdout. Non-JSON lines are
@@ -494,6 +539,7 @@ fn parse_stream_json(stdout: &str) -> ParsedOutput {
     let mut exit_code = None;
     let mut error = None;
     let mut events: Vec<serde_json::Value> = Vec::new();
+    let mut served_model = None;
 
     for line in stdout.lines() {
         let line = line.trim();
@@ -504,6 +550,18 @@ fn parse_stream_json(stdout: &str) -> ParsedOutput {
             continue;
         };
         let kind = value.get("type").and_then(serde_json::Value::as_str);
+        if kind == Some("system")
+            && value.get("subtype").and_then(serde_json::Value::as_str) == Some("init")
+        {
+            if let Some(model) = value
+                .get("model")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|m| !m.is_empty())
+            {
+                served_model = Some(model.to_string());
+            }
+        }
         if kind == Some("result") {
             if let Some(text) = value.get("text").and_then(serde_json::Value::as_str) {
                 content = text.to_string();
@@ -538,6 +596,7 @@ fn parse_stream_json(stdout: &str) -> ParsedOutput {
         exit_code,
         error,
         events,
+        served_model,
     }
 }
 
@@ -581,6 +640,29 @@ fn redact_child_diagnostic(detail: &str) -> String {
 /// The phrases are deliberately specific. Rate-limit / quota diagnostics that
 /// merely mention a key must not be reclassified as
 /// [`ProviderError::Unauthorized`].
+fn looks_like_rate_limit(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    ["rate limit", "rate-limit", "quota", "too many requests"]
+        .iter()
+        .any(|needle| lower.contains(needle))
+}
+
+fn classify_child_failure(detail: &str, exit_code: Option<i64>) -> ProviderError {
+    let redacted = redact_child_diagnostic(detail);
+    if looks_like_auth_error(detail) {
+        return ProviderError::Unauthorized;
+    }
+    if looks_like_rate_limit(detail) {
+        return ProviderError::RateLimited { retry_after_ms: 0 };
+    }
+    match exit_code {
+        Some(code) => {
+            ProviderError::Upstream(format!("hermes exited with status {code}: {redacted}"))
+        }
+        None => ProviderError::Upstream(format!("hermes reported an error: {redacted}")),
+    }
+}
+
 fn looks_like_auth_error(text: &str) -> bool {
     let lowered = text.to_ascii_lowercase();
 

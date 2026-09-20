@@ -54,7 +54,7 @@ fn request(prompt: &str) -> CompletionRequest {
             tool_call_id: None,
         }],
         ModelId(String::new()),
-        8_192,
+        0, // hermes oneshot cannot enforce max_tokens; 0 = delegate
     )
 }
 
@@ -81,13 +81,20 @@ async fn happy_turn_returns_text_usage_and_retained_events() {
     assert_eq!(response.usage.tokens_out, 7);
     assert_eq!(response.cost.cents, 0);
     assert_eq!(response.cost.tokens_in, 41);
-    let events = response
-        .raw_provider_response
-        .expect("events retained")
-        .as_array()
-        .expect("array")
+    let raw = response.raw_provider_response.expect("raw retained");
+    let obj = raw.as_object().expect("object with model+events");
+    let events = obj
+        .get("events")
+        .and_then(|v| v.as_array())
+        .expect("events array")
         .len();
     assert!(events >= 2, "expected retained events, got {events}");
+    // HAPPY_SHIM's init event names a model for telemetry.
+    assert_eq!(
+        obj.get("model").and_then(|v| v.as_str()),
+        Some("shim"),
+        "served model must surface for response_model_attr"
+    );
 }
 
 #[tokio::test]
