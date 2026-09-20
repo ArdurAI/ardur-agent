@@ -25,3 +25,10 @@ d82725f
 # omitted its sign-off trailer. Record this already-merged source SHA before
 # release promotion; do not rewrite the integration branch's history.
 e527d1469e61b9c08ac714a4b4fe78d094b40ea6
+
+# 2026-09-20: #560 squash-merge landed on dev without a Signed-off-by trailer
+# (auto-merge armed with a squash body that omitted it). The PR's own three
+# commits were each signed and the DCO check passed on them; this exempts the
+# merge SHA only, ahead of the next dev->main promotion, per the documented
+# procedure in this file's header.
+c8da5ca0df7505cd7091cc33a6e8449ea32987b9
