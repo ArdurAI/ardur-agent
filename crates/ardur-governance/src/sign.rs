@@ -111,23 +111,36 @@ impl SignedExecutionReceipt {
     pub fn receipt_hash(&self) -> String {
         sha256_hex(self.jws_compact.as_bytes())
     }
+}
 
-    /// Reassemble from a compact JWS plus the claim set a verifier already
-    /// decoded from it (via [`ErVerifier::verify_compact`]). Chain
-    /// verification is read-only; this constructor exists so a caller can
-    /// feed a verified persisted mirror log into [`verify_er_chain`] without
-    /// re-verifying each line twice.
-    ///
-    /// The caller must supply claims actually decoded from `jws_compact` —
-    /// this constructor trusts them (it exists on the verified side of the
-    /// API, after signature verification).
-    #[must_use]
-    pub fn from_parts(jws_compact: String, receipt: ExecutionReceipt) -> Self {
-        Self {
-            jws_compact,
-            receipt,
-        }
+/// Verify a persisted mirror log — every line's ES256 signature, then the
+/// hash-chain linkage — and return the signed chain. This is the CHECKED way
+/// to rebuild [`SignedExecutionReceipt`] values from disk: the claim set is
+/// decoded from the verified JWS itself, so no caller can pair an unrelated
+/// claim set with a valid signature.
+///
+/// # Errors
+///
+/// [`GovernanceError::BrokenChain`] naming the first line that fails
+/// signature verification or linkage.
+pub fn verify_er_log_lines(
+    lines: &[String],
+    jwks: &Jwks,
+) -> Result<Vec<SignedExecutionReceipt>, GovernanceError> {
+    let mut chain = Vec::with_capacity(lines.len());
+    for (i, line) in lines.iter().enumerate() {
+        let claims =
+            ErVerifier::verify_compact(line, jwks).map_err(|e| GovernanceError::BrokenChain {
+                index: i,
+                detail: format!("signature: {e}"),
+            })?;
+        chain.push(SignedExecutionReceipt {
+            jws_compact: line.clone(),
+            receipt: claims,
+        });
     }
+    verify_er_chain(&chain, jwks)?;
+    Ok(chain)
 }
 
 /// Signs [`ExecutionReceipt`] claim sets into [`SignedExecutionReceipt`]s.

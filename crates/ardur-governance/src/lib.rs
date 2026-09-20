@@ -88,6 +88,7 @@ pub use project::{
 };
 pub use sign::{
     ER_TYP, ErSigner, ErSigningKey, ErVerifier, SignedExecutionReceipt, verify_er_chain,
+    verify_er_log_lines,
 };
 
 /// The RFC 8785 (JCS) canonicalizer used for ER digests, exposed for callers

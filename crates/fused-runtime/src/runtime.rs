@@ -1976,6 +1976,10 @@ impl FusedRuntime {
                     tool: &self.tool,
                     provider: &provider_name,
                     tool_calls: &mirrored,
+                    // The conservative round-level side-effect fact: the
+                    // journal (when configured) appended this round's
+                    // transcript entries — actual persistence, not tool count.
+                    persisted_transcript: self.journal.is_some(),
                 };
                 if let Err(err) = emitter.mirror_committed_round(&facts) {
                     tracing::warn!(

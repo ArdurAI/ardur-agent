@@ -59,6 +59,12 @@ pub struct ErRoundFacts<'a> {
     pub provider: &'a str,
     /// The tool calls the round recorded, digests only.
     pub tool_calls: &'a [MirroredToolCall],
+    /// Whether the round durably persisted transcript state (a configured
+    /// session journal appended the round's messages). This — not the mere
+    /// presence of tool calls — is what a conservative round-level
+    /// `side_effect_class` keys off: `InternalWrite` only when durable
+    /// session state actually changed.
+    pub persisted_transcript: bool,
 }
 
 /// Receives committed-round facts and mirrors them as an Execution Receipt.

@@ -324,7 +324,7 @@ fn open_parent_directory_no_follow(path: &Path) -> std::io::Result<std::fs::File
     Ok(std::fs::File::from(descriptor))
 }
 
-fn open_regular_no_follow(path: &Path, write: bool) -> std::io::Result<std::fs::File> {
+pub(crate) fn open_regular_no_follow(path: &Path, write: bool) -> std::io::Result<std::fs::File> {
     #[cfg(unix)]
     let file = {
         use rustix::fs::{Mode, OFlags, openat};

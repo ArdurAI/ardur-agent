@@ -13,8 +13,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ardur_fused_runtime::{CancelProbe, ErMirrorEmitter, load_persisted_chain};
 use ardur_governance::{
-    ErRoundFacts, ErSigningKey, ErVerifier, GovernanceEmitter, SignedExecutionReceipt, Verdict,
-    verify_er_chain,
+    ErRoundFacts, ErSigningKey, GovernanceEmitter, SignedExecutionReceipt, Verdict, verify_er_chain,
 };
 use ardur_provider_runtime::{
     CompletionResponse, FinishReason, Provider, ProviderError, RateCard, Usage,
@@ -184,16 +183,11 @@ fn mirror_lines(path: &std::path::Path) -> Vec<String> {
 }
 
 /// Verify every mirror line and rebuild the signed chain (fails the test on
-/// any signature or linkage error).
+/// any signature or linkage error) — through the CHECKED rebuild path, so
+/// claims always come from the verified JWS itself.
 fn signed_chain(path: &std::path::Path) -> Vec<SignedExecutionReceipt> {
-    let jwks = er_jwks();
-    mirror_lines(path)
-        .iter()
-        .map(|l| {
-            let claims = ErVerifier::verify_compact(l, &jwks).expect("mirror line verifies");
-            SignedExecutionReceipt::from_parts(l.clone(), claims)
-        })
-        .collect()
+    ardur_governance::verify_er_log_lines(&mirror_lines(path), &er_jwks())
+        .expect("mirror chain verifies")
 }
 
 // ---------------------------------------------------------------------------
@@ -392,9 +386,200 @@ async fn multi_round_turns_chain_and_restart_resumes_the_mirror() {
 }
 
 // ---------------------------------------------------------------------------
-// 6. The #502 data-dir convention: <data_dir>/governance/er-chain.jsonl, and
-//    a foreign-key/corrupt existing log fails the open instead of re-genesis.
+// 7. Review-round guards: torn tail, concurrent-writer fork, gap poisoning,
+//    and persistence-keyed side-effect classification.
 // ---------------------------------------------------------------------------
+
+#[test]
+fn a_torn_tail_fails_the_open_instead_of_chaining_onto_it() {
+    let (_root, mirror, _receipts) = scratch();
+    // Simulate a crash mid-append: a written log whose last line lost its
+    // terminating newline.
+    let emitter = ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
+        .expect("emitter opens");
+    emitter
+        .mirror_committed_round(&facts_for_step("step-torn"))
+        .expect("one ER writes");
+    let bytes = std::fs::read(&mirror).expect("log exists");
+    assert!(bytes.ends_with(b"\n"));
+    let torn: Vec<u8> = bytes[..bytes.len() - 1].to_vec();
+    std::fs::write(&mirror, &torn).expect("strip the newline");
+    let err = ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
+        .err()
+        .expect("a torn tail must fail the open");
+    match err {
+        ardur_governance::GovernanceError::Io(m) => {
+            assert!(
+                m.contains("torn"),
+                "expected the torn-tail diagnostic, got: {m}"
+            );
+        }
+        other => panic!("expected Io, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_foreign_append_between_ours_fails_closed_instead_of_forking() {
+    let (_root, mirror, _receipts) = scratch();
+    let emitter = ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
+        .expect("emitter opens");
+
+    // A foreign writer appends garbage after our (empty) state.
+    std::fs::write(&mirror, b"foreign-writer-line\n").expect("foreign append");
+
+    let err = match emitter.mirror_committed_round(&facts_for_step("step-x")) {
+        Ok(()) => panic!("a changed log must fail the append"),
+        Err(err) => err,
+    };
+    match err {
+        ardur_governance::GovernanceError::Io(m) => {
+            assert!(
+                m.contains("changed under us"),
+                "expected the fork-guard diagnostic, got: {m}"
+            );
+        }
+        other => panic!("expected Io, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_failed_append_poisons_the_emitter_so_gaps_stay_observable() {
+    let (_root, mirror, _receipts) = scratch();
+    let emitter = ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
+        .expect("emitter opens");
+
+    // Force a projection failure with an idString-invalid trace id.
+    let bad = facts_for_trace("short");
+    assert!(emitter.mirror_committed_round(&bad).is_err());
+
+    // A later, otherwise-valid round must also fail: minting it would hide
+    // the skipped round behind a continuous-looking chain.
+    let err = match emitter.mirror_committed_round(&facts_for_step("step-y")) {
+        Ok(()) => panic!("a poisoned emitter must refuse"),
+        Err(err) => err,
+    };
+    match err {
+        ardur_governance::GovernanceError::Io(m) => {
+            assert!(
+                m.contains("poisoned"),
+                "expected the poison diagnostic, got: {m}"
+            );
+        }
+        other => panic!("expected Io, got {other:?}"),
+    }
+    // And nothing was written.
+    assert!(mirror_lines(&mirror).is_empty());
+}
+
+#[tokio::test]
+async fn side_effect_class_tracks_persistence_not_tool_count() {
+    let (_root, mirror, receipt_log) = scratch();
+    let session = ardur_runtime::SessionId::new();
+
+    // Journaling runtime, NO tool calls: still InternalWrite (transcript).
+    let journaled = runtime_builder(Arc::new(EchoProvider::new()))
+        .receipt_log(&receipt_log)
+        .with_journal(Arc::new(InMemorySessionJournal::new(session))
+            as Arc<dyn ardur_session_journals::SessionJournal>)
+        .with_governance(open_emitter(&mirror))
+        .build()
+        .expect("runtime builds");
+    journaled
+        .submit(request_for("plain", &valid_token(), session))
+        .await
+        .expect("commits");
+    let chain = signed_chain(&mirror);
+    assert_eq!(
+        chain[0].receipt().side_effect_class,
+        ardur_governance::SideEffectClass::InternalWrite,
+        "a journaled no-tool round persists transcript state"
+    );
+    drop(journaled);
+
+    // Journal-less runtime, tool round: None (nothing durable changed).
+    let plain = runtime_builder(Arc::new(ScriptedProvider::new(
+        vec![tool_call("c1", "echo"), stop("done")],
+        stop("d"),
+    )))
+    .receipt_log(&receipt_log)
+    .with_tools(echo_registry())
+    .with_governance(open_emitter(&mirror))
+    .build()
+    .expect("runtime builds");
+    plain
+        .submit(request_for(
+            "tools",
+            &valid_token(),
+            ardur_runtime::SessionId::new(),
+        ))
+        .await
+        .expect("commits");
+    let chain = signed_chain(&mirror);
+    assert_eq!(
+        chain[1].receipt().side_effect_class,
+        ardur_governance::SideEffectClass::None,
+        "a journal-less tool round changed no durable state"
+    );
+}
+
+/// Build a minimal fact bundle for direct emitter tests (valid trace/step).
+fn facts_for_step(step: &'static str) -> ardur_governance::ErRoundFacts<'static> {
+    facts_for_trace_and_step("trace:0123456789abcdef", step)
+}
+
+fn facts_for_trace(trace: &'static str) -> ardur_governance::ErRoundFacts<'static> {
+    facts_for_trace_and_step(trace, "step:0123456789abcdef")
+}
+
+fn facts_for_trace_and_step(
+    trace: &'static str,
+    step: &'static str,
+) -> ardur_governance::ErRoundFacts<'static> {
+    ardur_governance::ErRoundFacts {
+        claims: Box::leak(Box::new(verified_claims())),
+        trace_id: trace,
+        step_id: step,
+        timestamp_millis: 1_750_000_000_000,
+        tool: "chat.submit",
+        provider: "echo",
+        tool_calls: &[],
+        persisted_transcript: false,
+    }
+}
+
+/// Mint + verify a real cap-token, returning the verified claims (the same
+/// substrate the runtime's stage 1 produces).
+fn verified_claims() -> ardur_cap_token::VerifiedClaims {
+    use ardur_cap_token::{
+        BiscuitCapTokenIssuer, BiscuitCapTokenVerifier, CapScope, CapTokenIssuer, CapTokenVerifier,
+        HolderId, KeyPair, RequiredCaveats,
+    };
+    let issuer = BiscuitCapTokenIssuer::new(KeyPair::new());
+    let token = issuer
+        .issue(
+            HolderId(support::HOLDER.to_string()),
+            CapScope {
+                audience: support::AUDIENCE.to_string(),
+                expires_unix: 4_000_000_000,
+                budget_remaining: 1_000,
+                tool_allowlist: vec![support::TOOL.to_string()],
+            },
+        )
+        .expect("token issues");
+    let verifier = BiscuitCapTokenVerifier::new(ardur_cap_token::HashSetDenyList::new());
+    verifier
+        .verify(
+            &token,
+            &issuer.public_key(),
+            &RequiredCaveats {
+                now_unix: 1_750_000_000,
+                audience: support::AUDIENCE.to_string(),
+                tool: support::TOOL.to_string(),
+                cost: 1,
+            },
+        )
+        .expect("claims verify")
+}
 
 #[tokio::test]
 async fn the_data_dir_convention_lands_and_a_corrupt_log_fails_closed() {
@@ -419,7 +604,9 @@ async fn the_data_dir_convention_lands_and_a_corrupt_log_fails_closed() {
     assert!(
         matches!(
             err,
-            ardur_governance::GovernanceError::Verify(_) | ardur_governance::GovernanceError::Io(_)
+            ardur_governance::GovernanceError::Verify(_)
+                | ardur_governance::GovernanceError::BrokenChain { .. }
+                | ardur_governance::GovernanceError::Io(_)
         ),
         "got {err:?}"
     );
