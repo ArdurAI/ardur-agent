@@ -60,6 +60,23 @@ permit(principal, action == Action::\"ContextCompact\", resource);
 permit(principal, action == Action::\"TaskBackground\", resource);
 ";
 
+/// The exact starter policy earlier `ardur setup` versions wrote (Submit +
+/// ToolInvoke only). gh#533 review: once the runtime evaluates
+/// ContextCompact/TaskBackground, an installation still carrying this
+/// byte-exact generated policy would be policy-denied for `/compact` and
+/// `/background` with no self-service repair (setup never rewrites an
+/// existing file). [`upgrade_legacy_starter_policy`] migrates ONLY files
+/// that match this generated text byte-for-byte — an operator-customized
+/// policy is never touched.
+pub(crate) const LEGACY_STARTER_CEDAR_POLICY: &str = "\
+// Ardur starter policy (written by `ardur setup`).
+// Permits chat submission and tool invocation for local sessions; every other
+// action remains denied. Edit to taste — or delete this file to return to the
+// fail-closed deny-all default.
+permit(principal, action == Action::\"Submit\", resource);
+permit(principal, action == Action::\"ToolInvoke\", resource);
+";
+
 /// Operator-facing metadata recorded alongside a durable session journal.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct SessionMetadata {
@@ -220,6 +237,31 @@ impl StateDirs {
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
             Err(e) => Err(CliError::Io(e)),
         }
+    }
+
+    /// gh#533 review: migrate a legacy generated starter policy to the
+    /// current one (which permits the `ContextCompact` and `TaskBackground`
+    /// actions the runtime now evaluates). Returns `true` when a migration
+    /// was performed.
+    ///
+    /// The guard is byte-exact: ONLY a file whose entire contents equal
+    /// [`LEGACY_STARTER_CEDAR_POLICY`] — the text earlier `ardur setup`
+    /// versions generated — is rewritten. An operator-customized policy (any
+    /// edit, even a comment) never matches and is never touched; such an
+    /// operator sees the ordinary `PolicyDenied` for the new actions and
+    /// edits their policy deliberately.
+    pub fn upgrade_legacy_starter_policy(&self) -> Result<bool, CliError> {
+        let path = self.cedar_path();
+        let existing = match read_string_no_follow(&path) {
+            Ok(contents) => contents,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(CliError::Io(e)),
+        };
+        if existing != LEGACY_STARTER_CEDAR_POLICY {
+            return Ok(false);
+        }
+        write_private_file_atomic_no_follow(&path, STARTER_CEDAR_POLICY.as_bytes())?;
+        Ok(true)
     }
 
     /// Load the cap-token issuer from [`issuer_key_path`](Self::issuer_key_path),
@@ -417,6 +459,39 @@ mod tests {
     use serde_json::Value;
 
     use super::*;
+
+    /// gh#533 review: a byte-exact legacy starter policy migrates to the
+    /// current one (gaining the ContextCompact/TaskBackground permits), a
+    /// customized policy is never touched, and a missing file is a no-op.
+    #[test]
+    fn legacy_starter_policy_migrates_byte_exactly_only() {
+        let home = tempfile::tempdir().expect("temp HOME");
+        let dirs = state_under(home.path());
+        std::fs::create_dir_all(home.path().join(".ardur")).expect("dir");
+
+        // Missing file: no-op.
+        assert!(!dirs.upgrade_legacy_starter_policy().expect("upgrade runs"));
+
+        // Byte-exact legacy: migrated, and the result really permits the new
+        // actions.
+        std::fs::write(dirs.cedar_path(), LEGACY_STARTER_CEDAR_POLICY).expect("write legacy");
+        assert!(dirs.upgrade_legacy_starter_policy().expect("upgrade runs"));
+        let migrated = std::fs::read_to_string(dirs.cedar_path()).expect("read");
+        assert_eq!(migrated, STARTER_CEDAR_POLICY);
+        assert!(migrated.contains("ContextCompact"));
+        assert!(migrated.contains("TaskBackground"));
+        // Idempotent: a second run finds the current policy and does nothing.
+        assert!(!dirs.upgrade_legacy_starter_policy().expect("second run"));
+
+        // Customized policy (one comment line added): never touched.
+        let customized = format!("// my edit\n{LEGACY_STARTER_CEDAR_POLICY}");
+        std::fs::write(dirs.cedar_path(), &customized).expect("write customized");
+        assert!(!dirs.upgrade_legacy_starter_policy().expect("third run"));
+        assert_eq!(
+            std::fs::read_to_string(dirs.cedar_path()).expect("read"),
+            customized
+        );
+    }
 
     fn state_under(home: &Path) -> StateDirs {
         StateDirs {

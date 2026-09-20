@@ -306,11 +306,20 @@ impl TaskRegistry {
             }
         }
         let drained = handles.len();
-        for join in handles {
-            // A joined task updated its own record on completion/failure; a
-            // timeout here means it never reached a terminal state before
-            // shutdown, handled by the sweep below.
-            let _ = tokio::time::timeout(per_task_timeout, join).await;
+        for mut join in handles {
+            // A joined task updated its own record on completion/failure. A
+            // timeout must CANCEL the task, not merely detach it: dropping a
+            // timed-out JoinHandle leaves the spawned future running, which
+            // could overwrite the terminal state recorded below or keep a
+            // settlement owner alive into shutdown. Abort-and-await bounds
+            // the task deterministically.
+            if tokio::time::timeout(per_task_timeout, &mut join)
+                .await
+                .is_err()
+            {
+                join.abort();
+                let _ = join.await;
+            }
         }
         // Sweep: any record still active after the bounded drain is marked
         // failed, so no task can read as "running" after the process exits.

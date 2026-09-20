@@ -475,16 +475,18 @@ impl FusedRuntime {
         let provider_result = self.provider.complete(request).await;
         let response = match provider_result {
             Ok(response) => response,
-            Err(_provider_err) => {
+            Err(provider_err) => {
                 // Provider failure: refund the reserved envelope as an
-                // infrastructure failure and surface the provider's error.
-                // `ProviderUnavailable` is the runtime's canonical "the
-                // dispatch itself failed" signal (map_provider_error's
-                // non-cost default), which lets callers like
-                // run_background_task distinguish a provider failure from an
-                // admission refusal without string matching.
+                // infrastructure failure and surface the provider's error
+                // through the SAME typed mapping the chat path uses — a
+                // provider-reported CostCeilingExceeded stays
+                // CostCeilingExceeded (a hard error for callers like
+                // run_background_task, not an invariant-12 failed task),
+                // everything else is the canonical ProviderUnavailable
+                // dispatch-failure signal.
+                let mapped = map_provider_error(&provider_err);
                 self.release_failure(reservation).await;
-                return Err(RuntimeError::ProviderUnavailable);
+                return Err(mapped);
             }
         };
         reservation
@@ -524,16 +526,42 @@ impl FusedRuntime {
                 tool_calls: Vec::new(),
                 provider: Some(self.provider.name()),
             };
-            let signed = ReceiptSigner::sign(body, &self.receipt_key)
-                .map_err(|e| RuntimeError::Internal(anyhow::anyhow!("receipt mint failed: {e}")))?;
+            // gh#533 review: every failure from here on is POST-dispatch —
+            // the send happened and its cost is observed — so each must
+            // terminate the settlement as unresolved (stopping new
+            // admission), never as a clean cancellation via a dropped
+            // reservation.
+            let signed = match ReceiptSigner::sign(body, &self.receipt_key) {
+                Ok(signed) => signed,
+                Err(e) => {
+                    self.settlements.stop_admission();
+                    reservation
+                        .owner
+                        .receipt_unresolved()
+                        .map_err(settlement_error)?;
+                    return Err(RuntimeError::Internal(anyhow::anyhow!(
+                        "receipt mint failed: {e}"
+                    )));
+                }
+            };
             let path = self
                 .receipt_log
                 .as_ref()
                 .expect("builder requires receipt storage");
-            let expected_log_end = crate::receipts::open_append_no_follow(path)
-                .and_then(|f| f.metadata())
-                .map_err(|e| RuntimeError::Internal(e.into()))?
-                .len();
+            let expected_log_end =
+                match crate::receipts::open_append_no_follow(path).and_then(|f| f.metadata()) {
+                    Ok(meta) => meta.len(),
+                    Err(e) => {
+                        self.settlements.stop_admission();
+                        reservation
+                            .owner
+                            .receipt_unresolved()
+                            .map_err(settlement_error)?;
+                        return Err(RuntimeError::Internal(anyhow::anyhow!(
+                            "receipt log unreadable after dispatch: {e}"
+                        )));
+                    }
+                };
             reservation
                 .owner
                 .prepare_receipt(

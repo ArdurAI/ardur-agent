@@ -832,14 +832,13 @@ async fn dispatch_compact(
     history: &mut Vec<ChatMessage>,
     args: &str,
 ) {
-    // gh#533: the side-effect classification IS the dispatch guard. The
-    // provider-touching branches below are reachable only when the shared
-    // classification says this invocation is an ExternalSend — the same
-    // metadata a UI registry consumes — so a local subcommand can never be
-    // routed to the paid path and a paid subcommand can never be mistaken
-    // for a local read. The preview/apply arms re-assert it (they are
-    // admission-triggering sends); the guard tests in side_effect.rs pin
-    // the classification this match dispatches on.
+    // gh#533 guard 6: the shared side-effect classification IS the dispatch
+    // guard. The provider-touching arms below are entered only through this
+    // `is_external_send` check — the same classification a UI registry
+    // consumes — so release builds enforce it too, and a local subcommand
+    // can never be routed to the paid path nor a paid subcommand mistaken
+    // for a local read. The guard tests in side_effect.rs pin the
+    // classification to the dispatcher's subcommand vocabulary.
     let side_effect = crate::side_effect::compact_side_effect(args);
     let (sub, rest) = args.split_once(char::is_whitespace).unwrap_or((args, ""));
     let rest = rest.trim();
@@ -902,10 +901,19 @@ async fn dispatch_compact(
             Err(_) => println!("usage: /compact restore <checkpoint-id>"),
         },
         "preview" => {
-            debug_assert!(
-                side_effect.is_external_send(),
-                "the preview arm is an admission-triggering external send"
-            );
+            // gh#533 guard 6: the provider send is gated on the shared
+            // classification at RUNTIME (not just debug_assert), so the
+            // registry metadata is load-bearing in release builds too.
+            if !side_effect.is_external_send() {
+                println!(
+                    "{}",
+                    state.theme.paint(
+                        Role::Error,
+                        "internal error: /compact preview is not classified as an external send"
+                    )
+                );
+                return;
+            }
             let focus = (!rest.is_empty()).then(|| rest.to_string());
             match engine.preview_compact(history, focus).await {
                 Ok(summary) => println!("{summary}"),
@@ -915,10 +923,18 @@ async fn dispatch_compact(
         _ => {
             // Anything else is focus text for a real compact-and-install —
             // including the empty string, for a bare `/compact`.
-            debug_assert!(
-                side_effect.is_external_send(),
-                "the apply arm is an admission-triggering external send"
-            );
+            // gh#533 guard 6: gated on the shared classification at RUNTIME
+            // so the registry metadata is load-bearing in release builds.
+            if !side_effect.is_external_send() {
+                println!(
+                    "{}",
+                    state.theme.paint(
+                        Role::Error,
+                        "internal error: /compact apply is not classified as an external send"
+                    )
+                );
+                return;
+            }
             let focus = (!args.is_empty()).then(|| args.to_string());
             match engine.compact(history, focus).await {
                 Ok(outcome) => {

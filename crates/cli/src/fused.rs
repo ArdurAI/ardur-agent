@@ -472,6 +472,16 @@ impl FusedEngine {
         let issuer = dirs.load_or_create_issuer()?;
         let cap_root = issuer.public_key();
         let receipt_key = dirs.load_or_create_receipt_key()?;
+        // gh#533 review: migrate a byte-exact legacy starter policy before
+        // loading, so an installation created before the ContextCompact/
+        // TaskBackground actions existed is not silently policy-denied for
+        // /compact and /background. Customized policies are untouched.
+        if dirs.upgrade_legacy_starter_policy()? {
+            tracing::info!(
+                "migrated the generated starter Cedar policy to include the \
+                 ContextCompact/TaskBackground actions"
+            );
+        }
         let policies = dirs.load_cedar_policies()?;
 
         // ARD-457: consume the operator grant ledger — the granted hardened

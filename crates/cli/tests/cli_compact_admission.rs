@@ -120,7 +120,7 @@ fn chat_against_fixture(
 /// No Cedar policy file at all: the fail-closed deny-all default. Ordinary
 /// chat, `/compact preview`, `/compact`, and `/background` are ALL denied
 /// with the policy reason, and the peer sees ZERO requests.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn missing_policy_denies_chat_compact_preview_and_background_at_the_peer() {
     let fixture = PeerFixture::start().await;
     let home = tempfile::tempdir().expect("temp HOME");
@@ -147,7 +147,7 @@ async fn missing_policy_denies_chat_compact_preview_and_background_at_the_peer()
 /// The starter policy with a ZERO budget: everything is denied with the cost
 /// reason, and the peer sees ZERO requests — the exact `--budget-cents 0`
 /// contrast from the issue.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn zero_budget_denies_compact_preview_and_background_at_the_peer() {
     let fixture = PeerFixture::start().await;
     let home = tempfile::tempdir().expect("temp HOME");
@@ -174,7 +174,7 @@ async fn zero_budget_denies_compact_preview_and_background_at_the_peer() {
 /// Positive control: the starter policy and a funded budget really reach the
 /// peer — chat turns, `/compact`, `/compact preview`, and `/background` each
 /// dispatch exactly once. Without this row the denials above prove nothing.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn funded_starter_session_reaches_the_peer_for_all_four_paths() {
     let fixture = PeerFixture::start().await;
     let home = tempfile::tempdir().expect("temp HOME");
@@ -215,7 +215,7 @@ async fn funded_starter_session_reaches_the_peer_for_all_four_paths() {
 /// An explicit operator forbid of the control action: chat still works
 /// (Submit is permitted), but compaction is policy-denied — the actions are
 /// separable, which is the point of distinct Cedar actions.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn forbidding_the_control_action_denies_compact_but_not_chat() {
     let fixture = PeerFixture::start().await;
     let home = tempfile::tempdir().expect("temp HOME");
