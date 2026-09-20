@@ -43,16 +43,21 @@ const PERMISSIVE_POLICY: &str = "permit(principal, action, resource);";
 /// The scoped starter policy `ardur setup` writes to `cedar.policies` so a
 /// fresh install can chat out of the box without resorting to the permit-all
 /// development fallback. Deliberately narrower than [`PERMISSIVE_POLICY`]:
-/// chat submission and tool invocation only — every other action stays denied.
-/// Mirrors the server's embedded development policy
+/// chat submission, tool invocation, and the gh#533 control-plane provider
+/// actions (context compaction and background tasks — paid provider sends a
+/// chat-capable session is expected to make) — every other action stays
+/// denied. Mirrors the server's embedded development policy
 /// (`crates/server/src/state.rs::DEFAULT_POLICY`).
 pub(crate) const STARTER_CEDAR_POLICY: &str = "\
 // Ardur starter policy (written by `ardur setup`).
-// Permits chat submission and tool invocation for local sessions; every other
-// action remains denied. Edit to taste — or delete this file to return to the
-// fail-closed deny-all default.
+// Permits chat submission, tool invocation, and the paid control-plane
+// provider calls (compaction, background tasks) for local sessions; every
+// other action remains denied. Edit to taste — or delete this file to return
+// to the fail-closed deny-all default.
 permit(principal, action == Action::\"Submit\", resource);
 permit(principal, action == Action::\"ToolInvoke\", resource);
+permit(principal, action == Action::\"ContextCompact\", resource);
+permit(principal, action == Action::\"TaskBackground\", resource);
 ";
 
 /// Operator-facing metadata recorded alongside a durable session journal.
