@@ -472,6 +472,16 @@ impl FusedEngine {
         let issuer = dirs.load_or_create_issuer()?;
         let cap_root = issuer.public_key();
         let receipt_key = dirs.load_or_create_receipt_key()?;
+        // gh#533 review: migrate a byte-exact legacy starter policy before
+        // loading, so an installation created before the ContextCompact/
+        // TaskBackground actions existed is not silently policy-denied for
+        // /compact and /background. Customized policies are untouched.
+        if dirs.upgrade_legacy_starter_policy()? {
+            tracing::info!(
+                "migrated the generated starter Cedar policy to include the \
+                 ContextCompact/TaskBackground actions"
+            );
+        }
         let policies = dirs.load_cedar_policies()?;
 
         // ARD-457: consume the operator grant ledger — the granted hardened
@@ -861,18 +871,26 @@ impl FusedEngine {
     }
 
     /// **§1.7.** Preview a compaction candidate without installing it: no
-    /// journal entry, no receipt.
+    /// journal entry, but — gh#533 — the provider send is admitted (Cedar +
+    /// cost gate) and audited with a `context.compact.previewed.v1` receipt.
     ///
     /// # Errors
     /// Returns [`CliError`] if the session cap-token does not grant the
-    /// compact capability or the provider call fails.
+    /// compact capability, Cedar denies the action, the budget cannot cover
+    /// the call, or the provider call fails.
     pub async fn preview_compact(
         &self,
         history: &[ChatMessage],
         focus: Option<String>,
     ) -> Result<String, CliError> {
         self.runtime
-            .preview_compact(&self.cap_token, CONTEXT_COMPACT_CAPABILITY, history, focus)
+            .preview_compact(
+                self.session_id,
+                &self.cap_token,
+                CONTEXT_COMPACT_CAPABILITY,
+                history,
+                focus,
+            )
             .await
             .map_err(|e| CliError::State(format!("compact preview failed: {e}")))
     }

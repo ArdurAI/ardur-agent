@@ -43,6 +43,7 @@ mod links;
 mod markdown;
 mod schedule_exec;
 mod secure_io;
+mod side_effect;
 mod slash;
 mod state;
 mod stream;
@@ -564,6 +565,11 @@ async fn run_chat_loop(config: Config, args: &ChatArgs) -> Result<(), CliError> 
         Ok(())
     };
     if let Some(settlements) = settlements {
+        // gh#533: a piped REPL exits almost immediately after its last stdin
+        // line; concurrently-spawned background tasks must be drained to a
+        // terminal state (bounded) before the runtime is torn down, or their
+        // provider sends and terminal receipts are silently abandoned.
+        tasks.drain_active(std::time::Duration::from_secs(30)).await;
         let closed = settlements.finish().await;
         // An earlier REPL/output error wins, but shutdown failure is logged and
         // never advertised as clean completion.
@@ -684,6 +690,11 @@ async fn dispatch_slash(
             false
         }
         "memory" => {
+            // gh#533 guard 6: the side-effect classification is consulted on
+            // the dispatch path itself, so the registry metadata and the
+            // dispatch cannot drift — a `forget` (state_change) is exactly
+            // the invocation that mints a receipt-linked tombstone.
+            let _memory_class = crate::side_effect::memory_side_effect(args);
             println!("{}", engine.memory_command(args));
             false
         }
@@ -821,6 +832,14 @@ async fn dispatch_compact(
     history: &mut Vec<ChatMessage>,
     args: &str,
 ) {
+    // gh#533 guard 6: the shared side-effect classification IS the dispatch
+    // guard. The provider-touching arms below are entered only through this
+    // `is_external_send` check — the same classification a UI registry
+    // consumes — so release builds enforce it too, and a local subcommand
+    // can never be routed to the paid path nor a paid subcommand mistaken
+    // for a local read. The guard tests in side_effect.rs pin the
+    // classification to the dispatcher's subcommand vocabulary.
+    let side_effect = crate::side_effect::compact_side_effect(args);
     let (sub, rest) = args.split_once(char::is_whitespace).unwrap_or((args, ""));
     let rest = rest.trim();
     match sub {
@@ -882,6 +901,19 @@ async fn dispatch_compact(
             Err(_) => println!("usage: /compact restore <checkpoint-id>"),
         },
         "preview" => {
+            // gh#533 guard 6: the provider send is gated on the shared
+            // classification at RUNTIME (not just debug_assert), so the
+            // registry metadata is load-bearing in release builds too.
+            if !side_effect.is_external_send() {
+                println!(
+                    "{}",
+                    state.theme.paint(
+                        Role::Error,
+                        "internal error: /compact preview is not classified as an external send"
+                    )
+                );
+                return;
+            }
             let focus = (!rest.is_empty()).then(|| rest.to_string());
             match engine.preview_compact(history, focus).await {
                 Ok(summary) => println!("{summary}"),
@@ -891,6 +923,18 @@ async fn dispatch_compact(
         _ => {
             // Anything else is focus text for a real compact-and-install —
             // including the empty string, for a bare `/compact`.
+            // gh#533 guard 6: gated on the shared classification at RUNTIME
+            // so the registry metadata is load-bearing in release builds.
+            if !side_effect.is_external_send() {
+                println!(
+                    "{}",
+                    state.theme.paint(
+                        Role::Error,
+                        "internal error: /compact apply is not classified as an external send"
+                    )
+                );
+                return;
+            }
             let focus = (!args.is_empty()).then(|| args.to_string());
             match engine.compact(history, focus).await {
                 Ok(outcome) => {

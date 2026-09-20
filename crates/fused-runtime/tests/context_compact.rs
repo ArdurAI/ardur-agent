@@ -66,12 +66,24 @@ async fn compact_installs_a_checkpoint_without_polluting_the_turn_journal() {
     assert_eq!(outcome.summary, "now add tests");
 
     let entries = journal.replay(session_id).await.expect("journal replays");
-    assert_eq!(
-        entries.len(),
-        1,
-        "compact must not journal UserMessage/AssistantMessage entries for its own meta-call"
+    // gh#533: compact is now cost-admitted, so its settled round projects a
+    // CostFinalized accounting entry — that is the truthful cost record, not
+    // conversation content. The §1.7 invariant is about the latter: compact
+    // must not journal UserMessage/AssistantMessage entries for its own
+    // meta-call, and must install exactly one Checkpoint.
+    assert!(
+        entries.iter().all(|e| !matches!(
+            e,
+            JournalEntry::UserMessage { .. } | JournalEntry::AssistantMessage { .. }
+        )),
+        "compact must not journal conversation entries for its own meta-call: {entries:?}"
     );
-    match &entries[0] {
+    let checkpoints: Vec<_> = entries
+        .iter()
+        .filter(|e| matches!(e, JournalEntry::Checkpoint { .. }))
+        .collect();
+    assert_eq!(checkpoints.len(), 1, "exactly one compaction checkpoint");
+    match &checkpoints[0] {
         JournalEntry::Checkpoint {
             checkpoint_id,
             summary,
@@ -111,8 +123,9 @@ async fn compact_includes_the_focus_text_in_the_provider_request() {
 }
 
 /// `preview_compact` calls the provider and returns the summary, but
-/// installs nothing: no journal entry, and (implicitly, since no journal
-/// append happens) no receipt either.
+/// installs nothing: no journal entry. gh#533: the external send is still
+/// audited — a `context.compact.previewed.v1` receipt is minted even though
+/// the conversation history is untouched.
 #[tokio::test]
 async fn preview_compact_does_not_install_anything() {
     let dir = support::tempdir().expect("journal dir");
@@ -123,14 +136,31 @@ async fn preview_compact_does_not_install_anything() {
     let cap_token = CapTokenRef(compact_token());
 
     let summary = runtime
-        .preview_compact(&cap_token, "context.compact", &sample_history(), None)
+        .preview_compact(
+            session_id,
+            &cap_token,
+            "context.compact",
+            &sample_history(),
+            None,
+        )
         .await
         .expect("preview succeeds");
 
     assert_eq!(summary, "now add tests");
     assert_eq!(provider.call_count(), 1);
     let entries = journal.replay(session_id).await.expect("journal replays");
-    assert!(entries.is_empty(), "preview must not append anything");
+    // gh#533: the settled round projects a CostFinalized accounting entry —
+    // the truthful cost record of the external send — but no conversation
+    // content and no Checkpoint: preview installs nothing.
+    assert!(
+        entries.iter().all(|e| !matches!(
+            e,
+            JournalEntry::UserMessage { .. }
+                | JournalEntry::AssistantMessage { .. }
+                | JournalEntry::Checkpoint { .. }
+        )),
+        "preview must not install anything or journal conversation entries: {entries:?}"
+    );
 }
 
 /// A compaction checkpoint restores through the exact same
@@ -166,7 +196,16 @@ async fn a_compaction_checkpoint_is_restorable_via_rollback() {
         .expect("rollback to the compaction checkpoint succeeds");
 
     assert_eq!(restored.target_checkpoint_id, compacted.checkpoint_id);
-    assert_eq!(restored.retained_entries.len(), 1);
+    // gh#533: the settled compaction round projects its CostFinalized
+    // accounting entry, so "retained" counts it alongside the checkpoint.
+    // The restore contract itself is about the checkpoint: exactly one
+    // Checkpoint entry is retained.
+    let retained_checkpoints = restored
+        .retained_entries
+        .iter()
+        .filter(|e| matches!(e, JournalEntry::Checkpoint { .. }))
+        .count();
+    assert_eq!(retained_checkpoints, 1);
 }
 
 /// A cap-token that does not grant `context.compact` is denied — and the

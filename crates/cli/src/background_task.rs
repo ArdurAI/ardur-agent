@@ -270,6 +270,88 @@ impl TaskRegistry {
             })
     }
 
+    /// **gh#533.** Await every still-active task's spawned future to a
+    /// terminal state, bounded by `per_task_timeout`.
+    ///
+    /// The piped REPL reads its whole (static) stdin nearly instantly, so a
+    /// `/background` task spawned one line before `/quit` would otherwise be
+    /// abandoned mid-dispatch when the process tears down its runtime —
+    /// losing both the provider send's outcome and the terminal receipt
+    /// invariant 12 requires. Draining before shutdown makes the piped path
+    /// as honest as the interactive one: a started task either completes,
+    /// fails, or reports the timeout, and its receipt lands.
+    ///
+    /// The registry keeps every record (so late `/tasks` reads still work);
+    /// only the join handles are taken out, swapped for finished placeholders.
+    /// A timeout is recorded as a failed task rather than a hang.
+    pub async fn drain_active(&self, per_task_timeout: std::time::Duration) {
+        // Take the join handles of still-active tasks, swapping in finished
+        // placeholders so the registry's records stay intact for late reads.
+        let mut handles = Vec::new();
+        {
+            let mut tasks = self.tasks.lock().expect("task registry mutex");
+            for entry in tasks.values_mut() {
+                if entry
+                    .record
+                    .lock()
+                    .expect("background task record mutex")
+                    .status
+                    .is_active()
+                {
+                    handles.push(std::mem::replace(
+                        &mut entry.join,
+                        tokio::spawn(std::future::pending::<()>()),
+                    ));
+                }
+            }
+        }
+        let drained = handles.len();
+        for mut join in handles {
+            // A joined task updated its own record on completion/failure. A
+            // timeout must CANCEL the task, not merely detach it: dropping a
+            // timed-out JoinHandle leaves the spawned future running, which
+            // could overwrite the terminal state recorded below or keep a
+            // settlement owner alive into shutdown. Abort-and-await bounds
+            // the task deterministically.
+            if tokio::time::timeout(per_task_timeout, &mut join)
+                .await
+                .is_err()
+            {
+                join.abort();
+                let _ = join.await;
+            }
+        }
+        // Sweep: any record still active after the bounded drain is marked
+        // failed, so no task can read as "running" after the process exits.
+        let timed_out = {
+            let tasks = self.tasks.lock().expect("task registry mutex");
+            tasks
+                .values()
+                .filter(|entry| {
+                    entry
+                        .record
+                        .lock()
+                        .expect("record mutex")
+                        .status
+                        .is_active()
+                })
+                .map(|entry| Arc::clone(&entry.record))
+                .collect::<Vec<_>>()
+        };
+        for record in timed_out {
+            let mut record = record.lock().expect("record mutex");
+            let receipt_id = record.receipt_id;
+            record.fail(
+                format!(
+                    "drain timeout after {}ms before the process exited ({} task(s) drained)",
+                    per_task_timeout.as_millis(),
+                    drained
+                ),
+                receipt_id,
+            );
+        }
+    }
+
     /// **§1.9.** Cancel an active (queued or running) task: abort its
     /// spawned future and mint a `task.background.cancelled.v1` receipt.
     /// Rejects a task id that doesn't exist or is already terminal — "rerun

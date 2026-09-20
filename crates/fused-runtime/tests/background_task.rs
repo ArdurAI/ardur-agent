@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use ardur_provider_runtime::{CompletionResponse, Provider, ProviderError, RateCard};
 use ardur_runtime::{CapTokenRef, SessionId};
-use ardur_session_journals::{FileSessionJournal, SessionJournal};
+use ardur_session_journals::{FileSessionJournal, JournalEntry, SessionJournal};
 use async_trait::async_trait;
 
 use support::{AUDIENCE, HOLDER, mint_token_as, permissive_policy};
@@ -99,9 +99,15 @@ async fn run_background_task_completes_and_mints_a_receipt() {
     assert!(outcome.error.is_none());
 
     let entries = journal.replay(session_id).await.expect("journal replays");
+    // gh#533: the settled round projects a CostFinalized accounting entry —
+    // the truthful cost record — but a background task's own transcript is
+    // still NOT the foreground conversation: no UserMessage/AssistantMessage.
     assert!(
-        entries.is_empty(),
-        "a background task must not journal into the foreground session"
+        entries.iter().all(|e| !matches!(
+            e,
+            JournalEntry::UserMessage { .. } | JournalEntry::AssistantMessage { .. }
+        )),
+        "a background task must not journal into the foreground session: {entries:?}"
     );
 }
 

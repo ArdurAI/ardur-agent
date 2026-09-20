@@ -80,6 +80,19 @@ pub(crate) const COMPLETION_VERB: &str = "llm.completion.minted.v1";
 /// an intermediate round is never the last word on a turn that never settled.
 pub(crate) const CANCELLED_VERB: &str = "llm.completion.cancelled.v1";
 
+/// gh#533: the receipt verb an applied compaction settles under. The receipt
+/// is the settlement receipt of the paid summarization call (carrying the
+/// observed provider cost), not a zero-cost marker.
+pub(crate) const COMPACT_APPLIED_VERB: &str = "context.compact.applied.v1";
+/// gh#533: the receipt verb a compaction preview settles under. A preview is
+/// non-mutating to conversation history but IS an external provider send, so
+/// it must leave the same durable audit trail an applied compaction does.
+pub(crate) const COMPACT_PREVIEWED_VERB: &str = "context.compact.previewed.v1";
+/// gh#533: the receipt verb a completed background task settles under.
+pub(crate) const TASK_COMPLETED_VERB: &str = "task.background.completed.v1";
+/// gh#533: the receipt verb a failed background task settles under.
+pub(crate) const TASK_FAILED_VERB: &str = "task.background.failed.v1";
+
 /// The `filter_id` reported in [`RuntimeError::InjectionBlocked`] when stage 4.5
 /// blocks. The registry aggregates many filters into one combined verdict (and a
 /// [`CombinedScanResult`](ardur_injection_defense::CombinedScanResult) does not
@@ -365,6 +378,239 @@ impl FusedRuntime {
         )
     }
 
+    /// **gh#533.** Authorize a paid control-plane provider call (compaction
+    /// preview/apply, background task) exactly the way a chat turn is
+    /// authorized: stage-1 cap-token verification against `tool`, then a
+    /// stage-2 Cedar decision under a control-specific action — no parallel
+    /// guard stack, the same [`stage_cap_token_for_tool_at`] /
+    /// [`stage_cedar_with_action`] helpers [`submit`](ChatRuntime::submit)
+    /// uses. A missing policy (the fail-closed deny-all default) and a
+    /// matching `forbid` both surface as [`RuntimeError::PolicyDenied`]
+    /// BEFORE any budget is reserved or the provider is reached.
+    ///
+    /// The action is deliberately NOT `Action::Submit`: an operator policy
+    /// that permits chat but withholds compaction (a paid meta-operation over
+    /// the transcript) must be expressible without denying ordinary turns,
+    /// and vice versa. The cap-token's tool caveat still scopes the call to
+    /// the control capability (`context.compact`, `task.background`), so both
+    /// gates the chat path applies are present here, in the same order.
+    ///
+    /// # Errors
+    /// Returns [`RuntimeError`] when the cap-token is missing/expired/
+    /// revoked/malformed, does not grant `tool`, or the Cedar decision is not
+    /// `Allow`.
+    fn authorize_control_provider_call(
+        &self,
+        session_id: SessionId,
+        cap_token: &CapTokenRef,
+        tool: &str,
+        action: ActionRef,
+    ) -> Result<VerifiedClaims, RuntimeError> {
+        let claims = self.verify_cap_token_for_tool_at(cap_token, tool, self.cost_units)?;
+        self.stage_cedar_with_action(session_id, &claims, action)?;
+        Ok(claims)
+    }
+
+    /// **gh#533.** Run one paid control-plane provider call through the SAME
+    /// economic admission a chat turn takes: a supervised settlement turn, a
+    /// cost-gate reservation of the projected envelope BEFORE dispatch,
+    /// provider evidence observation, and a truthful settlement afterwards —
+    /// a signed, chained receipt carrying the provider-reported cost on
+    /// success, an infrastructure-failure refund on a provider error. The
+    /// caller owns no reservation on either exit path.
+    ///
+    /// Unknown price is not free: the reservation is taken against the
+    /// projected envelope (the operator-configured worst case), and the
+    /// settled debit is the observed cost when the provider reports one —
+    /// so an unpriced response still consumed real admission authority, and
+    /// a priced one settles at what was actually billed, mirroring
+    /// [`submit`](ChatRuntime::submit)'s admit → observe → settle sequence.
+    ///
+    /// Returns the completion response plus the minted receipt body (the
+    /// durable audit record of the external send).
+    ///
+    /// # Errors
+    /// Returns [`RuntimeError`] when admission is refused
+    /// ([`RuntimeError::CostCeilingExceeded`] for an exhausted budget), the
+    /// provider call fails (after the failure refund), or the receipt cannot
+    /// be durably minted — in which case the turn is marked unresolved and
+    /// the error surfaces, never a silent success.
+    async fn dispatch_control_completion(
+        &self,
+        session_id: SessionId,
+        claims: &VerifiedClaims,
+        request: CompletionRequest,
+        verb: &'static str,
+    ) -> Result<(CompletionResponse, ReceiptBody), RuntimeError> {
+        // Waiting control callers own no settlement capacity: declare the
+        // economic permit before the settlement owner, as submit does.
+        let mut economic_permit = Some(self.economic_admission.lock().await);
+        let mut owner =
+            self.begin_settlement(session_id, claims, &PerRequestProvisioning::default())?;
+        let gate_token_id = GateTokenId(claims.token_id);
+        self.gate
+            .bind_token(gate_token_id, GateHolderId(claims.subject.0.clone()));
+
+        let request_digest = GateSha256::of(
+            &serde_json::to_vec(&request).map_err(|e| RuntimeError::Internal(e.into()))?,
+        );
+        let reservation = self
+            .admit_round(
+                &mut owner,
+                AdmissionRequest {
+                    cap_token_id: gate_token_id,
+                    projected_envelope: self.envelope,
+                    provider_id: self.gate_provider_id.clone(),
+                    model_id: self.gate_model_id.clone(),
+                    request_digest,
+                },
+                request.request_id.0,
+            )
+            .await?;
+
+        reservation
+            .owner
+            .observe_provider(ProviderEvidence::DispatchIntent)
+            .map_err(settlement_error)?;
+        let provider_result = self.provider.complete(request).await;
+        let response = match provider_result {
+            Ok(response) => response,
+            Err(provider_err) => {
+                // Provider failure: refund the reserved envelope as an
+                // infrastructure failure and surface the provider's error
+                // through the SAME typed mapping the chat path uses — a
+                // provider-reported CostCeilingExceeded stays
+                // CostCeilingExceeded (a hard error for callers like
+                // run_background_task, not an invariant-12 failed task),
+                // everything else is the canonical ProviderUnavailable
+                // dispatch-failure signal.
+                let mapped = map_provider_error(&provider_err);
+                self.release_failure(reservation).await;
+                return Err(mapped);
+            }
+        };
+        reservation
+            .owner
+            .observe_provider(ProviderEvidence::Observed {
+                usage: Some(UsageSnapshot {
+                    input_tokens: u64::from(response.usage.tokens_in),
+                    output_tokens: u64::from(response.usage.tokens_out),
+                }),
+                cost: response.cost,
+                provenance: CostProvenance::ResponseCost,
+                finished: true,
+                interrupted: false,
+            })
+            .map_err(settlement_error)?;
+        self.gate.touch_reservation(reservation.reservation_id);
+
+        // Settle with a receipt, under the same commit lock + append contract
+        // commit_round uses, so the control receipt chains onto the turn
+        // chain and a persistence failure is recorded, never swallowed.
+        let verb = VerbObject::new(verb)
+            .map_err(|e| RuntimeError::Internal(anyhow::anyhow!("invalid receipt verb: {e}")))?;
+        let now_ms = self.clock.now_ms().get();
+        let receipt = {
+            let _guard = self.commit_lock.lock().await;
+            let parent_hash = *self.chain_tail.lock();
+            let body = ReceiptBody {
+                receipt_id: uuid::Uuid::new_v4(),
+                parent_hash,
+                verb,
+                issued_at: ardur_receipt::UnixTsMillis(now_ms),
+                subject: ardur_receipt::HolderId(claims.subject.0.clone()),
+                cap_token_id: ardur_receipt::TokenId(claims.token_id),
+                payload_digest: Sha256Digest::of(response.content.as_bytes()),
+                session_id: Some(session_id.0),
+                cost: response.cost,
+                tool_calls: Vec::new(),
+                provider: Some(self.provider.name()),
+            };
+            // gh#533 review: every failure from here on is POST-dispatch —
+            // the send happened and its cost is observed — so each must
+            // terminate the settlement as unresolved (stopping new
+            // admission), never as a clean cancellation via a dropped
+            // reservation.
+            let signed = match ReceiptSigner::sign(body, &self.receipt_key) {
+                Ok(signed) => signed,
+                Err(e) => {
+                    self.settlements.stop_admission();
+                    reservation
+                        .owner
+                        .receipt_unresolved()
+                        .map_err(settlement_error)?;
+                    return Err(RuntimeError::Internal(anyhow::anyhow!(
+                        "receipt mint failed: {e}"
+                    )));
+                }
+            };
+            let path = self
+                .receipt_log
+                .as_ref()
+                .expect("builder requires receipt storage");
+            let expected_log_end =
+                match crate::receipts::open_append_no_follow(path).and_then(|f| f.metadata()) {
+                    Ok(meta) => meta.len(),
+                    Err(e) => {
+                        self.settlements.stop_admission();
+                        reservation
+                            .owner
+                            .receipt_unresolved()
+                            .map_err(settlement_error)?;
+                        return Err(RuntimeError::Internal(anyhow::anyhow!(
+                            "receipt log unreadable after dispatch: {e}"
+                        )));
+                    }
+                };
+            reservation
+                .owner
+                .prepare_receipt(
+                    ReceiptCandidate {
+                        receipt_id: ReceiptId(signed.body().receipt_id),
+                        expected_parent: signed.body().parent_hash,
+                        expected_log_end,
+                        jws_compact: signed.jws_compact().to_string(),
+                        jws_digest: GateSha256::of(signed.jws_compact().as_bytes()),
+                    },
+                    true,
+                    signed.body().cost,
+                )
+                .map_err(settlement_error)?;
+            reservation
+                .owner
+                .finalize_sync()
+                .map_err(settlement_error)?;
+            if let Err(e) = crate::receipts::append_at_expected_end(
+                path,
+                expected_log_end,
+                signed.jws_compact(),
+            ) {
+                self.settlements.stop_admission();
+                reservation
+                    .owner
+                    .receipt_unresolved()
+                    .map_err(settlement_error)?;
+                return Err(RuntimeError::Internal(anyhow::anyhow!(
+                    "settlement receipt unresolved: {e}"
+                )));
+            }
+            *self.chain_tail.lock() = Some(Sha256Digest::of(signed.jws_compact().as_bytes()));
+            reservation
+                .owner
+                .commit_receipt(ReceiptBinding {
+                    receipt_id: ReceiptId(signed.body().receipt_id),
+                    jws_digest: GateSha256::of(signed.jws_compact().as_bytes()),
+                })
+                .map_err(settlement_error)?;
+            signed.body().clone()
+        };
+        drop(economic_permit.take());
+        self.drain_pending_settlements()
+            .await
+            .map_err(settlement_error)?;
+        Ok((response, receipt))
+    }
+
     /// The journal this runtime is wired to, or a typed error if none is
     /// configured — every §1.7/§1.8/§1.9 session-control operation requires a
     /// durable journal to record its state transition against.
@@ -543,12 +789,15 @@ impl FusedRuntime {
         })
     }
 
-    /// **§1.7.** Call the provider directly to summarize `history` into a
-    /// structured compaction summary. Bypasses the turn pipeline (`submit`/
-    /// `stream`) deliberately: this is a meta-operation *over* the
-    /// transcript, not a chat turn, so it must not itself become a journaled
-    /// `UserMessage`/`AssistantMessage` pair the way a real turn would — that
-    /// would pollute the conversation it is trying to summarize.
+    /// **§1.7.** Build the provider request that summarizes `history` into a
+    /// structured compaction summary. gh#533: returning the *request* (rather
+    /// than dispatching it here) lets the admission layer bind the cost-gate
+    /// reservation to the exact serialized request (its SHA-256 digest), the
+    /// same request-binding the chat turn's admission uses. Bypasses the turn
+    /// pipeline (`submit`/`stream`) deliberately: this is a meta-operation
+    /// *over* the transcript, not a chat turn, so it must not itself become a
+    /// journaled `UserMessage`/`AssistantMessage` pair the way a real turn
+    /// would — that would pollute the conversation it is trying to summarize.
     ///
     /// A condensed practical subset of the blueprint's nine-heading summary
     /// template: Active Task, Completed Actions, Open Items, Decisions,
@@ -557,11 +806,7 @@ impl FusedRuntime {
     /// object, capability-grant tracking, a memory index) this runtime does
     /// not yet expose to a summarization call, so they are omitted rather
     /// than filled with placeholders.
-    async fn summarize(
-        &self,
-        history: &[ChatMessage],
-        focus: Option<&str>,
-    ) -> Result<CompletionResponse, RuntimeError> {
+    fn summarize_request(&self, history: &[ChatMessage], focus: Option<&str>) -> CompletionRequest {
         let mut instruction = String::from(
             "Summarize the conversation below for continuation by another AI \
              agent. Use exactly this structure:\n\n\
@@ -581,11 +826,7 @@ impl FusedRuntime {
         let mut messages = vec![ChatMessage::system(instruction)];
         messages.extend_from_slice(history);
 
-        let req = CompletionRequest::new(messages, self.model.clone(), self.max_tokens);
-        self.provider
-            .complete(req)
-            .await
-            .map_err(|e| map_provider_error(&e))
+        CompletionRequest::new(messages, self.model.clone(), self.max_tokens)
     }
 
     /// **§1.7.** Summarize `history` and install the result as a compaction
@@ -597,17 +838,20 @@ impl FusedRuntime {
     /// are the same underlying journal record; only how the summary text was
     /// produced differs.
     ///
-    /// KNOWN LIMITATION: unlike a chat turn, this call does not yet reserve
-    /// against the cost-gate before dispatching — the minted receipt's
-    /// `cost` field reflects the real provider usage for audit, but the call
-    /// is not yet admission-controlled the way [`submit`](Self::submit) is.
-    /// Compaction is a threshold/user-triggered operation, not a per-turn
-    /// one, which bounds the exposure; tracked as a follow-up.
+    /// **gh#533:** the paid summarization call is admitted BEFORE dispatch
+    /// through the same two gates a chat turn passes — Cedar authorization
+    /// (action `Action::ContextCompact`, after cap-token verification for
+    /// `tool`) and a cost-gate reservation against the holder's budget. A
+    /// missing/forbid policy denies with [`RuntimeError::PolicyDenied`] and
+    /// an exhausted budget denies with [`RuntimeError::CostCeilingExceeded`],
+    /// in both cases without reaching the provider. Settlement is truthful:
+    /// the reservation is released as an infrastructure failure when the
+    /// provider errors, and the minted receipt settles at the observed cost.
     ///
     /// # Errors
-    /// Returns [`RuntimeError`] if the cap-token does not grant `tool`, the
-    /// provider call fails, no journal is configured, or the journal append
-    /// fails.
+    /// Returns [`RuntimeError`] if the cap-token does not grant `tool`, Cedar
+    /// denies the action, the budget cannot cover the envelope, the provider
+    /// call fails, no journal is configured, or the journal append fails.
     pub async fn compact(
         &self,
         session_id: SessionId,
@@ -616,27 +860,24 @@ impl FusedRuntime {
         history: &[ChatMessage],
         focus: Option<String>,
     ) -> Result<CompactOutcome, RuntimeError> {
-        // Fail fast on a denied cap-token before spending on a provider call.
-        self.verify_cap_token_for_tool(cap_token, tool)?;
+        // gh#533: full chat-parity admission — cap-token + Cedar + cost gate
+        // — BEFORE the provider is reached. A denial here spends nothing.
+        let claims = self.authorize_control_provider_call(
+            session_id,
+            cap_token,
+            tool,
+            ActionRef("Action::ContextCompact".to_string()),
+        )?;
         let journal = self.journal_or_err()?;
 
         let before_tokens = estimate_tokens(history);
-        let response = self.summarize(history, focus.as_deref()).await?;
+        let request = self.summarize_request(history, focus.as_deref());
+        let (response, receipt) = self
+            .dispatch_control_completion(session_id, &claims, request, COMPACT_APPLIED_VERB)
+            .await?;
         let after_tokens = estimate_tokens(std::slice::from_ref(&ChatMessage::assistant(
             response.content.clone(),
         )));
-
-        let receipt = self
-            .commit_control_receipt(
-                session_id,
-                cap_token,
-                tool,
-                "context.compact.applied.v1",
-                Sha256Digest::of(response.content.as_bytes()),
-                response.cost,
-                ControlVerifyCost::RuntimeDefault,
-            )
-            .await?;
 
         let checkpoint_id = uuid::Uuid::new_v4();
         let entry_id = journal
@@ -659,21 +900,42 @@ impl FusedRuntime {
     }
 
     /// **§1.7.** Summarize `history` without installing it: no journal entry,
-    /// no receipt, no session state change — lets a caller preview a
-    /// compaction candidate before committing to it with [`compact`](Self::compact).
+    /// no session state change — lets a caller preview a compaction candidate
+    /// before committing to it with [`compact`](Self::compact).
+    ///
+    /// **gh#533 audit contract:** preview is non-mutating to the
+    /// conversation, but it IS an external provider send — the full prompt
+    /// transcript leaves the process exactly as an applied compaction does.
+    /// It therefore passes the SAME admission as `compact` (cap-token +
+    /// Cedar `Action::ContextCompact` + cost reservation) and mints a
+    /// `context.compact.previewed.v1` receipt carrying the observed cost, so
+    /// the send is durably auditable. A receipt-persistence failure is an
+    /// `Err` (the settlement is marked unresolved), never a silent
+    /// success-without-audit: the runtime must not claim no egress happened
+    /// because persistence failed.
     ///
     /// # Errors
-    /// Returns [`RuntimeError`] if the cap-token does not grant `tool` or
-    /// the provider call fails.
+    /// Returns [`RuntimeError`] if the cap-token does not grant `tool`, Cedar
+    /// denies the action, the budget cannot cover the envelope, the provider
+    /// call fails, or the audit receipt cannot be durably minted.
     pub async fn preview_compact(
         &self,
+        session_id: SessionId,
         cap_token: &CapTokenRef,
         tool: &str,
         history: &[ChatMessage],
         focus: Option<String>,
     ) -> Result<String, RuntimeError> {
-        self.verify_cap_token_for_tool(cap_token, tool)?;
-        let response = self.summarize(history, focus.as_deref()).await?;
+        let claims = self.authorize_control_provider_call(
+            session_id,
+            cap_token,
+            tool,
+            ActionRef("Action::ContextCompact".to_string()),
+        )?;
+        let request = self.summarize_request(history, focus.as_deref());
+        let (response, _receipt) = self
+            .dispatch_control_completion(session_id, &claims, request, COMPACT_PREVIEWED_VERB)
+            .await?;
         Ok(response.content)
     }
 
@@ -691,12 +953,20 @@ impl FusedRuntime {
     /// `error` field set. Only a denied cap-token (never even attempted) or a
     /// receipt-mint failure is a hard `Err`.
     ///
-    /// KNOWN LIMITATION: same as `compact` — not yet cost-gate admission
-    /// controlled before dispatch.
+    /// **gh#533:** the provider call is admitted BEFORE dispatch through the
+    /// same two gates a chat turn passes — Cedar authorization (action
+    /// `Action::TaskBackground`, after cap-token verification for `tool`) and
+    /// a cost-gate reservation. A policy denial or an exhausted budget is a
+    /// hard `Err` BEFORE the provider is reached, and the failure receipt
+    /// path settles truthfully: the reserved envelope is refunded as an
+    /// infrastructure failure, then the zero-cost terminal
+    /// `task.background.failed.v1` marker is minted so the chain records the
+    /// task's outcome without double-counting the refund.
     ///
     /// # Errors
-    /// Returns [`RuntimeError`] if the cap-token does not grant `tool` or a
-    /// receipt could not be minted.
+    /// Returns [`RuntimeError`] if the cap-token does not grant `tool`, Cedar
+    /// denies the action, the budget cannot cover the envelope, or a receipt
+    /// could not be minted.
     pub async fn run_background_task(
         &self,
         session_id: SessionId,
@@ -704,39 +974,44 @@ impl FusedRuntime {
         tool: &str,
         prompt: &str,
     ) -> Result<BackgroundTaskOutcome, RuntimeError> {
-        self.verify_cap_token_for_tool(cap_token, tool)?;
+        // gh#533: full chat-parity admission BEFORE the provider is reached.
+        let claims = self.authorize_control_provider_call(
+            session_id,
+            cap_token,
+            tool,
+            ActionRef("Action::TaskBackground".to_string()),
+        )?;
         let req = CompletionRequest::new(
             vec![ChatMessage::user(prompt)],
             self.model.clone(),
             self.max_tokens,
         );
-        match self.provider.complete(req).await {
-            Ok(response) => {
+        match self
+            .dispatch_control_completion(session_id, &claims, req, TASK_COMPLETED_VERB)
+            .await
+        {
+            Ok((response, receipt)) => Ok(BackgroundTaskOutcome {
+                receipt_id: ReceiptId(receipt.receipt_id),
+                result: Some(response.content),
+                error: None,
+            }),
+            Err(dispatch_err) => {
+                // The dispatch already released its reservation (as an
+                // infrastructure-failure refund on a provider error, or it
+                // never took one on an admission refusal). Surface
+                // admission refusals and audit failures as the hard error
+                // they are; only a *provider* failure converts to the
+                // invariant-12 terminal failed-task receipt.
+                let message = dispatch_err.to_string();
+                if !matches!(dispatch_err, RuntimeError::ProviderUnavailable) {
+                    return Err(dispatch_err);
+                }
                 let receipt = self
                     .commit_control_receipt(
                         session_id,
                         cap_token,
                         tool,
-                        "task.background.completed.v1",
-                        Sha256Digest::of(response.content.as_bytes()),
-                        response.cost,
-                        ControlVerifyCost::RuntimeDefault,
-                    )
-                    .await?;
-                Ok(BackgroundTaskOutcome {
-                    receipt_id: ReceiptId(receipt.receipt_id),
-                    result: Some(response.content),
-                    error: None,
-                })
-            }
-            Err(e) => {
-                let message = e.to_string();
-                let receipt = self
-                    .commit_control_receipt(
-                        session_id,
-                        cap_token,
-                        tool,
-                        "task.background.failed.v1",
+                        TASK_FAILED_VERB,
                         Sha256Digest::of(message.as_bytes()),
                         ardur_receipt::CostTuple {
                             tokens_in: 0,
