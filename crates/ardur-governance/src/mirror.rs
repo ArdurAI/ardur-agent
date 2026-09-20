@@ -74,9 +74,22 @@ pub struct ErRoundFacts<'a> {
 /// without forking. They must be side-effect-bounded (a signed append), must
 /// not block indefinitely, and — critically — **cannot influence the turn's
 /// outcome**: by the time the seam fires the round has already committed, so
-/// an error is surfaced to the operator log, never to the caller. A mirror
-/// gap reads as absence at the governance plane (`insufficient_evidence`),
-/// which is the honest failure mode.
+/// an error is surfaced to the operator log, never to the caller.
+///
+/// # Gap-observability obligation
+///
+/// Returning `Err` means a **committed** round now has no ER. An
+/// implementation MUST make that gap observable rather than resume as if
+/// nothing happened: minting later ERs would produce a fully verifiable
+/// mirror that silently skips the round, which a downstream reader cannot
+/// distinguish from continuous compliance. The shipped file-backed emitter's
+/// pattern (`ardur_fused_runtime::ErMirrorEmitter`) is to poison the emitter
+/// for its lifetime on ANY failure (projection, signing, or append), so every
+/// later round also fails loudly until an operator re-opens the log —
+/// re-verification at open then reconciles the on-disk state. A durable
+/// gap/`insufficient_evidence` marker is the equivalent for implementations
+/// that keep writing. A mirror gap reads as absence at the governance plane
+/// (`insufficient_evidence`), never as compliance.
 pub trait GovernanceEmitter: Send + Sync {
     /// Mirror one committed round.
     ///
@@ -84,7 +97,9 @@ pub trait GovernanceEmitter: Send + Sync {
     ///
     /// Implementation-defined mirror failure (projection, signing, or the
     /// durable append). The runtime logs it and continues — the native
-    /// receipt chain remains the source of truth.
+    /// receipt chain remains the source of truth — but the implementation
+    /// MUST honor the gap-observability obligation above before returning
+    /// `Ok` from any LATER call.
     fn mirror_committed_round(
         &self,
         facts: &ErRoundFacts<'_>,
