@@ -45,6 +45,10 @@ ardur-provider-claude-cli = { workspace = true }
 # `ARDUR_PROVIDER=prime` (alias `prime-agent`). Driven over prime-agent's RPC
 # mode; credentials live inside prime-agent, not here.
 ardur-provider-prime = { workspace = true }
+# The Hermes Agent CLI backend (#501) — selected by
+# `ARDUR_PROVIDER=hermes` (alias `hermes-agent`). Driven as a one-shot
+# subprocess; credentials live inside Hermes, not here.
+ardur-provider-hermes = { workspace = true }
 # The `[router]` config table (#411 / #531 D0) the router branch parses at
 # boot; sits below every provider crate, so no cycle is closed.
 ardur-config = { workspace = true }
