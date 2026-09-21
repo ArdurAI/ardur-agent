@@ -61,9 +61,9 @@
 //!   ([`HermesConfig::allow_child_tools`]) and surfaces only the final assistant
 //!   text, never a [`FinishReason::ToolUse`]. Governing a child's *own* tool
 //!   steps is delegation work, not provider work.
-//! - **Selector registration** — `ProviderKind::Hermes` /
-//!   `ARDUR_PROVIDER=hermes` in `provider-selector::from_env` is deferred to the
-//!   D0 router lane. This crate is buildable and testable on its own.
+//! - **Selector registration** — selected at boot via `ARDUR_PROVIDER=hermes`
+//!   (alias `hermes-agent`) in `provider-selector::from_env` →
+//!   [`HermesProvider::from_env`].
 //!
 //! # Attribution
 //!
