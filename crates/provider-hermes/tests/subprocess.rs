@@ -54,7 +54,10 @@ fn request(prompt: &str) -> CompletionRequest {
             tool_call_id: None,
         }],
         ModelId(String::new()),
-        0, // hermes oneshot cannot enforce max_tokens; 0 = delegate
+        // At/above the default `max_tokens_floor`: this backend refuses a
+        // ceiling it cannot enforce, so the shared fixture must ask for one it
+        // can honour. The refusal path has its own dedicated test.
+        8_192,
     )
 }
 
@@ -359,4 +362,62 @@ sys.exit(0)
         lines.windows(2).any(|w| w == ["--format", "stream-json"]),
         "expected --format stream-json:\n{argv}"
     );
+}
+
+#[tokio::test]
+async fn an_unenforceable_output_ceiling_is_refused_not_ignored() {
+    // Review finding: hermes chat --oneshot has no per-completion output cap,
+    // so a ceiling below the floor must fail rather than be silently discarded —
+    // otherwise the runtime authorizes N tokens and is billed for more while
+    // the response still reports a clean stop.
+    let provider = provider_for(PathBuf::from("/nonexistent/must-not-spawn"));
+    let mut req = request("hello");
+    req.max_tokens = 16;
+
+    let err = provider
+        .complete(req)
+        .await
+        .expect_err("an unenforceable ceiling must be refused");
+    match err {
+        ProviderError::InvalidRequest(msg) => assert!(
+            msg.contains("cannot enforce"),
+            "expected an enforcement diagnostic, got: {msg}"
+        ),
+        other => panic!("expected InvalidRequest (not a spawn failure), got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_zero_floor_delegates_enforcement_and_accepts_any_ceiling() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let shim = write_shim(dir.path(), "hermes-floor-ok", HAPPY_SHIM);
+    let provider = HermesProvider::new(HermesConfig {
+        binary: shim,
+        max_tokens_floor: 0,
+        request_timeout: Duration::from_secs(30),
+        ..HermesConfig::default()
+    });
+
+    let mut req = request("hello");
+    req.max_tokens = 16;
+    let response = provider
+        .complete(req)
+        .await
+        .expect("zero floor must accept any ceiling");
+    assert_eq!(response.content, "SHIM-ROUNDTRIP-OK");
+}
+
+#[tokio::test]
+async fn a_zero_max_tokens_delegates_regardless_of_floor() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let shim = write_shim(dir.path(), "hermes-zero-ceiling", HAPPY_SHIM);
+    let response = provider_for(shim)
+        .complete({
+            let mut req = request("hello");
+            req.max_tokens = 0;
+            req
+        })
+        .await
+        .expect("max_tokens=0 must delegate");
+    assert_eq!(response.content, "SHIM-ROUNDTRIP-OK");
 }

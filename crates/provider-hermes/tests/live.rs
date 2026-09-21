@@ -16,7 +16,8 @@ async fn hermes_live_smoke() {
     let req = CompletionRequest::new(
         vec![ChatMessage::user("Reply with exactly the word: pong")],
         ModelId(String::new()),
-        64,
+        // At/above the default max_tokens_floor (4096).
+        8_192,
     );
     let resp = provider
         .complete(req)

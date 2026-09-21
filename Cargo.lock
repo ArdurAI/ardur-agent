@@ -1240,6 +1240,7 @@ dependencies = [
  "ardur-config",
  "ardur-provider-claude-cli",
  "ardur-provider-codex",
+ "ardur-provider-hermes",
  "ardur-provider-ollama",
  "ardur-provider-openai-compat",
  "ardur-provider-openrouter",

@@ -15,6 +15,7 @@
 //! | `codex`          | `CodexProvider` (subprocess wrap)    | `ardur-provider-codex`      |
 //! | `claude-cli`     | `ClaudeCliProvider` (subprocess wrap)| `ardur-provider-claude-cli` |
 //! | `prime`          | `PrimeProvider` (RPC subprocess wrap)| `ardur-provider-prime`      |
+//! | `hermes`         | `HermesProvider` (CLI subprocess wrap)| `ardur-provider-hermes`    |
 //!
 //! (`claude-cli` also answers to the alias `claude-subscription`.)
 //!
@@ -28,7 +29,8 @@
 //! *after* a valid selection when their key is absent — that surfaces as
 //! `Err(ProviderError)`, distinct from the panic on an unknown selector. The
 //! credential-free backends
-//! ([`ProviderKind::Ollama`], [`ProviderKind::Codex`], [`ProviderKind::ClaudeCli`])
+//! ([`ProviderKind::Ollama`], [`ProviderKind::Codex`], [`ProviderKind::ClaudeCli`],
+//! [`ProviderKind::Prime`], [`ProviderKind::Hermes`])
 //! never fail.
 //!
 //! # Why a standalone crate
@@ -47,6 +49,7 @@ use std::sync::Arc;
 
 use ardur_provider_claude_cli::ClaudeCliProvider;
 use ardur_provider_codex::CodexProvider;
+use ardur_provider_hermes::HermesProvider;
 use ardur_provider_ollama::OllamaProvider;
 use ardur_provider_openai_compat::OpenAiCompatProvider;
 use ardur_provider_openrouter::OpenRouterProvider;
@@ -82,6 +85,8 @@ pub enum ProviderKind {
     ClaudeCli,
     /// Prime Agent CLI, wrapped as a subprocess over its RPC mode (#501 Tier 0).
     Prime,
+    /// Hermes Agent CLI, wrapped as a one-shot subprocess (#501).
+    Hermes,
 }
 
 impl ProviderKind {
@@ -90,7 +95,7 @@ impl ProviderKind {
 
     /// Every recognized selector spelling, in selection order — the canonical
     /// list surfaced in the unknown-value error.
-    pub const ALL: [ProviderKind; 8] = [
+    pub const ALL: [ProviderKind; 9] = [
         ProviderKind::Anthropic,
         ProviderKind::OpenRouter,
         ProviderKind::OpenAiCompat,
@@ -98,6 +103,7 @@ impl ProviderKind {
         ProviderKind::Codex,
         ProviderKind::ClaudeCli,
         ProviderKind::Prime,
+        ProviderKind::Hermes,
         ProviderKind::OpenAiCompat, // openai alias
     ];
 
@@ -112,6 +118,7 @@ impl ProviderKind {
             ProviderKind::Codex => "codex",
             ProviderKind::ClaudeCli => "claude-cli",
             ProviderKind::Prime => "prime",
+            ProviderKind::Hermes => "hermes",
         }
     }
 
@@ -131,6 +138,7 @@ impl ProviderKind {
             "codex" => Ok(ProviderKind::Codex),
             "claude-cli" | "claude-subscription" => Ok(ProviderKind::ClaudeCli),
             "prime" | "prime-agent" => Ok(ProviderKind::Prime),
+            "hermes" | "hermes-agent" => Ok(ProviderKind::Hermes),
             _ => Err(UnknownProvider(raw.to_string())),
         }
     }
@@ -161,7 +169,8 @@ impl ProviderKind {
     /// [`ProviderKind::OpenAiCompat`] → [`ProviderError::Unauthorized`]).
     /// The credential-free backends
     /// ([`ProviderKind::Ollama`] / [`ProviderKind::Codex`] /
-    /// [`ProviderKind::ClaudeCli`] / [`ProviderKind::Prime`]) never fail.
+    /// [`ProviderKind::ClaudeCli`] / [`ProviderKind::Prime`] /
+    /// [`ProviderKind::Hermes`]) never fail.
     pub fn build(self, model: ModelId) -> Result<Arc<dyn Provider>, ProviderError> {
         let provider: Arc<dyn Provider> = match self {
             ProviderKind::Anthropic => Arc::new(AnthropicProvider::from_env(model)?),
@@ -171,6 +180,7 @@ impl ProviderKind {
             ProviderKind::Codex => Arc::new(CodexProvider::from_env(model)),
             ProviderKind::ClaudeCli => Arc::new(ClaudeCliProvider::from_env(model)),
             ProviderKind::Prime => Arc::new(PrimeProvider::from_env()),
+            ProviderKind::Hermes => Arc::new(HermesProvider::from_env()),
         };
         Ok(provider)
     }
@@ -194,7 +204,7 @@ impl fmt::Display for UnknownProvider {
         write!(
             f,
             "unknown {SELECTOR_ENV} value {:?}: supported values are \
-             anthropic (default), openrouter, openai-compat, ollama, codex, claude-cli, prime",
+             anthropic (default), openrouter, openai-compat, ollama, codex, claude-cli, prime, hermes",
             self.0
         )
     }
@@ -344,6 +354,29 @@ mod tests {
     }
 
     #[test]
+    fn hermes_selects_hermes_under_both_spellings() {
+        // The Hermes backend wraps the local `hermes` binary as a one-shot
+        // subprocess; from_env is infallible (no API key here, no probe until a
+        // turn runs). Both the canonical spelling and the `hermes-agent` alias
+        // resolve.
+        for v in [
+            "hermes",
+            "Hermes",
+            "HERMES",
+            "hermes-agent",
+            "  hermes-agent  ",
+        ] {
+            assert_eq!(
+                ProviderKind::resolve(Some(v)).unwrap(),
+                ProviderKind::Hermes,
+                "{v:?} should select hermes"
+            );
+        }
+        let provider = select(Some("hermes"), model()).expect("hermes is infallible");
+        assert_eq!(provider.id().0, "hermes");
+    }
+
+    #[test]
     fn claude_cli_selects_claude_cli() {
         // The Claude CLI backend wraps the local `claude` binary; from_env is
         // infallible (no API key, no probe until a turn runs). Both the canonical
@@ -386,6 +419,8 @@ mod tests {
             ProviderKind::Ollama,
             ProviderKind::Codex,
             ProviderKind::ClaudeCli,
+            ProviderKind::Prime,
+            ProviderKind::Hermes,
         ] {
             let provider = kind.build(model()).expect("infallible backend");
             assert_eq!(

@@ -22,7 +22,7 @@
 //! - Every configuration error (unknown backend, missing default lane,
 //!   unreadable config file) aborts boot as [`ProviderError::InvalidSelection`]
 //!   — a router that cannot be built correctly is never silently skipped.
-//! - Credential-free backends (ollama, codex, claude-cli, prime) ignore pools
+//! - Credential-free backends (ollama, codex, claude-cli, prime, hermes) ignore pools
 //!   with a loud warning; pooled builds use the keyed constructors, so key
 //!   material flows only into the provider instance that will use it.
 
@@ -175,7 +175,8 @@ fn build_entry_instances(
         ProviderKind::Ollama
         | ProviderKind::Codex
         | ProviderKind::ClaudeCli
-        | ProviderKind::Prime => false,
+        | ProviderKind::Prime
+        | ProviderKind::Hermes => false,
     };
 
     if !keyed {
@@ -248,7 +249,8 @@ fn build_entry_instances(
             ProviderKind::Ollama
             | ProviderKind::Codex
             | ProviderKind::ClaudeCli
-            | ProviderKind::Prime => unreachable!("credential-free kind handled above"),
+            | ProviderKind::Prime
+            | ProviderKind::Hermes => unreachable!("credential-free kind handled above"),
         };
         entries.push(chain_entry(backend, model, provider, index, table));
     }

@@ -61,9 +61,9 @@
 //!   ([`HermesConfig::allow_child_tools`]) and surfaces only the final assistant
 //!   text, never a [`FinishReason::ToolUse`]. Governing a child's *own* tool
 //!   steps is delegation work, not provider work.
-//! - **Selector registration** — `ProviderKind::Hermes` /
-//!   `ARDUR_PROVIDER=hermes` in `provider-selector::from_env` is deferred to the
-//!   D0 router lane. This crate is buildable and testable on its own.
+//! - **Selector registration** — selected at boot via `ARDUR_PROVIDER=hermes`
+//!   (alias `hermes-agent`) in `provider-selector::from_env` →
+//!   [`HermesProvider::from_env`].
 //!
 //! # Attribution
 //!
@@ -95,6 +95,11 @@ pub const DEFAULT_BINARY: &str = "hermes";
 /// Default per-turn timeout. A Hermes turn can involve several model
 /// round-trips, so this is generous.
 const DEFAULT_TIMEOUT_SECS: u64 = 300;
+/// Default [`HermesConfig::max_tokens_floor`]. A request asking for fewer output
+/// tokens than this is refused, because Hermes cannot enforce a per-completion
+/// ceiling and silently overshooting the caller's authorized budget is worse
+/// than failing the request.
+const DEFAULT_MAX_TOKENS_FLOOR: u32 = 4_096;
 /// Upper bound on retained stream-json event lines, so a chatty turn cannot grow
 /// the audit body without limit.
 const MAX_RETAINED_EVENTS: usize = 2_000;
@@ -117,6 +122,8 @@ pub const DEFAULT_MODEL_ENV: &str = "HERMES_DEFAULT_MODEL";
 pub const WORKING_DIR_ENV: &str = "HERMES_WORKING_DIR";
 /// Env var [`HermesConfig::from_env`] reads the per-turn timeout from.
 pub const TIMEOUT_SECS_ENV: &str = "HERMES_TIMEOUT_SECS";
+/// Env var [`HermesConfig::from_env`] reads the max-tokens floor from.
+pub const MAX_TOKENS_FLOOR_ENV: &str = "HERMES_MAX_TOKENS_FLOOR";
 
 /// How this backend locates and runs the `hermes` binary.
 #[derive(Clone, Debug)]
@@ -132,6 +139,13 @@ pub struct HermesConfig {
     pub working_directory: Option<PathBuf>,
     /// Wall-clock ceiling for one turn.
     pub request_timeout: Duration,
+    /// The smallest per-request `max_tokens` this backend will accept.
+    ///
+    /// Hermes has no per-completion output cap, so any ceiling below this is
+    /// refused rather than silently ignored (see [`Provider::complete`]).
+    /// Above it, enforcement is knowingly delegated to Hermes' own limits.
+    /// Set to `0` to accept every ceiling and delegate unconditionally.
+    pub max_tokens_floor: u32,
     /// Whether the child may run its own tools. `false` (the default) passes
     /// `--toolsets ""` (Hermes deny-all): as a *completion* backend we want the
     /// model's answer, not an agent editing the filesystem outside Ardur's grant
@@ -149,6 +163,7 @@ impl Default for HermesConfig {
             default_model: None,
             working_directory: None,
             request_timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+            max_tokens_floor: DEFAULT_MAX_TOKENS_FLOOR,
             allow_child_tools: false,
         }
     }
@@ -174,6 +189,13 @@ impl HermesConfig {
             .filter(|secs| *secs > 0)
         {
             config.request_timeout = Duration::from_secs(secs);
+        }
+        // `0` is meaningful here (delegate unconditionally), so unlike the
+        // timeout this accepts zero; only an unparseable value keeps the default.
+        if let Some(floor) =
+            non_empty_env(MAX_TOKENS_FLOOR_ENV).and_then(|raw| raw.parse::<u32>().ok())
+        {
+            config.max_tokens_floor = floor;
         }
         config
     }
@@ -242,14 +264,21 @@ impl Provider for HermesProvider {
                 "hermes requires a non-empty prompt".into(),
             ));
         }
-        // `hermes chat --oneshot` has no per-completion output-token flag. A
-        // nonzero ceiling would be silently ignored and could over-generate /
-        // over-bill vs the caller's authorized max_tokens — fail closed.
-        // Pass 0 to acknowledge the ceiling is delegated to Hermes' own config.
-        if req.max_tokens > 0 {
+        // The caller's output-token ceiling must not be silently discarded.
+        // `hermes chat --oneshot` exposes no per-request output cap, so a
+        // ceiling this backend cannot enforce is refused rather than ignored:
+        // the fused runtime would otherwise authorize N tokens, be billed for
+        // more, and still see a clean `FinishReason::Stop`.
+        //
+        // `max_tokens_floor` is the ceiling at or above which the operator
+        // accepts that enforcement is delegated to Hermes' own limits.
+        // Pass 0 to acknowledge the ceiling is delegated unconditionally.
+        if req.max_tokens > 0 && req.max_tokens < self.config.max_tokens_floor {
             return Err(ProviderError::InvalidRequest(format!(
-                "hermes chat --oneshot cannot enforce max_tokens={}; pass 0 to delegate the output ceiling to Hermes' configured limit",
-                req.max_tokens
+                "hermes chat --oneshot cannot enforce a per-request output ceiling of {} tokens \
+                 (it has no per-completion cap); raise max_tokens to at least {} or use \
+                 a provider that enforces it",
+                req.max_tokens, self.config.max_tokens_floor
             )));
         }
 
@@ -891,5 +920,16 @@ mod tests {
         assert!(!is_etxtbsy(&std::io::Error::from(
             std::io::ErrorKind::NotFound
         )));
+    }
+
+    #[test]
+    fn max_tokens_floor_is_configurable_and_zero_delegates() {
+        let default = HermesConfig::default();
+        assert_eq!(default.max_tokens_floor, DEFAULT_MAX_TOKENS_FLOOR);
+        let delegating = HermesConfig {
+            max_tokens_floor: 0,
+            ..HermesConfig::default()
+        };
+        assert_eq!(delegating.max_tokens_floor, 0);
     }
 }
