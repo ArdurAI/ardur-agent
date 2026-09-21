@@ -490,6 +490,19 @@ impl FusedRuntimeBuilder {
         self
     }
 
+    /// The `Option` half of [`with_governance`](Self::with_governance): boot
+    /// helpers whose governance emitter is conditional (an env flag defaulting
+    /// off) pass `None` to keep the default behaviour, without forking the
+    /// whole builder chain into `if`/`else` arms at every boot site.
+    /// Mirrors [`maybe_with_approvals`](Self::maybe_with_approvals).
+    #[must_use]
+    pub fn maybe_with_governance(self, emitter: Option<Arc<dyn GovernanceEmitter>>) -> Self {
+        match emitter {
+            Some(emitter) => self.with_governance(emitter),
+            None => self,
+        }
+    }
+
     /// Share an externally-held deny-list (so the caller can revoke through its
     /// own handle too). By default the runtime owns a fresh one, reachable via
     /// [`FusedRuntime::revoke_cap_token`].

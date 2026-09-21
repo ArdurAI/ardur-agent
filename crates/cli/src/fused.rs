@@ -38,7 +38,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use ardur_cap_token::{CapScope, CapTokenIssuer, HolderId as CapHolderId, VerifiedClaims};
 use ardur_cedar_policy::CedarPolicyBundle;
 use ardur_cost_gate::{CostEnvelope, CostTuple as GateCostTuple, HolderId as GateHolderId};
-use ardur_fused_runtime::FusedRuntimeBuilder;
+use ardur_fused_runtime::{ErMirrorEmitter, FusedRuntimeBuilder, GovernanceEmitter};
 use ardur_memory::{
     HolderId as MemoryHolderId, InMemoryMemoryRuntime, MemoryCard, MemoryControlPlane, ReceiptId,
     RecordId, UnixTsMillis,
@@ -56,12 +56,17 @@ use ardur_tool_registry::{
 use crate::config::Config;
 use crate::engine::TurnOutcome;
 use crate::error::CliError;
-use crate::state::{GrantRecord, StateDirs, read_grant_records};
+use crate::state::{GrantRecord, StateDirs, governance_mirror_enabled, read_grant_records};
 use crate::stream::{StreamOutcome, drive_fused_turn};
 
 /// The audience the session cap-token is scoped to (matches the runtime's
 /// verifier caveat).
 const AUDIENCE: &str = "cli";
+/// #502 Seam B7: the stable `verifier_id` stamped into every governance ER the
+/// CLI mirror mints — same scheme as the #560 fused-runtime contract, naming
+/// the boot surface so an ER names its minting plane (CLI vs server) without
+/// carrying host state.
+const GOVERNANCE_VERIFIER_ID: &str = "spiffe://ardur/verifier/cli";
 /// The tool/capability every chat turn exercises.
 const TOOL: &str = "chat.submit";
 /// §1.8 — the capability `/checkpoint` and `/rollback` exercise.
@@ -571,6 +576,33 @@ impl FusedEngine {
         // for the persistent store that replaces this).
         let memory = Arc::new(InMemoryMemoryRuntime::new());
 
+        // #502 Seam B7 follow-up: the opt-in governance ER mirror
+        // (`ARDUR_GOVERNANCE`, default off). Opened under the state root at the
+        // DESIGN.md convention `<root>/governance/er-chain.jsonl`, from the SAME
+        // P-256 custody key native receipts sign with (both live under `keys/`).
+        // The open is fail-closed: a corrupt or foreign-key mirror log fails the
+        // session start rather than re-genesis chains. Default off constructs
+        // nothing — byte-identical to a session without the seam.
+        let governance = (governance_mirror_enabled())
+            .then(|| {
+                ErMirrorEmitter::open_in_data_dir(&dirs.root, &receipt_key, GOVERNANCE_VERIFIER_ID)
+                    .map_err(|e| {
+                        CliError::State(format!(
+                            "opening the governance ER mirror in {}: {e} \
+                             (unset ARDUR_GOVERNANCE or repair {})",
+                            dirs.root.display(),
+                            dirs.root.join("governance").display()
+                        ))
+                    })
+            })
+            .transpose()?;
+        if let Some(emitter) = &governance {
+            tracing::info!(
+                mirror = %emitter.path().display(),
+                "governance ER mirror enabled"
+            );
+        }
+
         let (runtime, reconciliation) = FusedRuntimeBuilder::new(
             cap_root,
             policies.clone(),
@@ -604,6 +636,13 @@ impl FusedEngine {
         // chat` scans prompts too, rather than shipping stage 4.5 inert.
         .with_default_injection_filters()
         .receipt_log(dirs.receipt_log())
+        // #502 Seam B7 follow-up: hand the opt-in ER mirror over. `None` (the
+        // default) keeps the session byte-identical to one built before the
+        // seam; the runtime fires the emitter at the commit decision only, so
+        // abandoned/cancelled turns mint no ER.
+        .maybe_with_governance(
+            governance.map(|emitter| Arc::new(emitter) as Arc<dyn GovernanceEmitter>),
+        )
         .build_reconciled()
         .await
         .map_err(|e| CliError::State(format!("building/reconciling the fused runtime: {e}")))?;

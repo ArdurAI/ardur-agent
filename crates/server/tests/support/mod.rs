@@ -97,6 +97,9 @@ pub fn test_config(data_dir: &TempDir, slack_base: Option<String>) -> Config {
         // ARD-463: tests boot with the approval gate off, matching a default
         // deployment. Tests that want it armed set this field explicitly.
         approval_gated_capabilities: Vec::new(),
+        // #502 Seam B7 follow-up: default-off governance ER mirror, matching a
+        // default deployment. The dedicated boot tests set it explicitly.
+        governance_mirror: false,
         http_turn_timeout: std::time::Duration::from_secs(30),
     }
 }

@@ -122,6 +122,11 @@ pub mod settlement;
 mod shared;
 pub mod streaming;
 
+/// The seam's emitter trait, re-exported so boot sites can name the
+/// `Arc<dyn GovernanceEmitter>` they hand to
+/// [`maybe_with_governance`](FusedRuntimeBuilder::maybe_with_governance)
+/// without taking a direct `ardur-governance` dependency edge.
+pub use ardur_governance::GovernanceEmitter;
 pub use builder::FusedRuntimeBuilder;
 pub use governance::ErMirrorEmitter;
 pub use receipt_cache::{LoadedReceiptChain, ReceiptCacheStats, VerifiedReceiptCache};

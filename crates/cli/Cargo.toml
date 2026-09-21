@@ -142,6 +142,10 @@ async-trait = { workspace = true }
 futures = { workspace = true }
 # A throwaway HOME so the fused state-dir tests never touch the real `~/.ardur`.
 tempfile = { workspace = true }
+# The governance smoke test verifies the mirrored ER chain against the
+# session's own receipt custody key, through the same public verify API #560's
+# suite uses (re-exported path: ardur-fused-runtime → ardur-governance).
+ardur-governance = { workspace = true }
 # gh#533 black-box compaction-admission guards: an OpenAI-compatible loopback
 # provider fixture the real `ardur chat` binary is pointed at, so zero-dispatch
 # denials can be observed at the peer rather than inferred from output.
