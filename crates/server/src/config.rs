@@ -217,6 +217,15 @@ pub struct Config {
     /// Gating is by **capability**, not tool name, so a capability stays gated
     /// however many tools declare it.
     pub approval_gated_capabilities: Vec<String>,
+    /// **#502 Seam B7 follow-up.** Opt-in governance Execution-Receipt mirror
+    /// (`ARDUR_GOVERNANCE`, default `false`). When `true`, boot opens the
+    /// file-backed `ErMirrorEmitter` under `<data_dir>/governance/` and hands
+    /// it to the fused runtime — every committed turn mints a verifiable ER
+    /// (same P-256 custody as native receipts); abandoned/cancelled turns mint
+    /// none. Default off is byte-identical to a boot without the seam: no
+    /// mirror file, no admission change. Fail-closed: a corrupt or foreign-key
+    /// mirror log fails the boot rather than re-genesis.
+    pub governance_mirror: bool,
     /// How long a synchronous `POST /chat` (and ACP) turn may run before the
     /// HTTP surface stops waiting on it (`ARDUR_HTTP_TURN_TIMEOUT_SECS`, default
     /// `30`). When the wait elapses the client receives `504`; the worker
@@ -309,6 +318,7 @@ impl fmt::Debug for Config {
                 "approval_gated_capabilities",
                 &self.approval_gated_capabilities,
             )
+            .field("governance_mirror", &self.governance_mirror)
             .field("http_turn_timeout", &self.http_turn_timeout)
             .finish()
     }
@@ -581,6 +591,9 @@ impl Config {
             file_tool_root,
             file_write_diagnostics,
             approval_gated_capabilities,
+            governance_mirror: optional("ARDUR_GOVERNANCE")
+                .as_deref()
+                .is_some_and(is_truthy),
             http_turn_timeout,
         })
     }

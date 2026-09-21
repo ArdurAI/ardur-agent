@@ -434,6 +434,21 @@ pub fn dev_permissive_policy_enabled() -> bool {
         .unwrap_or(false)
 }
 
+/// Whether the opt-in governance ER mirror (#502 Seam B7 follow-up) is enabled
+/// (`ARDUR_GOVERNANCE`). Same normalized truthy rule as
+/// [`dev_permissive_policy_enabled`]; default off. Public so the engine's boot
+/// path and any operator surface read the same decision.
+pub fn governance_mirror_enabled() -> bool {
+    std::env::var("ARDUR_GOVERNANCE")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
 /// The local user id used in the session subject. See [`StateDirs::local_subject`].
 fn local_uid(home: &Path) -> String {
     #[cfg(unix)]

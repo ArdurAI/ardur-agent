@@ -504,9 +504,26 @@ It contains:
 | `journals/` | append-only session journals (replay source of truth) |
 | `receipts/` | signed receipt chain (JWS-ES256) |
 | `keys/` | issuer keys — **`keys/issuer.pem` is the root of trust for the receipt chain. Back this up. Losing it invalidates every prior receipt.** |
+| `governance/` | opt-in Execution-Receipt (ER) mirror — created only when `ARDUR_GOVERNANCE` is enabled (see below) |
 
 Back the whole volume up regularly. The receipt chain is content-addressed
 and append-only; a corrupted or missing journal entry breaks replay.
+
+### Governance Execution-Receipt mirror (opt-in, default off)
+
+`ARDUR_GOVERNANCE=1` (server and `ardur chat` alike) turns on the governance
+Execution-Receipt mirror from #502 Seam B7: every turn that durably commits
+its native receipt also appends a signed ER to `governance/er-chain.jsonl`
+under the data dir (`~/.ardur/governance/` for the CLI), signed with the same
+P-256 custody key as the receipt chain, hash-chained and verified across
+restarts. Turns that are abandoned or cancelled before the commit decision
+mint no ER. Admission behaviour (allow/deny) is unchanged either way — the
+mirror observes, it never decides.
+
+The default (unset) is byte-identical to running without the feature: no
+`governance/` directory is created. Enabling is fail-closed: if the mirror
+log is corrupt or was signed by a different key, the boot (or chat session)
+fails with an error rather than silently starting a new chain.
 
 ## MCP (Model Context Protocol)
 

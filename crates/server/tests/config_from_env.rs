@@ -61,6 +61,7 @@ const TOUCHED: &[&str] = &[
     "ARDUR_HTTP_ALLOWLIST",
     "ARDUR_FILE_TOOL_ROOT",
     "ARDUR_APPROVAL_GATED_CAPABILITIES",
+    "ARDUR_GOVERNANCE",
 ];
 
 fn set(key: &str, value: &str) {
@@ -608,6 +609,43 @@ async fn approval_gating_is_off_by_default() {
         "a fresh boot must gate nothing; got {:?}",
         config.approval_gated_capabilities
     );
+}
+
+/// #502 Seam B7 follow-up: the governance ER mirror is off unless asked for.
+/// An unset `ARDUR_GOVERNANCE` must leave the flag down (the boot opens no
+/// mirror), and only the normalized truthy spellings turn it on — an empty or
+/// garbage value must not (fail-closed default, not last-wins).
+#[tokio::test]
+#[serial]
+async fn governance_mirror_defaults_off_and_only_truthy_values_enable_it() {
+    let _lock = env_lock();
+    let _env = CleanEnv::new().with_slack();
+    set("ANTHROPIC_API_KEY", "sk-ant-test");
+
+    let config = Config::from_env().expect("config loads without the variable");
+    assert!(
+        !config.governance_mirror,
+        "a fresh boot must open no ER mirror; got {}",
+        config.governance_mirror
+    );
+
+    for value in ["", "0", "false", "off", "garbage"] {
+        set("ARDUR_GOVERNANCE", value);
+        let config = Config::from_env().unwrap_or_else(|e| panic!("`{value}` parses: {e}"));
+        assert!(
+            !config.governance_mirror,
+            "`ARDUR_GOVERNANCE={value}` must NOT enable the mirror"
+        );
+    }
+
+    for value in ["1", "true", "TRUE", "Yes", " on "] {
+        set("ARDUR_GOVERNANCE", value);
+        let config = Config::from_env().unwrap_or_else(|e| panic!("`{value}` parses: {e}"));
+        assert!(
+            config.governance_mirror,
+            "`ARDUR_GOVERNANCE={value}` enables the mirror"
+        );
+    }
 }
 
 /// The configured labels survive the round trip in order, so an operator can

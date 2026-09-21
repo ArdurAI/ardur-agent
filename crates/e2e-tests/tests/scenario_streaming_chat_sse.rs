@@ -40,6 +40,8 @@ fn test_config(data_dir: &tempfile::TempDir) -> Config {
         file_tool_root: None,
         file_write_diagnostics: false,
         approval_gated_capabilities: Vec::new(),
+        // #502 Seam B7 follow-up: default-off governance ER mirror.
+        governance_mirror: false,
         http_turn_timeout: std::time::Duration::from_secs(30),
         slack_enabled: true,
         slack_bot_token: Some("redacted-test-token".to_string()),

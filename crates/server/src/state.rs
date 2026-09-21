@@ -54,8 +54,8 @@ use ardur_channel_telegram::TelegramChannel;
 use ardur_cost_gate::{CostEnvelope, CostTuple as GateCostTuple, HolderId as GateHolderId};
 use ardur_fused_runtime::settlement::SettlementSupervisor;
 use ardur_fused_runtime::{
-    FusedEvent, FusedRuntime, FusedRuntimeBuilder, SharedDenyList, TurnCommitHandshake,
-    VerifiedReceiptCache,
+    ErMirrorEmitter, FusedEvent, FusedRuntime, FusedRuntimeBuilder, GovernanceEmitter,
+    SharedDenyList, TurnCommitHandshake, VerifiedReceiptCache,
 };
 use ardur_memory::{InMemoryMemoryRuntime, MemoryRuntime};
 use ardur_memory_qdrant::{
@@ -93,6 +93,11 @@ const SERVER_JOURNAL_SESSION_UUID: u128 = 0x018f_f6f0_7d5a_7b87_b3d6_6ab7_ad0f_0
 /// The fixed cost-gate holder / cap-token subject every session token is issued
 /// under (see the module Phase-3 note on why this is not the per-Slack-user id).
 pub const GATEWAY_SUBJECT: &str = "ardur:slack-gateway";
+/// #502 Seam B7: the stable `verifier_id` stamped into every governance ER the
+/// server mirror mints. Same scheme as the #560 fused-runtime contract
+/// (`spiffe://ardur/verifier/...`), names the boot surface so an ER names its
+/// minting plane (server vs CLI) without carrying host state.
+pub const GOVERNANCE_VERIFIER_ID: &str = "spiffe://ardur/verifier/server";
 
 /// How long a freshly minted session cap-token is valid — five minutes, matching
 /// the Slack replay window. A turn that outlives this re-mints on the next event.
@@ -595,6 +600,33 @@ impl AppState {
 
         let receipt_log = receipts_dir.join("chain.jsonl");
 
+        // #502 Seam B7 follow-up: the opt-in governance ER mirror. Opened from
+        // the SAME receipt custody key the runtime signs native receipts with,
+        // landed at the DESIGN.md convention `<data_dir>/governance/`. The open
+        // itself is the fail-closed gate: a corrupt or foreign-key mirror log
+        // fails the boot (the emitter never re-genesis chains), and a mirror
+        // gap never blocks a turn (the native receipt chain stays the source of
+        // truth). Default off constructs nothing — byte-identical boot.
+        let governance = config
+            .governance_mirror
+            .then(|| {
+                ErMirrorEmitter::open_in_data_dir(&data_dir, &receipt_key, GOVERNANCE_VERIFIER_ID)
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "opening the governance ER mirror in {}: {e} \
+                             (disable ARDUR_GOVERNANCE or repair the mirror log)",
+                            data_dir.display()
+                        )
+                    })
+            })
+            .transpose()?;
+        if let Some(emitter) = &governance {
+            tracing::info!(
+                mirror = %emitter.path().display(),
+                "governance ER mirror enabled"
+            );
+        }
+
         // 5. The fused runtime. Single instance, single receipt chain-tail mutex
         //    — so receipts chain correctly across turns.
         let envelope = per_turn_envelope(config.cost_budget_cents);
@@ -645,6 +677,16 @@ impl AppState {
                     .collect::<HashSet<String>>(),
             )
         }))
+        // #502 Seam B7 follow-up: the opt-in ER mirror (`ARDUR_GOVERNANCE`).
+        // `None` (the default) keeps the boot byte-identical to a runtime
+        // built before the seam — no mirror file, no admission change. When
+        // set, the emitter opened above is handed over as-is; the runtime
+        // fires it at the commit decision only (abandoned/cancelled turns
+        // mint no ER), reusing the native admission stack with no parallel
+        // guard.
+        .maybe_with_governance(
+            governance.map(|emitter| Arc::new(emitter) as Arc<dyn GovernanceEmitter>),
+        )
         .build_reconciled()
         .await
         .map_err(|e| anyhow::anyhow!("building/reconciling fused runtime: {e}"))?;

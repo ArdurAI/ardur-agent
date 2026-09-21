@@ -123,6 +123,11 @@ async-trait = { workspace = true }
 assert_cmd = { workspace = true }
 hmac = { workspace = true }
 sha2 = { workspace = true }
+# The governance-boot tests verify the mirrored ER chain against the boot's
+# own receipt custody key (re-exported path: ardur-fused-runtime →
+# ardur-governance), through the same public verify API #560's suite uses.
+ardur-governance = { workspace = true }
+ardur-receipt = { workspace = true }
 hex = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
