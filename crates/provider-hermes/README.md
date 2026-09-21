@@ -41,9 +41,20 @@ against the Hermes Agent CLI reference docs.
 | `HERMES_DEFAULT_MODEL` | Model when the request names none | Hermes' default |
 | `HERMES_WORKING_DIR` | Child working directory | inherited |
 | `HERMES_TIMEOUT_SECS` | Wall-clock ceiling for one turn | `300` |
+| `HERMES_MAX_TOKENS_FLOOR` | Smallest per-request `max_tokens` accepted | `4096` |
 
 An unparseable or zero timeout keeps the default rather than producing a turn
 that can never finish.
+
+### Why there is a max-tokens floor
+
+Hermes has no per-completion output cap (`hermes chat --oneshot` has no
+per-request token ceiling). A caller's `max_tokens` therefore cannot be
+enforced by this backend. Silently discarding it would let the runtime authorize
+N output tokens, be billed for more, and still see a clean `FinishReason::Stop`
+— so a ceiling below the floor is **refused** with `InvalidRequest` instead.
+Above the floor (or `max_tokens == 0`), enforcement is knowingly delegated to
+Hermes' own limits. Set `HERMES_MAX_TOKENS_FLOOR=0` to accept every ceiling.
 
 ## Protocol
 
@@ -81,13 +92,11 @@ Turns are paid by Hermes' own configured provider, so the rate card is zeroed
 counts come from the `result.tokens` object when present; otherwise they stay
 zero rather than being invented.
 
-## Deferred registration
+## Selector registration
 
-Wiring `ProviderKind::Hermes` / `ARDUR_PROVIDER=hermes` into
-`provider-selector::from_env` is **deferred** to the D0 model-router lane
-(gh#411 / gh#531). This crate ships standalone so it does not fight that
-branch's edits to `provider-selector`, `provider-runtime` router, or
-`crates/config`.
+Selected at boot via `ARDUR_PROVIDER=hermes` (alias `hermes-agent`) in
+`provider-selector::from_env` → `HermesProvider::from_env`. Also available as a
+router lane backend (`backend = "hermes"`).
 
 ## Not in this phase
 
