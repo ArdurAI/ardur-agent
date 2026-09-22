@@ -22,11 +22,14 @@ use std::time::Duration;
 use ardur_cedar_policy::PolicyBundle as _;
 use ardur_fused_runtime::{CancelProbe, ErMirrorEmitter, load_persisted_chain};
 use ardur_governance::{
-    ActionClass, CompletedOutcome, EventOutcome, EvidenceOutputAdmission, EvidenceRecord,
-    GrantFacts, InvocationClassification, PostEffectRecord, PreEffectRecord, PublicDenialReason,
-    SideEffectClass, SignedExecutionReceipt, Verdict, tool_event_id, verify_er_chain,
+    ActionClass, CompletedOutcome, EventKind, EventOutcome, EvidenceOutputAdmission,
+    EvidenceRecord, GrantFacts, InvocationClassification, PostEffectRecord, PreEffectRecord,
+    PublicDenialReason, SideEffectClass, SignedExecutionReceipt, Verdict, verify_er_chain,
 };
-use ardur_injection_defense::{FilterRegistry, PatternBasedFilter};
+use ardur_injection_defense::{
+    FilterError, FilterId, FilterRegistry, InjectionFilter, PatternBasedFilter, ScanResult,
+    ScannableContent,
+};
 use ardur_memory::InMemoryMemoryRuntime;
 use ardur_provider_runtime::{
     CompletionResponse, FinishReason, Provider, ProviderError, RateCard, Usage,
@@ -366,6 +369,7 @@ fn fixture_pre(
     PreEffectRecord::tool_invocation(
         &ardur_governance::EventScope {
             session_id: session,
+            request_id: "request-fixture",
             iteration: 1,
             tool_ordinal: ordinal,
             call_id,
@@ -509,15 +513,30 @@ async fn multi_tool_rounds_mint_one_er_per_event_with_stable_identities() {
         event_step_ids[0], event_step_ids[1],
         "each evaluated event has its own identity"
     );
-    // The identities are the deterministic, recomputable ones.
-    let session_string = session.0.to_string();
+    // The identities are the journaled ones: each event ER names its durable
+    // pre record's event id. (The deterministic seed now includes the round's
+    // runtime-minted request id, so tests read the identity from the journal
+    // rather than recomputing it — determinism itself is unit-tested in
+    // ardur-governance's evidence module.)
+    let journaled = event_lines(&events);
+    let pre_ids: Vec<String> = ["call-1", "call-2"]
+        .iter()
+        .map(|cid| {
+            journaled
+                .iter()
+                .find_map(|r| match r {
+                    EvidenceRecord::PreEffect(pre) if pre.call_id == *cid => {
+                        Some(pre.event_id.clone())
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("missing durable pre for {cid}"))
+        })
+        .collect();
     assert_eq!(
-        event_step_ids[0],
-        tool_event_id(&session_string, 1, 0, "call-1")
-    );
-    assert_eq!(
-        event_step_ids[1],
-        tool_event_id(&session_string, 1, 1, "call-2")
+        event_step_ids,
+        pre_ids.iter().map(String::as_str).collect::<Vec<_>>(),
+        "the chain's event ERs name the journaled event identities in order"
     );
     assert_eq!(
         chain[3].receipt().step_id,
@@ -1231,7 +1250,7 @@ fn a_denial_with_missing_arguments_stays_a_denial() {
 
 #[tokio::test]
 async fn a_mid_loop_cancel_preserves_the_completed_events_identity() {
-    let (_root, mirror, _events, receipts) = scratch();
+    let (_root, mirror, events, receipts) = scratch();
     let provider = ScriptedProvider::new(
         vec![
             tool_calls(vec![("call-1", "echo")]),
@@ -1268,10 +1287,391 @@ async fn a_mid_loop_cancel_preserves_the_completed_events_identity() {
         2,
         "the round-1 tool event ER and the round-1 round ER; the marker mints none"
     );
+    let journaled = event_lines(&events);
+    let pre_id = journaled
+        .iter()
+        .find_map(|r| match r {
+            EvidenceRecord::PreEffect(pre) if pre.call_id == "call-1" => Some(pre.event_id.clone()),
+            _ => None,
+        })
+        .expect("durable pre for call-1");
     assert_eq!(
         chain[0].receipt().step_id,
-        tool_event_id(&session.0.to_string(), 1, 0, "call-1"),
+        pre_id,
         "the completed event keeps its stable identity through the cancel"
     );
     verify_er_chain(&chain, &er_jwks()).expect("chain verifies");
+}
+
+// ---------------------------------------------------------------------------
+// Review-hardening guards (PR #566 review): scanner-error classification,
+// event-identity collision resistance, record-version fail-closed, the
+// post-before-ER invariant, the memory pre-before-backend invariant, and the
+// all-read classification seed.
+// ---------------------------------------------------------------------------
+
+/// A filter that fails operationally (never returns a verdict) — but only on
+/// tool OUTPUT, so the outbound prompt scan passes and the tool-output scan
+/// is the one that errors: the scanner error path, distinct from a block
+/// verdict.
+struct ErroringFilter;
+
+#[async_trait]
+impl InjectionFilter for ErroringFilter {
+    async fn scan(&self, content: &ScannableContent) -> Result<ScanResult, FilterError> {
+        match content {
+            ScannableContent::ToolOutput { .. } => Err(FilterError::InvalidInput(
+                "synthetic scanner failure".to_string(),
+            )),
+            _ => Ok(ScanResult {
+                verdict: ardur_injection_defense::Verdict::Allow,
+                flags: Vec::new(),
+                confidence: 0.0,
+                scan_duration_ms: 0,
+            }),
+        }
+    }
+    fn filter_id(&self) -> FilterId {
+        FilterId("erroring".to_string())
+    }
+    fn confidence_threshold(&self) -> f32 {
+        1.0
+    }
+}
+
+/// A tool that appends a foreign line to the evidence journal mid-effect —
+/// the fork between the emitter's committed length and the actual journal.
+struct JournalTamperingTool {
+    schema: ToolSchema,
+    events_path: std::path::PathBuf,
+}
+
+#[async_trait]
+impl Tool for JournalTamperingTool {
+    fn id(&self) -> ToolId {
+        ToolId::new("tamper")
+    }
+    fn schema(&self) -> &ToolSchema {
+        &self.schema
+    }
+    async fn invoke(
+        &self,
+        _ctx: &ToolContext,
+        _args: serde_json::Value,
+    ) -> Result<ToolOutput, ToolError> {
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&self.events_path)
+            .expect("events journal exists (the pre record landed before invoke)");
+        writeln!(file, "{{\"foreign\":true}}").expect("foreign append");
+        Ok(ToolOutput {
+            content: json!({"ok": true}),
+            cost: ardur_runtime::CostTuple::default(),
+            receipt_data: json!({}),
+        })
+    }
+    fn required_capabilities(&self) -> &[Capability] {
+        &[]
+    }
+}
+
+/// A memory backend that asserts the memory-write PRE record is durable in
+/// the evidence journal BEFORE the backend write is invoked — the F2
+/// invariant: a crash mid-write must never leave a durable mutation with no
+/// journal record.
+struct PreAssertingMemory {
+    inner: InMemoryMemoryRuntime,
+    events_path: std::path::PathBuf,
+    pre_seen: Arc<AtomicUsize>,
+}
+
+impl ardur_memory::MemoryRuntime for PreAssertingMemory {
+    fn record(
+        &self,
+        rec: ardur_memory::MemoryRecord,
+    ) -> ardur_memory::Result<ardur_memory::RecordId> {
+        let saw_pre = event_lines(&self.events_path).iter().any(
+            |r| matches!(r, EvidenceRecord::PreEffect(pre) if pre.kind == EventKind::MemoryWrite),
+        );
+        if saw_pre {
+            self.pre_seen.fetch_add(1, Ordering::SeqCst);
+        }
+        self.inner.record(rec)
+    }
+    fn at_time(
+        &self,
+        subject: &ardur_memory::HolderId,
+        as_of: ardur_memory::UnixTsMillis,
+    ) -> Vec<ardur_memory::MemoryRecord> {
+        self.inner.at_time(subject, as_of)
+    }
+    fn history_of(&self, record_id: ardur_memory::RecordId) -> Vec<ardur_memory::MemoryRecord> {
+        self.inner.history_of(record_id)
+    }
+    fn invalidate(
+        &self,
+        record_id: ardur_memory::RecordId,
+        at: ardur_memory::UnixTsMillis,
+        reason: ardur_memory::InvalidationReason,
+    ) -> ardur_memory::Result<()> {
+        self.inner.invalidate(record_id, at, reason)
+    }
+}
+
+#[tokio::test]
+async fn a_scanner_operational_error_is_insufficient_evidence_not_a_block() {
+    let (_root, mirror, events, receipts) = scratch();
+    let provider = ScriptedProvider::new(vec![tool_calls(vec![("call-1", "leaky")])], stop("d"));
+    let registry = FilterRegistry::new();
+    registry.register(Arc::new(ErroringFilter));
+    let token = mint_token_as(
+        support::HOLDER,
+        support::AUDIENCE,
+        &["chat.submit", "leaky"],
+    );
+    let runtime = runtime_builder(Arc::new(provider))
+        .receipt_log(&receipts)
+        .with_tools(registry_with(vec![Box::new(LeakyTool {
+            schema: schema(),
+        })]))
+        .with_injection_filters(registry)
+        .with_governance(open_emitter(&mirror))
+        .build()
+        .expect("runtime builds");
+
+    let err = runtime
+        .submit(user_request("clean prompt", &token))
+        .await
+        .expect_err("a scanner operational error fails the turn closed");
+    assert!(matches!(err, RuntimeError::Internal(_)), "got {err:?}");
+
+    // The event's ER must NOT claim a violation: no block verdict was ever
+    // returned. Admission is undetermined → insufficient_evidence.
+    let chain = signed_chain(&mirror);
+    assert_eq!(chain.len(), 1, "exactly the completed-tool event's ER");
+    let claims = chain[0].receipt();
+    assert_eq!(claims.tool, "leaky");
+    assert_eq!(
+        claims.verdict,
+        Verdict::InsufficientEvidence,
+        "a scanner failure is undetermined admission, never a guessed violation"
+    );
+    assert_eq!(
+        claims.internal_denial_code.as_deref(),
+        Some("output_scan_error")
+    );
+    let records = event_lines(&events);
+    let post = records.iter().find_map(|r| match r {
+        EvidenceRecord::PostEffect(post) => Some(post),
+        _ => None,
+    });
+    match post.map(|p| &p.outcome) {
+        Some(EventOutcome::Completed(completed)) => {
+            assert_eq!(
+                completed.output_admission,
+                EvidenceOutputAdmission::Undetermined
+            );
+        }
+        other => panic!("expected a completed-but-undetermined observation, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_provider_reusing_a_call_id_on_a_later_turn_cannot_collide() {
+    let (_root, mirror, _events, receipts) = scratch();
+    let session = ardur_runtime::SessionId::new();
+    // Two turns in ONE session; the provider reuses the same call id at the
+    // same batch ordinal on both turns — the exact collision a bare
+    // (session, iteration, ordinal, call id) seed would collapse.
+    let provider = ScriptedProvider::new(
+        vec![
+            tool_calls(vec![("call-dup", "echo")]),
+            stop("turn 1 done"),
+            tool_calls(vec![("call-dup", "echo")]),
+            stop("turn 2 done"),
+        ],
+        stop("unused"),
+    );
+    let runtime = runtime_builder(Arc::new(provider))
+        .receipt_log(&receipts)
+        .with_tools(echo_registry())
+        .with_governance(open_emitter(&mirror))
+        .build()
+        .expect("runtime builds");
+
+    runtime
+        .submit(request_for("turn one", &valid_token(), session))
+        .await
+        .expect("turn 1 commits");
+    runtime
+        .submit(request_for("turn two", &valid_token(), session))
+        .await
+        .expect("turn 2 commits");
+
+    let event_step_ids: Vec<String> = signed_chain(&mirror)
+        .iter()
+        .map(|er| er.receipt().step_id.clone())
+        .filter(|s| s.starts_with("ev:"))
+        .collect();
+    assert_eq!(
+        event_step_ids.len(),
+        2,
+        "both turns' evaluated events minted their ERs (no duplicate-pre failure)"
+    );
+    assert_ne!(
+        event_step_ids[0], event_step_ids[1],
+        "a reused call id at the same ordinal on a later turn must NOT collide: \
+         the round request id discriminates"
+    );
+    verify_er_chain(&signed_chain(&mirror), &er_jwks()).expect("chain verifies");
+}
+
+#[tokio::test]
+async fn an_all_read_capability_set_classifies_as_a_read() {
+    let (_root, mirror, _events, receipts) = scratch();
+    let invocations = Arc::new(AtomicUsize::new(0));
+    let reader = CapabilityGatedTool {
+        id: ToolId::new("fsreader"),
+        schema: schema(),
+        caps: vec![Capability::FsRead],
+        invocations: invocations.clone(),
+    };
+    let token = mint_token_as(
+        support::HOLDER,
+        support::AUDIENCE,
+        &["chat.submit", "fsreader", "cap.fs_read"],
+    );
+    let provider = ScriptedProvider::new(
+        vec![tool_calls(vec![("call-read", "fsreader")]), stop("done")],
+        stop("d"),
+    );
+    let runtime = runtime_builder(Arc::new(provider))
+        .receipt_log(&receipts)
+        .with_tools(registry_with(vec![Box::new(reader)]))
+        .with_governance(open_emitter(&mirror))
+        .build()
+        .expect("runtime builds");
+
+    runtime
+        .submit(user_request("read", &token))
+        .await
+        .expect("turn commits");
+    assert_eq!(invocations.load(Ordering::SeqCst), 1);
+
+    let chain = signed_chain(&mirror);
+    let event_er = chain
+        .iter()
+        .find(|er| er.receipt().step_id.starts_with("ev:"))
+        .expect("the tool event ER");
+    let claims = event_er.receipt();
+    assert_eq!(
+        claims.action_class,
+        ActionClass::Read,
+        "an all-read capability set classifies as a read, not the no-capability default"
+    );
+    assert_eq!(claims.resource_family, "filesystem");
+    assert_eq!(claims.side_effect_class, SideEffectClass::None);
+}
+
+#[tokio::test]
+async fn an_unsupported_record_version_fails_closed() {
+    let (_root, mirror, events, _receipts) = scratch();
+    std::fs::create_dir_all(events.parent().expect("parent")).expect("mkdir");
+    // A record written by a NEWER format version: this build must refuse to
+    // interpret it with its own semantics.
+    let mut foreign =
+        serde_json::to_value(fixture_pre("session-v", 0, "call-v", json!({}))).expect("serialize");
+    foreign["v"] = json!(99);
+    let line = serde_json::to_string(&json!({ "pre_effect": foreign })).expect("line");
+    use std::io::Write as _;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&events)
+        .expect("create journal");
+    writeln!(file, "{line}").expect("write");
+    drop(file);
+
+    let result = ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID);
+    let err = match result {
+        Ok(_) => panic!("an unsupported record version must fail the open"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string().contains("version"),
+        "the failure names the version, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_post_append_mints_no_er() {
+    let (_root, mirror, _events, receipts) = scratch();
+    let events_path = _events.clone();
+    let provider = ScriptedProvider::new(
+        vec![tool_calls(vec![("call-t", "tamper")]), stop("done")],
+        stop("d"),
+    );
+    let token = mint_token_as(
+        support::HOLDER,
+        support::AUDIENCE,
+        &["chat.submit", "tamper"],
+    );
+    let runtime = runtime_builder(Arc::new(provider))
+        .receipt_log(&receipts)
+        .with_tools(registry_with(vec![Box::new(JournalTamperingTool {
+            schema: schema(),
+            events_path,
+        })]))
+        .with_governance(open_emitter(&mirror))
+        .build()
+        .expect("runtime builds");
+
+    runtime
+        .submit(user_request("go", &token))
+        .await
+        .expect("the turn itself completes; only evidence append fails");
+
+    // The foreign append forked the journal between the pre and the post:
+    // record_post_effect fails closed and — critically — NO ER is minted from
+    // the undurable observation. The round ERs still land (the chain is
+    // unforked); the event reads as honest absence, and a restart's sweep
+    // would project the stranded pre as effect-unobserved.
+    let chain = signed_chain(&mirror);
+    assert!(
+        chain
+            .iter()
+            .all(|er| !er.receipt().step_id.starts_with("ev:")),
+        "no ER may be minted for an event whose post record is not durable"
+    );
+    assert_eq!(chain.len(), 2, "the two committed rounds still mirror");
+}
+
+#[tokio::test]
+async fn the_memory_pre_record_is_durable_before_the_backend_write() {
+    let (_root, mirror, events, receipts) = scratch();
+    let pre_seen = Arc::new(AtomicUsize::new(0));
+    let memory = Arc::new(PreAssertingMemory {
+        inner: InMemoryMemoryRuntime::new(),
+        events_path: events,
+        pre_seen: pre_seen.clone(),
+    });
+    let runtime = runtime_builder(Arc::new(EchoProvider::new()))
+        .receipt_log(&receipts)
+        .with_memory(memory)
+        .with_governance(open_emitter(&mirror))
+        .build()
+        .expect("runtime builds");
+
+    runtime
+        .submit(user_request("remember this", &valid_token()))
+        .await
+        .expect("turn commits");
+
+    assert_eq!(
+        pre_seen.load(Ordering::SeqCst),
+        1,
+        "the backend write observed the durable pre record — the pre lands \
+         BEFORE the memory mutation is invoked"
+    );
 }

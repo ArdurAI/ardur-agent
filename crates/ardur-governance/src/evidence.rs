@@ -71,7 +71,8 @@ pub enum EventKind {
 /// The admission decision on a completed tool's output before it re-enters
 /// the transcript. `NotScanned` is deliberately absent: the record is written
 /// at the scan decision, so a persisted completion is always decisively
-/// admitted or blocked.
+/// admitted, blocked, or — when the scanner itself failed operationally —
+/// undetermined.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EvidenceOutputAdmission {
@@ -79,6 +80,10 @@ pub enum EvidenceOutputAdmission {
     Allowed,
     /// The output scan blocked the result (the effect still happened).
     Blocked,
+    /// The scanner failed operationally (a filter error, not a block
+    /// verdict): admission could not be determined, and the projection must
+    /// report `insufficient_evidence`, never a guessed violation.
+    Undetermined,
 }
 
 /// An observed, completed effect.
@@ -120,13 +125,20 @@ pub enum EventOutcome {
     TimeoutUnknown,
 }
 
-/// The identity scope of a tool-invocation event: which session, loop
-/// iteration, and batch ordinal the call was evaluated in, plus the
-/// provider-assigned call id. Together these key the deterministic event id.
+/// The identity scope of a tool-invocation event: which session and which
+/// round of which turn the call was evaluated in, its batch ordinal, and the
+/// provider-assigned call id. The round's request id (minted fresh per
+/// provider round) is the discriminator that keeps the event id unique even
+/// when a provider reuses a call id at the same ordinal on a later turn of
+/// the same session — the case #543 review caught a bare
+/// (session, iteration, ordinal, call id) seed collapsing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EventScope<'a> {
     /// The session the event belongs to (ER `trace_id`).
     pub session_id: &'a str,
+    /// The round's request id (`CompletionRequest::request_id`, a fresh
+    /// UUIDv4 per round).
+    pub request_id: &'a str,
     /// The tool-loop iteration (1-based).
     pub iteration: u32,
     /// The call's ordinal within the round's requested batch.
@@ -144,9 +156,9 @@ pub struct PreEffectRecord {
     /// Record format version ([`EVIDENCE_RECORD_VERSION`]).
     pub v: u32,
     /// Stable event identity: `ev:<40 hex>` over
-    /// (session, iteration, tool ordinal, call id) — or the round receipt id
-    /// for a memory write. Deterministic, so a crash replay reconstructs the
-    /// same identity instead of minting a sibling.
+    /// (session, round request id, iteration, tool ordinal, call id) — or
+    /// the round receipt id for a memory write. Deterministic, so a crash
+    /// replay reconstructs the same identity instead of minting a sibling.
     pub event_id: String,
     /// The event family.
     pub kind: EventKind,
@@ -209,6 +221,7 @@ impl PreEffectRecord {
     ) -> Self {
         let event_id = tool_event_id(
             scope.session_id,
+            scope.request_id,
             scope.iteration,
             scope.tool_ordinal,
             scope.call_id,
@@ -367,9 +380,27 @@ impl EvidenceRecord {
     }
 
     /// Parse one journal line.
+    ///
+    /// # Errors
+    ///
+    /// [`GovernanceError::Io`] on malformed JSON, unknown fields, or a record
+    /// whose `v` is not [`EVIDENCE_RECORD_VERSION`]: a record written by a
+    /// different format version must fail closed at the open-time sweep, not
+    /// be interpreted with this build's semantics.
     pub fn from_line(line: &str) -> Result<Self, GovernanceError> {
-        serde_json::from_str(line)
-            .map_err(|e| GovernanceError::Io(format!("evidence record parse: {e}")))
+        let record: Self = serde_json::from_str(line)
+            .map_err(|e| GovernanceError::Io(format!("evidence record parse: {e}")))?;
+        let v = match &record {
+            EvidenceRecord::PreEffect(pre) => pre.v,
+            EvidenceRecord::PostEffect(post) => post.v,
+        };
+        if v != EVIDENCE_RECORD_VERSION {
+            return Err(GovernanceError::Io(format!(
+                "evidence record version {v} is not supported by this build \
+                 (v{EVIDENCE_RECORD_VERSION}); refusing to replay"
+            )));
+        }
+        Ok(record)
     }
 }
 
@@ -390,11 +421,20 @@ pub struct InvocationClassification {
 }
 
 /// The stable identity of a tool-invocation event: a deterministic hash over
-/// the unambiguous (JSON-encoded) tuple of session, iteration, ordinal and
-/// provider call id, so a replayed projection names the same event.
-pub fn tool_event_id(session_id: &str, iteration: u32, tool_ordinal: u32, call_id: &str) -> String {
+/// the unambiguous (JSON-encoded) tuple of session, round request id,
+/// iteration, ordinal and provider call id, so a replayed projection names
+/// the same event. The round request id keeps the identity unique across
+/// turns of a session even when a provider reuses call ids.
+pub fn tool_event_id(
+    session_id: &str,
+    request_id: &str,
+    iteration: u32,
+    tool_ordinal: u32,
+    call_id: &str,
+) -> String {
     let seed = serde_json::to_vec(&serde_json::json!([
         session_id,
+        request_id,
         iteration,
         tool_ordinal,
         call_id
@@ -449,34 +489,39 @@ mod tests {
 
     #[test]
     fn event_identity_is_deterministic_and_field_sensitive() {
-        let a = tool_event_id("session-1", 1, 0, "call-1");
-        let b = tool_event_id("session-1", 1, 0, "call-1");
+        let a = tool_event_id("session-1", "request-1", 1, 0, "call-1");
+        let b = tool_event_id("session-1", "request-1", 1, 0, "call-1");
         assert_eq!(a, b, "same facts, same identity");
         assert!(a.starts_with("ev:") && a.len() == 43);
         assert_ne!(
             a,
-            tool_event_id("session-1", 1, 1, "call-1"),
+            tool_event_id("session-1", "request-1", 1, 1, "call-1"),
             "ordinal matters"
         );
         assert_ne!(
             a,
-            tool_event_id("session-1", 2, 0, "call-1"),
+            tool_event_id("session-1", "request-1", 2, 0, "call-1"),
             "iteration matters"
         );
         assert_ne!(
             a,
-            tool_event_id("session-2", 1, 0, "call-1"),
+            tool_event_id("session-2", "request-1", 1, 0, "call-1"),
             "session matters"
         );
         assert_ne!(
             a,
-            tool_event_id("session-1", 1, 0, "call-2"),
+            tool_event_id("session-1", "request-2", 1, 0, "call-1"),
+            "round request id matters: a provider reusing a call id on a later              turn of the same session cannot collide"
+        );
+        assert_ne!(
+            a,
+            tool_event_id("session-1", "request-1", 1, 0, "call-2"),
             "call id matters"
         );
         // No delimiter ambiguity: shifting text across fields changes the id.
         assert_ne!(
-            tool_event_id("ab", 1, 0, "c"),
-            tool_event_id("a", 1, 0, "bc"),
+            tool_event_id("ab", "r", 1, 0, "c"),
+            tool_event_id("a", "r", 1, 0, "bc"),
             "JSON-tuple seeding cannot shift bytes across fields"
         );
     }
@@ -498,6 +543,7 @@ mod tests {
         let pre = PreEffectRecord::tool_invocation(
             &EventScope {
                 session_id: "session-1",
+                request_id: "request-1",
                 iteration: 1,
                 tool_ordinal: 0,
                 call_id: "call-1",
@@ -521,6 +567,7 @@ mod tests {
         let pre = PreEffectRecord::tool_invocation(
             &EventScope {
                 session_id: "session-1",
+                request_id: "request-1",
                 iteration: 1,
                 tool_ordinal: 0,
                 call_id: "call-1",
@@ -548,6 +595,7 @@ mod tests {
         let pre = PreEffectRecord::tool_invocation(
             &EventScope {
                 session_id: "session-1",
+                request_id: "request-1",
                 iteration: 1,
                 tool_ordinal: 0,
                 call_id: "call-1",

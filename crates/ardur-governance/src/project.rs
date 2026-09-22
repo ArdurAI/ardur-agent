@@ -410,6 +410,10 @@ pub fn check_verdict_invariant(er: &ExecutionReceipt) -> Result<(), GovernanceEr
 /// happened (and is digest-bound in the durable record); the *step* — tool
 /// invocation plus output re-entry — ended in a policy denial.
 pub const OUTPUT_SCAN_BLOCKED_CODE: &str = "output_scan_blocked";
+/// The internal code when the scanner itself failed operationally (a filter
+/// error, not a block verdict): output admission could not be determined, so
+/// the honest verdict is `insufficient_evidence`, never a guessed violation.
+pub const OUTPUT_SCAN_ERROR_CODE: &str = "output_scan_error";
 /// The internal code when the invocation exceeded its deadline after a
 /// possible dispatch: the effect is unknown and is never guessed.
 pub const EFFECT_UNKNOWN_TIMEOUT_CODE: &str = "effect_unknown_timeout";
@@ -490,6 +494,9 @@ pub fn project_event_execution_receipt(
                     EvidenceOutputAdmission::Blocked => AuthOutcome::Violation {
                         public: PublicDenialReason::PolicyDenied,
                         internal: OUTPUT_SCAN_BLOCKED_CODE.to_string(),
+                    },
+                    EvidenceOutputAdmission::Undetermined => AuthOutcome::InsufficientEvidence {
+                        internal: OUTPUT_SCAN_ERROR_CODE.to_string(),
                     },
                 },
                 EventOutcome::Denied(denied) => match denied.public {

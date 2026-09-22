@@ -217,12 +217,23 @@ impl ErMirrorEmitter {
             .collect();
 
         // ---- #543: open the evidence journal, check it, and sweep. ----
+        // The events file gets the same durability discipline as the chain
+        // log: fsync the file itself, then fsync the PARENT again — the
+        // earlier parent fsync covered the chain log's directory entry, not
+        // `events.jsonl`'s, which may have been created just now.
         let events_path = path.with_file_name(EVENTS_FILE_NAME);
         let events_file = open_append_no_follow(&events_path)
             .map_err(|e| ardur_governance::GovernanceError::Io(format!("events open: {e}")))?;
         events_file
             .sync_all()
             .map_err(|e| ardur_governance::GovernanceError::Io(format!("events fsync: {e}")))?;
+        if let Some(parent) = events_path.parent() {
+            std::fs::File::open(parent)
+                .and_then(|d| d.sync_all())
+                .map_err(|e| {
+                    ardur_governance::GovernanceError::Io(format!("events parent fsync: {e}"))
+                })?;
+        }
         let events_committed_len = events_file
             .metadata()
             .map_err(|e| ardur_governance::GovernanceError::Io(format!("events stat: {e}")))?

@@ -235,8 +235,9 @@ impl<'a, R: MemoryRuntime + ?Sized> MemoryControlPlane<'a, R> {
         });
         match decision {
             Decision::Allow { .. } => Ok(()),
-            Decision::Deny { reason, .. } | Decision::Indeterminate { reason } => {
-                Err(MemoryError::PolicyDenied { action, reason })
+            Decision::Deny { reason, .. } => Err(MemoryError::PolicyDenied { action, reason }),
+            Decision::Indeterminate { reason } => {
+                Err(MemoryError::PolicyIndeterminate { action, reason })
             }
         }
     }

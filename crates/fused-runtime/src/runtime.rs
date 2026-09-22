@@ -1371,9 +1371,11 @@ impl FusedRuntime {
     /// configured this is a no-op, and a record failure is logged and skips
     /// the event (its ER stays absent — an honest gap, never a fabricated
     /// fact) rather than affecting the turn.
+    #[allow(clippy::too_many_arguments)]
     fn governance_pre_effect(
         &self,
         session_id: SessionId,
+        request_id: &str,
         iteration: u32,
         tool_ordinal: usize,
         call: &ToolCall,
@@ -1385,6 +1387,7 @@ impl FusedRuntime {
         let record = PreEffectRecord::tool_invocation(
             &ardur_governance::EventScope {
                 session_id: &session_id.0.to_string(),
+                request_id,
                 iteration,
                 tool_ordinal: tool_ordinal as u32,
                 call_id: &call.id,
@@ -1411,9 +1414,13 @@ impl FusedRuntime {
 
     /// **#543.** Record the terminal observation of one evaluated event and
     /// mirror its ER — the *one ER per evaluated event* the verifier
-    /// contract requires. Always records the post-effect observation first
-    /// (so the ER is only ever projected from durable evidence), then
-    /// projects; both are best-effort and logged, never gating.
+    /// contract requires. The post-effect observation must land durably
+    /// **before** the ER is minted: an ER is only ever projected from durable
+    /// evidence, so if the durable post append fails, no ER is minted — the
+    /// event reads as honest absence downstream (a restart's sweep will
+    /// project the stranded pre record as effect-unobserved), never as an
+    /// unsupported verdict. Both operations are best-effort and logged,
+    /// never gating.
     fn governance_terminal_event(&self, pre: &Option<PreEffectRecord>, outcome: EventOutcome) {
         let (Some(emitter), Some(pre)) = (self.governance.as_ref(), pre.as_ref()) else {
             return;
@@ -1423,9 +1430,10 @@ impl FusedRuntime {
             tracing::warn!(
                 event_id = %pre.event_id,
                 error = %err,
-                "governance post-effect evidence failed; this event's crash recovery is \
-                 degraded to honest absence"
+                "governance post-effect evidence failed; no ER minted for this event — \
+                 it reads as honest absence, never as an unsupported verdict"
             );
+            return;
         }
         if let Err(err) = emitter.mirror_evaluated_event(pre, &post) {
             tracing::warn!(
@@ -1440,13 +1448,15 @@ impl FusedRuntime {
     /// **#543.** Record + mirror a gate's denial of one evaluated event.
     /// The denial point is the event's whole lifecycle: the inputs and the
     /// typed denial are recorded back-to-back and the ER (a `violation` with
-    /// the stable denial codes) is projected immediately — the round the
-    /// call belonged to will typically refuse and never reach the commit
+    /// the stable denial codes, or `insufficient_evidence` when the gate
+    /// could not determine the outcome) is projected immediately — the round
+    /// the call belonged to will typically refuse and never reach the commit
     /// mirror, which is exactly why per-event evidence must not wait for it.
     #[allow(clippy::too_many_arguments)]
     fn governance_denied_event(
         &self,
         session_id: SessionId,
+        request_id: &str,
         iteration: u32,
         tool_ordinal: usize,
         call: &ToolCall,
@@ -1455,8 +1465,15 @@ impl FusedRuntime {
         public: ErPublicDenialReason,
         internal: &str,
     ) {
-        let pre =
-            self.governance_pre_effect(session_id, iteration, tool_ordinal, call, claims, required);
+        let pre = self.governance_pre_effect(
+            session_id,
+            request_id,
+            iteration,
+            tool_ordinal,
+            call,
+            claims,
+            required,
+        );
         self.governance_terminal_event(
             &pre,
             EventOutcome::Denied(DeniedOutcome {
@@ -1466,22 +1483,24 @@ impl FusedRuntime {
         );
     }
 
-    /// **#543.** Record + mirror a turn's memory-write event: the write is
-    /// evaluated (under its own `memory.write` re-verification) and either
-    /// completes, is denied, or fails with an unknown effect — each an
-    /// evaluated event with a stable identity keyed on the owning round's
-    /// receipt.
-    fn governance_memory_event(
+    /// **#543.** Record the pre-effect evidence for a turn's memory-write
+    /// event and return the record for the later terminal observation. The
+    /// pre record must be durably appended **before** the backend write is
+    /// invoked (`MemoryControlPlane::record`): a crash mid-write would
+    /// otherwise leave a durable memory mutation with no journal record —
+    /// exactly the gap #543 exists to close. Callers pair this with
+    /// [`Self::governance_terminal_event`] at the terminal observation; on a
+    /// control-plane denial (re-verification before the backend) the denial
+    /// is recorded via [`Self::governance_memory_denied_event`] instead,
+    /// since no backend write is ever attempted.
+    fn governance_memory_pre_effect(
         &self,
         session_id: SessionId,
         round_receipt: &ReceiptBody,
         claims: &VerifiedClaims,
         record_digest: &str,
-        outcome: EventOutcome,
-    ) {
-        let Some(emitter) = self.governance.as_ref() else {
-            return;
-        };
+    ) -> Option<PreEffectRecord> {
+        let emitter = self.governance.as_ref()?;
         let pre = PreEffectRecord::memory_write(
             &session_id.0.to_string(),
             &round_receipt.receipt_id.to_string(),
@@ -1489,15 +1508,40 @@ impl FusedRuntime {
             record_digest,
             self.clock.now_ms().get(),
         );
-        if let Err(err) = emitter.record_pre_effect(&pre) {
-            tracing::warn!(
-                event_id = %pre.event_id,
-                error = %err,
-                "governance memory-write pre-effect evidence failed"
-            );
-            return;
+        match emitter.record_pre_effect(&pre) {
+            Ok(()) => Some(pre),
+            Err(err) => {
+                tracing::warn!(
+                    event_id = %pre.event_id,
+                    error = %err,
+                    "governance memory-write pre-effect evidence failed"
+                );
+                None
+            }
         }
-        self.governance_terminal_event(&Some(pre), outcome);
+    }
+
+    /// **#543.** Record + mirror a memory-write event denied at the control
+    /// plane, where no backend write is ever attempted: the denial point is
+    /// the event's whole lifecycle, recorded back-to-back.
+    fn governance_memory_denied_event(
+        &self,
+        session_id: SessionId,
+        round_receipt: &ReceiptBody,
+        claims: &VerifiedClaims,
+        record_digest: &str,
+        public: ErPublicDenialReason,
+        internal: &str,
+    ) {
+        let pre =
+            self.governance_memory_pre_effect(session_id, round_receipt, claims, record_digest);
+        self.governance_terminal_event(
+            &pre,
+            EventOutcome::Denied(DeniedOutcome {
+                public,
+                internal: internal.to_string(),
+            }),
+        );
     }
 
     /// **Stage 4.5 (ARD-48).** Scan the outbound completion request's prompt
@@ -3193,7 +3237,9 @@ impl FusedRuntime {
                 Err(err) => return Err(err),
             };
 
-            // 5. provider dispatch.
+            // 5. provider dispatch. #543: keep the round's request id — the
+            // tool-event identity discriminator — past the request's move.
+            let iter_request_id = iter_request.request_id.0.to_string();
             reservation
                 .owner
                 .observe_provider(ProviderEvidence::DispatchIntent)
@@ -3319,6 +3365,7 @@ impl FusedRuntime {
                         // refusal settles, since this round never commits.
                         self.governance_denied_event(
                             session_id,
+                            &iter_request_id,
                             iteration,
                             tool_ordinal,
                             call,
@@ -3347,15 +3394,17 @@ impl FusedRuntime {
                         &call.name,
                     ) {
                         // #543: cap-token/Cedar tool-invoke denial.
+                        let (public, internal) = tool_auth_denial_classification(&err);
                         self.governance_denied_event(
                             session_id,
+                            &iter_request_id,
                             iteration,
                             tool_ordinal,
                             call,
                             &claims,
                             tool.required_capabilities(),
-                            ErPublicDenialReason::PolicyDenied,
-                            tool_auth_denial_code(&err),
+                            public,
+                            internal,
                         );
                         let known = response.cost.saturating_add(&tool_cost);
                         let settlement = self
@@ -3380,6 +3429,7 @@ impl FusedRuntime {
                         // #543: declared-capability denial.
                         self.governance_denied_event(
                             session_id,
+                            &iter_request_id,
                             iteration,
                             tool_ordinal,
                             call,
@@ -3415,6 +3465,24 @@ impl FusedRuntime {
                             &claims.subject.0,
                         )
                         .await;
+                    // #543: an already-evaluated approval denial is evidence-
+                    // recorded BEFORE the cancellation gate can return — a
+                    // caller disconnecting during the approval wait must not
+                    // strand the evaluated event.
+                    if let Err(err) = &approval_result {
+                        let (public, internal) = approval_denial_classification(err);
+                        self.governance_denied_event(
+                            session_id,
+                            &iter_request_id,
+                            iteration,
+                            tool_ordinal,
+                            call,
+                            &claims,
+                            tool.required_capabilities(),
+                            public,
+                            internal,
+                        );
+                    }
                     reservation = match self
                         .abort_if_caller_gone(
                             session_id,
@@ -3435,22 +3503,6 @@ impl FusedRuntime {
                     let spent_approval = match approval_result {
                         Ok(spent) => spent,
                         Err(err) => {
-                            // #543: approval-gate denial (required or
-                            // rejected).
-                            self.governance_denied_event(
-                                session_id,
-                                iteration,
-                                tool_ordinal,
-                                call,
-                                &claims,
-                                tool.required_capabilities(),
-                                ErPublicDenialReason::PolicyDenied,
-                                if matches!(err, RuntimeError::ApprovalRequired { .. }) {
-                                    "approval_required"
-                                } else {
-                                    "approval_rejected"
-                                },
-                            );
                             let known = response.cost.saturating_add(&tool_cost);
                             let reason = if matches!(err, RuntimeError::ApprovalRequired { .. }) {
                                 APPROVAL_SETTLEMENT
@@ -3473,6 +3525,7 @@ impl FusedRuntime {
                     // immutable authorization inputs BEFORE the effect runs.
                     let governance_pre = self.governance_pre_effect(
                         session_id,
+                        &iter_request_id,
                         iteration,
                         tool_ordinal,
                         call,
@@ -3637,7 +3690,10 @@ impl FusedRuntime {
                     // observed effect (digest + incurred cost) plus the
                     // output-admission decision. Recorded BEFORE the cancel
                     // gate below so a caller disconnect cannot strand a
-                    // completed tool without its evidence.
+                    // completed tool without its evidence. A scanner
+                    // operational failure (a filter error, not a block
+                    // verdict) records admission as undetermined →
+                    // insufficient_evidence, never a guessed violation.
                     self.governance_terminal_event(
                         &governance_pre,
                         EventOutcome::Completed(CompletedOutcome {
@@ -3646,10 +3702,12 @@ impl FusedRuntime {
                             )
                             .to_hex(),
                             cost: output.cost,
-                            output_admission: if scan_result.is_ok() {
-                                EvidenceOutputAdmission::Allowed
-                            } else {
-                                EvidenceOutputAdmission::Blocked
+                            output_admission: match &scan_result {
+                                Ok(()) => EvidenceOutputAdmission::Allowed,
+                                Err(RuntimeError::InjectionBlocked { .. }) => {
+                                    EvidenceOutputAdmission::Blocked
+                                }
+                                Err(_) => EvidenceOutputAdmission::Undetermined,
                             },
                         }),
                     );
@@ -3829,18 +3887,24 @@ impl FusedRuntime {
                             iteration_now_ms,
                         );
                         // #543: the memory write is an evaluated event — its
-                        // record digest is the content-addressed evidence.
+                        // record digest is the content-addressed evidence, and
+                        // the pre record lands BEFORE the backend write is
+                        // invoked, so a crash mid-write never leaves a durable
+                        // mutation without its journal record.
                         let record_digest =
                             Sha256Digest::of(&serde_json::to_vec(&record).unwrap_or_default())
                                 .to_hex();
+                        let memory_pre = self.governance_memory_pre_effect(
+                            session_id,
+                            &receipt,
+                            &claims,
+                            &record_digest,
+                        );
                         let plane = MemoryControlPlane::new(memory.as_ref(), self.policies.clone());
                         match plane.record(&mem_claims, record) {
                             Ok(_record_id) => {
-                                self.governance_memory_event(
-                                    session_id,
-                                    &receipt,
-                                    &claims,
-                                    &record_digest,
+                                self.governance_terminal_event(
+                                    &memory_pre,
                                     EventOutcome::Completed(CompletedOutcome {
                                         output_digest: record_digest.clone(),
                                         cost: RuntimeCostTuple::default(),
@@ -3852,11 +3916,8 @@ impl FusedRuntime {
                                 // #543: a control-plane rejection is a typed
                                 // denial; an operational failure leaves the
                                 // effect unknown.
-                                self.governance_memory_event(
-                                    session_id,
-                                    &receipt,
-                                    &claims,
-                                    &record_digest,
+                                self.governance_terminal_event(
+                                    &memory_pre,
                                     memory_failure_outcome(&mem_err),
                                 );
                                 self.fire_error(session_id, LifecyclePhase::MemoryWrite, &mem_err)
@@ -3881,12 +3942,13 @@ impl FusedRuntime {
                                 internal: "memory_write_denied".to_string(),
                             },
                         };
-                        self.governance_memory_event(
+                        self.governance_memory_denied_event(
                             session_id,
                             &receipt,
                             &claims,
                             "",
-                            EventOutcome::Denied(denied),
+                            denied.public,
+                            &denied.internal,
                         );
                         match cap_err {
                             CapTokenError::ToolNotAllowed => {
@@ -4156,6 +4218,9 @@ impl FusedRuntime {
                 // 5. provider stream: forward each delta as it arrives.
                 yield FusedEvent::StageStart { stage: StageKind::ProviderStream };
                 reservation.as_mut().expect("held").owner.observe_provider(ProviderEvidence::DispatchIntent).map_err(settlement_error)?;
+                // #543: keep the round's request id — the tool-event identity
+                // discriminator — past the request's move.
+                let iter_request_id = iter_request.request_id.0.to_string();
                 let mut provider_stream = match self.provider.stream(iter_request).await {
                     Ok(provider_stream) => provider_stream,
                     Err(provider_err) => {
@@ -4296,6 +4361,7 @@ impl FusedRuntime {
                             // tool) — this round never commits.
                             self.governance_denied_event(
                                 session_id,
+                                &iter_request_id,
                                 iteration,
                                 tool_ordinal,
                                 call,
@@ -4330,15 +4396,17 @@ impl FusedRuntime {
                             &call.name,
                         ) {
                             // #543: cap-token/Cedar tool-invoke denial.
+                            let (public, internal) = tool_auth_denial_classification(&err);
                             self.governance_denied_event(
                                 session_id,
+                                &iter_request_id,
                                 iteration,
                                 tool_ordinal,
                                 call,
                                 &claims,
                                 tool.required_capabilities(),
-                                ErPublicDenialReason::PolicyDenied,
-                                tool_auth_denial_code(&err),
+                                public,
+                                internal,
                             );
                             yield FusedEvent::StageEnd { stage: StageKind::ToolExec, ok: false };
                             let known = response.cost.saturating_add(&tool_cost);
@@ -4368,6 +4436,7 @@ impl FusedRuntime {
                             // #543: declared-capability denial.
                             self.governance_denied_event(
                                 session_id,
+                                &iter_request_id,
                                 iteration,
                                 tool_ordinal,
                                 call,
@@ -4412,20 +4481,20 @@ impl FusedRuntime {
                         {
                             Ok(spent) => spent,
                             Err(err) => {
-                                // #543: approval-gate denial.
+                                // #543: approval-gate denial (classified: an
+                                // operational failure of the approval gate is
+                                // insufficient_evidence, never a violation).
+                                let (public, internal) = approval_denial_classification(&err);
                                 self.governance_denied_event(
                                     session_id,
+                                    &iter_request_id,
                                     iteration,
                                     tool_ordinal,
                                     call,
                                     &claims,
                                     tool.required_capabilities(),
-                                    ErPublicDenialReason::PolicyDenied,
-                                    if matches!(err, RuntimeError::ApprovalRequired { .. }) {
-                                        "approval_required"
-                                    } else {
-                                        "approval_rejected"
-                                    },
+                                    public,
+                                    internal,
                                 );
                                 yield FusedEvent::StageEnd { stage: StageKind::ToolExec, ok: false };
                                 let known = response.cost.saturating_add(&tool_cost);
@@ -4452,6 +4521,7 @@ impl FusedRuntime {
                         // #543: gates passed — durable inputs before the effect.
                         let governance_pre = self.governance_pre_effect(
                             session_id,
+                            &iter_request_id,
                             iteration,
                             tool_ordinal,
                             call,
@@ -4543,7 +4613,10 @@ impl FusedRuntime {
                             output_digest: GateSha256::of(&serde_json::to_vec(&output.content).map_err(|e| RuntimeError::Internal(e.into()))?), cost: output.cost,
                         }, if scan_result.is_ok() { OutputAdmission::Allowed } else { OutputAdmission::Blocked })?;
                         // #543: terminal at the scan decision — observed
-                        // effect + output-admission decision.
+                        // effect + output-admission decision. A scanner
+                        // operational failure (a filter error, not a block
+                        // verdict) records admission as undetermined →
+                        // insufficient_evidence, never a guessed violation.
                         self.governance_terminal_event(
                             &governance_pre,
                             EventOutcome::Completed(CompletedOutcome {
@@ -4552,10 +4625,12 @@ impl FusedRuntime {
                                 )
                                 .to_hex(),
                                 cost: output.cost,
-                                output_admission: if scan_result.is_ok() {
-                                    EvidenceOutputAdmission::Allowed
-                                } else {
-                                    EvidenceOutputAdmission::Blocked
+                                output_admission: match &scan_result {
+                                    Ok(()) => EvidenceOutputAdmission::Allowed,
+                                    Err(RuntimeError::InjectionBlocked { .. }) => {
+                                        EvidenceOutputAdmission::Blocked
+                                    }
+                                    Err(_) => EvidenceOutputAdmission::Undetermined,
                                 },
                             }),
                         );
@@ -4711,19 +4786,23 @@ impl FusedRuntime {
                                 &receipt,
                                 memory_now_ms,
                             );
-                            // #543: the memory write is an evaluated event.
+                            // #543: the memory write is an evaluated event —
+                            // the pre record lands BEFORE the backend write.
                             let record_digest = Sha256Digest::of(
                                 &serde_json::to_vec(&record).unwrap_or_default(),
                             )
                             .to_hex();
+                            let memory_pre = self.governance_memory_pre_effect(
+                                session_id,
+                                &receipt,
+                                &claims,
+                                &record_digest,
+                            );
                             let plane = MemoryControlPlane::new(memory.as_ref(), self.policies.clone());
                             match plane.record(&mem_claims, record) {
                                 Ok(_record_id) => {
-                                    self.governance_memory_event(
-                                        session_id,
-                                        &receipt,
-                                        &claims,
-                                        &record_digest,
+                                    self.governance_terminal_event(
+                                        &memory_pre,
                                         EventOutcome::Completed(CompletedOutcome {
                                             output_digest: record_digest.clone(),
                                             cost: RuntimeCostTuple::default(),
@@ -4733,11 +4812,8 @@ impl FusedRuntime {
                                 }
                                 Err(mem_err) => {
                                     // #543: control-plane denial vs unknown effect.
-                                    self.governance_memory_event(
-                                        session_id,
-                                        &receipt,
-                                        &claims,
-                                        &record_digest,
+                                    self.governance_terminal_event(
+                                        &memory_pre,
                                         memory_failure_outcome(&mem_err),
                                     );
                                     self.fire_error(session_id, LifecyclePhase::MemoryWrite, &mem_err)
@@ -4761,12 +4837,13 @@ impl FusedRuntime {
                                     internal: "memory_write_denied".to_string(),
                                 },
                             };
-                            self.governance_memory_event(
+                            self.governance_memory_denied_event(
                                 session_id,
                                 &receipt,
                                 &claims,
                                 "",
-                                EventOutcome::Denied(denied),
+                                denied.public,
+                                &denied.internal,
                             );
                             match cap_err {
                                 CapTokenError::ToolNotAllowed => {
@@ -4853,15 +4930,18 @@ fn derive_resource(session_id: SessionId) -> ResourceRef {
 /// surface — the authorized intent, never the argument values (classifying
 /// from arguments would be guessing at their semantics). For a mixed
 /// capability set the strongest declared effect wins, in a fixed severity
-/// order, so the classification is deterministic per tool. A tool declaring
-/// no capabilities classifies as an observation with no side effect (the
+/// order, so the classification is deterministic per tool; the fold seeds
+/// from the first declared capability so an all-read set classifies as a
+/// read rather than the no-capability default. A tool declaring no
+/// capabilities classifies as an observation with no side effect (the
 /// registry's Phase-1 tools, e.g. `echo`, match that); a `Custom` capability
 /// declares nothing, so it classifies conservatively as state-changing
 /// rather than under-claim an unknown effect surface.
 fn classify_tool_invocation(tool_name: &str, required: &[Capability]) -> InvocationClassification {
-    let mut family = "tool";
-    let mut action = ErActionClass::Observe;
-    let mut side = ErSideEffectClass::None;
+    let (mut family, mut action, mut side) = match required.first() {
+        Some(cap) => capability_effect(cap),
+        None => ("tool", ErActionClass::Observe, ErSideEffectClass::None),
+    };
     for cap in required {
         let (cap_family, cap_action, cap_side) = capability_effect(cap);
         if side_effect_severity(cap_side) > side_effect_severity(side) {
@@ -4933,24 +5013,57 @@ fn capability_effect(cap: &Capability) -> (&'static str, ErActionClass, ErSideEf
     }
 }
 
-/// **#543.** The stable audit-only code for a tool-invocation gate denial,
-/// mapped from the runtime's typed error — diagnostic detail riding the
-/// settled `RefusalClass::Authorization` classification, never a new
-/// classification of its own.
-fn tool_auth_denial_code(err: &RuntimeError) -> &'static str {
+/// **#543.** The (public reason, audit code) pair for a tool-invocation gate
+/// denial, mapped from the runtime's typed error. A Cedar **indeterminate**
+/// (an evaluation error, which `stage_cedar_with_action` surfaces as
+/// `PolicyDenied` with an `indeterminate:` reason) establishes neither
+/// permission nor a breach — it is `insufficient_evidence`, never a proven
+/// violation. Any other operational failure classifies the same way: only
+/// the recognized policy-denial shapes mint a violation.
+fn tool_auth_denial_classification(err: &RuntimeError) -> (ErPublicDenialReason, &'static str) {
     match err {
-        RuntimeError::CapTokenExpired => "grant_expired",
-        RuntimeError::CapDenied { .. } => "tool_not_allowed",
-        RuntimeError::PolicyDenied { .. } => "policy_denied",
-        _ => "tool_invocation_denied",
+        RuntimeError::CapTokenExpired => (ErPublicDenialReason::PolicyDenied, "grant_expired"),
+        RuntimeError::CapDenied { .. } => (ErPublicDenialReason::PolicyDenied, "tool_not_allowed"),
+        RuntimeError::PolicyDenied { reason } if reason.starts_with("indeterminate:") => (
+            ErPublicDenialReason::InsufficientEvidence,
+            "policy_indeterminate",
+        ),
+        RuntimeError::PolicyDenied { .. } => (ErPublicDenialReason::PolicyDenied, "policy_denied"),
+        _ => (
+            ErPublicDenialReason::InsufficientEvidence,
+            "tool_invocation_error",
+        ),
+    }
+}
+
+/// **#543.** The (public reason, audit code) pair for an approval-gate
+/// denial. Only an explicit human decision mints a violation; any
+/// operational failure of the approval store/evaluation (store errors,
+/// unrecognized claim outcomes, contention exhaustion) supports only
+/// `insufficient_evidence` — no human rejection occurred.
+fn approval_denial_classification(err: &RuntimeError) -> (ErPublicDenialReason, &'static str) {
+    match err {
+        RuntimeError::ApprovalRequired { .. } => {
+            (ErPublicDenialReason::PolicyDenied, "approval_required")
+        }
+        RuntimeError::ApprovalRejected { .. } => {
+            (ErPublicDenialReason::PolicyDenied, "approval_rejected")
+        }
+        _ => (
+            ErPublicDenialReason::InsufficientEvidence,
+            "approval_evaluation_error",
+        ),
     }
 }
 
 /// **#543.** Classify a memory-write failure honestly: a control-plane
 /// rejection (capability, policy, subject, receipt, or shape) happens BEFORE
 /// the backend write, so the effect provably never occurred — a typed
-/// denial. An operational failure (`Backend`, poisoned lock, missing record)
-/// leaves the effect unknown: the write may have partially completed.
+/// denial. A policy *evaluation failure* (`PolicyIndeterminate`) establishes
+/// neither permission nor a breach: `insufficient_evidence`, never a proven
+/// violation. An operational failure (`Backend`, poisoned lock, missing
+/// record) leaves the effect unknown: the write may have partially
+/// completed.
 fn memory_failure_outcome(err: &ardur_memory::MemoryError) -> EventOutcome {
     use ardur_memory::MemoryError as ME;
     let denied = |internal: &str| {
@@ -4962,6 +5075,10 @@ fn memory_failure_outcome(err: &ardur_memory::MemoryError) -> EventOutcome {
     match err {
         ME::CapabilityDenied { .. } => denied("memory_capability_denied"),
         ME::PolicyDenied { .. } => denied("memory_policy_denied"),
+        ME::PolicyIndeterminate { .. } => EventOutcome::Denied(DeniedOutcome {
+            public: ErPublicDenialReason::InsufficientEvidence,
+            internal: "memory_policy_indeterminate".to_string(),
+        }),
         ME::SubjectMismatch { .. } => denied("memory_subject_mismatch"),
         ME::ReceiptRequired { .. } => denied("memory_receipt_required"),
         ME::Malformed(_) => denied("memory_record_malformed"),
@@ -5220,5 +5337,135 @@ mod tool_error_tests {
             map_tool_error(ToolError::ExecutionFailed("revoked".to_string()), "probe"),
             RuntimeError::Internal(_)
         ));
+    }
+}
+
+#[cfg(test)]
+mod governance_classification_tests {
+    //! #543 review hardening: the public/private classification of gate
+    //! failures. An evaluation *failure* (Cedar indeterminate, scanner
+    //! operational error, approval-store error) must never be filed as a
+    //! proven violation — only `insufficient_evidence`.
+    use super::*;
+
+    #[test]
+    fn a_cedar_indeterminate_is_insufficient_evidence_not_a_violation() {
+        let err = RuntimeError::PolicyDenied {
+            reason: "indeterminate: invalid entity uid".to_string(),
+        };
+        let (public, internal) = tool_auth_denial_classification(&err);
+        assert_eq!(public, ErPublicDenialReason::InsufficientEvidence);
+        assert_eq!(internal, "policy_indeterminate");
+    }
+
+    #[test]
+    fn a_typed_policy_denial_stays_a_violation() {
+        let err = RuntimeError::PolicyDenied {
+            reason: "denied by policy p1".to_string(),
+        };
+        let (public, internal) = tool_auth_denial_classification(&err);
+        assert_eq!(public, ErPublicDenialReason::PolicyDenied);
+        assert_eq!(internal, "policy_denied");
+
+        let err = RuntimeError::CapDenied {
+            reason: "tool not in allowlist".to_string(),
+        };
+        let (public, internal) = tool_auth_denial_classification(&err);
+        assert_eq!(public, ErPublicDenialReason::PolicyDenied);
+        assert_eq!(internal, "tool_not_allowed");
+
+        let (public, internal) = tool_auth_denial_classification(&RuntimeError::CapTokenExpired);
+        assert_eq!(public, ErPublicDenialReason::PolicyDenied);
+        assert_eq!(internal, "grant_expired");
+    }
+
+    #[test]
+    fn an_operational_tool_gate_error_is_insufficient_evidence() {
+        let err = RuntimeError::Internal(anyhow::anyhow!("store offline"));
+        let (public, internal) = tool_auth_denial_classification(&err);
+        assert_eq!(public, ErPublicDenialReason::InsufficientEvidence);
+        assert_eq!(internal, "tool_invocation_error");
+    }
+
+    #[test]
+    fn only_an_explicit_human_decision_mints_an_approval_violation() {
+        let err = RuntimeError::ApprovalRequired {
+            approval_id: "a1".to_string(),
+            tool: "t".to_string(),
+            reason: "approval-gated capability".to_string(),
+        };
+        let (public, internal) = approval_denial_classification(&err);
+        assert_eq!(public, ErPublicDenialReason::PolicyDenied);
+        assert_eq!(internal, "approval_required");
+
+        let err = RuntimeError::ApprovalRejected {
+            approval_id: "a1".to_string(),
+            tool: "t".to_string(),
+            reason: "rejected by operator".to_string(),
+        };
+        let (public, internal) = approval_denial_classification(&err);
+        assert_eq!(public, ErPublicDenialReason::PolicyDenied);
+        assert_eq!(internal, "approval_rejected");
+
+        // An approval-store operational failure is NOT a human rejection.
+        let err = RuntimeError::Internal(anyhow::anyhow!("approval store offline"));
+        let (public, internal) = approval_denial_classification(&err);
+        assert_eq!(public, ErPublicDenialReason::InsufficientEvidence);
+        assert_eq!(internal, "approval_evaluation_error");
+    }
+
+    #[test]
+    fn a_memory_policy_evaluation_failure_is_insufficient_evidence() {
+        let err = ardur_memory::MemoryError::PolicyIndeterminate {
+            action: ardur_memory::MemoryAction::Record,
+            reason: "invalid entity uid".to_string(),
+        };
+        match memory_failure_outcome(&err) {
+            EventOutcome::Denied(denied) => {
+                assert_eq!(denied.public, ErPublicDenialReason::InsufficientEvidence);
+                assert_eq!(denied.internal, "memory_policy_indeterminate");
+            }
+            other => panic!("expected a denied-as-insufficient outcome, got {other:?}"),
+        }
+
+        let err = ardur_memory::MemoryError::PolicyDenied {
+            action: ardur_memory::MemoryAction::Record,
+            reason: "denied".to_string(),
+        };
+        match memory_failure_outcome(&err) {
+            EventOutcome::Denied(denied) => {
+                assert_eq!(denied.public, ErPublicDenialReason::PolicyDenied);
+                assert_eq!(denied.internal, "memory_policy_denied");
+            }
+            other => panic!("expected a typed denial, got {other:?}"),
+        }
+
+        let err = ardur_memory::MemoryError::Backend("write failed mid-flight".to_string());
+        assert!(
+            matches!(memory_failure_outcome(&err), EventOutcome::FailedUnknown),
+            "a backend failure leaves the effect unknown"
+        );
+    }
+
+    #[test]
+    fn an_all_read_capability_set_classifies_as_a_read() {
+        let classification = classify_tool_invocation("reader", &[Capability::FsRead]);
+        assert_eq!(classification.action_class, ErActionClass::Read);
+        assert_eq!(classification.resource_family, "filesystem");
+        assert_eq!(classification.side_effect_class, ErSideEffectClass::None);
+
+        // The strongest declared effect still wins for mixed sets.
+        let classification =
+            classify_tool_invocation("mixed", &[Capability::FsRead, Capability::FsWrite]);
+        assert_eq!(classification.action_class, ErActionClass::Write);
+        assert_eq!(
+            classification.side_effect_class,
+            ErSideEffectClass::StateChange
+        );
+
+        // And the no-capability default is unchanged.
+        let classification = classify_tool_invocation("echo", &[]);
+        assert_eq!(classification.action_class, ErActionClass::Observe);
+        assert_eq!(classification.resource_family, "tool");
     }
 }

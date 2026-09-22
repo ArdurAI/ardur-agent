@@ -40,12 +40,25 @@ pub enum MemoryError {
         required: String,
     },
 
-    /// Cedar denied or could not safely decide a memory operation.
+    /// Cedar denied a memory operation.
     #[error("memory policy denied for {action:?}: {reason}")]
     PolicyDenied {
         /// Operation being attempted.
         action: crate::MemoryAction,
-        /// Cedar denial or indeterminate reason.
+        /// Cedar denial reason.
+        reason: String,
+    },
+
+    /// Cedar evaluation of a memory operation **failed** (a policy error, not
+    /// a deny verdict): the result is indeterminate, which establishes
+    /// neither permission nor a policy breach. Kept distinct from
+    /// [`PolicyDenied`](Self::PolicyDenied) so callers never file an
+    /// evaluation failure as a proven violation.
+    #[error("memory policy evaluation indeterminate for {action:?}: {reason}")]
+    PolicyIndeterminate {
+        /// Operation being attempted.
+        action: crate::MemoryAction,
+        /// The Cedar evaluation error.
         reason: String,
     },
 

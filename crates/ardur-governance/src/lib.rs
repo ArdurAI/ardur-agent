@@ -93,8 +93,8 @@ pub use mission::{
 pub use project::{
     ARGUMENTS_EVIDENCE_OMITTED_CODE, AuthOutcome, EFFECT_UNKNOWN_EXECUTION_CODE,
     EFFECT_UNKNOWN_TIMEOUT_CODE, EFFECT_UNOBSERVED_CODE, GrantFacts, OUTPUT_SCAN_BLOCKED_CODE,
-    StepContext, ToolInvocation, check_verdict_invariant, invocation_digests,
-    project_event_execution_receipt, project_execution_receipt,
+    OUTPUT_SCAN_ERROR_CODE, StepContext, ToolInvocation, check_verdict_invariant,
+    invocation_digests, project_event_execution_receipt, project_execution_receipt,
 };
 pub use sign::{
     ER_TYP, ErSigner, ErSigningKey, ErVerifier, SignedExecutionReceipt, verify_er_chain,
