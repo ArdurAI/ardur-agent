@@ -47,6 +47,7 @@ startup (`using provider provider=<id>`).
 | `ollama` | Ollama local daemon **or** hosted cloud | `OLLAMA_BASE_URL` (default `http://localhost:11434`); `OLLAMA_API_KEY` (cloud only — its presence auto-defaults the base URL to `https://ollama.com`) |
 | `codex` | OpenAI Codex CLI (ChatGPT subscription) | `CODEX_BINARY` (default: `codex` on `PATH`), `CODEX_DEFAULT_MODEL`, `CODEX_SANDBOX_MODE` (`read-only` \| `workspace-write` \| `danger-full-access`), `CODEX_WORKING_DIR` |
 | `claude-cli` (alias `claude-subscription`) | Claude Code CLI (Anthropic subscription) | `CLAUDE_CLI_BINARY` (default: `claude` on `PATH`), `CLAUDE_CLI_DEFAULT_MODEL`, `CLAUDE_CLI_PERMISSION_MODE` (`default` \| `acceptEdits` \| `auto` \| `bypassPermissions` \| `dontAsk` \| `plan`), `CLAUDE_CLI_WORKING_DIR`, `CLAUDE_CLI_ALLOWED_TOOLS`. Run `claude login` once; spends the **Agent SDK Credit pool** ($20–$200/mo, plan-dependent), not unbounded |
+| `prime` (alias `prime-agent`) | Prime Agent CLI (local RPC subprocess wrap) | `PRIME_AGENT_BINARY` (default: `prime-agent` on `PATH`), `PRIME_AGENT_PROVIDER`, `PRIME_AGENT_DEFAULT_MODEL`, `PRIME_AGENT_WORKING_DIR`, `PRIME_AGENT_TIMEOUT_SECS`, `PRIME_AGENT_MAX_TOKENS_FLOOR` (default `4096`). Run `prime-agent /login` once; no Ardur-side API key |
 | `hermes` (alias `hermes-agent`) | Hermes Agent CLI (local subprocess wrap) | `HERMES_BINARY` (default: `hermes` on `PATH`), `HERMES_PROVIDER`, `HERMES_DEFAULT_MODEL`, `HERMES_WORKING_DIR`, `HERMES_TIMEOUT_SECS`, `HERMES_MAX_TOKENS_FLOOR` (default `4096`). Run `hermes auth` / `hermes model` once; no Ardur-side API key |
 
 One-liners (CLI shown; the server reads the same variables from its `.env`):
@@ -74,6 +75,8 @@ ARDUR_PROVIDER=codex ardur chat
 # Claude CLI — uses your logged-in Anthropic subscription via the claude CLI
 ARDUR_PROVIDER=claude-cli ardur chat
 
+# Prime — uses your locally configured Prime Agent CLI
+ARDUR_PROVIDER=prime ardur chat
 # Hermes — uses your locally configured Hermes Agent CLI
 ARDUR_PROVIDER=hermes ardur chat
 ```
@@ -81,7 +84,7 @@ ARDUR_PROVIDER=hermes ardur chat
 The Anthropic, OpenRouter, and OpenAI-compatible backends fail at boot if their
 API key is missing (the CLI then falls back to a network-free stub and prints an
 offline notice; the server aborts). `OPENAI_COMPAT_BASE_URL` must use HTTPS
-unless it targets loopback HTTP for local tests. The Ollama, Codex, Claude-CLI,
+unless it targets loopback HTTP for local tests. The Ollama, Codex, Claude-CLI, Prime,
 and Hermes backends need no credentials to wire — they fail later, per-turn, if
 the daemon/binary is unreachable or the CLI is not logged in.
 
@@ -1133,6 +1136,7 @@ advertises whether it implements it via `supports_streaming()`:
 | `openai-compat` | yes | SSE |
 | `codex` | no | CLI orchestrates its own output |
 | `claude-cli` | no | planned |
+| `prime` | no | CLI orchestrates its own output |
 | `hermes` | no | CLI orchestrates its own output |
 
 This is currently a **provider-library** capability: the fused turn pipeline
@@ -1293,7 +1297,7 @@ attributes — `gen_ai.system`, `gen_ai.request.model`,
 `error.type`, and friends. Export them to any OTLP-native backend (Langfuse,
 Arize Phoenix, Arize, Jaeger, Grafana Tempo, …) for token-usage dashboards,
 latency tracing, and per-call drill-down — for free, across **every** provider
-(anthropic / openrouter / openai-compat / ollama / codex / claude-cli / hermes).
+(anthropic / openrouter / openai-compat / ollama / codex / claude-cli / prime / hermes).
 
 Disabled by default. To enable, set:
 

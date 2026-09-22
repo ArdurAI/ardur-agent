@@ -170,6 +170,16 @@ fn from_env_claude_cli_selects_claude_cli() {
 }
 
 #[test]
+fn from_env_prime_selects_prime() {
+    let _guard = env_lock();
+    let env = CleanEnv::new();
+    env.set("ARDUR_PROVIDER", "prime-agent"); // alias
+
+    let provider = from_env(model()).expect("prime is infallible");
+    assert_eq!(provider.id().0, "prime");
+}
+
+#[test]
 fn from_env_unknown_provider_returns_helpful_error() {
     let _guard = env_lock();
     let env = CleanEnv::new();
