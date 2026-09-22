@@ -21,6 +21,30 @@ use crate::hash::{sha256_b64url, sha256_hex};
 use crate::jcs;
 use crate::sign::SignedExecutionReceipt;
 
+/// The grant facts an ER binds to, reduced to the fields the projection
+/// actually consumes — the form durable per-event evidence (#543) can carry
+/// when no live [`VerifiedClaims`] exists (crash-replay of an evidence
+/// journal projects from records, not from a re-verified token).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GrantFacts {
+    /// The cap-token `token_id` (hyphenated UUIDv4; ER `grant_id`).
+    pub grant_id: String,
+    /// The verified subject (ER `actor`).
+    pub actor: String,
+    /// The verified remaining budget (legacy economic scalar).
+    pub budget_remaining: u64,
+}
+
+impl From<&VerifiedClaims> for GrantFacts {
+    fn from(claims: &VerifiedClaims) -> Self {
+        Self {
+            grant_id: claims.token_id.to_string(),
+            actor: claims.subject.0.clone(),
+            budget_remaining: claims.budget_remaining,
+        }
+    }
+}
+
 /// The authorization outcome for the step, already reduced to the tri-state ER
 /// verdict plus (for non-compliant) the fixed denial vocabulary.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -181,21 +205,13 @@ pub struct StepContext<'a> {
     pub per_class_budget_remaining: Option<&'a BTreeMap<String, u64>>,
 }
 
-/// Project a governed step into an [`ExecutionReceipt`]. `grant_id` is the
-/// cap-token `token_id`; `actor` and `budget_remaining` come from the verified
-/// claims.
-pub fn project_execution_receipt(
-    claims: &VerifiedClaims,
-    call: &ToolInvocation,
-    outcome: &AuthOutcome,
-    step: &StepContext,
-) -> Result<ExecutionReceipt, GovernanceError> {
-    validate_id_string("trace_id", step.trace_id)?;
-    validate_len("step_id", step.step_id, 1, 256)?; // nonEmptyString
-    validate_run_nonce(step.run_nonce)?;
-    validate_id_string("grant_id", &claims.token_id.to_string())?;
-    validate_len("target", call.target, 1, 2048)?;
-
+/// The JCS-canonical digests of a normalized invocation: the hex SHA-256 of
+/// the canonical arguments (ER `arguments_hash`) and the [`DigestObject`] over
+/// the canonical invocation envelope (ER `invocation_digest`). This is the
+/// SINGLE definition of the envelope shape — the live projector, the #543
+/// evidence recorder, and the evidence replay projector all hash through it,
+/// so a recorded digest and a recomputed one are comparable byte-for-byte.
+pub fn invocation_digests(grant_id: &str, call: &ToolInvocation<'_>) -> (String, DigestObject) {
     // arguments_hash over the JCS-canonical normalized arguments.
     let arguments_hash = sha256_hex(&jcs::to_canonical_bytes(call.arguments));
 
@@ -203,7 +219,7 @@ pub fn project_execution_receipt(
     let envelope = json!({
         "action_class": serde_plain(&call.action_class),
         "arguments": call.arguments,
-        "grant_id": claims.token_id.to_string(),
+        "grant_id": grant_id,
         "resource_family": call.resource_family,
         "side_effect_class": serde_plain(&call.side_effect_class),
         "target": call.target,
@@ -215,6 +231,57 @@ pub fn project_execution_receipt(
         scope: Some(DigestScope::NormalizedInput),
         value: sha256_b64url(&jcs::to_canonical_bytes(&envelope)),
     };
+    (arguments_hash, invocation_digest)
+}
+
+/// Project a governed step into an [`ExecutionReceipt`]. `grant_id` is the
+/// cap-token `token_id`; `actor` and `budget_remaining` come from the verified
+/// claims.
+pub fn project_execution_receipt(
+    claims: &VerifiedClaims,
+    call: &ToolInvocation,
+    outcome: &AuthOutcome,
+    step: &StepContext,
+) -> Result<ExecutionReceipt, GovernanceError> {
+    let grant = GrantFacts::from(claims);
+    let (arguments_hash, invocation_digest) = invocation_digests(&grant.grant_id, call);
+    project_execution_receipt_core(
+        &grant,
+        call.tool,
+        call.action_class,
+        call.target,
+        call.resource_family,
+        call.side_effect_class,
+        arguments_hash,
+        invocation_digest,
+        outcome,
+        step,
+    )
+}
+
+/// The projection core every path funnels through: the round mirror (#560,
+/// digests computed from live facts) and the #543 per-event projector
+/// (digests recomputed from — or, when the arguments exceeded the evidence
+/// inline cap, replayed out of — the durable record). All schema validation
+/// and the verdict invariant live here exactly once.
+#[allow(clippy::too_many_arguments)]
+pub fn project_execution_receipt_core(
+    grant: &GrantFacts,
+    tool: &str,
+    action_class: ActionClass,
+    target: &str,
+    resource_family: &str,
+    side_effect_class: SideEffectClass,
+    arguments_hash: String,
+    invocation_digest: DigestObject,
+    outcome: &AuthOutcome,
+    step: &StepContext,
+) -> Result<ExecutionReceipt, GovernanceError> {
+    validate_id_string("trace_id", step.trace_id)?;
+    validate_len("step_id", step.step_id, 1, 256)?; // nonEmptyString
+    validate_run_nonce(step.run_nonce)?;
+    validate_id_string("grant_id", &grant.grant_id)?;
+    validate_len("target", target, 1, 2048)?;
 
     let timestamp = rfc3339_from_millis(step.timestamp_millis)?;
     let iat = step.timestamp_millis / 1000;
@@ -227,7 +294,7 @@ pub fn project_execution_receipt(
     // a hash over the id-free step material).
     let stable_seed = format!(
         "{}|{}|{}|{}|{}",
-        step.trace_id, step.run_nonce, step.step_id, claims.token_id, invocation_digest.value
+        step.trace_id, step.run_nonce, step.step_id, grant.grant_id, invocation_digest.value
     );
     let receipt_id = format!("er:{}", &sha256_hex(stable_seed.as_bytes())[..40]);
     let jti = format!(
@@ -267,7 +334,7 @@ pub fn project_execution_receipt(
             // StepContext::per_class_budget_remaining. Retained because the
             // cap-token budget is one axis and inventing five buckets from
             // it would be the opposite dishonesty.
-            BTreeMap::from([("cost".to_string(), claims.budget_remaining)])
+            BTreeMap::from([("cost".to_string(), grant.budget_remaining)])
         }
     };
 
@@ -280,20 +347,20 @@ pub fn project_execution_receipt(
 
     let receipt = ExecutionReceipt {
         receipt_id,
-        grant_id: claims.token_id.to_string(),
+        grant_id: grant.grant_id.clone(),
         parent_receipt_id,
         parent_receipt_hash,
-        actor: claims.subject.0.clone(),
+        actor: grant.actor.clone(),
         verifier_id: step.verifier_id.to_string(),
         trace_id: step.trace_id.to_string(),
         run_nonce: step.run_nonce.to_string(),
         step_id: step.step_id.to_string(),
         invocation_digest,
-        tool: call.tool.to_string(),
-        action_class: call.action_class,
-        target: call.target.to_string(),
-        resource_family: call.resource_family.to_string(),
-        side_effect_class: call.side_effect_class,
+        tool: tool.to_string(),
+        action_class,
+        target: target.to_string(),
+        resource_family: resource_family.to_string(),
+        side_effect_class,
         verdict,
         evidence_level: step.evidence_level,
         reason,
@@ -336,6 +403,186 @@ pub fn check_verdict_invariant(er: &ExecutionReceipt) -> Result<(), GovernanceEr
         }
     }
     Ok(())
+}
+
+/// The internal denial code when the observed effect's output was blocked at
+/// the injection-defense re-admission scan. The tool's effect already
+/// happened (and is digest-bound in the durable record); the *step* — tool
+/// invocation plus output re-entry — ended in a policy denial.
+pub const OUTPUT_SCAN_BLOCKED_CODE: &str = "output_scan_blocked";
+/// The internal code when the invocation exceeded its deadline after a
+/// possible dispatch: the effect is unknown and is never guessed.
+pub const EFFECT_UNKNOWN_TIMEOUT_CODE: &str = "effect_unknown_timeout";
+/// The internal code when the tool returned an execution error: a tool error
+/// does not imply no external effect occurred, so the outcome is unknown.
+pub const EFFECT_UNKNOWN_EXECUTION_CODE: &str = "effect_unknown_execution";
+/// The internal code when a crash (or a dropped stream) stranded the event
+/// between its durable pre-effect record and any observation: the tool may
+/// have run; nothing was observed.
+pub const EFFECT_UNOBSERVED_CODE: &str = "effect_unobserved";
+/// The internal code when the durable record kept only the invocation
+/// *digests* (arguments exceeded the evidence inline cap): an otherwise
+/// compliant outcome cannot be shown compliant without the inputs.
+pub const ARGUMENTS_EVIDENCE_OMITTED_CODE: &str = "arguments_evidence_omitted";
+
+/// Project one **evaluated event** (#543) into an [`ExecutionReceipt`] from
+/// its durable pre/post-effect evidence records — the same projection whether
+/// the facts arrive live at the event's terminal point or are replayed out of
+/// the evidence journal after a crash.
+///
+/// Replay-idempotent by construction: `step_id` is the stable event id, the
+/// run nonce is derived deterministically from it, and the receipt id / jti
+/// hash over id-free recorded material, so a live projection and a crash
+/// replay of the same records mint the *same* ER claims (modulo the chain
+/// link), never a duplicate.
+///
+/// # Fail-closed honesty rules
+///
+/// - `post` is `None` (a crash stranded the event pre-observation) →
+///   `insufficient_evidence` ([`EFFECT_UNOBSERVED_CODE`]); the tool is never
+///   re-executed to fill the gap.
+/// - The record's canonical arguments are present → the digests are
+///   **recomputed** and must equal the recorded ones; a mismatch means the
+///   journal was tampered with and fails the projection (and, through the
+///   emitter, the mirror open) instead of minting onto forged inputs.
+/// - The record kept digests only (arguments over the inline cap) → the
+///   recorded digests are replayed, but an otherwise-`compliant` outcome is
+///   escalated to `insufficient_evidence`
+///   ([`ARGUMENTS_EVIDENCE_OMITTED_CODE`]): compliance cannot be claimed for
+///   inputs the evidence cannot show. Denials stay denials — the gate's
+///   decision is itself the sufficient fact.
+///
+/// # Errors
+///
+/// [`GovernanceError::InvalidClaim`] on a schema-invalid recorded field, an
+/// argument/digest mismatch (tampered journal), or a `post` record naming a
+/// different event than `pre`.
+pub fn project_event_execution_receipt(
+    pre: &crate::evidence::PreEffectRecord,
+    post: Option<&crate::evidence::PostEffectRecord>,
+    verifier_id: &str,
+    ttl_secs: u64,
+    parent: Option<&SignedExecutionReceipt>,
+) -> Result<ExecutionReceipt, GovernanceError> {
+    use crate::evidence::{EventOutcome, EvidenceOutputAdmission};
+
+    if let Some(post) = post {
+        if post.event_id != pre.event_id {
+            return Err(GovernanceError::InvalidClaim(format!(
+                "post-effect record names event {} but the pre-effect record names {}",
+                post.event_id, pre.event_id
+            )));
+        }
+    }
+
+    // The verdict and the observation timestamp the ER will carry.
+    let (mut outcome, timestamp_millis) = match post {
+        None => (
+            AuthOutcome::InsufficientEvidence {
+                internal: EFFECT_UNOBSERVED_CODE.to_string(),
+            },
+            pre.recorded_at_ms,
+        ),
+        Some(post) => {
+            let outcome = match &post.outcome {
+                EventOutcome::Completed(completed) => match completed.output_admission {
+                    EvidenceOutputAdmission::Allowed => AuthOutcome::Compliant,
+                    EvidenceOutputAdmission::Blocked => AuthOutcome::Violation {
+                        public: PublicDenialReason::PolicyDenied,
+                        internal: OUTPUT_SCAN_BLOCKED_CODE.to_string(),
+                    },
+                },
+                EventOutcome::Denied(denied) => match denied.public {
+                    // A denial whose own classification is "could not
+                    // establish what this authorizes" stays insufficient —
+                    // filing it as a violation would claim knowledge the
+                    // verifier does not have (§9.2).
+                    PublicDenialReason::InsufficientEvidence => AuthOutcome::InsufficientEvidence {
+                        internal: denied.internal.clone(),
+                    },
+                    _ => AuthOutcome::Violation {
+                        public: denied.public,
+                        internal: denied.internal.clone(),
+                    },
+                },
+                EventOutcome::FailedUnknown => AuthOutcome::InsufficientEvidence {
+                    internal: EFFECT_UNKNOWN_EXECUTION_CODE.to_string(),
+                },
+                EventOutcome::TimeoutUnknown => AuthOutcome::InsufficientEvidence {
+                    internal: EFFECT_UNKNOWN_TIMEOUT_CODE.to_string(),
+                },
+            };
+            (outcome, post.recorded_at_ms)
+        }
+    };
+
+    // The invocation digests: recomputed from the recorded arguments when they
+    // are inline (cross-checked against the record), replayed from the record
+    // when the arguments exceeded the inline cap.
+    let (arguments_hash, invocation_digest) = match &pre.arguments {
+        Some(arguments) => {
+            let call = pre.as_tool_invocation(arguments);
+            let (recomputed_hash, recomputed_digest) = invocation_digests(&pre.grant_id, &call);
+            if recomputed_hash != pre.arguments_hash
+                || recomputed_digest.value != pre.invocation_digest
+            {
+                return Err(GovernanceError::InvalidClaim(format!(
+                    "evidence integrity: the recorded arguments for event {} do not hash to \
+                     the recorded digests (tampered or corrupt journal)",
+                    pre.event_id
+                )));
+            }
+            (recomputed_hash, recomputed_digest)
+        }
+        None => (
+            pre.arguments_hash.clone(),
+            DigestObject {
+                alg: DigestAlg::Sha256,
+                canonicalization: Some(Canonicalization::JcsRfc8785),
+                scope: Some(DigestScope::NormalizedInput),
+                value: pre.invocation_digest.clone(),
+            },
+        ),
+    };
+
+    // Missing reconstruction inputs never mint compliance.
+    if pre.arguments.is_none() && matches!(outcome, AuthOutcome::Compliant) {
+        outcome = AuthOutcome::InsufficientEvidence {
+            internal: ARGUMENTS_EVIDENCE_OMITTED_CODE.to_string(),
+        };
+    }
+
+    let run_nonce = crate::evidence::event_run_nonce(&pre.event_id);
+    let grant = GrantFacts {
+        grant_id: pre.grant_id.clone(),
+        actor: pre.actor.clone(),
+        budget_remaining: pre.budget_remaining,
+    };
+    project_execution_receipt_core(
+        &grant,
+        &pre.tool,
+        pre.action_class,
+        &pre.target,
+        &pre.resource_family,
+        pre.side_effect_class,
+        arguments_hash,
+        invocation_digest,
+        &outcome,
+        &StepContext {
+            verifier_id,
+            iss: verifier_id,
+            trace_id: &pre.session_id,
+            run_nonce: &run_nonce,
+            step_id: &pre.event_id,
+            timestamp_millis,
+            ttl_secs,
+            evidence_level: EvidenceLevel::SelfSigned,
+            parent,
+            // #543 keeps the Phase 1 economic scalar: per-effect-class budgets
+            // remain #545-tracked and are not invented per event.
+            per_class_budget_remaining: None,
+        },
+    )
 }
 
 /// The lowercase snake_case wire token for an ER enum value (via its serde

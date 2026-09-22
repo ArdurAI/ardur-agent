@@ -52,6 +52,7 @@ mod effect;
 mod enforce;
 mod er;
 mod error;
+pub mod evidence;
 mod grant;
 mod hash;
 mod jcs;
@@ -75,6 +76,12 @@ pub use er::{
     ExecutionReceipt, PolicyDecision, PublicDenialReason, SideEffectClass, Verdict,
 };
 pub use error::GovernanceError;
+pub use evidence::{
+    CompletedOutcome, DeniedOutcome, EVIDENCE_RECORD_VERSION, EventKind, EventOutcome,
+    EventScope, EvidenceOutputAdmission, EvidenceRecord, InvocationClassification,
+    MAX_INLINE_ARGUMENTS_BYTES, MEMORY_WRITE_TOOL, PostEffectRecord, PreEffectRecord,
+    event_run_nonce, memory_event_id, tool_event_id,
+};
 pub use grant::{GrantDescriptor, MissionRef};
 pub use mirror::{ErRoundFacts, GovernanceEmitter, MirroredToolCall};
 pub use mission::{
@@ -84,7 +91,10 @@ pub use mission::{
     author_mission_declaration, mission_digest, tool_manifest_digest, tool_manifest_digest_of,
 };
 pub use project::{
-    AuthOutcome, StepContext, ToolInvocation, check_verdict_invariant, project_execution_receipt,
+    ARGUMENTS_EVIDENCE_OMITTED_CODE, AuthOutcome, EFFECT_UNKNOWN_EXECUTION_CODE,
+    EFFECT_UNKNOWN_TIMEOUT_CODE, EFFECT_UNOBSERVED_CODE, GrantFacts, OUTPUT_SCAN_BLOCKED_CODE,
+    StepContext, ToolInvocation, check_verdict_invariant, invocation_digests,
+    project_event_execution_receipt, project_execution_receipt,
 };
 pub use sign::{
     ER_TYP, ErSigner, ErSigningKey, ErVerifier, SignedExecutionReceipt, verify_er_chain,

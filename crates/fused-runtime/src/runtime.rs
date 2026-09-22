@@ -28,7 +28,12 @@ use ardur_cost_gate::{
     ModelId as GateModelId, ProviderId as GateProviderId, Sha256Digest as GateSha256,
     TokenId as GateTokenId,
 };
-use ardur_governance::{ErRoundFacts, GovernanceEmitter, MirroredToolCall};
+use ardur_governance::{
+    ActionClass as ErActionClass, AuthOutcome as ErAuthOutcome, CompletedOutcome, DeniedOutcome,
+    ErRoundFacts, EventOutcome, EvidenceOutputAdmission, GovernanceEmitter, GrantFacts,
+    InvocationClassification, MirroredToolCall, PostEffectRecord, PreEffectRecord,
+    PublicDenialReason as ErPublicDenialReason, SideEffectClass as ErSideEffectClass,
+};
 use ardur_injection_defense::{ContentSource, FilterRegistry, ScannableContent, Verdict};
 use ardur_lifecycle_hooks::{
     ErrorCtx, HookError, HookRegistry, LifecyclePhase, PostReceiptCtx, PreSubmitCtx,
@@ -1357,6 +1362,142 @@ impl FusedRuntime {
                 output_admission: admission,
             })
             .map_err(settlement_error)
+    }
+
+    /// **#543.** Record the immutable authorization inputs of one evaluated
+    /// tool event **before** its effect runs (or at its denial point), so a
+    /// post-crash replay can reconstruct the event without re-executing
+    /// anything. Best-effort and never gating: when no governance emitter is
+    /// configured this is a no-op, and a record failure is logged and skips
+    /// the event (its ER stays absent — an honest gap, never a fabricated
+    /// fact) rather than affecting the turn.
+    fn governance_pre_effect(
+        &self,
+        session_id: SessionId,
+        iteration: u32,
+        tool_ordinal: usize,
+        call: &ToolCall,
+        claims: &VerifiedClaims,
+        required: &[Capability],
+    ) -> Option<PreEffectRecord> {
+        let emitter = self.governance.as_ref()?;
+        let classification = classify_tool_invocation(&call.name, required);
+        let record = PreEffectRecord::tool_invocation(
+            &ardur_governance::EventScope {
+                session_id: &session_id.0.to_string(),
+                iteration,
+                tool_ordinal: tool_ordinal as u32,
+                call_id: &call.id,
+            },
+            &call.name,
+            &GrantFacts::from(claims),
+            &classification,
+            call.arguments.clone(),
+            self.clock.now_ms().get(),
+        );
+        match emitter.record_pre_effect(&record) {
+            Ok(()) => Some(record),
+            Err(err) => {
+                tracing::warn!(
+                    event_id = %record.event_id,
+                    error = %err,
+                    "governance pre-effect evidence failed; this event's crash recovery is \
+                     degraded to honest absence"
+                );
+                None
+            }
+        }
+    }
+
+    /// **#543.** Record the terminal observation of one evaluated event and
+    /// mirror its ER — the *one ER per evaluated event* the verifier
+    /// contract requires. Always records the post-effect observation first
+    /// (so the ER is only ever projected from durable evidence), then
+    /// projects; both are best-effort and logged, never gating.
+    fn governance_terminal_event(&self, pre: &Option<PreEffectRecord>, outcome: EventOutcome) {
+        let (Some(emitter), Some(pre)) = (self.governance.as_ref(), pre.as_ref()) else {
+            return;
+        };
+        let post = PostEffectRecord::new(pre, self.clock.now_ms().get(), outcome);
+        if let Err(err) = emitter.record_post_effect(&post) {
+            tracing::warn!(
+                event_id = %pre.event_id,
+                error = %err,
+                "governance post-effect evidence failed; this event's crash recovery is \
+                 degraded to honest absence"
+            );
+        }
+        if let Err(err) = emitter.mirror_evaluated_event(pre, &post) {
+            tracing::warn!(
+                event_id = %pre.event_id,
+                error = %err,
+                "governance per-event ER mirror failed; the gap reads as insufficient_evidence \
+                 downstream, never compliance"
+            );
+        }
+    }
+
+    /// **#543.** Record + mirror a gate's denial of one evaluated event.
+    /// The denial point is the event's whole lifecycle: the inputs and the
+    /// typed denial are recorded back-to-back and the ER (a `violation` with
+    /// the stable denial codes) is projected immediately — the round the
+    /// call belonged to will typically refuse and never reach the commit
+    /// mirror, which is exactly why per-event evidence must not wait for it.
+    #[allow(clippy::too_many_arguments)]
+    fn governance_denied_event(
+        &self,
+        session_id: SessionId,
+        iteration: u32,
+        tool_ordinal: usize,
+        call: &ToolCall,
+        claims: &VerifiedClaims,
+        required: &[Capability],
+        public: ErPublicDenialReason,
+        internal: &str,
+    ) {
+        let pre =
+            self.governance_pre_effect(session_id, iteration, tool_ordinal, call, claims, required);
+        self.governance_terminal_event(
+            &pre,
+            EventOutcome::Denied(DeniedOutcome {
+                public,
+                internal: internal.to_string(),
+            }),
+        );
+    }
+
+    /// **#543.** Record + mirror a turn's memory-write event: the write is
+    /// evaluated (under its own `memory.write` re-verification) and either
+    /// completes, is denied, or fails with an unknown effect — each an
+    /// evaluated event with a stable identity keyed on the owning round's
+    /// receipt.
+    fn governance_memory_event(
+        &self,
+        session_id: SessionId,
+        round_receipt: &ReceiptBody,
+        claims: &VerifiedClaims,
+        record_digest: &str,
+        outcome: EventOutcome,
+    ) {
+        let Some(emitter) = self.governance.as_ref() else {
+            return;
+        };
+        let pre = PreEffectRecord::memory_write(
+            &session_id.0.to_string(),
+            &round_receipt.receipt_id.to_string(),
+            &GrantFacts::from(claims),
+            record_digest,
+            self.clock.now_ms().get(),
+        );
+        if let Err(err) = emitter.record_pre_effect(&pre) {
+            tracing::warn!(
+                event_id = %pre.event_id,
+                error = %err,
+                "governance memory-write pre-effect evidence failed"
+            );
+            return;
+        }
+        self.governance_terminal_event(&Some(pre), outcome);
     }
 
     /// **Stage 4.5 (ARD-48).** Scan the outbound completion request's prompt
@@ -3173,6 +3314,19 @@ impl FusedRuntime {
                         let err = RuntimeError::UnknownTool {
                             tool: call.name.clone(),
                         };
+                        // #543: the requested call was evaluated and rejected
+                        // (no registered tool) — record the denial before the
+                        // refusal settles, since this round never commits.
+                        self.governance_denied_event(
+                            session_id,
+                            iteration,
+                            tool_ordinal,
+                            call,
+                            &claims,
+                            &[],
+                            ErPublicDenialReason::PolicyDenied,
+                            "unknown_tool",
+                        );
                         let known = response.cost.saturating_add(&tool_cost);
                         let settlement = self
                             .settle_refusal(session_id, reservation, known, UNKNOWN_TOOL_SETTLEMENT)
@@ -3192,6 +3346,17 @@ impl FusedRuntime {
                         tool_auth_now_unix,
                         &call.name,
                     ) {
+                        // #543: cap-token/Cedar tool-invoke denial.
+                        self.governance_denied_event(
+                            session_id,
+                            iteration,
+                            tool_ordinal,
+                            call,
+                            &claims,
+                            tool.required_capabilities(),
+                            ErPublicDenialReason::PolicyDenied,
+                            tool_auth_denial_code(&err),
+                        );
                         let known = response.cost.saturating_add(&tool_cost);
                         let settlement = self
                             .settle_refusal(session_id, reservation, known, TOOL_AUTH_SETTLEMENT)
@@ -3212,6 +3377,17 @@ impl FusedRuntime {
                         &call.name,
                         tool.required_capabilities(),
                     ) {
+                        // #543: declared-capability denial.
+                        self.governance_denied_event(
+                            session_id,
+                            iteration,
+                            tool_ordinal,
+                            call,
+                            &claims,
+                            tool.required_capabilities(),
+                            ErPublicDenialReason::PolicyDenied,
+                            "capability_not_granted",
+                        );
                         let known = response.cost.saturating_add(&tool_cost);
                         let settlement = self
                             .settle_refusal(session_id, reservation, known, CAPABILITY_SETTLEMENT)
@@ -3259,6 +3435,22 @@ impl FusedRuntime {
                     let spent_approval = match approval_result {
                         Ok(spent) => spent,
                         Err(err) => {
+                            // #543: approval-gate denial (required or
+                            // rejected).
+                            self.governance_denied_event(
+                                session_id,
+                                iteration,
+                                tool_ordinal,
+                                call,
+                                &claims,
+                                tool.required_capabilities(),
+                                ErPublicDenialReason::PolicyDenied,
+                                if matches!(err, RuntimeError::ApprovalRequired { .. }) {
+                                    "approval_required"
+                                } else {
+                                    "approval_rejected"
+                                },
+                            );
                             let known = response.cost.saturating_add(&tool_cost);
                             let reason = if matches!(err, RuntimeError::ApprovalRequired { .. }) {
                                 APPROVAL_SETTLEMENT
@@ -3277,6 +3469,16 @@ impl FusedRuntime {
                         }
                     };
                     let ctx = self.tool_context(&req.cap_token, session_id);
+                    // #543: every admission gate passed — persist the
+                    // immutable authorization inputs BEFORE the effect runs.
+                    let governance_pre = self.governance_pre_effect(
+                        session_id,
+                        iteration,
+                        tool_ordinal,
+                        call,
+                        &claims,
+                        tool.required_capabilities(),
+                    );
                     self.observe_tool(
                         &mut reservation,
                         tool_ordinal,
@@ -3324,6 +3526,13 @@ impl FusedRuntime {
                                 },
                                 OutputAdmission::NotScanned,
                             )?;
+                            // #543: execution error with an unknown effect —
+                            // recorded now so a cancel at the next gate cannot
+                            // strand the event without an observation.
+                            self.governance_terminal_event(
+                                &governance_pre,
+                                EventOutcome::FailedUnknown,
+                            );
                             self.record_approval_invocation(
                                 &spent_approval,
                                 InvocationResult::Failed,
@@ -3337,6 +3546,11 @@ impl FusedRuntime {
                                 ToolEffect::InterruptedUnknown,
                                 OutputAdmission::NotScanned,
                             )?;
+                            // #543: timeout with a possible effect.
+                            self.governance_terminal_event(
+                                &governance_pre,
+                                EventOutcome::TimeoutUnknown,
+                            );
                         }
                     }
                     // Failed awaits and timeouts obey the same cancellation
@@ -3419,6 +3633,26 @@ impl FusedRuntime {
                             OutputAdmission::Blocked
                         },
                     )?;
+                    // #543: the event is terminal at the scan decision — the
+                    // observed effect (digest + incurred cost) plus the
+                    // output-admission decision. Recorded BEFORE the cancel
+                    // gate below so a caller disconnect cannot strand a
+                    // completed tool without its evidence.
+                    self.governance_terminal_event(
+                        &governance_pre,
+                        EventOutcome::Completed(CompletedOutcome {
+                            output_digest: Sha256Digest::of(
+                                &serde_json::to_vec(&output.content).unwrap_or_default(),
+                            )
+                            .to_hex(),
+                            cost: output.cost,
+                            output_admission: if scan_result.is_ok() {
+                                EvidenceOutputAdmission::Allowed
+                            } else {
+                                EvidenceOutputAdmission::Blocked
+                            },
+                        }),
+                    );
                     reservation = match self
                         .abort_if_caller_gone(session_id, reservation, known, &cancel_probe)
                         .await
@@ -3594,38 +3828,96 @@ impl FusedRuntime {
                             &receipt,
                             iteration_now_ms,
                         );
+                        // #543: the memory write is an evaluated event — its
+                        // record digest is the content-addressed evidence.
+                        let record_digest =
+                            Sha256Digest::of(&serde_json::to_vec(&record).unwrap_or_default())
+                                .to_hex();
                         let plane = MemoryControlPlane::new(memory.as_ref(), self.policies.clone());
-                        if let Err(mem_err) = plane.record(&mem_claims, record) {
-                            self.fire_error(session_id, LifecyclePhase::MemoryWrite, &mem_err)
-                                .await;
+                        match plane.record(&mem_claims, record) {
+                            Ok(_record_id) => {
+                                self.governance_memory_event(
+                                    session_id,
+                                    &receipt,
+                                    &claims,
+                                    &record_digest,
+                                    EventOutcome::Completed(CompletedOutcome {
+                                        output_digest: record_digest.clone(),
+                                        cost: RuntimeCostTuple::default(),
+                                        output_admission: EvidenceOutputAdmission::Allowed,
+                                    }),
+                                );
+                            }
+                            Err(mem_err) => {
+                                // #543: a control-plane rejection is a typed
+                                // denial; an operational failure leaves the
+                                // effect unknown.
+                                self.governance_memory_event(
+                                    session_id,
+                                    &receipt,
+                                    &claims,
+                                    &record_digest,
+                                    memory_failure_outcome(&mem_err),
+                                );
+                                self.fire_error(session_id, LifecyclePhase::MemoryWrite, &mem_err)
+                                    .await;
+                            }
                         }
                     }
-                    Err(CapTokenError::ToolNotAllowed) => {
-                        // Token does not grant memory.write (attenuated or never
-                        // issued). Skip the memory side-effect silently — this is
-                        // the intended behaviour for write-less tokens.
-                    }
-                    Err(CapTokenError::Expired) => {
-                        let err = RuntimeError::CapTokenExpired;
-                        tracing::warn!(
-                            session_id = ?session_id,
-                            error = %err,
-                            "memory.write cap-token re-verification failed"
-                        );
-                        self.fire_error(session_id, LifecyclePhase::MemoryWrite, &err)
-                            .await;
-                    }
-                    Err(other) => {
-                        let err = RuntimeError::CapDenied {
-                            reason: other.to_string(),
+                    Err(cap_err) => {
+                        // #543: the re-verification denial is itself an
+                        // evaluated event — recorded through the §9 fail-closed
+                        // mapping, never guessed.
+                        let denied = match ErAuthOutcome::from_cap_token_error(&cap_err) {
+                            ErAuthOutcome::Violation { public, internal } => {
+                                DeniedOutcome { public, internal }
+                            }
+                            ErAuthOutcome::InsufficientEvidence { internal } => DeniedOutcome {
+                                public: ErPublicDenialReason::InsufficientEvidence,
+                                internal,
+                            },
+                            ErAuthOutcome::Compliant => DeniedOutcome {
+                                public: ErPublicDenialReason::PolicyDenied,
+                                internal: "memory_write_denied".to_string(),
+                            },
                         };
-                        tracing::warn!(
-                            session_id = ?session_id,
-                            error = %err,
-                            "memory.write cap-token re-verification failed"
+                        self.governance_memory_event(
+                            session_id,
+                            &receipt,
+                            &claims,
+                            "",
+                            EventOutcome::Denied(denied),
                         );
-                        self.fire_error(session_id, LifecyclePhase::MemoryWrite, &err)
-                            .await;
+                        match cap_err {
+                            CapTokenError::ToolNotAllowed => {
+                                // Token does not grant memory.write (attenuated
+                                // or never issued). Skip the memory side-effect
+                                // silently — this is the intended behaviour for
+                                // write-less tokens.
+                            }
+                            CapTokenError::Expired => {
+                                let err = RuntimeError::CapTokenExpired;
+                                tracing::warn!(
+                                    session_id = ?session_id,
+                                    error = %err,
+                                    "memory.write cap-token re-verification failed"
+                                );
+                                self.fire_error(session_id, LifecyclePhase::MemoryWrite, &err)
+                                    .await;
+                            }
+                            other => {
+                                let err = RuntimeError::CapDenied {
+                                    reason: other.to_string(),
+                                };
+                                tracing::warn!(
+                                    session_id = ?session_id,
+                                    error = %err,
+                                    "memory.write cap-token re-verification failed"
+                                );
+                                self.fire_error(session_id, LifecyclePhase::MemoryWrite, &err)
+                                    .await;
+                            }
+                        }
                     }
                 }
             }
@@ -4000,6 +4292,18 @@ impl FusedRuntime {
                             let err = RuntimeError::UnknownTool {
                                 tool: call.name.clone(),
                             };
+                            // #543: evaluated and rejected (no registered
+                            // tool) — this round never commits.
+                            self.governance_denied_event(
+                                session_id,
+                                iteration,
+                                tool_ordinal,
+                                call,
+                                &claims,
+                                &[],
+                                ErPublicDenialReason::PolicyDenied,
+                                "unknown_tool",
+                            );
                             yield FusedEvent::StageEnd { stage: StageKind::ToolExec, ok: false };
                             let known = response.cost.saturating_add(&tool_cost);
                             let settlement = self
@@ -4025,6 +4329,17 @@ impl FusedRuntime {
                             invocation_now_unix,
                             &call.name,
                         ) {
+                            // #543: cap-token/Cedar tool-invoke denial.
+                            self.governance_denied_event(
+                                session_id,
+                                iteration,
+                                tool_ordinal,
+                                call,
+                                &claims,
+                                tool.required_capabilities(),
+                                ErPublicDenialReason::PolicyDenied,
+                                tool_auth_denial_code(&err),
+                            );
                             yield FusedEvent::StageEnd { stage: StageKind::ToolExec, ok: false };
                             let known = response.cost.saturating_add(&tool_cost);
                             let settlement = self
@@ -4050,6 +4365,17 @@ impl FusedRuntime {
                             &call.name,
                             tool.required_capabilities(),
                         ) {
+                            // #543: declared-capability denial.
+                            self.governance_denied_event(
+                                session_id,
+                                iteration,
+                                tool_ordinal,
+                                call,
+                                &claims,
+                                tool.required_capabilities(),
+                                ErPublicDenialReason::PolicyDenied,
+                                "capability_not_granted",
+                            );
                             yield FusedEvent::StageEnd { stage: StageKind::ToolExec, ok: false };
                             let known = response.cost.saturating_add(&tool_cost);
                             let settlement = self
@@ -4086,6 +4412,21 @@ impl FusedRuntime {
                         {
                             Ok(spent) => spent,
                             Err(err) => {
+                                // #543: approval-gate denial.
+                                self.governance_denied_event(
+                                    session_id,
+                                    iteration,
+                                    tool_ordinal,
+                                    call,
+                                    &claims,
+                                    tool.required_capabilities(),
+                                    ErPublicDenialReason::PolicyDenied,
+                                    if matches!(err, RuntimeError::ApprovalRequired { .. }) {
+                                        "approval_required"
+                                    } else {
+                                        "approval_rejected"
+                                    },
+                                );
                                 yield FusedEvent::StageEnd { stage: StageKind::ToolExec, ok: false };
                                 let known = response.cost.saturating_add(&tool_cost);
                                 let reason = if matches!(err, RuntimeError::ApprovalRequired { .. }) {
@@ -4108,6 +4449,15 @@ impl FusedRuntime {
                             }
                         };
                         let ctx = self.tool_context(&req.cap_token, session_id);
+                        // #543: gates passed — durable inputs before the effect.
+                        let governance_pre = self.governance_pre_effect(
+                            session_id,
+                            iteration,
+                            tool_ordinal,
+                            call,
+                            &claims,
+                            tool.required_capabilities(),
+                        );
                         self.observe_tool(reservation.as_mut().expect("held"), tool_ordinal, call, ToolEffect::DispatchIntent, OutputAdmission::NotScanned)?;
                         let output = match tokio::time::timeout(
                             self.tool_timeout,
@@ -4128,6 +4478,11 @@ impl FusedRuntime {
                             }
                             Ok(Err(tool_err)) => {
                                 self.observe_tool(reservation.as_mut().expect("held"), tool_ordinal, call, ToolEffect::Failed { class: ToolFailureClass::Execution, effect_unknown: true }, OutputAdmission::NotScanned)?;
+                                // #543: execution error with an unknown effect.
+                                self.governance_terminal_event(
+                                    &governance_pre,
+                                    EventOutcome::FailedUnknown,
+                                );
                                 // Consume-before-invoke: the approval stays
                                 // spent; the card records the call resolved
                                 // as failed.
@@ -4150,6 +4505,11 @@ impl FusedRuntime {
                             }
                             Err(_elapsed) => {
                                 self.observe_tool(reservation.as_mut().expect("held"), tool_ordinal, call, ToolEffect::InterruptedUnknown, OutputAdmission::NotScanned)?;
+                                // #543: timeout with a possible effect.
+                                self.governance_terminal_event(
+                                    &governance_pre,
+                                    EventOutcome::TimeoutUnknown,
+                                );
                                 // Timed out with the invocation's effect
                                 // unknown: the spent card is deliberately
                                 // left WITHOUT an outcome record — the
@@ -4182,6 +4542,23 @@ impl FusedRuntime {
                         self.observe_tool(reservation.as_mut().expect("held"), tool_ordinal, call, ToolEffect::Completed {
                             output_digest: GateSha256::of(&serde_json::to_vec(&output.content).map_err(|e| RuntimeError::Internal(e.into()))?), cost: output.cost,
                         }, if scan_result.is_ok() { OutputAdmission::Allowed } else { OutputAdmission::Blocked })?;
+                        // #543: terminal at the scan decision — observed
+                        // effect + output-admission decision.
+                        self.governance_terminal_event(
+                            &governance_pre,
+                            EventOutcome::Completed(CompletedOutcome {
+                                output_digest: Sha256Digest::of(
+                                    &serde_json::to_vec(&output.content).unwrap_or_default(),
+                                )
+                                .to_hex(),
+                                cost: output.cost,
+                                output_admission: if scan_result.is_ok() {
+                                    EvidenceOutputAdmission::Allowed
+                                } else {
+                                    EvidenceOutputAdmission::Blocked
+                                },
+                            }),
+                        );
                         if let Err(err) = scan_result {
                             yield FusedEvent::StageEnd { stage: StageKind::ToolExec, ok: false };
                             let known = response
@@ -4334,36 +4711,90 @@ impl FusedRuntime {
                                 &receipt,
                                 memory_now_ms,
                             );
+                            // #543: the memory write is an evaluated event.
+                            let record_digest = Sha256Digest::of(
+                                &serde_json::to_vec(&record).unwrap_or_default(),
+                            )
+                            .to_hex();
                             let plane = MemoryControlPlane::new(memory.as_ref(), self.policies.clone());
-                            if let Err(mem_err) = plane.record(&mem_claims, record) {
-                                self.fire_error(session_id, LifecyclePhase::MemoryWrite, &mem_err)
-                                    .await;
+                            match plane.record(&mem_claims, record) {
+                                Ok(_record_id) => {
+                                    self.governance_memory_event(
+                                        session_id,
+                                        &receipt,
+                                        &claims,
+                                        &record_digest,
+                                        EventOutcome::Completed(CompletedOutcome {
+                                            output_digest: record_digest.clone(),
+                                            cost: RuntimeCostTuple::default(),
+                                            output_admission: EvidenceOutputAdmission::Allowed,
+                                        }),
+                                    );
+                                }
+                                Err(mem_err) => {
+                                    // #543: control-plane denial vs unknown effect.
+                                    self.governance_memory_event(
+                                        session_id,
+                                        &receipt,
+                                        &claims,
+                                        &record_digest,
+                                        memory_failure_outcome(&mem_err),
+                                    );
+                                    self.fire_error(session_id, LifecyclePhase::MemoryWrite, &mem_err)
+                                        .await;
+                                }
                             }
                         }
-                        Err(CapTokenError::ToolNotAllowed) => {
-                            // Token does not grant memory.write — skip silently.
-                        }
-                        Err(CapTokenError::Expired) => {
-                            let err = RuntimeError::CapTokenExpired;
-                            tracing::warn!(
-                                session_id = ?session_id,
-                                error = %err,
-                                "memory.write cap-token re-verification failed"
-                            );
-                            self.fire_error(session_id, LifecyclePhase::MemoryWrite, &err)
-                                .await;
-                        }
-                        Err(other) => {
-                            let err = RuntimeError::CapDenied {
-                                reason: other.to_string(),
+                        Err(cap_err) => {
+                            // #543: the re-verification denial is itself an
+                            // evaluated event (§9 fail-closed mapping).
+                            let denied = match ErAuthOutcome::from_cap_token_error(&cap_err) {
+                                ErAuthOutcome::Violation { public, internal } => {
+                                    DeniedOutcome { public, internal }
+                                }
+                                ErAuthOutcome::InsufficientEvidence { internal } => DeniedOutcome {
+                                    public: ErPublicDenialReason::InsufficientEvidence,
+                                    internal,
+                                },
+                                ErAuthOutcome::Compliant => DeniedOutcome {
+                                    public: ErPublicDenialReason::PolicyDenied,
+                                    internal: "memory_write_denied".to_string(),
+                                },
                             };
-                            tracing::warn!(
-                                session_id = ?session_id,
-                                error = %err,
-                                "memory.write cap-token re-verification failed"
+                            self.governance_memory_event(
+                                session_id,
+                                &receipt,
+                                &claims,
+                                "",
+                                EventOutcome::Denied(denied),
                             );
-                            self.fire_error(session_id, LifecyclePhase::MemoryWrite, &err)
-                                .await;
+                            match cap_err {
+                                CapTokenError::ToolNotAllowed => {
+                                    // Token does not grant memory.write — skip silently.
+                                }
+                                CapTokenError::Expired => {
+                                    let err = RuntimeError::CapTokenExpired;
+                                    tracing::warn!(
+                                        session_id = ?session_id,
+                                        error = %err,
+                                        "memory.write cap-token re-verification failed"
+                                    );
+                                    self.fire_error(session_id, LifecyclePhase::MemoryWrite, &err)
+                                        .await;
+                                }
+                                other => {
+                                    let err = RuntimeError::CapDenied {
+                                        reason: other.to_string(),
+                                    };
+                                    tracing::warn!(
+                                        session_id = ?session_id,
+                                        error = %err,
+                                        "memory.write cap-token re-verification failed"
+                                    );
+                                    self.fire_error(session_id, LifecyclePhase::MemoryWrite, &err)
+                                        .await;
+                                }
+                            }
                         }
                     }
                     yield FusedEvent::StageEnd { stage: StageKind::MemoryRecord, ok: true };
@@ -4416,6 +4847,126 @@ fn derive_principal(entity_type: &str, claims: &VerifiedClaims) -> PrincipalRef 
 /// per-request resource rather than a static placeholder.
 fn derive_resource(session_id: SessionId) -> ResourceRef {
     ResourceRef(format!("Session::\"{}\"", session_id.0))
+}
+
+/// **#543.** Classify an invoked tool from its **declared** capability
+/// surface — the authorized intent, never the argument values (classifying
+/// from arguments would be guessing at their semantics). For a mixed
+/// capability set the strongest declared effect wins, in a fixed severity
+/// order, so the classification is deterministic per tool. A tool declaring
+/// no capabilities classifies as an observation with no side effect (the
+/// registry's Phase-1 tools, e.g. `echo`, match that); a `Custom` capability
+/// declares nothing, so it classifies conservatively as state-changing
+/// rather than under-claim an unknown effect surface.
+fn classify_tool_invocation(tool_name: &str, required: &[Capability]) -> InvocationClassification {
+    let mut family = "tool";
+    let mut action = ErActionClass::Observe;
+    let mut side = ErSideEffectClass::None;
+    for cap in required {
+        let (cap_family, cap_action, cap_side) = capability_effect(cap);
+        if side_effect_severity(cap_side) > side_effect_severity(side) {
+            side = cap_side;
+            action = cap_action;
+            family = cap_family;
+        }
+    }
+    InvocationClassification {
+        action_class: action,
+        target: tool_name.to_string(),
+        resource_family: family.to_string(),
+        side_effect_class: side,
+    }
+}
+
+/// The severity order the #543 classification maximizes over: an external
+/// send outranks a durable state change, which outranks an internal write,
+/// which outranks no effect.
+fn side_effect_severity(side: ErSideEffectClass) -> u8 {
+    match side {
+        ErSideEffectClass::None => 0,
+        ErSideEffectClass::InternalWrite => 1,
+        ErSideEffectClass::StateChange => 2,
+        ErSideEffectClass::ExternalSend => 3,
+    }
+}
+
+/// The (resource family, action class, side-effect class) one declared
+/// capability contributes to the #543 classification.
+fn capability_effect(cap: &Capability) -> (&'static str, ErActionClass, ErSideEffectClass) {
+    match cap {
+        Capability::FsRead => ("filesystem", ErActionClass::Read, ErSideEffectClass::None),
+        Capability::FsWrite => (
+            "filesystem",
+            ErActionClass::Write,
+            ErSideEffectClass::StateChange,
+        ),
+        Capability::ShellExec => (
+            "process",
+            ErActionClass::Write,
+            ErSideEffectClass::StateChange,
+        ),
+        Capability::ProcessSpawn => (
+            "process",
+            ErActionClass::Write,
+            ErSideEffectClass::StateChange,
+        ),
+        Capability::NetworkOut => (
+            "network",
+            ErActionClass::Send,
+            ErSideEffectClass::ExternalSend,
+        ),
+        Capability::EnvRead => ("process", ErActionClass::Read, ErSideEffectClass::None),
+        Capability::ClipboardRead => ("device", ErActionClass::Read, ErSideEffectClass::None),
+        Capability::VoiceInput => ("device", ErActionClass::Observe, ErSideEffectClass::None),
+        Capability::VoiceOutput => (
+            "device",
+            ErActionClass::Write,
+            ErSideEffectClass::InternalWrite,
+        ),
+        Capability::ImageGenerate => (
+            "model",
+            ErActionClass::Write,
+            ErSideEffectClass::InternalWrite,
+        ),
+        Capability::ImageAnalyze => ("model", ErActionClass::Observe, ErSideEffectClass::None),
+        Capability::Custom(_) => ("tool", ErActionClass::Write, ErSideEffectClass::StateChange),
+    }
+}
+
+/// **#543.** The stable audit-only code for a tool-invocation gate denial,
+/// mapped from the runtime's typed error — diagnostic detail riding the
+/// settled `RefusalClass::Authorization` classification, never a new
+/// classification of its own.
+fn tool_auth_denial_code(err: &RuntimeError) -> &'static str {
+    match err {
+        RuntimeError::CapTokenExpired => "grant_expired",
+        RuntimeError::CapDenied { .. } => "tool_not_allowed",
+        RuntimeError::PolicyDenied { .. } => "policy_denied",
+        _ => "tool_invocation_denied",
+    }
+}
+
+/// **#543.** Classify a memory-write failure honestly: a control-plane
+/// rejection (capability, policy, subject, receipt, or shape) happens BEFORE
+/// the backend write, so the effect provably never occurred — a typed
+/// denial. An operational failure (`Backend`, poisoned lock, missing record)
+/// leaves the effect unknown: the write may have partially completed.
+fn memory_failure_outcome(err: &ardur_memory::MemoryError) -> EventOutcome {
+    use ardur_memory::MemoryError as ME;
+    let denied = |internal: &str| {
+        EventOutcome::Denied(DeniedOutcome {
+            public: ErPublicDenialReason::PolicyDenied,
+            internal: internal.to_string(),
+        })
+    };
+    match err {
+        ME::CapabilityDenied { .. } => denied("memory_capability_denied"),
+        ME::PolicyDenied { .. } => denied("memory_policy_denied"),
+        ME::SubjectMismatch { .. } => denied("memory_subject_mismatch"),
+        ME::ReceiptRequired { .. } => denied("memory_receipt_required"),
+        ME::Malformed(_) => denied("memory_record_malformed"),
+        ME::NotFound(_) | ME::LockPoisoned | ME::Backend(_) => EventOutcome::FailedUnknown,
+    }
 }
 
 /// Project a verified cap-token's claims onto the Cedar resource attributes so

@@ -521,8 +521,22 @@ its native receipt also appends a signed ER to `governance/er-chain.jsonl`
 under the data dir (`~/.ardur/governance/` for the CLI), signed with the same
 P-256 custody key as the receipt chain, hash-chained and verified across
 restarts. Turns that are abandoned or cancelled before the commit decision
-mint no ER. Admission behaviour (allow/deny) is unchanged either way — the
-mirror observes, it never decides.
+mint no round ER. Admission behaviour (allow/deny) is unchanged either way —
+the mirror observes, it never decides.
+
+Since #543 the mirror also keeps a durable per-event evidence journal at
+`governance/events.jsonl`: the immutable authorization inputs of every
+evaluated event (each tool invocation before it runs, each memory write) and
+its terminal observation (observed effect, typed denial, or an explicitly
+unknown outcome such as a timeout). Every evaluated event gets its own ER —
+including events whose round never commits (a denial after an earlier
+successful tool, a scan rejection), which the round mirror cannot cover.
+After a crash, the next boot replays the journal idempotently: events the ER
+chain does not yet carry are projected from their records, an event stranded
+mid-effect is marked `insufficient_evidence` (the tool is never re-run), and
+a corrupt or tampered journal fails the boot. Evidence records cap inlined
+arguments at 1 MiB; larger calls keep their content-addressing digests and
+the event reports `insufficient_evidence` rather than guessing compliance.
 
 The default (unset) is byte-identical to running without the feature: no
 `governance/` directory is created. Enabling is fail-closed: if the mirror
