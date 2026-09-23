@@ -1383,10 +1383,13 @@ impl FusedRuntime {
                 public: PublicDenialReason::PolicyDenied,
                 internal: "tool_capability_denied".to_string(),
             }),
-            ToolError::CapTokenDenied { .. } => EventOutcome::Denied(DeniedOutcome {
-                public: PublicDenialReason::PolicyDenied,
-                internal: "tool_cap_token_denied".to_string(),
-            }),
+            // NOT a pre-effect refusal: across the delegate-tool boundary a
+            // child can be revoked or unauthorized after running rounds and
+            // settling actual cost — the effect may already have occurred
+            // and the phase does not survive the boundary. Minting a
+            // policy-denial receipt would be a false claim; the honest
+            // classification is unknown-effect.
+            ToolError::CapTokenDenied { .. } => EventOutcome::FailedUnknown,
             ToolError::InvalidArgs(_) => EventOutcome::Denied(DeniedOutcome {
                 public: PublicDenialReason::PolicyDenied,
                 internal: "tool_invalid_arguments".to_string(),
@@ -1912,14 +1915,25 @@ impl FusedRuntime {
             let label = cap.as_str();
             // ARD-474: re-verify the cap-token for the capability label
             // immediately before invocation.
-            if self
-                .stage_cap_token_for_tool(req, provisioning, now_unix, &label)
-                .is_err()
-            {
-                return Err(RuntimeError::CapDenied {
-                    reason: format!(
-                        "tool `{tool_name}` requires capability `{label}` which is not granted by the cap-token"
-                    ),
+            if let Err(err) = self.stage_cap_token_for_tool(req, provisioning, now_unix, &label) {
+                // #543: a token-VALIDITY failure here (revoked between the
+                // tool-name gate and this re-verification, expired,
+                // malformed, …) is the same finding the adjacent gate
+                // reports — propagate it verbatim so both verifier calls
+                // classify the audit identically. Only a genuine
+                // capability/allowlist miss wraps in the gate's own message.
+                return Err(match &err {
+                    RuntimeError::CapDenied { reason }
+                        if reason != &CapTokenError::ToolNotAllowed.to_string() =>
+                    {
+                        err
+                    }
+                    RuntimeError::CapTokenExpired | RuntimeError::CapTokenMissing => err,
+                    _ => RuntimeError::CapDenied {
+                        reason: format!(
+                            "tool `{tool_name}` requires capability `{label}` which is not granted by the cap-token"
+                        ),
+                    },
                 });
             }
         }
@@ -3474,7 +3488,11 @@ impl FusedRuntime {
                         &call.name,
                         tool.required_capabilities(),
                     ) {
-                        // #543: declared-capability denial.
+                        // #543: declared-capability denial — classified from the
+                        // propagated error so a revocation observed by this
+                        // re-verification reports identically to the adjacent
+                        // tool-name gate observing it.
+                        let (public, internal) = tool_auth_denial_classification(&err);
                         self.governance_denied_event(
                             session_id,
                             &iter_request_id,
@@ -3483,8 +3501,8 @@ impl FusedRuntime {
                             call,
                             &claims,
                             tool.required_capabilities(),
-                            ErPublicDenialReason::PolicyDenied,
-                            "capability_not_granted",
+                            public,
+                            internal,
                         );
                         let known = response.cost.saturating_add(&tool_cost);
                         let settlement = self
@@ -4485,7 +4503,11 @@ impl FusedRuntime {
                             &call.name,
                             tool.required_capabilities(),
                         ) {
-                            // #543: declared-capability denial.
+                            // #543: declared-capability denial — classified from the
+                            // propagated error so a revocation observed by this
+                            // re-verification reports identically to the adjacent
+                            // tool-name gate observing it.
+                            let (public, internal) = tool_auth_denial_classification(&err);
                             self.governance_denied_event(
                                 session_id,
                                 &iter_request_id,
@@ -4494,8 +4516,8 @@ impl FusedRuntime {
                                 call,
                                 &claims,
                                 tool.required_capabilities(),
-                                ErPublicDenialReason::PolicyDenied,
-                                "capability_not_granted",
+                                public,
+                                internal,
                             );
                             yield FusedEvent::StageEnd { stage: StageKind::ToolExec, ok: false };
                             let known = response.cost.saturating_add(&tool_cost);
@@ -5091,6 +5113,14 @@ fn capability_effect(cap: &Capability) -> (&'static str, ErActionClass, ErSideEf
 fn tool_auth_denial_classification(err: &RuntimeError) -> (ErPublicDenialReason, &'static str) {
     match err {
         RuntimeError::CapTokenExpired => (ErPublicDenialReason::PolicyDenied, "grant_expired"),
+        RuntimeError::CapDenied { reason }
+            if reason.ends_with("which is not granted by the cap-token") =>
+        {
+            // The declared-capability gate's own wrap (ARD-420): a genuine
+            // allowlist miss, distinct from the token-validity failures it
+            // propagates verbatim.
+            (ErPublicDenialReason::PolicyDenied, "capability_not_granted")
+        }
         RuntimeError::CapDenied { reason } => {
             if *reason == CapTokenError::Revoked.to_string() {
                 (ErPublicDenialReason::Revoked, "revoked")
@@ -5447,11 +5477,6 @@ mod governance_classification_tests {
                 PublicDenialReason::PolicyDenied,
             ),
             (
-                ToolError::CapTokenDenied { reason: "r".into() },
-                "tool_cap_token_denied",
-                PublicDenialReason::PolicyDenied,
-            ),
-            (
                 ToolError::InvalidArgs("r".into()),
                 "tool_invalid_arguments",
                 PublicDenialReason::PolicyDenied,
@@ -5481,6 +5506,9 @@ mod governance_classification_tests {
             ToolError::ExecutionFailed("r".into()),
             ToolError::OutputTooLarge { actual: 9, max: 1 },
             ToolError::Internal(anyhow::anyhow!("r")),
+            // Ambiguous across the delegate boundary (a child revoked
+            // mid-flight already ran effects): never a false denial.
+            ToolError::CapTokenDenied { reason: "r".into() },
         ] {
             assert!(matches!(
                 FusedRuntime::tool_error_event_outcome(&err),
@@ -5491,6 +5519,35 @@ mod governance_classification_tests {
             FusedRuntime::tool_error_event_outcome(&ToolError::Timeout),
             EventOutcome::TimeoutUnknown
         ));
+    }
+
+    #[test]
+    fn the_capability_gate_wrap_and_propagated_validity_split() {
+        // The declared-capability gate wraps a genuine allowlist miss in its
+        // own message (classified capability_not_granted) but propagates
+        // token-validity failures verbatim — so a revocation observed by the
+        // capability re-verification classifies identically to the adjacent
+        // tool-name gate observing it, never as the miss.
+        let wrapped = RuntimeError::CapDenied {
+            reason:
+                "tool `echo` requires capability `cap.fs_write` which is not granted by the cap-token"
+                    .to_string(),
+        };
+        assert_eq!(
+            tool_auth_denial_classification(&wrapped),
+            (ErPublicDenialReason::PolicyDenied, "capability_not_granted")
+        );
+        let revoked = RuntimeError::CapDenied {
+            reason: CapTokenError::Revoked.to_string(),
+        };
+        assert_eq!(
+            tool_auth_denial_classification(&revoked),
+            (ErPublicDenialReason::Revoked, "revoked")
+        );
+        // And the propagated-validity path is NOT mistaken for the wrap: a
+        // revocation string must never classify as capability_not_granted.
+        let (_, code) = tool_auth_denial_classification(&revoked);
+        assert_ne!(code, "capability_not_granted");
     }
 
     #[test]

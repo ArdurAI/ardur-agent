@@ -728,7 +728,6 @@ fn canonical_public_for_denial_code(internal: &str) -> Option<PublicDenialReason
         | "pop_invalid"
         | "tool_policy_denied"
         | "tool_capability_denied"
-        | "tool_cap_token_denied"
         | "tool_invalid_arguments" => PublicDenialReason::PolicyDenied,
         "revoked" => PublicDenialReason::Revoked,
         "signature_invalid" | "malformed_token" => PublicDenialReason::ChainInvalid,
@@ -772,7 +771,6 @@ fn decision_backend_for(outcome: &AuthOutcome) -> &'static str {
         // malformed arguments, cost ceiling, unimplemented backend).
         "tool_policy_denied"
         | "tool_capability_denied"
-        | "tool_cap_token_denied"
         | "tool_invalid_arguments"
         | "tool_cost_ceiling_exceeded"
         | "tool_not_implemented" => "tool-runtime",

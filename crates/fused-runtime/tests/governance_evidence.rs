@@ -3126,3 +3126,31 @@ async fn a_typed_tool_refusal_records_a_denial_on_the_streaming_path() {
 
     assert_tool_refusal_event_er(&mirror);
 }
+
+// ---------------------------------------------------------------------------
+// Fourteenth review round: signed verifier identity on reopen; revocation
+// propagation from the capability gate.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn reopening_under_a_different_verifier_identity_reprojects_cleanly() {
+    let (_root, mirror, _events, receipts) = scratch();
+    one_tool_turn(&mirror, &receipts).await;
+    let chain_before = signed_chain(&mirror);
+
+    // The same governed data dir reopened by a surface with a DIFFERENT
+    // verifier id (the CLI and server use different ones): the already-signed
+    // event ERs must re-project against their signed identity, not fail the
+    // exact comparison as a false tamper.
+    ErMirrorEmitter::open(
+        &mirror,
+        &support::receipt_key(),
+        "spiffe://ardur/verifier/server",
+    )
+    .expect("reopen under a different verifier id re-projects cleanly");
+    assert_eq!(
+        signed_chain(&mirror).len(),
+        chain_before.len(),
+        "no duplicate or rewritten ERs"
+    );
+}

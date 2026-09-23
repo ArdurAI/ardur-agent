@@ -677,10 +677,17 @@ impl ErMirrorEmitter {
                 )));
             };
             let parent = idx.checked_sub(1).map(|p| &chain[p]);
+            // Re-project with the receipt's SIGNED verifier identity, not the
+            // opener's: the same governed data dir is legitimately reopened
+            // under different verifier ids (the CLI and server surfaces use
+            // different ones), and re-signing history under the new identity
+            // would report a tampered journal over valid evidence. The
+            // current verifier id is for previously unmirrored events (the
+            // sweep below), not for already-signed receipts.
             let projected = project_event_execution_receipt(
                 pre,
                 post.as_ref(),
-                verifier_id,
+                er.receipt().verifier_id.as_str(),
                 ER_TTL_SECS,
                 parent,
             )?;
