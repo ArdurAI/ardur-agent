@@ -380,6 +380,13 @@ fn write_chained_journal(path: &std::path::Path, raw_lines: &[String]) {
     let refs: Vec<&str> = raw_lines.iter().map(String::as_str).collect();
     let (content, tail_mac, next_seq) = mac_raw_lines(&refs);
     std::fs::write(path, content).expect("write journal");
+    let anchor = match next_seq {
+        0 => ardur_governance::evidence_anchor_json(&test_mac_key(), None),
+        _ => {
+            ardur_governance::evidence_anchor_json(&test_mac_key(), Some((next_seq - 1, &tail_mac)))
+        }
+    };
+    std::fs::write(path.with_file_name("events.anchor"), anchor).expect("write anchor");
     if next_seq > 0 {
         let checkpoint =
             ardur_governance::evidence_checkpoint_json(&test_mac_key(), next_seq - 1, &tail_mac);
@@ -470,6 +477,8 @@ fn tamper_journal_with(path: &std::path::Path, edit: impl Fn(&mut serde_json::Va
     if remac && !records.is_empty() {
         let checkpoint = ardur_governance::evidence_checkpoint_json(&key, last_seq, &last_mac);
         std::fs::write(path.with_file_name("events.tail"), checkpoint).expect("checkpoint");
+        let anchor = ardur_governance::evidence_anchor_json(&key, Some((last_seq, &last_mac)));
+        std::fs::write(path.with_file_name("events.anchor"), anchor).expect("anchor");
     }
 }
 
@@ -1890,13 +1899,25 @@ async fn a_deleted_journal_fails_the_reopen() {
         "expected the truncation diagnostic, got: {err}"
     );
 
-    // Deleting the checkpoint too still fails closed: the reconciliation arm
-    // (chained event ERs with no journaled evidence) is what catches it.
+    // Deleting the checkpoint too: the anchor survives and commits to a tail
+    // the journal no longer has — the wholesale-deletion check fires.
     let checkpoint = events.with_file_name("events.tail");
     let _ = std::fs::remove_file(&checkpoint);
     let err = ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
         .err()
         .expect("a deleted journal and checkpoint must still fail the reopen");
+    assert!(
+        err.to_string().contains("anchored tail"),
+        "expected the wholesale-deletion diagnostic, got: {err}"
+    );
+
+    // Deleting the anchor as well still fails closed: the reconciliation arm
+    // (chained event ERs with no journaled evidence) is what catches it.
+    let anchor = events.with_file_name("events.anchor");
+    let _ = std::fs::remove_file(&anchor);
+    let err = ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
+        .err()
+        .expect("a deleted journal, checkpoint, and anchor must still fail the reopen");
     assert!(
         err.to_string().contains("no durable evidence"),
         "expected the missing-evidence diagnostic, got: {err}"
@@ -2413,4 +2434,71 @@ async fn a_tampered_tail_checkpoint_fails_the_reopen() {
         err.to_string().contains("checkpoint"),
         "expected the checkpoint diagnostic, got: {err}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Eighth review round: ownership + third-artifact anchoring.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_second_emitter_over_the_same_journal_fails_to_open() {
+    let (_root, mirror, _events, receipts) = scratch();
+    one_tool_turn(&mirror, &receipts).await;
+
+    // The first emitter is still alive in the runtime above (dropped with
+    // it) — open a fresh turn's runtime AND then a second emitter by hand:
+    // simplest honest check is two direct opens with the first still held.
+    let first = ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
+        .expect("the first open holds the lock");
+    let err = ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
+        .err()
+        .expect("a concurrent second emitter must fail to open");
+    assert!(
+        err.to_string().contains("another emitter owns"),
+        "expected the ownership diagnostic, got: {err}"
+    );
+    drop(first);
+    // After the holder drops, the kernel releases the flock: a later open
+    // succeeds (crash recovery is not blocked by the dead holder's lock).
+    ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
+        .expect("the lock is released when the holder drops");
+}
+
+#[tokio::test]
+async fn a_rolled_back_journal_pair_fails_against_the_anchor() {
+    let (_root, mirror, events, receipts) = scratch();
+    one_tool_turn(&mirror, &receipts).await;
+
+    // Snapshot the pair after turn 1, run turn 2 (anchor advances), then
+    // restore the OLD pair: the anchor commits to a newer tail.
+    let journal_v1 = std::fs::read_to_string(&events).expect("journal v1");
+    let checkpoint_v1 =
+        std::fs::read_to_string(events.with_file_name("events.tail")).expect("checkpoint v1");
+    one_tool_turn(&mirror, &receipts).await;
+    std::fs::write(&events, &journal_v1).expect("restore old journal");
+    std::fs::write(events.with_file_name("events.tail"), &checkpoint_v1)
+        .expect("restore old checkpoint");
+
+    let err = ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
+        .err()
+        .expect("a rolled-back journal pair must fail the reopen");
+    assert!(
+        err.to_string().contains("anchored tail"),
+        "expected the rollback diagnostic, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn a_first_initialization_creates_the_anchor_and_reopens_clean() {
+    let (_root, mirror, events, receipts) = scratch();
+    // Fresh open (no journal writes): the anchor is created with an empty
+    // tail so first init is distinguishable from wholesale deletion.
+    ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID).expect("fresh open");
+    let anchor = std::fs::read_to_string(events.with_file_name("events.anchor"))
+        .expect("the anchor exists after first init");
+    assert!(anchor.contains("\"tail_seq\":null"), "empty tail: {anchor}");
+
+    one_tool_turn(&mirror, &receipts).await;
+    // And a plain reopen of an intact store stays clean.
+    ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID).expect("clean reopen");
 }

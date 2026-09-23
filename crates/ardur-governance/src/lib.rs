@@ -84,8 +84,9 @@ pub use evidence::{
 };
 pub use grant::{GrantDescriptor, MissionRef};
 pub use hash::{
-    evidence_checkpoint_json, evidence_line_chain_mac, evidence_record_mac_key,
-    unwrap_evidence_line, verify_evidence_checkpoint, wrap_evidence_line,
+    evidence_anchor_json, evidence_checkpoint_json, evidence_line_chain_mac,
+    evidence_record_mac_key, unwrap_evidence_line, verify_evidence_anchor,
+    verify_evidence_checkpoint, wrap_evidence_line,
 };
 pub use mirror::{ErRoundFacts, GovernanceEmitter, MirroredToolCall};
 pub use mission::{

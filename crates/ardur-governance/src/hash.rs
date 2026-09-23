@@ -240,3 +240,90 @@ pub fn verify_evidence_checkpoint(
     }
     Ok((seq, tail_mac.to_string()))
 }
+
+/// The anchor domain label: the third-artifact tail commitment that survives
+/// deletion of the journal+checkpoint pair. Rewritten after every journal
+/// append; its tail sequence is the monotonic state a wholesale deletion
+/// cannot roll back without also deleting the anchor (which the open
+/// distinguishes from first initialization).
+const EVIDENCE_ANCHOR_DOMAIN: &[u8] = b"ardur-governance/evidence-anchor/v1";
+
+/// The authenticated anchor document for a journal whose committed tail is
+/// (`tail_seq`, `tail_chain_mac`) — empty tail (seq none) before the first
+/// append.
+pub fn evidence_anchor_json(key: &[u8; 32], tail: Option<(u64, &str)>) -> String {
+    let (tail_seq, tail_mac) = match tail {
+        Some((seq, mac)) => (seq.to_string(), mac.to_string()),
+        None => ("null".to_string(), String::new()),
+    };
+    let anchor_mac = hmac_sha256(
+        key,
+        &[
+            EVIDENCE_ANCHOR_DOMAIN,
+            tail_seq.as_bytes(),
+            tail_mac.as_bytes(),
+        ],
+    );
+    match tail {
+        Some((seq, mac)) => {
+            format!("{{\"anchor_mac\":\"{anchor_mac}\",\"tail_mac\":\"{mac}\",\"tail_seq\":{seq}}}")
+        }
+        None => format!("{{\"anchor_mac\":\"{anchor_mac}\",\"tail_mac\":null,\"tail_seq\":null}}"),
+    }
+}
+
+/// Verify an anchor document and return its committed tail (None before the
+/// first append).
+///
+/// # Errors
+///
+/// [`crate::GovernanceError::Io`] when the document is malformed or its MAC
+/// does not verify.
+pub fn verify_evidence_anchor(
+    key: &[u8; 32],
+    json: &str,
+) -> Result<Option<(u64, String)>, crate::GovernanceError> {
+    use subtle::ConstantTimeEq as _;
+    let value: serde_json::Value = serde_json::from_str(json).map_err(|e| {
+        crate::GovernanceError::Io(format!("evidence anchor is not valid JSON: {e}"))
+    })?;
+    let presented = value
+        .get("anchor_mac")
+        .and_then(|m| m.as_str())
+        .ok_or_else(|| crate::GovernanceError::Io("evidence anchor lacks anchor_mac".into()))?;
+    let tail: Option<(u64, String)> = match value.get("tail_seq") {
+        Some(serde_json::Value::Null) | None => None,
+        Some(seq) => {
+            let seq = seq.as_u64().ok_or_else(|| {
+                crate::GovernanceError::Io("evidence anchor tail_seq is not an integer".into())
+            })?;
+            let mac = value
+                .get("tail_mac")
+                .and_then(|m| m.as_str())
+                .ok_or_else(|| {
+                    crate::GovernanceError::Io("evidence anchor lacks tail_mac".into())
+                })?;
+            Some((seq, mac.to_string()))
+        }
+    };
+    let (tail_seq, tail_mac) = match &tail {
+        Some((seq, mac)) => (seq.to_string(), mac.clone()),
+        None => ("null".to_string(), String::new()),
+    };
+    let expected = hmac_sha256(
+        key,
+        &[
+            EVIDENCE_ANCHOR_DOMAIN,
+            tail_seq.as_bytes(),
+            tail_mac.as_bytes(),
+        ],
+    );
+    if presented.len() != expected.len()
+        || presented.as_bytes().ct_eq(expected.as_bytes()).unwrap_u8() != 1
+    {
+        return Err(crate::GovernanceError::Io(
+            "evidence anchor MAC mismatch (tampered anchor); refusing to replay".into(),
+        ));
+    }
+    Ok(tail)
+}

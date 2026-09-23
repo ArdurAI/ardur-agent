@@ -128,6 +128,11 @@ pub struct ErMirrorEmitter {
     verifier_id: String,
     run_nonce: String,
     inner: Mutex<EmitterState>,
+    /// The exclusive journal-ownership lock: held for the emitter's
+    /// lifetime so a second runtime over the same data directory cannot
+    /// interleave appends (the fork check would otherwise be a TOCTOU
+    /// against its own metadata read).
+    _events_lock: std::fs::File,
 }
 
 impl ErMirrorEmitter {
@@ -233,6 +238,29 @@ impl ErMirrorEmitter {
         // earlier parent fsync covered the chain log's directory entry, not
         // `events.jsonl`'s, which may have been created just now.
         let events_path = path.with_file_name(EVENTS_FILE_NAME);
+
+        // ---- Exclusive journal ownership (one emitter per data directory). ----
+        // Two runtimes sharing one directory could otherwise both pass the
+        // length fork-check before either writes (O_APPEND serializes the
+        // writes, not the check/write transaction), emitting duplicate-seq
+        // envelopes that fail chain verification on restart. Hold an
+        // exclusive advisory lock for the emitter's whole lifetime: the
+        // second opener fails immediately instead of corrupting the journal,
+        // and the kernel releases the lock if the holder dies.
+        let lock_path = events_path.with_file_name("events.lock");
+        let events_lock = open_append_no_follow(&lock_path)
+            .map_err(|e| ardur_governance::GovernanceError::Io(format!("events lock open: {e}")))?;
+        #[cfg(unix)]
+        rustix::fs::flock(
+            &events_lock,
+            rustix::fs::FlockOperation::NonBlockingLockExclusive,
+        )
+        .map_err(|e| {
+            ardur_governance::GovernanceError::Io(format!(
+                "events lock: another emitter owns this evidence journal ({e})"
+            ))
+        })?;
+
         let events_file = open_append_no_follow(&events_path)
             .map_err(|e| ardur_governance::GovernanceError::Io(format!("events open: {e}")))?;
         events_file
@@ -253,7 +281,7 @@ impl ErMirrorEmitter {
             .map_err(|e| ardur_governance::GovernanceError::Io(format!("events read open: {e}")))?;
         let events_bytes = read_all_from(&events_reader)
             .map_err(|e| ardur_governance::GovernanceError::Io(format!("events read: {e}")))?;
-        let (events, next_seq, tail_chain_mac) =
+        let (events, next_seq, tail_chain_mac, line_macs) =
             parse_evidence_journal(&events_bytes, &events_mac_key)?;
 
         // ---- Completeness: the journal must end where it last committed. ----
@@ -297,6 +325,67 @@ impl ErMirrorEmitter {
                      (tail truncation); refusing to replay"
                         .to_string(),
                 ));
+            }
+        }
+
+        // ---- Anchor: the third artifact that outlives the pair. ----
+        // The checkpoint proves the journal still ends where it last
+        // committed, but both files live in one deletable pair: an editor in
+        // the crash window (journal records fsynced, the event ER not yet
+        // chained) could delete both and the open would recreate an empty
+        // journal with no contradiction. The anchor is rewritten on every
+        // append and holds the committed tail under its own MAC: a missing
+        // anchor over committed state, or an anchor whose tail is AHEAD of
+        // the journal (or whose MAC is not the journal line's at that seq),
+        // is a wholesale deletion or rollback — fail closed. An anchor one
+        // transaction BEHIND the checkpoint is the benign mid-transaction
+        // crash (write order journal → checkpoint → anchor) and is allowed;
+        // the checkpoint remains the binding tail check. The residual limit,
+        // honestly: an editor who deletes or rolls back all three evidence
+        // artifacts AND no event ER has ever chained is indistinguishable
+        // from first initialization — nothing signed exists yet to anchor
+        // against; once any event ER chains, the reconciliation closes that
+        // window.
+        let anchor_path = events_path.with_file_name("events.anchor");
+        let anchor_bytes = match open_regular_no_follow(&anchor_path, false) {
+            Ok(file) => Some(read_all_from(&file).map_err(|e| {
+                ardur_governance::GovernanceError::Io(format!("events anchor read: {e}"))
+            })?),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => {
+                return Err(ardur_governance::GovernanceError::Io(format!(
+                    "events anchor open: {e}"
+                )));
+            }
+        };
+        match anchor_bytes {
+            None => {
+                if next_seq > 0 {
+                    return Err(ardur_governance::GovernanceError::Io(
+                        "evidence anchor is missing but the journal has committed lines;                          the anchor was deleted — refusing to replay"
+                            .to_string(),
+                    ));
+                }
+                // First initialization: create the anchor (empty tail) before
+                // any append, so a later wholesale deletion of the journal
+                // pair is distinguishable from a store that never saw one.
+                write_events_anchor(&events_path, &events_mac_key, None)?;
+            }
+            Some(bytes) => {
+                let json = std::str::from_utf8(&bytes).map_err(|e| {
+                    ardur_governance::GovernanceError::Io(format!("anchor utf8: {e}"))
+                })?;
+                let anchor_tail =
+                    ardur_governance::verify_evidence_anchor(&events_mac_key, json.trim())?;
+                if let Some((anchor_seq, anchor_mac)) = anchor_tail {
+                    let idx = anchor_seq as usize;
+                    if idx >= line_macs.len() || line_macs[idx] != anchor_mac {
+                        return Err(ardur_governance::GovernanceError::Io(
+                            "the journal/checkpoint tail is below the anchored tail (wholesale                              deletion or rollback of the evidence pair); refusing to replay"
+                                .to_string(),
+                        ));
+                    }
+                }
             }
         }
 
@@ -391,6 +480,7 @@ impl ErMirrorEmitter {
             verifier_id: verifier_id.to_string(),
             run_nonce,
             inner: Mutex::new(state),
+            _events_lock: events_lock,
         })
     }
 
@@ -538,7 +628,14 @@ impl GovernanceEmitter for ErMirrorEmitter {
             &self.events_mac_key,
             state.next_seq,
             &chain_mac,
-        ) {
+        )
+        .and_then(|()| {
+            write_events_anchor(
+                &self.events_path,
+                &self.events_mac_key,
+                Some((state.next_seq, &chain_mac)),
+            )
+        }) {
             state.poisoned = Some(e.to_string());
             return Err(e);
         }
@@ -585,7 +682,14 @@ impl GovernanceEmitter for ErMirrorEmitter {
             &self.events_mac_key,
             state.next_seq,
             &chain_mac,
-        ) {
+        )
+        .and_then(|()| {
+            write_events_anchor(
+                &self.events_path,
+                &self.events_mac_key,
+                Some((state.next_seq, &chain_mac)),
+            )
+        }) {
             state.poisoned = Some(e.to_string());
             return Err(e);
         }
@@ -719,76 +823,101 @@ fn append_chain_line(
     Ok(())
 }
 
-/// Create+truncate the checkpoint with the same no-follow discipline as the
-/// journal and receipt chain.
+/// Rewrite one small sibling of the journal (checkpoint or anchor) with the
+/// full hardened discipline: the parent directory is opened ONCE with
+/// NOFOLLOW, the child is created/truncated through that anchored descriptor
+/// (a directory swapped for a symlink between the journal append and this
+/// open is never followed), the file is fsynced, and the directory entry is
+/// fsynced through the SAME anchored descriptor — a separate path-based open
+/// of the parent would follow a swap that happened in between.
 #[cfg(unix)]
-fn open_checkpoint_truncate(checkpoint_path: &Path) -> std::io::Result<std::fs::File> {
-    use rustix::fs::{Mode, OFlags, openat};
-    let parent = checkpoint_path
-        .parent()
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "no parent"))?;
-    let parent = openat(
-        rustix::fs::CWD,
-        parent,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map_err(|e| std::io::Error::from_raw_os_error(e.raw_os_error()))?;
-    let name = checkpoint_path.file_name().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "checkpoint has no file name",
+fn write_durable_sibling(
+    events_path: &Path,
+    name: &str,
+    contents: &str,
+) -> Result<(), ardur_governance::GovernanceError> {
+    use std::io::Write as _;
+    let write_result: std::io::Result<()> = (|| {
+        use rustix::fs::{Mode, OFlags, openat};
+        let parent_path = events_path.parent().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "journal has no parent")
+        })?;
+        let parent = openat(
+            rustix::fs::CWD,
+            parent_path,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
         )
-    })?;
-    openat(
-        &parent,
-        name,
-        OFlags::RDWR | OFlags::CREATE | OFlags::TRUNC | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::from_raw_mode(0o600),
-    )
-    .map(std::fs::File::from)
-    .map_err(|e| std::io::Error::from_raw_os_error(e.raw_os_error()))
+        .map_err(|e| std::io::Error::from_raw_os_error(e.raw_os_error()))?;
+        let mut file = openat(
+            &parent,
+            name,
+            OFlags::RDWR | OFlags::CREATE | OFlags::TRUNC | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::from_raw_mode(0o600),
+        )
+        .map(std::fs::File::from)
+        .map_err(|e| std::io::Error::from_raw_os_error(e.raw_os_error()))?;
+        file.write_all(contents.as_bytes())?;
+        file.sync_all()?;
+        std::fs::File::from(parent).sync_all()
+    })();
+    write_result.map_err(|e| {
+        ardur_governance::GovernanceError::Io(format!("evidence sibling {name} write: {e}"))
+    })
 }
 
-/// Create+truncate the checkpoint (non-unix fallback).
+/// Rewrite one small sibling of the journal (non-unix fallback).
 #[cfg(not(unix))]
-fn open_checkpoint_truncate(checkpoint_path: &Path) -> std::io::Result<std::fs::File> {
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(checkpoint_path)
+fn write_durable_sibling(
+    events_path: &Path,
+    name: &str,
+    contents: &str,
+) -> Result<(), ardur_governance::GovernanceError> {
+    use std::io::Write as _;
+    (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(events_path.with_file_name(name))?;
+        file.write_all(contents.as_bytes())?;
+        file.sync_all()?;
+        if let Some(parent) = events_path.parent() {
+            std::fs::File::open(parent)?.sync_all()?;
+        }
+        Ok(())
+    })()
+    .map_err(|e: std::io::Error| {
+        ardur_governance::GovernanceError::Io(format!("evidence sibling {name} write: {e}"))
+    })
 }
 
-/// Rewrite the authenticated tail checkpoint beside the journal with the
-/// same no-follow + fsync discipline as the journal itself. The checkpoint
-/// is what makes a TAIL truncation as detectable as a mid-journal deletion:
-/// the chain MACs alone prove linkage, and this proves the journal still
-/// ends where the emitter last committed it. Failure poisons the caller the
-/// same way an append failure does (handled at the call site).
+/// Rewrite the authenticated tail checkpoint beside the journal. The
+/// checkpoint is what makes a TAIL truncation as detectable as a mid-journal
+/// deletion: the chain MACs alone prove linkage, and this proves the journal
+/// still ends where the emitter last committed it. Failure poisons the
+/// caller the same way an append failure does (handled at the call site).
 fn write_events_checkpoint(
     events_path: &Path,
     key: &[u8; 32],
     seq: u64,
     tail_chain_mac: &str,
 ) -> Result<(), ardur_governance::GovernanceError> {
-    use std::io::Write as _;
-    let checkpoint_path = events_path.with_file_name("events.tail");
     let json = ardur_governance::evidence_checkpoint_json(key, seq, tail_chain_mac);
-    let mut file = open_checkpoint_truncate(&checkpoint_path).map_err(|e| {
-        ardur_governance::GovernanceError::Io(format!("events checkpoint open: {e}"))
-    })?;
-    file.write_all(json.as_bytes())
-        .and_then(|()| file.sync_all())
-        .and_then(|()| {
-            // The receipt-chain discipline: fsync the directory entry too, so
-            // the checkpoint survives a crash that preserves the file.
-            std::fs::File::open(checkpoint_path.parent().ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::InvalidInput, "no checkpoint parent")
-            })?)?
-            .sync_all()
-        })
-        .map_err(|e| ardur_governance::GovernanceError::Io(format!("events checkpoint write: {e}")))
+    write_durable_sibling(events_path, "events.tail", &json)
+}
+
+/// Rewrite the authenticated tail anchor — the third artifact that survives
+/// deletion of the journal+checkpoint pair, so a wholesale deletion in the
+/// crash window (journal records fsynced, event ER not yet chained) is
+/// distinguishable from first initialization at the next open.
+fn write_events_anchor(
+    events_path: &Path,
+    key: &[u8; 32],
+    tail: Option<(u64, &str)>,
+) -> Result<(), ardur_governance::GovernanceError> {
+    let json = ardur_governance::evidence_anchor_json(key, tail);
+    write_durable_sibling(events_path, "events.anchor", &json)
 }
 
 /// Append one evidence record line to the journal with the same fork guard
@@ -845,12 +974,14 @@ fn append_events_line(
     }
 }
 
-/// The parsed journal: the paired records, the next sequence number, and the
-/// verified chain MAC of the last line (empty when the journal is empty).
+/// The parsed journal: the paired records, the next sequence number, the
+/// verified chain MAC of the last line (empty when the journal is empty),
+/// and every line's verified chain MAC (the anchor cross-check indexes it).
 type ParsedEvidenceJournal = (
     Vec<(PreEffectRecord, Option<PostEffectRecord>)>,
     u64,
     String,
+    Vec<String>,
 );
 
 /// Parse the evidence journal into ordered (pre, post) pairs. Structural
@@ -864,7 +995,7 @@ fn parse_evidence_journal(
 ) -> Result<ParsedEvidenceJournal, ardur_governance::GovernanceError> {
     use std::collections::HashMap;
     if bytes.is_empty() {
-        return Ok((Vec::new(), 0, String::new()));
+        return Ok((Vec::new(), 0, String::new(), Vec::new()));
     }
     if bytes.last() != Some(&b'\n') {
         return Err(ardur_governance::GovernanceError::Io(
@@ -882,6 +1013,7 @@ fn parse_evidence_journal(
     // breaks the linkage — per-line MACs alone authenticate each line
     // independently and cannot detect one going missing.
     let mut prev_chain_mac = String::new();
+    let mut line_macs: Vec<String> = Vec::new();
     for (i, line) in text.lines().filter(|l| !l.trim().is_empty()).enumerate() {
         let seq = i as u64;
         // Verify the keyed chain-MAC BEFORE any semantic check: without it an
@@ -894,6 +1026,7 @@ fn parse_evidence_journal(
                     ardur_governance::GovernanceError::Io(format!("evidence journal line {i}: {e}"))
                 },
             )?;
+        line_macs.push(verified_mac.clone());
         prev_chain_mac = verified_mac;
         let record = EvidenceRecord::from_line(&line).map_err(|e| {
             ardur_governance::GovernanceError::Io(format!("evidence journal line {i}: {e}"))
@@ -928,7 +1061,7 @@ fn parse_evidence_journal(
             }
         }
     }
-    let next_seq = pres.len() as u64 + posts.len() as u64;
+    let next_seq = line_macs.len() as u64;
     Ok((
         pres.into_iter()
             .map(|pre| {
@@ -938,6 +1071,7 @@ fn parse_evidence_journal(
             .collect(),
         next_seq,
         prev_chain_mac,
+        line_macs,
     ))
 }
 
