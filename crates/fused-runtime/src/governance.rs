@@ -84,6 +84,12 @@ struct EmitterState {
     chain_committed_len: u64,
     /// The same fork-guard for the evidence journal.
     events_committed_len: u64,
+    /// The next evidence-journal sequence number, and the chain MAC of the
+    /// journal's last line (empty when the journal is empty). Every append
+    /// links its MAC to this tail, so a deleted line breaks the chain and a
+    /// truncated tail contradicts the authenticated checkpoint.
+    next_seq: u64,
+    tail_chain_mac: String,
     /// The `step_id`s of every ER in the chain — event ids (`ev:…`) for
     /// evaluated events, native receipt ids for committed rounds. The
     /// idempotency key for both live re-mirroring and the open-time sweep.
@@ -247,12 +253,59 @@ impl ErMirrorEmitter {
             .map_err(|e| ardur_governance::GovernanceError::Io(format!("events read open: {e}")))?;
         let events_bytes = read_all_from(&events_reader)
             .map_err(|e| ardur_governance::GovernanceError::Io(format!("events read: {e}")))?;
-        let events = parse_evidence_journal(&events_bytes, &events_mac_key)?;
+        let (events, next_seq, tail_chain_mac) =
+            parse_evidence_journal(&events_bytes, &events_mac_key)?;
+
+        // ---- Completeness: the journal must end where it last committed. ----
+        // The chain MACs prove linkage (a deleted line anywhere breaks them);
+        // the authenticated tail checkpoint proves the journal still ends
+        // where the emitter last fsynced it — otherwise a crash-window
+        // editor could delete a stranded pair (or just its post, downgrading
+        // a completed event to `effect_unobserved`) and the per-line MACs
+        // would still verify. An empty journal with a checkpoint is a
+        // wholesale deletion; a non-empty journal without one (or with a
+        // mismatching one) is a tail truncation. Both fail closed.
+        let checkpoint_path = events_path.with_file_name("events.tail");
+        if next_seq == 0 {
+            if checkpoint_path.symlink_metadata().is_ok() {
+                return Err(ardur_governance::GovernanceError::Io(
+                    "evidence journal is empty but an authenticated tail checkpoint exists; \
+                     the journal was truncated or deleted after events were recorded"
+                        .to_string(),
+                ));
+            }
+        } else {
+            let checkpoint_file = open_regular_no_follow(&checkpoint_path, false).map_err(|e| {
+                ardur_governance::GovernanceError::Io(format!(
+                    "evidence journal tail checkpoint is unreadable ({e}); the journal tail \
+                     may have been truncated — refusing to replay"
+                ))
+            })?;
+            let checkpoint_bytes = read_all_from(&checkpoint_file).map_err(|e| {
+                ardur_governance::GovernanceError::Io(format!("events checkpoint read: {e}"))
+            })?;
+            let checkpoint_json = std::str::from_utf8(&checkpoint_bytes).map_err(|e| {
+                ardur_governance::GovernanceError::Io(format!("checkpoint utf8: {e}"))
+            })?;
+            let (checkpoint_seq, checkpoint_tail) = ardur_governance::verify_evidence_checkpoint(
+                &events_mac_key,
+                checkpoint_json.trim(),
+            )?;
+            if checkpoint_seq != next_seq - 1 || checkpoint_tail != tail_chain_mac {
+                return Err(ardur_governance::GovernanceError::Io(
+                    "evidence journal tail does not match its authenticated checkpoint \
+                     (tail truncation); refusing to replay"
+                        .to_string(),
+                ));
+            }
+        }
 
         let mut state = EmitterState {
             tail: chain.last().cloned(),
             chain_committed_len,
             events_committed_len,
+            next_seq,
+            tail_chain_mac,
             chained_step_ids,
             open_event_ids: HashSet::new(),
             closed_event_ids: HashSet::new(),
@@ -473,11 +526,24 @@ impl GovernanceEmitter for ErMirrorEmitter {
             state.poisoned = Some(err.to_string());
             return Err(err);
         }
-        let line = ardur_governance::wrap_evidence_line(
+        let (line, chain_mac) = ardur_governance::wrap_evidence_line(
             &self.events_mac_key,
+            state.next_seq,
+            &state.tail_chain_mac,
             &EvidenceRecord::PreEffect(Box::new(record.clone())).to_line()?,
         );
         append_events_line(&self.events_path, &mut state, &line)?;
+        if let Err(e) = write_events_checkpoint(
+            &self.events_path,
+            &self.events_mac_key,
+            state.next_seq,
+            &chain_mac,
+        ) {
+            state.poisoned = Some(e.to_string());
+            return Err(e);
+        }
+        state.tail_chain_mac = chain_mac;
+        state.next_seq += 1;
         state.open_event_ids.insert(record.event_id.clone());
         Ok(())
     }
@@ -507,11 +573,24 @@ impl GovernanceEmitter for ErMirrorEmitter {
             state.poisoned = Some(err.to_string());
             return Err(err);
         }
-        let line = ardur_governance::wrap_evidence_line(
+        let (line, chain_mac) = ardur_governance::wrap_evidence_line(
             &self.events_mac_key,
+            state.next_seq,
+            &state.tail_chain_mac,
             &EvidenceRecord::PostEffect(record.clone()).to_line()?,
         );
         append_events_line(&self.events_path, &mut state, &line)?;
+        if let Err(e) = write_events_checkpoint(
+            &self.events_path,
+            &self.events_mac_key,
+            state.next_seq,
+            &chain_mac,
+        ) {
+            state.poisoned = Some(e.to_string());
+            return Err(e);
+        }
+        state.tail_chain_mac = chain_mac;
+        state.next_seq += 1;
         state.open_event_ids.remove(&record.event_id);
         state.closed_event_ids.insert(record.event_id.clone());
         Ok(())
@@ -640,6 +719,78 @@ fn append_chain_line(
     Ok(())
 }
 
+/// Create+truncate the checkpoint with the same no-follow discipline as the
+/// journal and receipt chain.
+#[cfg(unix)]
+fn open_checkpoint_truncate(checkpoint_path: &Path) -> std::io::Result<std::fs::File> {
+    use rustix::fs::{Mode, OFlags, openat};
+    let parent = checkpoint_path
+        .parent()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "no parent"))?;
+    let parent = openat(
+        rustix::fs::CWD,
+        parent,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|e| std::io::Error::from_raw_os_error(e.raw_os_error()))?;
+    let name = checkpoint_path.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "checkpoint has no file name",
+        )
+    })?;
+    openat(
+        &parent,
+        name,
+        OFlags::RDWR | OFlags::CREATE | OFlags::TRUNC | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::from_raw_mode(0o600),
+    )
+    .map(std::fs::File::from)
+    .map_err(|e| std::io::Error::from_raw_os_error(e.raw_os_error()))
+}
+
+/// Create+truncate the checkpoint (non-unix fallback).
+#[cfg(not(unix))]
+fn open_checkpoint_truncate(checkpoint_path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(checkpoint_path)
+}
+
+/// Rewrite the authenticated tail checkpoint beside the journal with the
+/// same no-follow + fsync discipline as the journal itself. The checkpoint
+/// is what makes a TAIL truncation as detectable as a mid-journal deletion:
+/// the chain MACs alone prove linkage, and this proves the journal still
+/// ends where the emitter last committed it. Failure poisons the caller the
+/// same way an append failure does (handled at the call site).
+fn write_events_checkpoint(
+    events_path: &Path,
+    key: &[u8; 32],
+    seq: u64,
+    tail_chain_mac: &str,
+) -> Result<(), ardur_governance::GovernanceError> {
+    use std::io::Write as _;
+    let checkpoint_path = events_path.with_file_name("events.tail");
+    let json = ardur_governance::evidence_checkpoint_json(key, seq, tail_chain_mac);
+    let mut file = open_checkpoint_truncate(&checkpoint_path).map_err(|e| {
+        ardur_governance::GovernanceError::Io(format!("events checkpoint open: {e}"))
+    })?;
+    file.write_all(json.as_bytes())
+        .and_then(|()| file.sync_all())
+        .and_then(|()| {
+            // The receipt-chain discipline: fsync the directory entry too, so
+            // the checkpoint survives a crash that preserves the file.
+            std::fs::File::open(checkpoint_path.parent().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "no checkpoint parent")
+            })?)?
+            .sync_all()
+        })
+        .map_err(|e| ardur_governance::GovernanceError::Io(format!("events checkpoint write: {e}")))
+}
+
 /// Append one evidence record line to the journal with the same fork guard
 /// and fsync discipline as the chain. An ambiguous write poisons the emitter:
 /// a possibly-missing record would silently degrade crash recovery to
@@ -694,6 +845,14 @@ fn append_events_line(
     }
 }
 
+/// The parsed journal: the paired records, the next sequence number, and the
+/// verified chain MAC of the last line (empty when the journal is empty).
+type ParsedEvidenceJournal = (
+    Vec<(PreEffectRecord, Option<PostEffectRecord>)>,
+    u64,
+    String,
+);
+
 /// Parse the evidence journal into ordered (pre, post) pairs. Structural
 /// inconsistencies fail the open: a torn tail (crash mid-append residue —
 /// appending past it would corrupt the journal), an unparseable line, a
@@ -702,10 +861,10 @@ fn append_events_line(
 fn parse_evidence_journal(
     bytes: &[u8],
     mac_key: &[u8; 32],
-) -> Result<Vec<(PreEffectRecord, Option<PostEffectRecord>)>, ardur_governance::GovernanceError> {
+) -> Result<ParsedEvidenceJournal, ardur_governance::GovernanceError> {
     use std::collections::HashMap;
     if bytes.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), 0, String::new()));
     }
     if bytes.last() != Some(&b'\n') {
         return Err(ardur_governance::GovernanceError::Io(
@@ -718,14 +877,24 @@ fn parse_evidence_journal(
     let mut pres: Vec<PreEffectRecord> = Vec::new();
     let mut pre_index: HashMap<String, usize> = HashMap::new();
     let mut posts: HashMap<String, PostEffectRecord> = HashMap::new();
+    // The chain walk: each line's MAC must cover its sequence number and the
+    // previous line's chain MAC, so deleting ANY line (not just editing one)
+    // breaks the linkage — per-line MACs alone authenticate each line
+    // independently and cannot detect one going missing.
+    let mut prev_chain_mac = String::new();
     for (i, line) in text.lines().filter(|l| !l.trim().is_empty()).enumerate() {
-        // Verify the keyed MAC BEFORE any semantic check: without it an
+        let seq = i as u64;
+        // Verify the keyed chain-MAC BEFORE any semantic check: without it an
         // editor of the crash window could falsify a stranded record's
         // provenance AND its publicly recomputable identity, and the sweep
         // would sign the forgery.
-        let line = ardur_governance::unwrap_evidence_line(mac_key, line).map_err(|e| {
-            ardur_governance::GovernanceError::Io(format!("evidence journal line {i}: {e}"))
-        })?;
+        let (line, verified_mac) =
+            ardur_governance::unwrap_evidence_line(mac_key, seq, &prev_chain_mac, line).map_err(
+                |e| {
+                    ardur_governance::GovernanceError::Io(format!("evidence journal line {i}: {e}"))
+                },
+            )?;
+        prev_chain_mac = verified_mac;
         let record = EvidenceRecord::from_line(&line).map_err(|e| {
             ardur_governance::GovernanceError::Io(format!("evidence journal line {i}: {e}"))
         })?;
@@ -759,13 +928,17 @@ fn parse_evidence_journal(
             }
         }
     }
-    Ok(pres
-        .into_iter()
-        .map(|pre| {
-            let post = posts.get(&pre.event_id).cloned();
-            (pre, post)
-        })
-        .collect())
+    let next_seq = pres.len() as u64 + posts.len() as u64;
+    Ok((
+        pres.into_iter()
+            .map(|pre| {
+                let post = posts.get(&pre.event_id).cloned();
+                (pre, post)
+            })
+            .collect(),
+        next_seq,
+        prev_chain_mac,
+    ))
 }
 
 /// Read the whole file through an already-open descriptor (no path re-open,
