@@ -256,6 +256,7 @@ pub fn project_execution_receipt(
         invocation_digest,
         outcome,
         step,
+        "cap-token",
     )
 }
 
@@ -276,6 +277,7 @@ pub fn project_execution_receipt_core(
     invocation_digest: DigestObject,
     outcome: &AuthOutcome,
     step: &StepContext,
+    decision_backend: &str,
 ) -> Result<ExecutionReceipt, GovernanceError> {
     validate_id_string("trace_id", step.trace_id)?;
     validate_len("step_id", step.step_id, 1, 256)?; // nonEmptyString
@@ -339,7 +341,7 @@ pub fn project_execution_receipt_core(
     };
 
     let policy_decisions = vec![PolicyDecision {
-        backend: "cap-token".to_string(),
+        backend: decision_backend.to_string(),
         decision,
         reason: Some(reason.clone()),
         eval_ms: None,
@@ -438,13 +440,18 @@ fn is_lower_hex_sha256(s: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
-/// The shape of a base64url-no-pad encoded SHA-256: 43 characters from the
-/// URL-safe alphabet. Used to validate recorded digests before they are
-/// replayed into a signed ER.
+/// The shape of a base64url-no-pad encoded SHA-256, checked by actually
+/// decoding: exactly 32 bytes, and canonically encoded (a 43-character
+/// value whose final digit carries nonzero padding bits is a different
+/// string for the same bytes and must fail closed, not be signed). Used to
+/// validate recorded digests before they are replayed into a signed ER.
 fn is_base64url_sha256(s: &str) -> bool {
-    s.len() == 43
-        && s.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    use base64::Engine as _;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
+    let Ok(bytes) = B64URL.decode(s) else {
+        return false;
+    };
+    bytes.len() == 32 && B64URL.encode(&bytes) == s
 }
 
 /// Project one **evaluated event** (#543) into an [`ExecutionReceipt`] from
@@ -605,7 +612,8 @@ pub fn project_event_execution_receipt(
         actor: pre.actor.clone(),
         budget_remaining: pre.budget_remaining,
     };
-    project_execution_receipt_core(
+    let backend = decision_backend_for(&outcome);
+    let mut receipt = project_execution_receipt_core(
         &grant,
         &pre.tool,
         pre.action_class,
@@ -629,7 +637,62 @@ pub fn project_event_execution_receipt(
             // remain #545-tracked and are not invented per event.
             per_class_budget_remaining: None,
         },
-    )
+        backend,
+    )?;
+    // Bind the terminal observation into the signed claims: the ER's audit
+    // `reason` carries the SHA-256 of the durable post-effect record's
+    // journal line (outcome, observed output digest, incurred cost,
+    // timestamp — the whole terminal fact set, since the v0.1 schema's
+    // `additionalProperties: false` leaves no free field for it). Without
+    // this, editing a completed event's recorded output digest or cost in
+    // the journal would re-project an exactly equal receipt and pass the
+    // reopen reconciliation unchecked.
+    if let Some(post) = post {
+        let line = crate::evidence::EvidenceRecord::PostEffect(post.clone()).to_line()?;
+        receipt.reason = format!(
+            "{}; evidence sha256:{}",
+            receipt.reason,
+            sha256_hex(line.as_bytes())
+        );
+    }
+    Ok(receipt)
+}
+
+/// The policy backend an event outcome's verdict is attributed to (ER
+/// `policy_decisions[].backend`) — the deciding gate, never the round
+/// mirror's cap-token catch-all. An output-scanner block, a Cedar denial, an
+/// approval rejection, or a memory-policy denial signed as a cap-token
+/// decision would corrupt audit attribution, so the durable outcome's
+/// internal code selects the backend; verdicts produced by the verifier's
+/// own evidence rules (an unobserved or unknown effect, omitted argument
+/// evidence, an operational failure that never reached a decision) attribute
+/// to the verifier, not to a gate that never decided.
+fn decision_backend_for(outcome: &AuthOutcome) -> &'static str {
+    let internal = match outcome {
+        AuthOutcome::Compliant => return "cap-token",
+        AuthOutcome::Violation { internal, .. }
+        | AuthOutcome::InsufficientEvidence { internal } => internal.as_str(),
+    };
+    match internal {
+        "policy_denied"
+        | "policy_indeterminate"
+        | "memory_policy_denied"
+        | "memory_policy_indeterminate" => "cedar",
+        "approval_required" | "approval_rejected" | "approval_evaluation_error" => "approval",
+        "output_scan_blocked" | "output_scan_error" => "injection-scanner",
+        "memory_record_malformed" => "memory-control-plane",
+        "unknown_tool" => "tool-registry",
+        "effect_unobserved"
+        | "effect_unknown_execution"
+        | "effect_unknown_timeout"
+        | "arguments_evidence_omitted"
+        | "tool_invocation_error" => "verifier",
+        // grant_expired, tool_not_allowed, revoked, audience_mismatch,
+        // signature_invalid, budget_exhausted, capability_not_granted,
+        // memory_capability_denied, memory_receipt_required,
+        // memory_subject_mismatch, memory_write_denied
+        _ => "cap-token",
+    }
 }
 
 /// The lowercase snake_case wire token for an ER enum value (via its serde

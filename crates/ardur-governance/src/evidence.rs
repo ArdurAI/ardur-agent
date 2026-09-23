@@ -400,6 +400,20 @@ impl EvidenceRecord {
                  (v{EVIDENCE_RECORD_VERSION}); refusing to replay"
             )));
         }
+        // The event id must carry the evidence namespace: a record tampered
+        // to name a valid non-event step id would otherwise be swept and
+        // signed as an event ER, and the next reopen would treat that
+        // receipt as a round and skip journal reconciliation.
+        let event_id = match &record {
+            EvidenceRecord::PreEffect(pre) => pre.event_id.as_str(),
+            EvidenceRecord::PostEffect(post) => post.event_id.as_str(),
+        };
+        if !is_event_id(event_id) {
+            return Err(GovernanceError::Io(format!(
+                "evidence record event id {event_id:?} is not an `ev:` event identity; \
+                 refusing to replay"
+            )));
+        }
         Ok(record)
     }
 }
@@ -418,6 +432,19 @@ pub struct InvocationClassification {
     pub resource_family: String,
     /// The side-effect family.
     pub side_effect_class: SideEffectClass,
+}
+
+/// The shape every journaled event identity must carry: `ev:` plus 40
+/// lowercase hex characters — the namespace that distinguishes an event ER
+/// from a round ER at reconciliation time.
+pub fn is_event_id(event_id: &str) -> bool {
+    let Some(hex) = event_id.strip_prefix("ev:") else {
+        return false;
+    };
+    hex.len() == 40
+        && hex
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 /// The stable identity of a tool-invocation event: a deterministic hash over

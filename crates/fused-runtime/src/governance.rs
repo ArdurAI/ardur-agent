@@ -627,18 +627,34 @@ fn append_events_line(
     line: &str,
 ) -> Result<(), ardur_governance::GovernanceError> {
     use std::io::Write as _;
-    let mut file = open_append_no_follow(path)
-        .map_err(|e| ardur_governance::GovernanceError::Io(format!("events append open: {e}")))?;
-    let actual = file
-        .metadata()
-        .map_err(|e| ardur_governance::GovernanceError::Io(format!("events stat: {e}")))?
-        .len();
+    // As with the chain append, EVERY failure here poisons the emitter: a
+    // journal that cannot be appended to is exactly the evidence gap the
+    // fail-closed posture exists to surface — letting rounds continue past
+    // an event whose evidence cannot be journaled would hide it.
+    let mut file = match open_append_no_follow(path) {
+        Ok(file) => file,
+        Err(e) => {
+            let err = ardur_governance::GovernanceError::Io(format!("events append open: {e}"));
+            state.poisoned = Some(err.to_string());
+            return Err(err);
+        }
+    };
+    let actual = match file.metadata() {
+        Ok(meta) => meta.len(),
+        Err(e) => {
+            let err = ardur_governance::GovernanceError::Io(format!("events stat: {e}"));
+            state.poisoned = Some(err.to_string());
+            return Err(err);
+        }
+    };
     if actual != state.events_committed_len {
-        return Err(ardur_governance::GovernanceError::Io(format!(
+        let err = ardur_governance::GovernanceError::Io(format!(
             "evidence journal changed under us (len {actual} != committed {}): one emitter \
              must own one journal",
             state.events_committed_len
-        )));
+        ));
+        state.poisoned = Some(err.to_string());
+        return Err(err);
     }
     let append = writeln!(file, "{line}").and_then(|()| file.sync_all());
     match append {

@@ -711,6 +711,10 @@ async fn a_scan_rejection_mints_a_violation_with_the_observed_effect() {
         claims.internal_denial_code.as_deref(),
         Some("output_scan_blocked")
     );
+    assert_eq!(
+        claims.policy_decisions[0].backend, "injection-scanner",
+        "the decision attributes to the gate that made it, never a catch-all"
+    );
     // The effect still happened — and the evidence says so: the post record
     // carries the observed digest with the blocked admission.
     let records = event_lines(&events);
@@ -832,6 +836,11 @@ async fn a_memory_policy_denial_is_a_typed_denial_not_an_unknown_effect() {
     assert_eq!(
         event.internal_denial_code.as_deref(),
         Some("memory_policy_denied")
+    );
+
+    assert_eq!(
+        event.policy_decisions[0].backend, "cedar",
+        "a memory-policy denial attributes to the policy engine"
     );
 }
 
@@ -1633,18 +1642,21 @@ async fn a_failed_post_append_mints_no_er() {
         .expect("the turn itself completes; only evidence append fails");
 
     // The foreign append forked the journal between the pre and the post:
-    // record_post_effect fails closed and — critically — NO ER is minted from
-    // the undurable observation. The round ERs still land (the chain is
-    // unforked); the event reads as honest absence, and a restart's sweep
-    // would project the stranded pre as effect-unobserved.
+    // record_post_effect fails closed and NO ER is minted from the undurable
+    // observation. With the journal-append poison (round-3 review), the
+    // emitter then refuses EVERYTHING — later round receipts must not chain
+    // past an event whose evidence cannot be journaled.
     let chain = signed_chain(&mirror);
     assert!(
-        chain
-            .iter()
-            .all(|er| !er.receipt().step_id.starts_with("ev:")),
-        "no ER may be minted for an event whose post record is not durable"
+        chain.is_empty(),
+        "a forked journal poisons the mirror: no event ER, and no later round \
+         ERs chaining past the evidence gap"
     );
-    assert_eq!(chain.len(), 2, "the two committed rounds still mirror");
+    // And the tampered journal fails the reopen closed.
+    assert!(
+        ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID).is_err(),
+        "the foreign journal line fails parsing at open"
+    );
 }
 
 #[tokio::test]
@@ -1825,5 +1837,138 @@ async fn a_wellformed_digest_only_record_replays_as_insufficient_evidence() {
         chain[0].receipt().verdict,
         Verdict::InsufficientEvidence,
         "inputs the evidence cannot show never mint compliance"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Third review round: journal-append poisoning, event-id namespace, canonical
+// digest encodings, output-evidence binding, decision-backend attribution.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_journal_record_without_the_event_namespace_fails_closed() {
+    let (_root, mirror, events, _receipts) = scratch();
+    std::fs::create_dir_all(events.parent().expect("parent")).expect("mkdir");
+    // A record tampered to carry a valid non-event step id: it must not be
+    // swept and signed as an event ER (the next reopen would treat that
+    // receipt as a round and skip reconciliation).
+    let pre = fixture_pre("session-ns", 0, "call-ns", json!({}));
+    let mut value = serde_json::to_value(&pre).expect("serialize");
+    value["event_id"] = json!("r:0123456789abcdef0123456789abcdef01234567");
+    let line = serde_json::to_string(&json!({ "pre_effect": value })).expect("line");
+    use std::io::Write as _;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&events)
+        .expect("create journal");
+    writeln!(file, "{line}").expect("write");
+    drop(file);
+
+    let err = ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
+        .err()
+        .expect("a record outside the ev: namespace fails the open");
+    assert!(
+        err.to_string().contains("ev:"),
+        "the failure names the namespace, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn a_noncanonical_base64url_digest_fails_the_reopen() {
+    let (_root, mirror, events, _receipts) = scratch();
+    std::fs::create_dir_all(events.parent().expect("parent")).expect("mkdir");
+    // 43 URL-safe characters whose final digit carries nonzero padding bits:
+    // length-and-alphabet checks accept it; a canonical decode does not.
+    let args = json!({"blob": "x".repeat(1000)});
+    let pre = fixture_pre("session-b64", 0, "call-b64", args.clone());
+    let (arguments_hash, invocation_digest) =
+        ardur_governance::invocation_digests(&pre.grant_id, &pre.as_tool_invocation(&args));
+    let mut noncanonical = invocation_digest.value;
+    let last = noncanonical.pop().expect("nonempty");
+    // Set the lowest padding bit of the final base64url digit: the encoding
+    // stays 43 URL-safe characters but is no longer canonical.
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let pos = ALPHABET
+        .iter()
+        .position(|&c| c == last as u8)
+        .expect("base64url char");
+    noncanonical.push(ALPHABET[pos | 1] as char);
+    let mut value = serde_json::to_value(&pre).expect("serialize");
+    value["arguments"] = serde_json::Value::Null;
+    value["arguments_hash"] = json!(arguments_hash);
+    value["invocation_digest"] = json!(noncanonical);
+    let line = serde_json::to_string(&json!({ "pre_effect": value })).expect("line");
+    use std::io::Write as _;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&events)
+        .expect("create journal");
+    writeln!(file, "{line}").expect("write");
+    drop(file);
+
+    let err = ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
+        .err()
+        .expect("a noncanonical digest encoding fails the open");
+    assert!(
+        err.to_string().contains("evidence integrity"),
+        "expected the integrity diagnostic, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn a_tampered_output_digest_fails_the_reopen() {
+    let (_root, mirror, events, receipts) = scratch();
+    one_tool_turn(&mirror, &receipts).await;
+    assert!(
+        signed_chain(&mirror)
+            .iter()
+            .any(|er| er.receipt().step_id.starts_with("ev:")),
+        "the event ER is chained"
+    );
+
+    // Tamper ONLY the completed observation's output digest: nothing else in
+    // the record changes, and the digest itself is well-formed — only the
+    // evidence binding in the signed reason catches this.
+    let text = std::fs::read_to_string(&events).expect("journal");
+    let mut lines: Vec<String> = Vec::new();
+    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+        let mut value: serde_json::Value = serde_json::from_str(line).expect("parse");
+        if let Some(post) = value.get_mut("post_effect") {
+            post["outcome"]["completed"]["output_digest"] =
+                json!("0000000000000000000000000000000000000000000000000000000000000000");
+        }
+        lines.push(serde_json::to_string(&value).expect("serialize"));
+    }
+    std::fs::write(&events, lines.join("\n") + "\n").expect("rewrite");
+
+    let err = ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
+        .err()
+        .expect("a tampered output digest must fail the reopen");
+    assert!(
+        err.to_string().contains("does not reproduce"),
+        "expected the re-projection diagnostic, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn the_signed_reason_binds_the_terminal_evidence() {
+    let (_root, mirror, _events, receipts) = scratch();
+    one_tool_turn(&mirror, &receipts).await;
+    let chain = signed_chain(&mirror);
+    let event_er = chain
+        .iter()
+        .find(|er| er.receipt().step_id.starts_with("ev:"))
+        .expect("the tool event ER");
+    let reason = &event_er.receipt().reason;
+    assert!(
+        reason.contains("; evidence sha256:"),
+        "the signed reason carries the post-effect evidence digest, got: {reason}"
+    );
+    assert_eq!(
+        event_er.receipt().policy_decisions[0].backend,
+        "cap-token",
+        "a compliant event's admission attributes to the cap-token permit"
     );
 }
