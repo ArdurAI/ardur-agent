@@ -1151,6 +1151,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ardur-provider-kimi"
+version = "0.0.1"
+dependencies = [
+ "ardur-provider-runtime",
+ "ardur-runtime",
+ "ardur-session-journals",
+ "async-trait",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "ardur-provider-ollama"
 version = "0.0.1"
 dependencies = [
@@ -1256,6 +1269,7 @@ dependencies = [
  "ardur-provider-claude-cli",
  "ardur-provider-codex",
  "ardur-provider-hermes",
+ "ardur-provider-kimi",
  "ardur-provider-ollama",
  "ardur-provider-openai-compat",
  "ardur-provider-opencode",

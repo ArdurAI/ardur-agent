@@ -53,6 +53,10 @@ ardur-provider-hermes = { workspace = true }
 # `ARDUR_PROVIDER=opencode` (alias `opencode-agent`). Driven as a one-shot
 # subprocess; credentials live inside OpenCode, not here.
 ardur-provider-opencode = { workspace = true }
+# The Kimi Code CLI backend (#569) — selected by
+# `ARDUR_PROVIDER=kimi` (alias `kimi-agent`). Driven as a one-shot
+# subprocess; credentials live inside Kimi Code (~/.kimi), not here.
+ardur-provider-kimi = { workspace = true }
 # The `[router]` config table (#411 / #531 D0) the router branch parses at
 # boot; sits below every provider crate, so no cycle is closed.
 ardur-config = { workspace = true }

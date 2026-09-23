@@ -50,6 +50,7 @@ startup (`using provider provider=<id>`).
 | `prime` (alias `prime-agent`) | Prime Agent CLI (local RPC subprocess wrap) | `PRIME_AGENT_BINARY` (default: `prime-agent` on `PATH`), `PRIME_AGENT_PROVIDER`, `PRIME_AGENT_DEFAULT_MODEL`, `PRIME_AGENT_WORKING_DIR`, `PRIME_AGENT_TIMEOUT_SECS`, `PRIME_AGENT_MAX_TOKENS_FLOOR` (default `4096`). Run `prime-agent /login` once; no Ardur-side API key |
 | `hermes` (alias `hermes-agent`) | Hermes Agent CLI (local subprocess wrap) | `HERMES_BINARY` (default: `hermes` on `PATH`), `HERMES_PROVIDER`, `HERMES_DEFAULT_MODEL`, `HERMES_WORKING_DIR`, `HERMES_TIMEOUT_SECS`, `HERMES_MAX_TOKENS_FLOOR` (default `4096`). Run `hermes auth` / `hermes model` once; no Ardur-side API key |
 | `opencode` (alias `opencode-agent`) | OpenCode CLI (local one-shot subprocess wrap) | `OPENCODE_BINARY` (default: `opencode` on `PATH`), `OPENCODE_DEFAULT_MODEL`, `OPENCODE_WORKING_DIR`, `OPENCODE_TIMEOUT_SECS`, `OPENCODE_MAX_TOKENS_FLOOR` (default `4096`). Run `opencode auth login` once; no Ardur-side API key |
+| `kimi` (alias `kimi-agent`) | Kimi Code CLI (local one-shot subprocess wrap) | `KIMI_BINARY` (default: `kimi` on `PATH`), `KIMI_DEFAULT_MODEL`, `KIMI_WORKING_DIR`, `KIMI_TIMEOUT_SECS`, `KIMI_MAX_TOKENS_FLOOR` (default `4096`). Run `kimi login` once; no Ardur-side API key |
 
 One-liners (CLI shown; the server reads the same variables from its `.env`):
 
@@ -82,13 +83,15 @@ ARDUR_PROVIDER=prime ardur chat
 ARDUR_PROVIDER=hermes ardur chat
 # OpenCode — uses your locally configured OpenCode CLI
 ARDUR_PROVIDER=opencode ardur chat
+# Kimi — uses your locally configured Kimi Code CLI
+ARDUR_PROVIDER=kimi ardur chat
 ```
 
 The Anthropic, OpenRouter, and OpenAI-compatible backends fail at boot if their
 API key is missing (the CLI then falls back to a network-free stub and prints an
 offline notice; the server aborts). `OPENAI_COMPAT_BASE_URL` must use HTTPS
 unless it targets loopback HTTP for local tests. The Ollama, Codex, Claude-CLI, Prime,
-Hermes, and OpenCode backends need no credentials to wire — they fail later, per-turn, if
+Hermes, OpenCode, and Kimi backends need no credentials to wire — they fail later, per-turn, if
 the daemon/binary is unreachable or the CLI is not logged in.
 
 ## Model router (task-class lanes, failover, credential pools)
@@ -1142,6 +1145,7 @@ advertises whether it implements it via `supports_streaming()`:
 | `prime` | no | CLI orchestrates its own output |
 | `hermes` | no | CLI orchestrates its own output |
 | `opencode` | no | CLI orchestrates its own output |
+| `kimi` | no | CLI orchestrates its own output |
 
 This is currently a **provider-library** capability: the fused turn pipeline
 consumes the non-streaming completion and posts the full reply once it is
@@ -1301,7 +1305,7 @@ attributes — `gen_ai.system`, `gen_ai.request.model`,
 `error.type`, and friends. Export them to any OTLP-native backend (Langfuse,
 Arize Phoenix, Arize, Jaeger, Grafana Tempo, …) for token-usage dashboards,
 latency tracing, and per-call drill-down — for free, across **every** provider
-(anthropic / openrouter / openai-compat / ollama / codex / claude-cli / prime / hermes / opencode).
+(anthropic / openrouter / openai-compat / ollama / codex / claude-cli / prime / hermes / opencode / kimi).
 
 Disabled by default. To enable, set:
 

@@ -1,0 +1,51 @@
+# ardur-provider-kimi — the Kimi Code CLI backend driven as a one-shot subprocess.
+#
+# Unlike the HTTP backends (Anthropic, OpenRouter, openai-compat), this provider
+# does not POST to a REST endpoint with an API key. It spawns the locally
+# installed `kimi` binary in print (one-shot) mode
+# (`kimi --print --output-format stream-json`) and reads the structured JSONL
+# message stream from stdout, inheriting whatever credentials Kimi Code itself
+# is configured with (`kimi login`, ~/.kimi).
+#
+# It implements the same `Provider` trait as every other backend, so it slots
+# into the generic `ProviderRegistry` with no catalog change and runs behind the
+# full fused pipeline (cap-token, Cedar, cost gate, receipt, journal).
+#
+# Upstream: Kimi Code CLI (Moonshot AI) — see README.md for attribution.
+
+[package]
+name = "ardur-provider-kimi"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The provider abstraction this backend implements — the `Provider` trait, the
+# request/response/usage envelopes, the `RateCard`, and the typed
+# `ProviderError`. One-directional dep; the registry stays generic.
+ardur-provider-runtime = { workspace = true }
+# Shared value types the provider call speaks in — `CostTuple` (zeroed here: the
+# turn is paid by Kimi Code's own configured account, not metered by us),
+# `ProviderId` (the registry key), and `Role` (the prompt turn kind).
+ardur-runtime = { workspace = true }
+# Object-safe async `Provider::complete`.
+async-trait = { workspace = true }
+# Async subprocess (`tokio::process::Command`), the wall-clock `timeout`
+# bounding a turn, and the concurrent capped stderr drain.
+tokio = { workspace = true }
+# Decoding the newline-delimited JSON messages Kimi Code writes to stdout.
+serde_json = { workspace = true }
+# Secret-shaped redaction for child stderr / stdout error lines before they
+# enter ProviderError (AGENTS.md: never print/store secret values).
+ardur-session-journals = { workspace = true }
+
+[dev-dependencies]
+# The async `complete` calls need a runtime to poll them.
+tokio = { workspace = true }
+# The subprocess tests write an executable shim standing in for the real
+# `kimi` binary (replaying a recorded message stream, or failing on
+# purpose), so the spawn + protocol round-trip is asserted with no kimi
+# install and no model spend.
+tempfile = { workspace = true }
