@@ -1293,6 +1293,7 @@ impl FusedRuntime {
             APPROVAL_SETTLEMENT => Disposition::Refusal(RefusalClass::ApprovalRequired),
             APPROVAL_REJECTED_SETTLEMENT => Disposition::Refusal(RefusalClass::ApprovalRejected),
             SCAN_SETTLEMENT => Disposition::Refusal(RefusalClass::OutputBlocked),
+            SCAN_ERROR_SETTLEMENT => Disposition::Refusal(RefusalClass::ScannerError),
             _ => Disposition::Infrastructure(InfrastructureFailureClass::Provider),
         };
         reservation
@@ -2943,6 +2944,10 @@ const APPROVAL_REJECTED_SETTLEMENT: &str = "refusal:approval_rejected";
 const TOOL_ERROR_SETTLEMENT: &str = "refusal:tool_error";
 const TOOL_TIMEOUT_SETTLEMENT: &str = "refusal:tool_timeout_uncertain_effect";
 const SCAN_SETTLEMENT: &str = "refusal:output_scan";
+/// #543: an operational scanner failure is NOT a policy block — it settles
+/// under its own class so the durable settlement evidence and the event ER
+/// (which reports insufficient evidence) never contradict each other.
+const SCAN_ERROR_SETTLEMENT: &str = "refusal:output_scan_error";
 
 #[async_trait::async_trait]
 impl ChatRuntime for FusedRuntime {
@@ -3664,10 +3669,15 @@ impl FusedRuntime {
                                     ),
                                     cost: output.cost,
                                 },
-                                if scan_result.is_ok() {
-                                    OutputAdmission::Allowed
-                                } else {
-                                    OutputAdmission::Blocked
+                                match &scan_result {
+                                    Ok(()) => OutputAdmission::Allowed,
+                                    Err(RuntimeError::InjectionBlocked { .. }) => {
+                                        OutputAdmission::Blocked
+                                    }
+                                    // An operational scanner failure is not a
+                                    // policy decision: the admission is
+                                    // undetermined, never Blocked.
+                                    Err(_) => OutputAdmission::Undetermined,
                                 },
                             )?;
                             self.record_approval_invocation(
@@ -3805,7 +3815,16 @@ impl FusedRuntime {
                             .saturating_add(&tool_cost)
                             .saturating_add(&output.cost);
                         let settlement = self
-                            .settle_refusal(session_id, reservation, known, SCAN_SETTLEMENT)
+                            .settle_refusal(
+                                session_id,
+                                reservation,
+                                known,
+                                if matches!(err, RuntimeError::InjectionBlocked { .. }) {
+                                    SCAN_SETTLEMENT
+                                } else {
+                                    SCAN_ERROR_SETTLEMENT
+                                },
+                            )
                             .await;
                         self.fire_error(session_id, LifecyclePhase::Submit, &err)
                             .await;
@@ -4645,7 +4664,7 @@ impl FusedRuntime {
                                 self.observe_tool(reservation.as_mut().expect("held"), tool_ordinal, call, ToolEffect::Completed {
                                     output_digest: GateSha256::of(&serde_json::to_vec(&output.content).map_err(|e| RuntimeError::Internal(e.into()))?),
                                     cost: output.cost,
-                                }, if scan_result.is_ok() { OutputAdmission::Allowed } else { OutputAdmission::Blocked })?;
+                                }, match &scan_result { Ok(()) => OutputAdmission::Allowed, Err(RuntimeError::InjectionBlocked { .. }) => OutputAdmission::Blocked, Err(_) => OutputAdmission::Undetermined })?;
                                 self.record_approval_invocation(
                                     &spent_approval,
                                     InvocationResult::Completed,
@@ -4733,7 +4752,11 @@ impl FusedRuntime {
                                     session_id,
                                     reservation.take().expect("reservation held"),
                                     known,
-                                    SCAN_SETTLEMENT,
+                                    if matches!(err, RuntimeError::InjectionBlocked { .. }) {
+                                        SCAN_SETTLEMENT
+                                    } else {
+                                        SCAN_ERROR_SETTLEMENT
+                                    },
                                 )
                                 .await;
                             self.fire_error(session_id, LifecyclePhase::Submit, &err).await;

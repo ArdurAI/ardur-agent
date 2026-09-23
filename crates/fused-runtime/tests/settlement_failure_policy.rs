@@ -1529,7 +1529,10 @@ async fn stream_refusal_observer_case(case: StreamRefusal) {
         StreamRefusal::ApprovalRequired => "refusal:approval_required",
         StreamRefusal::ApprovalRejected => "refusal:approval_rejected",
         StreamRefusal::ToolError => "refusal:tool_error",
-        StreamRefusal::OutputBlock | StreamRefusal::OutputError => "refusal:output_scan",
+        StreamRefusal::OutputBlock => "refusal:output_scan",
+        // #543: an operational scanner error settles under its own class —
+        // never as a policy block.
+        StreamRefusal::OutputError => "refusal:output_scan_error",
         StreamRefusal::Timeout => "refusal:tool_timeout_uncertain_effect",
     };
     let known = provider_cost.saturating_add(&CostTuple::cents(if completed { 2 } else { 0 }));
@@ -2414,7 +2417,10 @@ async fn stream_failed_settlement_observer_case(case: StreamRefusal) {
         StreamRefusal::ApprovalRequired => "refusal:approval_required",
         StreamRefusal::ApprovalRejected => "refusal:approval_rejected",
         StreamRefusal::ToolError => "refusal:tool_error",
-        StreamRefusal::OutputBlock | StreamRefusal::OutputError => "refusal:output_scan",
+        StreamRefusal::OutputBlock => "refusal:output_scan",
+        // #543: an operational scanner error settles under its own class —
+        // never as a policy block.
+        StreamRefusal::OutputError => "refusal:output_scan_error",
         StreamRefusal::Timeout => "refusal:tool_timeout_uncertain_effect",
     };
     {

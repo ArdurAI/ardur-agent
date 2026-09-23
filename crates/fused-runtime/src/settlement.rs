@@ -1114,6 +1114,7 @@ fn projection_reason(decision: Option<&SettlementDecision>) -> &'static str {
             RefusalClass::ApprovalRequired => "refusal:approval_required",
             RefusalClass::ApprovalRejected => "refusal:approval_rejected",
             RefusalClass::OutputBlocked => "refusal:output_scan",
+            RefusalClass::ScannerError => "refusal:output_scan_error",
             RefusalClass::IterationLimit => "refusal:iteration_limit",
             RefusalClass::Capacity => "refusal:capacity",
         },

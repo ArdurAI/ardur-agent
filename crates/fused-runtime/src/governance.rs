@@ -110,10 +110,13 @@ struct EmitterState {
     chained_step_ids: HashSet<String>,
     /// Events with a durable pre-effect record but no post yet (in-flight).
     open_event_ids: HashSet<String>,
-    /// The records actually journaled, retained so `mirror_evaluated_event`
-    /// can require the caller-supplied records to be EXACTLY these — an ER
-    /// must never claim evidence that was never durable. Seeded from the
-    /// verified parse at open; updated on each successful record append.
+    /// The records actually journaled AND NOT YET CHAINED, retained so
+    /// `mirror_evaluated_event` can require the caller-supplied records to be
+    /// EXACTLY these — an ER must never claim evidence that was never
+    /// durable. Bounded by design: chained events are skipped by the
+    /// idempotency check before the lookup, so they are never seeded at open
+    /// and each entry is removed when its event ER lands — the map holds
+    /// only the in-flight/unmirrored events, never the journal's history.
     journaled: std::collections::HashMap<String, (PreEffectRecord, Option<PostEffectRecord>)>,
     /// Events with a durable post-effect record (terminal).
     closed_event_ids: HashSet<String>,
@@ -723,6 +726,11 @@ impl ErMirrorEmitter {
             }
         }
 
+        let journaled = events
+            .iter()
+            .filter(|(pre, _)| !chained_step_ids.contains(&pre.event_id))
+            .map(|(pre, post)| (pre.event_id.clone(), (pre.clone(), post.clone())))
+            .collect();
         let mut state = EmitterState {
             tail: chain.last().cloned(),
             chain_committed_len,
@@ -732,10 +740,7 @@ impl ErMirrorEmitter {
             chained_step_ids,
             open_event_ids: HashSet::new(),
             closed_event_ids: HashSet::new(),
-            journaled: events
-                .iter()
-                .map(|(pre, post)| (pre.event_id.clone(), (pre.clone(), post.clone())))
-                .collect(),
+            journaled,
             poisoned: None,
         };
 
@@ -817,6 +822,7 @@ impl ErMirrorEmitter {
             // ownership before each (the live paths do the same).
             verify_lock_inode_for(&events_lock, &lock_path)?;
             append_chain_line(&path, chain_identity, &mut state, signed)?;
+            state.journaled.remove(&pre.event_id);
             mark_event_recorded(&mut state, pre, post.as_ref());
         }
 
@@ -1247,7 +1253,14 @@ impl GovernanceEmitter for ErMirrorEmitter {
                 return Err(e);
             }
         };
-        append_chain_line(&self.path, self.chain_identity, &mut state, signed)
+        let event_id = pre.event_id.clone();
+        let result = append_chain_line(&self.path, self.chain_identity, &mut state, signed);
+        if result.is_ok() {
+            // Chained: the equality lease is no longer needed (the
+            // idempotency check above short-circuits before the lookup).
+            state.journaled.remove(&event_id);
+        }
+        result
     }
 }
 
