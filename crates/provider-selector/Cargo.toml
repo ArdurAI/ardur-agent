@@ -49,6 +49,10 @@ ardur-provider-prime = { workspace = true }
 # `ARDUR_PROVIDER=hermes` (alias `hermes-agent`). Driven as a one-shot
 # subprocess; credentials live inside Hermes, not here.
 ardur-provider-hermes = { workspace = true }
+# The OpenCode CLI backend (#567) — selected by
+# `ARDUR_PROVIDER=opencode` (alias `opencode-agent`). Driven as a one-shot
+# subprocess; credentials live inside OpenCode, not here.
+ardur-provider-opencode = { workspace = true }
 # The `[router]` config table (#411 / #531 D0) the router branch parses at
 # boot; sits below every provider crate, so no cycle is closed.
 ardur-config = { workspace = true }

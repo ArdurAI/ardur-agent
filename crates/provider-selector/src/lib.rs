@@ -16,8 +16,11 @@
 //! | `claude-cli`     | `ClaudeCliProvider` (subprocess wrap)| `ardur-provider-claude-cli` |
 //! | `prime`          | `PrimeProvider` (RPC subprocess wrap)| `ardur-provider-prime`      |
 //! | `hermes`         | `HermesProvider` (CLI subprocess wrap)| `ardur-provider-hermes`    |
+//! | `opencode`       | `OpenCodeProvider` (CLI subprocess wrap)| `ardur-provider-opencode` |
 //!
-//! (`claude-cli` also answers to the alias `claude-subscription`.)
+//! (`claude-cli` also answers to the alias `claude-subscription`, `prime` to
+//! `prime-agent`, `hermes` to `hermes-agent`, and `opencode` to
+//! `opencode-agent`.)
 //!
 //! Parsing is case-insensitive; an unset (or empty) value selects the default,
 //! `anthropic`. An unrecognized value is returned as a [`ProviderError`] whose
@@ -30,7 +33,7 @@
 //! `Err(ProviderError)`, distinct from the panic on an unknown selector. The
 //! credential-free backends
 //! ([`ProviderKind::Ollama`], [`ProviderKind::Codex`], [`ProviderKind::ClaudeCli`],
-//! [`ProviderKind::Prime`], [`ProviderKind::Hermes`])
+//! [`ProviderKind::Prime`], [`ProviderKind::Hermes`], [`ProviderKind::OpenCode`])
 //! never fail.
 //!
 //! # Why a standalone crate
@@ -52,6 +55,7 @@ use ardur_provider_codex::CodexProvider;
 use ardur_provider_hermes::HermesProvider;
 use ardur_provider_ollama::OllamaProvider;
 use ardur_provider_openai_compat::OpenAiCompatProvider;
+use ardur_provider_opencode::OpenCodeProvider;
 use ardur_provider_openrouter::OpenRouterProvider;
 use ardur_provider_prime::PrimeProvider;
 use ardur_provider_runtime::AnthropicProvider;
@@ -87,6 +91,9 @@ pub enum ProviderKind {
     Prime,
     /// Hermes Agent CLI, wrapped as a one-shot subprocess (#501).
     Hermes,
+    /// OpenCode CLI, wrapped as a one-shot subprocess (#567). Also selected by
+    /// the alias `opencode-agent`.
+    OpenCode,
 }
 
 impl ProviderKind {
@@ -95,7 +102,7 @@ impl ProviderKind {
 
     /// Every recognized selector spelling, in selection order — the canonical
     /// list surfaced in the unknown-value error.
-    pub const ALL: [ProviderKind; 9] = [
+    pub const ALL: [ProviderKind; 10] = [
         ProviderKind::Anthropic,
         ProviderKind::OpenRouter,
         ProviderKind::OpenAiCompat,
@@ -104,6 +111,7 @@ impl ProviderKind {
         ProviderKind::ClaudeCli,
         ProviderKind::Prime,
         ProviderKind::Hermes,
+        ProviderKind::OpenCode,
         ProviderKind::OpenAiCompat, // openai alias
     ];
 
@@ -119,6 +127,7 @@ impl ProviderKind {
             ProviderKind::ClaudeCli => "claude-cli",
             ProviderKind::Prime => "prime",
             ProviderKind::Hermes => "hermes",
+            ProviderKind::OpenCode => "opencode",
         }
     }
 
@@ -139,6 +148,7 @@ impl ProviderKind {
             "claude-cli" | "claude-subscription" => Ok(ProviderKind::ClaudeCli),
             "prime" | "prime-agent" => Ok(ProviderKind::Prime),
             "hermes" | "hermes-agent" => Ok(ProviderKind::Hermes),
+            "opencode" | "opencode-agent" => Ok(ProviderKind::OpenCode),
             _ => Err(UnknownProvider(raw.to_string())),
         }
     }
@@ -170,7 +180,7 @@ impl ProviderKind {
     /// The credential-free backends
     /// ([`ProviderKind::Ollama`] / [`ProviderKind::Codex`] /
     /// [`ProviderKind::ClaudeCli`] / [`ProviderKind::Prime`] /
-    /// [`ProviderKind::Hermes`]) never fail.
+    /// [`ProviderKind::Hermes`] / [`ProviderKind::OpenCode`]) never fail.
     pub fn build(self, model: ModelId) -> Result<Arc<dyn Provider>, ProviderError> {
         let provider: Arc<dyn Provider> = match self {
             ProviderKind::Anthropic => Arc::new(AnthropicProvider::from_env(model)?),
@@ -181,6 +191,7 @@ impl ProviderKind {
             ProviderKind::ClaudeCli => Arc::new(ClaudeCliProvider::from_env(model)),
             ProviderKind::Prime => Arc::new(PrimeProvider::from_env()),
             ProviderKind::Hermes => Arc::new(HermesProvider::from_env()),
+            ProviderKind::OpenCode => Arc::new(OpenCodeProvider::from_env()),
         };
         Ok(provider)
     }
@@ -204,7 +215,7 @@ impl fmt::Display for UnknownProvider {
         write!(
             f,
             "unknown {SELECTOR_ENV} value {:?}: supported values are \
-             anthropic (default), openrouter, openai-compat, ollama, codex, claude-cli, prime, hermes",
+             anthropic (default), openrouter, openai-compat, ollama, codex, claude-cli, prime, hermes, opencode",
             self.0
         )
     }
@@ -377,6 +388,29 @@ mod tests {
     }
 
     #[test]
+    fn opencode_selects_opencode_under_both_spellings() {
+        // The OpenCode backend wraps the local `opencode` binary as a one-shot
+        // subprocess; from_env is infallible (no API key here, no probe until a
+        // turn runs). Both the canonical spelling and the `opencode-agent`
+        // alias resolve.
+        for v in [
+            "opencode",
+            "OpenCode",
+            "OPENCODE",
+            "opencode-agent",
+            "  opencode-agent  ",
+        ] {
+            assert_eq!(
+                ProviderKind::resolve(Some(v)).unwrap(),
+                ProviderKind::OpenCode,
+                "{v:?} should select opencode"
+            );
+        }
+        let provider = select(Some("opencode"), model()).expect("opencode is infallible");
+        assert_eq!(provider.id().0, "opencode");
+    }
+
+    #[test]
     fn claude_cli_selects_claude_cli() {
         // The Claude CLI backend wraps the local `claude` binary; from_env is
         // infallible (no API key, no probe until a turn runs). Both the canonical
@@ -421,6 +455,7 @@ mod tests {
             ProviderKind::ClaudeCli,
             ProviderKind::Prime,
             ProviderKind::Hermes,
+            ProviderKind::OpenCode,
         ] {
             let provider = kind.build(model()).expect("infallible backend");
             assert_eq!(
