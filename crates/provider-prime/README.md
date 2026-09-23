@@ -104,6 +104,12 @@ calls, and keeping only the last record would under-report the run in the signed
 receipt. When the child reports no usage at all, the counts stay zero rather than
 being invented.
 
+## Selector registration
+
+Selected at boot via `ARDUR_PROVIDER=prime` (alias `prime-agent`) in
+`provider-selector::from_env` → `PrimeProvider::from_env`. Also available as a
+router lane backend (`backend = "prime"`).
+
 ## Not in this phase
 
 - **Streaming** (`supports_streaming()` is `false`). The event stream is already
