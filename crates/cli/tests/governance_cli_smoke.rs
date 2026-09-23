@@ -136,8 +136,9 @@ async fn default_off_creates_no_governance_mirror() {
     );
 }
 
-/// ON + one committed turn: exactly one ER at the DESIGN.md convention, and it
-/// verifies against the SAME receipt custody the session used.
+/// ON + one committed turn: one ER per evaluated event at the DESIGN.md
+/// convention — the committed round plus the session's memory write — and
+/// both verify against the SAME receipt custody the session used.
 #[tokio::test]
 async fn on_with_a_committed_turn_mints_one_verifiable_er() {
     let home = tempfile::tempdir().expect("temp HOME");
@@ -150,9 +151,13 @@ async fn on_with_a_committed_turn_mints_one_verifiable_er() {
     );
 
     let lines = mirror_lines(home.path());
-    assert_eq!(lines.len(), 1, "one ER per committed turn");
+    assert_eq!(
+        lines.len(),
+        2,
+        "one ER per evaluated event: the committed round plus the memory write"
+    );
 
-    // The ER must verify against the receipt key this session persisted.
+    // The ERs must verify against the receipt key this session persisted.
     let pem = std::fs::read_to_string(home.path().join(".ardur/keys/receipt.pem"))
         .expect("the session persisted its receipt key");
     let receipt_key = ardur_receipt::Es256SigningKey::from_pkcs8_pem(&pem).expect("key parses");
@@ -162,7 +167,7 @@ async fn on_with_a_committed_turn_mints_one_verifiable_er() {
             .jwks();
     let chain = ardur_governance::verify_er_log_lines(&lines, &jwks)
         .expect("the ER verifies against the session's receipt custody");
-    assert_eq!(chain.len(), 1);
+    assert_eq!(chain.len(), 2);
     assert_eq!(
         chain[0].receipt().verifier_id,
         "spiffe://ardur/verifier/cli",
@@ -171,6 +176,22 @@ async fn on_with_a_committed_turn_mints_one_verifiable_er() {
     assert!(
         chain[0].receipt().parent_receipt_hash.is_none(),
         "genesis ER"
+    );
+    assert_eq!(
+        chain[1].receipt().tool,
+        "memory.write",
+        "the second ER is the turn's memory-write event"
+    );
+    // The session's starter policy permits Submit/ToolInvoke only, so the
+    // memory control plane denies the write: the event ER reports that
+    // denial honestly instead of the write passing silently.
+    assert_eq!(
+        chain[1].receipt().verdict,
+        ardur_governance::Verdict::Violation
+    );
+    assert_eq!(
+        chain[1].receipt().internal_denial_code.as_deref(),
+        Some("memory_policy_denied")
     );
 }
 

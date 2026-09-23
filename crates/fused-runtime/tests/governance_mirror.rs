@@ -123,17 +123,23 @@ fn gone_after(calls: Arc<AtomicUsize>, rounds: usize) -> CancelProbe {
 /// forward to an inner emitter in compositions).
 struct CountingEmitter {
     calls: AtomicUsize,
+    event_calls: AtomicUsize,
 }
 
 impl CountingEmitter {
     fn new() -> Arc<Self> {
         Arc::new(Self {
             calls: AtomicUsize::new(0),
+            event_calls: AtomicUsize::new(0),
         })
     }
 
     fn mirror_count(&self) -> usize {
         self.calls.load(Ordering::SeqCst)
+    }
+
+    fn event_count(&self) -> usize {
+        self.event_calls.load(Ordering::SeqCst)
     }
 }
 
@@ -143,6 +149,29 @@ impl GovernanceEmitter for CountingEmitter {
         _facts: &ErRoundFacts<'_>,
     ) -> Result<(), ardur_governance::GovernanceError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn record_pre_effect(
+        &self,
+        _record: &ardur_governance::PreEffectRecord,
+    ) -> Result<(), ardur_governance::GovernanceError> {
+        Ok(())
+    }
+
+    fn record_post_effect(
+        &self,
+        _record: &ardur_governance::PostEffectRecord,
+    ) -> Result<(), ardur_governance::GovernanceError> {
+        Ok(())
+    }
+
+    fn mirror_evaluated_event(
+        &self,
+        _pre: &ardur_governance::PreEffectRecord,
+        _post: &ardur_governance::PostEffectRecord,
+    ) -> Result<(), ardur_governance::GovernanceError> {
+        self.event_calls.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 }
@@ -267,6 +296,11 @@ async fn an_abandoned_turn_mints_no_er() {
 
     assert!(matches!(result, Err(RuntimeError::TurnCancelled)));
     assert_eq!(capturing.mirror_count(), 0, "no mirror call may happen");
+    assert_eq!(
+        capturing.event_count(),
+        0,
+        "no per-event mirror call may happen either"
+    );
     assert!(
         mirror_lines(&mirror_path).is_empty(),
         "no ER line may be written"
@@ -346,16 +380,27 @@ async fn multi_round_turns_chain_and_restart_resumes_the_mirror() {
         .await
         .expect("turn commits");
 
+    // #543: round 1 requested one echo call, so the chain is
+    // [round-1 tool event ER, round-1 ER, round-2 ER] — one ER per evaluated
+    // event plus one per committed round.
     let signed = signed_chain(&mirror_path);
-    assert_eq!(signed.len(), 2, "one ER per committed round");
+    assert_eq!(
+        signed.len(),
+        3,
+        "one ER per committed round plus one per evaluated tool event"
+    );
     verify_er_chain(&signed, &er_jwks()).expect("mirror chain verifies");
+    assert!(
+        signed[0].receipt().step_id.starts_with("ev:"),
+        "the first ER is the round-1 tool event"
+    );
     assert_eq!(
         signed[1].receipt().parent_receipt_hash.as_deref(),
         Some(signed[0].receipt_hash().as_str()),
-        "the second ER chains onto the first ER's JWS hash"
+        "the round ER chains onto the tool event ER's JWS hash"
     );
     assert_eq!(
-        signed[1].receipt().step_id,
+        signed[2].receipt().step_id,
         first.receipt_id.0.to_string(),
         "the final ER mirrors the final committed native receipt"
     );
@@ -377,9 +422,9 @@ async fn multi_round_turns_chain_and_restart_resumes_the_mirror() {
         .expect("post-restart turn commits");
 
     let signed = signed_chain(&mirror_path);
-    assert_eq!(signed.len(), 3, "restart appends, never re-genesis");
+    assert_eq!(signed.len(), 4, "restart appends, never re-genesis");
     assert!(
-        signed[2].receipt().parent_receipt_hash.is_some(),
+        signed[3].receipt().parent_receipt_hash.is_some(),
         "the post-restart ER chains onto the pre-restart tail"
     );
     verify_er_chain(&signed, &er_jwks()).expect("the resumed mirror chain still verifies");
@@ -436,6 +481,22 @@ fn a_foreign_append_between_ours_fails_closed_instead_of_forking() {
             assert!(
                 m.contains("changed under us"),
                 "expected the fork-guard diagnostic, got: {m}"
+            );
+        }
+        other => panic!("expected Io, got {other:?}"),
+    }
+    // And the fork poisons the emitter: no later receipt may chain past the
+    // omission (a transient-looking failure would otherwise let the chain
+    // skip an evaluated event and keep going).
+    let err = match emitter.mirror_committed_round(&facts_for_step("step-y")) {
+        Ok(()) => panic!("a poisoned emitter must refuse"),
+        Err(err) => err,
+    };
+    match err {
+        ardur_governance::GovernanceError::Io(m) => {
+            assert!(
+                m.contains("poisoned"),
+                "expected the poison diagnostic, got: {m}"
             );
         }
         other => panic!("expected Io, got {other:?}"),
@@ -497,6 +558,8 @@ async fn side_effect_class_tracks_persistence_not_tool_count() {
     drop(journaled);
 
     // Journal-less runtime, tool round: None (nothing durable changed).
+    // #543: the chain is [round-1 ER, tool event ER, round-2 ER] — the round
+    // ER under assertion is now the third entry.
     let plain = runtime_builder(Arc::new(ScriptedProvider::new(
         vec![tool_call("c1", "echo"), stop("done")],
         stop("d"),
@@ -516,7 +579,7 @@ async fn side_effect_class_tracks_persistence_not_tool_count() {
         .expect("commits");
     let chain = signed_chain(&mirror);
     assert_eq!(
-        chain[1].receipt().side_effect_class,
+        chain[2].receipt().side_effect_class,
         ardur_governance::SideEffectClass::None,
         "a journal-less tool round changed no durable state"
     );
@@ -656,10 +719,12 @@ async fn a_mid_loop_cancel_mints_no_er_for_the_cancellation_marker() {
         "round 1 committed and the terminal cancellation marker appended, got {}",
         native.len()
     );
+    // #543: round 1's echo call is an evaluated event (one ER) and round 1
+    // committed (one ER); the terminal cancellation marker still mints none.
     assert_eq!(
         mirror_lines(&mirror_path).len(),
-        1,
-        "exactly the committed round mirrors; the cancellation marker mints no ER"
+        2,
+        "the round-1 tool event and the committed round mirror; the cancellation marker mints no ER"
     );
     verify_er_chain(&signed_chain(&mirror_path), &er_jwks())
         .expect("the surviving mirror chain still verifies");

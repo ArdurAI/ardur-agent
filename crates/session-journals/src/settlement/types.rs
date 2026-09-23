@@ -177,6 +177,9 @@ pub enum OutputAdmission {
     Allowed,
     /// Output rejected (does not undo the effect).
     Blocked,
+    /// The scanner failed operationally — no allow/block decision exists.
+    /// Never readable as a policy block.
+    Undetermined,
 }
 /// Stable refusal classifications, not diagnostic reason strings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -191,8 +194,14 @@ pub enum RefusalClass {
     ApprovalRequired,
     /// Approval explicitly rejected.
     ApprovalRejected,
+    /// The approval machinery failed operationally (store or receipt append
+    /// error) — no human decision was made. Never readable as a rejection.
+    ApprovalError,
     /// Returned output blocked by scanning.
     OutputBlocked,
+    /// The output scanner failed operationally — no policy decision was
+    /// made. Distinct from a block: nothing was refused on policy grounds.
+    ScannerError,
     /// Iteration limit exhausted.
     IterationLimit,
     /// Evidence capacity exhausted.

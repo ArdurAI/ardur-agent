@@ -119,13 +119,53 @@ public APIs; the runtime wiring landed as the B7 integration PR:
 `FusedRuntimeBuilder::with_governance(Arc<dyn GovernanceEmitter>)` is the
 opt-in setter, and the emitter is invoked at the commit decision — inside the
 commit lock, immediately after the native receipt append — so abandoned /
-cancelled turns mint no ER (Phase 1 semantics; the terminal cancellation
+cancelled turns mint no round ER (Phase 1 semantics; the terminal cancellation
 marker is deliberately not mirrored). The shipped file-backed implementation
 is `ardur_fused_runtime::ErMirrorEmitter`, which signs with the same P-256
 custody as native receipts and chains signed ERs into a
 `governance/er-chain.jsonl` mirror log (one line per committed round,
 verified and resumed across restarts). Per-tool effect classification and
-durable pre-effect evidence remain #543 and stay out of Phase 1.
+durable pre-effect evidence were #543 and landed as Phase 2 below.
+
+### Durable per-event evidence (landed — #543, Phase 2)
+
+Phase 1's round ERs cannot reconstruct what the verifier contract wants — one
+ER per **evaluated event** — because the native receipt aggregates a tool
+round and never carries arguments/outputs inline, while refusal / timeout /
+scan failure exit before its append and memory work happens after it. Phase 2
+adds a durable evidence journal beside the mirror log:
+
+- **`governance/events.jsonl`** — one JSON record per line, appended with the
+  same hardened no-follow fsync writer and single-writer fork guard as the
+  chains. A **pre-effect record** (grant facts, normalized invocation
+  classification, canonical arguments — inline up to 1 MiB, otherwise the
+  content-addressing digests only) is durable **before** the effect runs; a
+  **post-effect record** (observed effect digest + incurred cost + output
+  admission, a typed denial, or an explicitly **unknown** outcome) lands at
+  the event's terminal point. Event identity is deterministic
+  (`ev:<hash(session, iteration, ordinal, call_id)>`), so replay reconstructs
+  the same identity rather than minting siblings.
+- **One ER per evaluated event**, projected from the records at the terminal
+  point — including events whose round never commits (denial after an earlier
+  successful tool, timeout, scan rejection, memory-write denial), which the
+  round mirror cannot cover. The round ER (Phase 1) is unchanged.
+- **Crash replay is idempotent and never re-executes.** At open the emitter
+  re-projects every terminal event the chain does not already carry (dedup by
+  `step_id` = event id); an event stranded pre-observation (crash mid-invoke,
+  dropped stream) mints an explicit `insufficient_evidence` ER — the tool is
+  never re-run. The journal itself is checked, not trusted: a torn tail, a
+  dangling post, a duplicate record, or arguments that do not hash to the
+  recorded digests fails the open.
+- **Missing reconstruction inputs never mint compliance.** An otherwise
+  compliant event whose arguments exceeded the inline cap reports
+  `insufficient_evidence` (`arguments_evidence_omitted`) with the recorded
+  digests still binding the invocation; denials stay denials — the gate's
+  decision is itself the sufficient fact.
+
+The mirror remains strictly observational: recording and projection are
+best-effort and never gate admission (no second admit stack), default-off via
+`ARDUR_GOVERNANCE`, and the native receipt chain is untouched (verified
+byte-identical across crash replay in the guard suite).
 
 ## 4. Cross-repo dependencies (Ardur-side vs agent-side)
 

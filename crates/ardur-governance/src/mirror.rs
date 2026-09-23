@@ -20,6 +20,8 @@
 use ardur_cap_token::VerifiedClaims;
 use ardur_core_types::CostTuple;
 
+use crate::evidence::{PostEffectRecord, PreEffectRecord};
+
 /// One tool call recorded on the committed round's native receipt, as the
 /// mirror sees it: identifiers plus the **digests the native receipt already
 /// computed** (never raw arguments or outputs — those are not carried inline
@@ -103,5 +105,66 @@ pub trait GovernanceEmitter: Send + Sync {
     fn mirror_committed_round(
         &self,
         facts: &ErRoundFacts<'_>,
+    ) -> Result<(), crate::GovernanceError>;
+
+    /// #543: durably record the immutable authorization inputs of one
+    /// evaluated event **before** its effect runs.
+    ///
+    /// The runtime calls this at the tool-call boundary, after the last
+    /// admission gate and before `invoke` (or at a gate's denial point, where
+    /// no effect will ever run). The record lets a post-crash replay
+    /// reconstruct the event without re-executing anything; a live ER is
+    /// projected later, at the event's terminal point, from the same record.
+    ///
+    /// This is **not** an admission hook: the runtime ignores the return
+    /// value except to log a failure, and never lets it change the turn's
+    /// outcome. An implementation that cannot make the record durable must
+    /// treat that as a mirror failure under the gap-observability obligation
+    /// above (a missing pre-effect record silently degrades crash recovery
+    /// to `insufficient_evidence` absence otherwise).
+    ///
+    /// # Errors
+    ///
+    /// Implementation-defined durability failure.
+    fn record_pre_effect(&self, record: &PreEffectRecord) -> Result<(), crate::GovernanceError>;
+
+    /// #543: durably record the terminal observation of one evaluated event.
+    ///
+    /// Written at the event's terminal point (observed effect, typed denial,
+    /// or an explicitly unknown outcome) and always BEFORE the matching
+    /// [`mirror_evaluated_event`](Self::mirror_evaluated_event) call, so the
+    /// ER is only ever projected from durable evidence.
+    ///
+    /// # Errors
+    ///
+    /// Implementation-defined durability failure.
+    fn record_post_effect(&self, record: &PostEffectRecord) -> Result<(), crate::GovernanceError>;
+
+    /// #543: mirror one evaluated event — one ER per evaluated event — from
+    /// its durable pre/post-effect records.
+    ///
+    /// Called at the event's terminal point, including for events whose round
+    /// will never commit (a denial after an earlier successful tool, a
+    /// timeout, a scan rejection): the verifier contract wants one ER per
+    /// evaluated event in both enforce and attest modes, which the
+    /// round-level mirror alone cannot supply. The cancellation marker is
+    /// still deliberately not an event (Phase 1 semantics), and a tool call
+    /// recorded on a committed round's native receipt but never *evaluated*
+    /// (the iteration-limit audit entries) mints no event ER either — it was
+    /// never authorized or dispatched.
+    ///
+    /// Must be idempotent per event: a replayed call for an event whose ER is
+    /// already chained is a no-op, not a duplicate (the shipped emitter keys
+    /// this on the ER `step_id`, which equals the stable event id).
+    ///
+    /// # Errors
+    ///
+    /// Implementation-defined mirror failure, under the same
+    /// gap-observability obligation as
+    /// [`mirror_committed_round`](Self::mirror_committed_round).
+    fn mirror_evaluated_event(
+        &self,
+        pre: &PreEffectRecord,
+        post: &PostEffectRecord,
     ) -> Result<(), crate::GovernanceError>;
 }

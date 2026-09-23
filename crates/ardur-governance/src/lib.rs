@@ -52,6 +52,7 @@ mod effect;
 mod enforce;
 mod er;
 mod error;
+pub mod evidence;
 mod grant;
 mod hash;
 mod jcs;
@@ -75,7 +76,18 @@ pub use er::{
     ExecutionReceipt, PolicyDecision, PublicDenialReason, SideEffectClass, Verdict,
 };
 pub use error::GovernanceError;
+pub use evidence::{
+    CompletedOutcome, DeniedOutcome, EVIDENCE_RECORD_VERSION, EventKind, EventOutcome, EventScope,
+    EvidenceOutputAdmission, EvidenceRecord, InvocationClassification, MAX_INLINE_ARGUMENTS_BYTES,
+    MEMORY_WRITE_TOOL, PostEffectRecord, PreEffectRecord, event_run_nonce, is_event_id,
+    memory_event_id, tool_event_id,
+};
 pub use grant::{GrantDescriptor, MissionRef};
+pub use hash::{
+    EvidenceAnchorTail, evidence_anchor_json, evidence_checkpoint_json, evidence_line_chain_mac,
+    evidence_record_mac_key, unwrap_evidence_line, verify_evidence_anchor,
+    verify_evidence_checkpoint, wrap_evidence_line,
+};
 pub use mirror::{ErRoundFacts, GovernanceEmitter, MirroredToolCall};
 pub use mission::{
     BudgetPair, DelegationPolicy, EFFECT_CLASSES, EffectPolicy, FlowPolicy, GovernedMemoryStore,
@@ -84,7 +96,10 @@ pub use mission::{
     author_mission_declaration, mission_digest, tool_manifest_digest, tool_manifest_digest_of,
 };
 pub use project::{
-    AuthOutcome, StepContext, ToolInvocation, check_verdict_invariant, project_execution_receipt,
+    ARGUMENTS_EVIDENCE_OMITTED_CODE, AuthOutcome, EFFECT_UNKNOWN_EXECUTION_CODE,
+    EFFECT_UNKNOWN_TIMEOUT_CODE, EFFECT_UNOBSERVED_CODE, GrantFacts, OUTPUT_SCAN_BLOCKED_CODE,
+    OUTPUT_SCAN_ERROR_CODE, StepContext, ToolInvocation, check_verdict_invariant,
+    invocation_digests, project_event_execution_receipt, project_execution_receipt,
 };
 pub use sign::{
     ER_TYP, ErSigner, ErSigningKey, ErVerifier, SignedExecutionReceipt, verify_er_chain,

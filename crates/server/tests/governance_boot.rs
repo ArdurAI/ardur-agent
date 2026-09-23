@@ -109,8 +109,14 @@ async fn default_off_boots_without_a_mirror() {
     );
 }
 
-/// ON + one committed turn: exactly one ER lands at the DESIGN.md convention,
-/// and it verifies end-to-end against the boot's own receipt custody.
+/// ON + one committed turn: one ER per evaluated event lands at the DESIGN.md
+/// convention — the committed round plus the turn's memory write (this boot
+/// configures an in-memory backend, so stage 9 runs) — and both verify
+/// end-to-end against the boot's own receipt custody. The boot's
+/// dev-permissive policy permits only Submit/ToolInvoke, so the memory
+/// control plane denies the write: the turn still commits (memory is
+/// non-fatal) and the event ER now reports that denial honestly instead of
+/// the write passing silently.
 #[tokio::test]
 async fn on_with_a_committed_turn_mints_one_verifiable_er() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -125,13 +131,32 @@ async fn on_with_a_committed_turn_mints_one_verifiable_er() {
     state.finish_shutdown().await.expect("worker settles");
 
     let lines = mirror_lines(dir.path());
-    assert_eq!(lines.len(), 1, "one ER per committed turn");
+    assert_eq!(
+        lines.len(),
+        2,
+        "one ER per evaluated event: the committed round plus the memory write"
+    );
     let chain = verify_er_log_lines(&lines, &booted_er_jwks(dir.path()))
         .expect("the ER verifies against the boot's receipt custody");
-    assert_eq!(chain.len(), 1);
+    assert_eq!(chain.len(), 2);
     let claims = chain[0].receipt();
     assert_eq!(claims.verifier_id, GOVERNANCE_VERIFIER_ID);
     assert!(claims.parent_receipt_hash.is_none(), "genesis ER");
+    let memory_event = chain[1].receipt();
+    assert_eq!(memory_event.tool, "memory.write");
+    assert!(
+        memory_event.step_id.starts_with("ev:"),
+        "the memory write is a stable-identity evaluated event"
+    );
+    assert_eq!(
+        memory_event.verdict,
+        ardur_governance::Verdict::Violation,
+        "the dev-permissive policy (Submit/ToolInvoke only) denies the memory write"
+    );
+    assert_eq!(
+        memory_event.internal_denial_code.as_deref(),
+        Some("memory_policy_denied")
+    );
 }
 
 /// ON + an abandoned (provider-failing) turn: the mirror stays empty. The
