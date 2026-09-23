@@ -3008,10 +3008,11 @@ async fn a_planted_tmp_hardlink_cannot_truncate_the_journal() {
 // Thirteenth review round: typed tool refusals record as canonical denials.
 // ---------------------------------------------------------------------------
 
-/// A tool that refuses pre-effect under its own configured policy (e.g. a
-/// shell command outside its allowlist): `ToolError::Denied`. Registered
-/// under the "echo" id so the standard token allowlist admits the call and
-/// the REFUSAL comes from the tool itself.
+/// A tool that rejects the call pre-effect (malformed arguments under its
+/// input schema): `ToolError::InvalidArgs` — structurally pre-effect, unlike
+/// the phase-ambiguous `Denied`. Registered under the "echo" id so the
+/// standard token allowlist admits the call and the REFUSAL comes from the
+/// tool itself.
 struct RefusingTool {
     schema: ToolSchema,
 }
@@ -3029,9 +3030,9 @@ impl Tool for RefusingTool {
         _ctx: &ToolContext,
         _args: serde_json::Value,
     ) -> Result<ToolOutput, ToolError> {
-        Err(ToolError::Denied {
-            reason: "command is not on the allowlist".to_string(),
-        })
+        Err(ToolError::InvalidArgs(
+            "expected an object with a `text` field".to_string(),
+        ))
     }
     fn required_capabilities(&self) -> &[Capability] {
         &[]
@@ -3055,7 +3056,7 @@ fn assert_tool_refusal_event_er(mirror: &std::path::Path) {
     );
     assert_eq!(
         receipt.internal_denial_code.as_deref(),
-        Some("tool_policy_denied")
+        Some("tool_invalid_arguments")
     );
     assert_eq!(
         receipt.public_denial_reason,
@@ -3085,7 +3086,7 @@ async fn a_typed_tool_refusal_records_a_denial_not_an_unknown_effect() {
         .await
         .expect_err("the tool refusal surfaces as the turn's error");
     assert!(
-        err.to_string().contains("denied"),
+        err.to_string().contains("invalid arguments"),
         "the typed refusal propagates: {err}"
     );
 
@@ -3120,7 +3121,7 @@ async fn a_typed_tool_refusal_records_a_denial_on_the_streaming_path() {
         outcomes.iter().any(|item| item
             .as_ref()
             .err()
-            .is_some_and(|e| e.to_string().contains("denied"))),
+            .is_some_and(|e| e.to_string().contains("invalid arguments"))),
         "the typed refusal surfaces in the stream: {outcomes:?}"
     );
 
@@ -3153,4 +3154,36 @@ async fn reopening_under_a_different_verifier_identity_reprojects_cleanly() {
         chain_before.len(),
         "no duplicate or rewritten ERs"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Fifteenth review round: reserved sibling basenames.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_mirror_path_named_like_an_evidence_sibling_is_rejected() {
+    let (_root, _mirror, events, _receipts) = scratch();
+    for basename in [
+        "events.jsonl",
+        "events.tail",
+        "events.anchor",
+        "events.lock",
+        "events.tail.tmp",
+    ] {
+        let colliding = events.with_file_name(basename);
+        let err = ErMirrorEmitter::open(&colliding, &support::receipt_key(), VERIFIER_ID)
+            .err()
+            .expect("a colliding basename must be rejected");
+        assert!(
+            err.to_string().contains("collides"),
+            "expected the collision diagnostic for {basename}, got: {err}"
+        );
+    }
+    // And the normal path still opens.
+    ErMirrorEmitter::open(
+        &events.with_file_name("er-chain.jsonl"),
+        &support::receipt_key(),
+        VERIFIER_ID,
+    )
+    .expect("a non-colliding basename opens");
 }

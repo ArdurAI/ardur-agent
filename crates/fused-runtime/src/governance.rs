@@ -68,6 +68,20 @@ const ER_TTL_SECS: u64 = 300;
 /// The evidence journal file name, beside the ER chain log.
 const EVENTS_FILE_NAME: &str = "events.jsonl";
 
+/// Basenames the emitter derives as siblings of the chain log. A mirror path
+/// whose own basename collides with any of these would alias the chain onto
+/// the journal (or have a sibling publish rename over the chain) — rejected
+/// at open instead of failing later on the fork guard or a JWS parse of a
+/// MAC envelope.
+const RESERVED_SIBLING_BASENAMES: &[&str] = &[
+    "events.jsonl",
+    "events.tail",
+    "events.anchor",
+    "events.lock",
+    "events.tail.tmp",
+    "events.anchor.tmp",
+];
+
 /// The emitter's locked state: the ER chain tail and fork-guard length, the
 /// evidence journal's fork-guard length, the dedup sets, and the poison
 /// marker. One lock serializes every append so a file-backed mirror chains
@@ -182,6 +196,14 @@ impl ErMirrorEmitter {
                 .map_err(|e| ardur_governance::GovernanceError::Io(format!("cwd: {e}")))?
                 .join(path)
         };
+        if let Some(basename) = path.file_name().and_then(|n| n.to_str()) {
+            if RESERVED_SIBLING_BASENAMES.contains(&basename) {
+                return Err(ardur_governance::GovernanceError::Io(format!(
+                    "mirror path basename `{basename}` collides with an evidence sibling \
+                     name; the ER chain and the evidence journal must be distinct files"
+                )));
+            }
+        }
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| ardur_governance::GovernanceError::Io(format!("mkdir: {e}")))?;

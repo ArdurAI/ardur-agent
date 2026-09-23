@@ -726,7 +726,6 @@ fn canonical_public_for_denial_code(internal: &str) -> Option<PublicDenialReason
         | "pop_required"
         | "pop_key_mismatch"
         | "pop_invalid"
-        | "tool_policy_denied"
         | "tool_capability_denied"
         | "tool_invalid_arguments" => PublicDenialReason::PolicyDenied,
         "revoked" => PublicDenialReason::Revoked,
@@ -769,8 +768,7 @@ fn decision_backend_for(outcome: &AuthOutcome) -> &'static str {
         // Typed in-tool refusals (#543): the tool itself refused before the
         // effect (allowlist, root escape, missing grant, rejected token,
         // malformed arguments, cost ceiling, unimplemented backend).
-        "tool_policy_denied"
-        | "tool_capability_denied"
+        "tool_capability_denied"
         | "tool_invalid_arguments"
         | "tool_cost_ceiling_exceeded"
         | "tool_not_implemented" => "tool-runtime",

@@ -1364,21 +1364,27 @@ impl FusedRuntime {
             .map_err(settlement_error)
     }
 
-    /// The honest event outcome for a tool error: the typed refusal variants
-    /// are requests refused BEFORE the effect (a shell command outside its
-    /// allowlist, a path escaping the tool root, a missing capability grant,
-    /// a rejected token, malformed arguments, a cost ceiling) and must be
-    /// recorded as canonical denials — projecting them as `FailedUnknown`
-    /// would report verifier-attributed `insufficient_evidence` for what was
-    /// in fact a refusal. `FailedUnknown` is reserved for the variants where
-    /// execution may actually have occurred.
+    /// The honest event outcome for a tool error. Only the STRUCTURALLY
+    /// pre-effect variants record as canonical denials — a missing capability
+    /// grant, malformed arguments, a cost ceiling, an unimplemented backend —
+    /// projecting them as `FailedUnknown` would report verifier-attributed
+    /// `insufficient_evidence` for what was in fact a refusal. `Denied` and
+    /// `CapTokenDenied` are PHASE-ambiguous across tool boundaries (a code
+    /// execution tool denies when its output scan blocks AFTER running; a
+    /// delegate child can be revoked mid-flight), so they stay
+    /// unknown-effect rather than minting a false no-effect denial.
+    /// `FailedUnknown` otherwise remains for the variants where execution may
+    /// actually have occurred.
     fn tool_error_event_outcome(err: &ToolError) -> EventOutcome {
         use ardur_governance::{DeniedOutcome, PublicDenialReason};
         match err {
-            ToolError::Denied { .. } => EventOutcome::Denied(DeniedOutcome {
-                public: PublicDenialReason::PolicyDenied,
-                internal: "tool_policy_denied".to_string(),
-            }),
+            // NOT universally pre-effect: CodeExecutionTool runs the adapter
+            // and can then return `Denied` when its output scan blocks, and
+            // the HTTP fetcher can issue an allowed request before rejecting
+            // a redirect hop. The execution phase does not survive the error
+            // boundary, and `tool_policy_denied` asserts no effect occurred —
+            // classify the ambiguous case as unknown-effect instead.
+            ToolError::Denied { .. } => EventOutcome::FailedUnknown,
             ToolError::CapabilityDenied(_) => EventOutcome::Denied(DeniedOutcome {
                 public: PublicDenialReason::PolicyDenied,
                 internal: "tool_capability_denied".to_string(),
@@ -5467,11 +5473,6 @@ mod governance_classification_tests {
         use ardur_governance::{EventOutcome, PublicDenialReason};
         let cases: Vec<(ToolError, &str, PublicDenialReason)> = vec![
             (
-                ToolError::Denied { reason: "r".into() },
-                "tool_policy_denied",
-                PublicDenialReason::PolicyDenied,
-            ),
-            (
                 ToolError::CapabilityDenied(Capability::FsWrite),
                 "tool_capability_denied",
                 PublicDenialReason::PolicyDenied,
@@ -5509,6 +5510,9 @@ mod governance_classification_tests {
             // Ambiguous across the delegate boundary (a child revoked
             // mid-flight already ran effects): never a false denial.
             ToolError::CapTokenDenied { reason: "r".into() },
+            // Phase-ambiguous (code execution denies when its output scan
+            // blocks AFTER running): never a false no-effect denial.
+            ToolError::Denied { reason: "r".into() },
         ] {
             assert!(matches!(
                 FusedRuntime::tool_error_event_outcome(&err),
