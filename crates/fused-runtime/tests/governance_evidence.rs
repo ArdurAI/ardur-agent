@@ -2702,3 +2702,183 @@ async fn the_first_appends_crash_window_recovers() {
     assert_eq!(checkpoint["seq"].as_u64().expect("seq"), 0);
     assert_eq!(checkpoint["tail_mac"].as_str().expect("tail_mac"), tail_mac);
 }
+
+// ---------------------------------------------------------------------------
+// Eleventh review round: validate before recovering; ownership everywhere;
+// advance lagging anchors.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_first_line_with_deleted_siblings_is_not_the_crash_window() {
+    let (_root, mirror, events, receipts) = scratch();
+    one_tool_turn(&mirror, &receipts).await;
+
+    // The attack: an unmirrored pre/post pair is truncated to its first
+    // authenticated line and BOTH siblings are deleted. Without verifying
+    // the pre-existing anchor, the first-append recovery would recreate the
+    // siblings and sign `effect_unobserved` for a completed event.
+    let content = std::fs::read_to_string(&events).expect("journal");
+    let first = content.lines().next().expect("one line").to_string();
+    std::fs::write(&events, first + "\n").expect("truncate to the pre");
+    let _ = std::fs::remove_file(events.with_file_name("events.tail"));
+    let _ = std::fs::remove_file(events.with_file_name("events.anchor"));
+
+    let err = ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
+        .err()
+        .expect("a deleted anchor is not the first-append crash window");
+    assert!(
+        err.to_string().contains("anchor"),
+        "expected the anchor diagnostic, got: {err}"
+    );
+}
+
+/// Mint + verify a real cap-token for the lock-test round facts (the same
+/// substrate the runtime's stage 1 produces).
+fn verified_claims_for_lock_test() -> ardur_cap_token::VerifiedClaims {
+    use ardur_cap_token::{
+        BiscuitCapTokenIssuer, BiscuitCapTokenVerifier, CapScope, CapTokenIssuer, CapTokenVerifier,
+        HolderId, KeyPair, RequiredCaveats,
+    };
+    let issuer = BiscuitCapTokenIssuer::new(KeyPair::new());
+    let token = issuer
+        .issue(
+            HolderId(support::HOLDER.to_string()),
+            CapScope {
+                audience: support::AUDIENCE.to_string(),
+                expires_unix: 4_000_000_000,
+                budget_remaining: 1_000,
+                tool_allowlist: vec![support::TOOL.to_string()],
+            },
+        )
+        .expect("token issues");
+    let verifier = BiscuitCapTokenVerifier::new(ardur_cap_token::HashSetDenyList::new());
+    verifier
+        .verify(
+            &token,
+            &issuer.public_key(),
+            &RequiredCaveats {
+                now_unix: 1_750_000_000,
+                audience: support::AUDIENCE.to_string(),
+                tool: support::TOOL.to_string(),
+                cost: 1,
+            },
+        )
+        .expect("claims verify")
+}
+
+#[tokio::test]
+async fn a_replaced_lock_inode_fails_chain_appends_too() {
+    use ardur_governance::GovernanceEmitter as _;
+    let (_root, mirror, events, receipts) = scratch();
+    one_tool_turn(&mirror, &receipts).await;
+    let emitter = ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
+        .expect("open holds the lock");
+
+    let lock_path = events.with_file_name("events.lock");
+    std::fs::remove_file(&lock_path).expect("unlink lock");
+    std::fs::File::create(&lock_path).expect("recreate lock");
+
+    // mirror_committed_round is a chain-only path: it must verify ownership
+    // exactly as the journal record paths do.
+    let claims = Box::leak(Box::new(verified_claims_for_lock_test()));
+    let facts = ardur_governance::ErRoundFacts {
+        claims,
+        trace_id: "session-lock",
+        step_id: "r:lock-test",
+        timestamp_millis: 1_750_000_000_000,
+        tool: "chat.submit",
+        provider: "echo",
+        tool_calls: &[],
+        persisted_transcript: false,
+    };
+    let err = emitter
+        .mirror_committed_round(&facts)
+        .expect_err("a replaced lock inode must fail the chain append");
+    assert!(
+        err.to_string().contains("inode"),
+        "expected the inode diagnostic, got: {err}"
+    );
+
+    // mirror_evaluated_event likewise: the ownership check precedes the
+    // idempotency skip and the append.
+    let records = event_lines(&events);
+    let mut pre = None;
+    let mut post = None;
+    for record in records {
+        match record {
+            EvidenceRecord::PreEffect(p) => pre = Some(*p),
+            EvidenceRecord::PostEffect(q) => post = Some(q),
+        }
+    }
+    let mut pre = pre.expect("one pre");
+    let mut post = post.expect("one post");
+    // Fresh identity (the real event is already chained — irrelevant here:
+    // the ownership check fires first).
+    pre.event_id = format!("{}-lockcheck", pre.event_id);
+    post.event_id = pre.event_id.clone();
+    let err = emitter
+        .mirror_evaluated_event(&pre, &post)
+        .expect_err("a replaced lock inode must fail the event chain append");
+    assert!(
+        err.to_string().contains("inode"),
+        "expected the inode diagnostic, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn a_one_behind_anchor_is_advanced_before_the_sweep() {
+    let (_root, mirror, events, receipts) = scratch();
+    one_tool_turn(&mirror, &receipts).await;
+
+    // Put the anchor exactly one append behind (the benign crash window).
+    let content = std::fs::read_to_string(&events).expect("journal");
+    let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
+    let penultimate: serde_json::Value =
+        serde_json::from_str(lines[lines.len() - 2]).expect("envelope");
+    let prev_seq = lines.len() as u64 - 2;
+    let prev_mac = penultimate["mac"].as_str().expect("mac").to_string();
+    let anchor = ardur_governance::evidence_anchor_json(
+        &test_mac_key(),
+        Some((prev_seq, prev_mac.as_str())),
+    );
+    std::fs::write(events.with_file_name("events.anchor"), anchor).expect("rewind anchor");
+
+    ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
+        .expect("the one-behind anchor is accepted");
+
+    // ...and durably advanced, so the rollback attack cannot recur: truncate
+    // the last line and restore the predecessor checkpoint — the anchor now
+    // sits AHEAD of that state and fails closed.
+    let advanced: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(events.with_file_name("events.anchor")).expect("anchor"),
+    )
+    .expect("anchor json");
+    assert_eq!(
+        advanced["tail_seq"].as_u64().expect("tail_seq"),
+        lines.len() as u64 - 1,
+        "the anchor is advanced to the journal tail during the open"
+    );
+
+    let mut lines: Vec<String> = content.lines().map(str::to_string).collect();
+    let removed = lines.pop().expect("last line");
+    std::fs::write(&events, lines.join("\n") + "\n").expect("truncate");
+    let removed_env: serde_json::Value = serde_json::from_str(&removed).expect("envelope");
+    let prev_seq = lines.len() as u64 - 1;
+    let prev_env: serde_json::Value =
+        serde_json::from_str(&lines[lines.len() - 1]).expect("envelope");
+    let checkpoint = ardur_governance::evidence_checkpoint_json(
+        &test_mac_key(),
+        prev_seq,
+        prev_env["mac"].as_str().expect("mac"),
+    );
+    let _ = removed_env;
+    std::fs::write(events.with_file_name("events.tail"), checkpoint).expect("rolled checkpoint");
+
+    let err = ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
+        .err()
+        .expect("the truncation + checkpoint rollback must fail against the advanced anchor");
+    assert!(
+        err.to_string().contains("anchored tail"),
+        "expected the rollback diagnostic, got: {err}"
+    );
+}

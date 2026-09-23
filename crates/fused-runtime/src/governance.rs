@@ -419,13 +419,48 @@ impl ErMirrorEmitter {
                     ));
                 }
                 None => {
-                    // The first append's crash window: one journaled line,
-                    // no checkpoint yet, and the anchor must still be the
-                    // initial null snapshot (verified against it below).
+                    // The first append's crash window: one journaled line, no
+                    // checkpoint yet, and the anchor must still be the initial
+                    // null snapshot — VERIFY IT BEFORE writing anything. An
+                    // editor who truncates an unmirrored pair to its first
+                    // line and deletes both siblings would otherwise get a
+                    // freshly-written anchor and a signed `effect_unobserved`
+                    // for an event that may have completed: the anchor's
+                    // absence (or a non-null tail) proves this is NOT the
+                    // first append's window.
                     if next_seq != 1 {
                         return Err(ardur_governance::GovernanceError::Io(
                             "evidence journal tail checkpoint is missing over a multi-line \
                              journal (truncation); refusing to replay"
+                                .to_string(),
+                        ));
+                    }
+                    let existing_anchor = open_regular_no_follow(&anchor_path, false)
+                        .map_err(|e| {
+                            ardur_governance::GovernanceError::Io(format!(
+                                "evidence anchor is unreadable ({e}) over a checkpoint-less \
+                                 first line; the anchor proves the first-append crash window — \
+                                 refusing to replay"
+                            ))
+                        })
+                        .and_then(|f| {
+                            read_all_from(&f).map_err(|e| {
+                                ardur_governance::GovernanceError::Io(format!(
+                                    "events anchor read: {e}"
+                                ))
+                            })
+                        })?;
+                    let anchor_json = std::str::from_utf8(&existing_anchor).map_err(|e| {
+                        ardur_governance::GovernanceError::Io(format!("anchor utf8: {e}"))
+                    })?;
+                    let anchor_tail = ardur_governance::verify_evidence_anchor(
+                        &events_mac_key,
+                        anchor_json.trim(),
+                    )?;
+                    if anchor_tail.is_some() {
+                        return Err(ardur_governance::GovernanceError::Io(
+                            "the anchor commits to a tail but no checkpoint exists (not the \
+                             first-append crash window); refusing to replay"
                                 .to_string(),
                         ));
                     }
@@ -516,6 +551,20 @@ impl ErMirrorEmitter {
                                     .to_string(),
                             ));
                         }
+                        // A one-append-behind anchor is the benign
+                        // checkpoint-then-crash window — but leaving it stale
+                        // would let a SECOND crash plus a truncation +
+                        // checkpoint rollback land in a state the stale
+                        // anchor agrees with. Durably advance it to the
+                        // current tail before the sweep, exactly as the
+                        // checkpoint-lag recovery path does.
+                        if idx + 2 == current {
+                            write_events_anchor(
+                                &events_path,
+                                &events_mac_key,
+                                Some((next_seq - 1, tail_chain_mac.as_str())),
+                            )?;
+                        }
                     }
                 }
             }
@@ -600,6 +649,9 @@ impl ErMirrorEmitter {
                 state.tail.as_ref(),
             )?;
             let signed = ErSigner::sign(receipt, &key)?;
+            // Recovery appends are chain transactions too: verify journal
+            // ownership before each (the live paths do the same).
+            verify_lock_inode_for(&events_lock, &lock_path)?;
             append_chain_line(&path, &mut state, signed)?;
             mark_event_recorded(&mut state, pre, post.as_ref());
         }
@@ -659,23 +711,7 @@ impl ErMirrorEmitter {
     /// finding's scenario — impossible to survive.)
     #[cfg(unix)]
     fn verify_lock_inode(&self) -> Result<(), ardur_governance::GovernanceError> {
-        use std::os::unix::fs::MetadataExt as _;
-        let held = self
-            .events_lock
-            .metadata()
-            .map_err(|e| ardur_governance::GovernanceError::Io(format!("events lock stat: {e}")))?;
-        let named = std::fs::symlink_metadata(&self.events_lock_path).map_err(|e| {
-            ardur_governance::GovernanceError::Io(format!(
-                "events lock path stat: {e} (the lock file was replaced?)"
-            ))
-        })?;
-        if held.dev() != named.dev() || held.ino() != named.ino() {
-            return Err(ardur_governance::GovernanceError::Io(
-                    "the events.lock inode changed under us (unlinked and recreated); journal                  ownership is no longer exclusive"
-                        .to_string(),
-                ));
-        }
-        Ok(())
+        verify_lock_inode_for(&self.events_lock, &self.events_lock_path)
     }
 
     /// Non-unix: unreachable (open fails closed without the ownership
@@ -685,6 +721,48 @@ impl ErMirrorEmitter {
         Ok(())
     }
 }
+
+/// The held flock covers the lock file's INODE; an editor who unlinks and
+/// recreates `events.lock` lets a second emitter lock a different inode, and
+/// both would then pass the length fork-check concurrently. Re-verify the
+/// named inode before EVERY journal or chain transaction — the journal
+/// record paths, the round/event chain appends, and the open-time sweep
+/// (which appends ERs before the emitter exists). (A swap landing in the
+/// microseconds between this check and the append is the documented
+/// residual; the check makes the already-executed swap — the finding's
+/// scenario — impossible to survive.)
+#[cfg(unix)]
+fn verify_lock_inode_for(
+    lock: &std::fs::File,
+    lock_path: &Path,
+) -> Result<(), ardur_governance::GovernanceError> {
+    use std::os::unix::fs::MetadataExt as _;
+    let held = lock
+        .metadata()
+        .map_err(|e| ardur_governance::GovernanceError::Io(format!("events lock stat: {e}")))?;
+    let named = std::fs::symlink_metadata(lock_path).map_err(|e| {
+        ardur_governance::GovernanceError::Io(format!(
+            "events lock path stat: {e} (the lock file was replaced?)"
+        ))
+    })?;
+    if held.dev() != named.dev() || held.ino() != named.ino() {
+        return Err(ardur_governance::GovernanceError::Io(
+            "the events.lock inode changed under us (unlinked and recreated); journal \
+             ownership is no longer exclusive"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn verify_lock_inode_for(
+    _lock: &std::fs::File,
+    _lock_path: &Path,
+) -> Result<(), ardur_governance::GovernanceError> {
+    Ok(())
+}
+
 impl GovernanceEmitter for ErMirrorEmitter {
     fn mirror_committed_round(
         &self,
@@ -701,6 +779,12 @@ impl GovernanceEmitter for ErMirrorEmitter {
         let mut state = self.inner.lock();
         if let Some(reason) = state.poisoned.as_deref() {
             return Err(poisoned_error(reason));
+        }
+        // A chain append is a transaction too: confirm the lock inode still
+        // names the file we hold, or a second emitter could be racing it.
+        if let Err(e) = self.verify_lock_inode() {
+            state.poisoned = Some(e.to_string());
+            return Err(e);
         }
 
         // The invocation the ER digests: the round's admission identity plus
@@ -883,6 +967,12 @@ impl GovernanceEmitter for ErMirrorEmitter {
         let mut state = self.inner.lock();
         if let Some(reason) = state.poisoned.as_deref() {
             return Err(poisoned_error(reason));
+        }
+        // A chain append is a transaction too: confirm the lock inode still
+        // names the file we hold, or a second emitter could be racing it.
+        if let Err(e) = self.verify_lock_inode() {
+            state.poisoned = Some(e.to_string());
+            return Err(e);
         }
         // Idempotent per event: a replayed terminal (a live mirror racing a
         // boot sweep, or a caller retry) must not duplicate the ER.
