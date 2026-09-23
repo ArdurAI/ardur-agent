@@ -2576,3 +2576,129 @@ async fn an_anchor_exactly_one_transaction_behind_is_the_benign_crash() {
     ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
         .expect("the one-transaction-behind anchor is the documented benign crash");
 }
+
+// ---------------------------------------------------------------------------
+// Tenth review round: lock-inode replacement + write-order crash recovery.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_replaced_lock_inode_breaks_the_next_transaction() {
+    use ardur_governance::GovernanceEmitter as _;
+    let (_root, mirror, events, _receipts) = scratch();
+    let emitter = ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
+        .expect("open holds the lock");
+
+    // An editor unlinks and recreates events.lock: a second emitter could
+    // now lock the NEW inode, so the holder must refuse its next transaction.
+    let lock_path = events.with_file_name("events.lock");
+    std::fs::remove_file(&lock_path).expect("unlink lock");
+    std::fs::File::create(&lock_path).expect("recreate lock");
+
+    let pre = fixture_pre("session-lock", 0, "call-lock", json!({}));
+    let err = emitter
+        .record_pre_effect(&pre)
+        .expect_err("a replaced lock inode must fail the transaction");
+    assert!(
+        err.to_string().contains("inode"),
+        "expected the inode diagnostic, got: {err}"
+    );
+    // And it poisons like any other append-path failure.
+    let err = emitter
+        .record_pre_effect(&pre)
+        .expect_err("the emitter stays poisoned");
+    assert!(
+        err.to_string().contains("poisoned"),
+        "expected the poison diagnostic, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn a_checkpoint_one_append_behind_recovers_and_advances() {
+    let (_root, mirror, events, receipts) = scratch();
+    one_tool_turn(&mirror, &receipts).await;
+
+    // Simulate the crash after the last journal append fsync but before the
+    // checkpoint publish: roll BOTH the checkpoint and the anchor back to
+    // the previous line's (seq, mac) — the consistent write-order window.
+    let content = std::fs::read_to_string(&events).expect("journal");
+    let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
+    let penultimate: serde_json::Value =
+        serde_json::from_str(lines[lines.len() - 2]).expect("envelope");
+    let prev_seq = lines.len() as u64 - 2;
+    let prev_mac = penultimate["mac"].as_str().expect("mac").to_string();
+    let checkpoint =
+        ardur_governance::evidence_checkpoint_json(&test_mac_key(), prev_seq, prev_mac.as_str());
+    std::fs::write(events.with_file_name("events.tail"), checkpoint).expect("rewind checkpoint");
+    let anchor = ardur_governance::evidence_anchor_json(
+        &test_mac_key(),
+        Some((prev_seq, prev_mac.as_str())),
+    );
+    std::fs::write(events.with_file_name("events.anchor"), anchor).expect("rewind anchor");
+
+    // The open recovers instead of failing...
+    ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
+        .expect("the write-order crash window recovers");
+    // ...and durably advances the checkpoint to the journal tail.
+    let advanced: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(events.with_file_name("events.tail")).expect("checkpoint"),
+    )
+    .expect("checkpoint json");
+    assert_eq!(
+        advanced["seq"].as_u64().expect("seq"),
+        lines.len() as u64 - 1,
+        "the checkpoint is advanced to the journal tail during recovery"
+    );
+}
+
+#[tokio::test]
+async fn a_checkpoint_one_behind_without_anchor_agreement_fails() {
+    let (_root, mirror, events, receipts) = scratch();
+    one_tool_turn(&mirror, &receipts).await;
+
+    // The checkpoint alone rolled back (anchor still at the tail): that is
+    // NOT the write-order window — a deletion + checkpoint rollback looks
+    // exactly like this — so it fails closed.
+    let content = std::fs::read_to_string(&events).expect("journal");
+    let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
+    let penultimate: serde_json::Value =
+        serde_json::from_str(lines[lines.len() - 2]).expect("envelope");
+    let prev_seq = lines.len() as u64 - 2;
+    let prev_mac = penultimate["mac"].as_str().expect("mac").to_string();
+    let checkpoint =
+        ardur_governance::evidence_checkpoint_json(&test_mac_key(), prev_seq, prev_mac.as_str());
+    std::fs::write(events.with_file_name("events.tail"), checkpoint).expect("rewind checkpoint");
+
+    let err = ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
+        .err()
+        .expect("a lone rolled-back checkpoint must fail");
+    assert!(
+        err.to_string().contains("write-order"),
+        "expected the write-order diagnostic, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn the_first_appends_crash_window_recovers() {
+    let (_root, mirror, events, _receipts) = scratch();
+    // One journaled pre line, no checkpoint yet, initial null anchor: the
+    // crash window of the very first append.
+    let pre = fixture_pre("session-first", 0, "call-first", json!({}));
+    let line = EvidenceRecord::PreEffect(Box::new(pre))
+        .to_line()
+        .expect("line");
+    let (content, tail_mac, next_seq) = mac_raw_lines(&[&line]);
+    assert_eq!(next_seq, 1);
+    std::fs::create_dir_all(events.parent().unwrap()).unwrap();
+    std::fs::write(&events, content).expect("journal");
+    let anchor = ardur_governance::evidence_anchor_json(&test_mac_key(), None);
+    std::fs::write(events.with_file_name("events.anchor"), anchor).expect("anchor");
+
+    ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
+        .expect("the first append's crash window recovers");
+    let checkpoint: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(events.with_file_name("events.tail")).expect("checkpoint"),
+    )
+    .expect("checkpoint json");
+    assert_eq!(checkpoint["seq"].as_u64().expect("seq"), 0);
+    assert_eq!(checkpoint["tail_mac"].as_str().expect("tail_mac"), tail_mac);
+}

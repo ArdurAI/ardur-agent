@@ -131,8 +131,12 @@ pub struct ErMirrorEmitter {
     /// The exclusive journal-ownership lock: held for the emitter's
     /// lifetime so a second runtime over the same data directory cannot
     /// interleave appends (the fork check would otherwise be a TOCTOU
-    /// against its own metadata read).
-    _events_lock: std::fs::File,
+    /// against its own metadata read). The lock is on the INODE: the path is
+    /// re-checked against it before every transaction, because an editor
+    /// could unlink and recreate `events.lock` so a second emitter locks a
+    /// different inode.
+    events_lock: std::fs::File,
+    events_lock_path: PathBuf,
 }
 
 impl ErMirrorEmitter {
@@ -305,6 +309,7 @@ impl ErMirrorEmitter {
         // wholesale deletion; a non-empty journal without one (or with a
         // mismatching one) is a tail truncation. Both fail closed.
         let checkpoint_path = events_path.with_file_name("events.tail");
+        let anchor_path = events_path.with_file_name("events.anchor");
         if next_seq == 0 {
             if checkpoint_path.symlink_metadata().is_ok() {
                 return Err(ardur_governance::GovernanceError::Io(
@@ -314,28 +319,123 @@ impl ErMirrorEmitter {
                 ));
             }
         } else {
-            let checkpoint_file = open_regular_no_follow(&checkpoint_path, false).map_err(|e| {
-                ardur_governance::GovernanceError::Io(format!(
-                    "evidence journal tail checkpoint is unreadable ({e}); the journal tail \
-                     may have been truncated — refusing to replay"
-                ))
-            })?;
-            let checkpoint_bytes = read_all_from(&checkpoint_file).map_err(|e| {
-                ardur_governance::GovernanceError::Io(format!("events checkpoint read: {e}"))
-            })?;
-            let checkpoint_json = std::str::from_utf8(&checkpoint_bytes).map_err(|e| {
-                ardur_governance::GovernanceError::Io(format!("checkpoint utf8: {e}"))
-            })?;
-            let (checkpoint_seq, checkpoint_tail) = ardur_governance::verify_evidence_checkpoint(
-                &events_mac_key,
-                checkpoint_json.trim(),
-            )?;
-            if checkpoint_seq != next_seq - 1 || checkpoint_tail != tail_chain_mac {
-                return Err(ardur_governance::GovernanceError::Io(
-                    "evidence journal tail does not match its authenticated checkpoint \
-                     (tail truncation); refusing to replay"
-                        .to_string(),
-                ));
+            // The write order (journal → checkpoint → anchor) leaves one
+            // legitimate stale state: a crash after the journal append fsync
+            // but before the checkpoint publish. That journal line is fully
+            // authenticated (its chain MAC verifies), so rejecting the open
+            // would force manual repair of a state that is provably the
+            // write-order window. Accept the checkpoint exactly one append
+            // behind — only when the anchor AGREES with it (both at the
+            // pre-append tail), which a rolled-back-truncation attack cannot
+            // arrange without the key — then durably advance both siblings
+            // before anything else runs. A checkpoint AHEAD of the journal
+            // or more than one behind stays fail-closed, as does a missing
+            // checkpoint beyond the first append's window.
+            let checkpoint_state: Option<(u64, String)> =
+                match open_regular_no_follow(&checkpoint_path, false) {
+                    Ok(checkpoint_file) => {
+                        let checkpoint_bytes = read_all_from(&checkpoint_file).map_err(|e| {
+                            ardur_governance::GovernanceError::Io(format!(
+                                "events checkpoint read: {e}"
+                            ))
+                        })?;
+                        let checkpoint_json =
+                            std::str::from_utf8(&checkpoint_bytes).map_err(|e| {
+                                ardur_governance::GovernanceError::Io(format!(
+                                    "checkpoint utf8: {e}"
+                                ))
+                            })?;
+                        Some(ardur_governance::verify_evidence_checkpoint(
+                            &events_mac_key,
+                            checkpoint_json.trim(),
+                        )?)
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(e) => {
+                        return Err(ardur_governance::GovernanceError::Io(format!(
+                            "evidence journal tail checkpoint is unreadable ({e}); the journal \
+                             tail may have been truncated — refusing to replay"
+                        )));
+                    }
+                };
+            match checkpoint_state {
+                Some((checkpoint_seq, checkpoint_tail))
+                    if checkpoint_seq == next_seq - 1 && checkpoint_tail == tail_chain_mac =>
+                {
+                    // Current — the steady state.
+                }
+                Some((checkpoint_seq, ref checkpoint_tail))
+                    if checkpoint_seq + 1 == next_seq - 1
+                        && line_macs[checkpoint_seq as usize] == *checkpoint_tail =>
+                {
+                    // One append behind. The anchor must independently agree
+                    // (it was not yet rewritten either), which a deletion +
+                    // checkpoint-rollback cannot forge: the steady-state
+                    // anchor is at the tail, not at the checkpoint.
+                    let anchor_bytes = read_all_from(
+                        &open_regular_no_follow(&anchor_path, false).map_err(|e| {
+                            ardur_governance::GovernanceError::Io(format!(
+                                "events anchor read for crash-window recovery: {e}"
+                            ))
+                        })?,
+                    )
+                    .map_err(|e| {
+                        ardur_governance::GovernanceError::Io(format!("events anchor read: {e}"))
+                    })?;
+                    let anchor_json = std::str::from_utf8(&anchor_bytes).map_err(|e| {
+                        ardur_governance::GovernanceError::Io(format!("anchor utf8: {e}"))
+                    })?;
+                    let anchor_tail = ardur_governance::verify_evidence_anchor(
+                        &events_mac_key,
+                        anchor_json.trim(),
+                    )?;
+                    if anchor_tail != Some((checkpoint_seq, checkpoint_tail.clone())) {
+                        return Err(ardur_governance::GovernanceError::Io(
+                            "the checkpoint is one append behind but the anchor does not \
+                             describe the same pre-append tail (not the write-order crash \
+                             window); refusing to replay"
+                                .to_string(),
+                        ));
+                    }
+                    // Durably advance both siblings to the journal tail
+                    // before the sweep: the recovered state must not persist.
+                    write_events_checkpoint(
+                        &events_path,
+                        &events_mac_key,
+                        next_seq - 1,
+                        &tail_chain_mac,
+                    )?;
+                    write_events_anchor(
+                        &events_path,
+                        &events_mac_key,
+                        Some((next_seq - 1, &tail_chain_mac)),
+                    )?;
+                }
+                Some(_) => {
+                    return Err(ardur_governance::GovernanceError::Io(
+                        "evidence journal tail does not match its authenticated checkpoint \
+                         (tail truncation); refusing to replay"
+                            .to_string(),
+                    ));
+                }
+                None => {
+                    // The first append's crash window: one journaled line,
+                    // no checkpoint yet, and the anchor must still be the
+                    // initial null snapshot (verified against it below).
+                    if next_seq != 1 {
+                        return Err(ardur_governance::GovernanceError::Io(
+                            "evidence journal tail checkpoint is missing over a multi-line \
+                             journal (truncation); refusing to replay"
+                                .to_string(),
+                        ));
+                    }
+                    write_events_checkpoint(&events_path, &events_mac_key, 0, &tail_chain_mac)?;
+                    write_events_anchor(
+                        &events_path,
+                        &events_mac_key,
+                        Some((0, tail_chain_mac.as_str())),
+                    )?;
+                }
             }
         }
 
@@ -357,7 +457,6 @@ impl ErMirrorEmitter {
         // from first initialization — nothing signed exists yet to anchor
         // against; once any event ER chains, the reconciliation closes that
         // window.
-        let anchor_path = events_path.with_file_name("events.anchor");
         let anchor_bytes = match open_regular_no_follow(&anchor_path, false) {
             Ok(file) => Some(read_all_from(&file).map_err(|e| {
                 ardur_governance::GovernanceError::Io(format!("events anchor read: {e}"))
@@ -513,7 +612,8 @@ impl ErMirrorEmitter {
             verifier_id: verifier_id.to_string(),
             run_nonce,
             inner: Mutex::new(state),
-            _events_lock: events_lock,
+            events_lock,
+            events_lock_path: lock_path,
         })
     }
 
@@ -549,8 +649,42 @@ impl ErMirrorEmitter {
     pub fn events_path(&self) -> &Path {
         &self.events_path
     }
-}
 
+    /// The held flock covers the lock file's INODE; an editor who unlinks
+    /// and recreates `events.lock` lets a second emitter lock a different
+    /// inode, and both would then pass the length fork-check concurrently.
+    /// Re-verify the named inode before every transaction. (A swap landing
+    /// in the microseconds between this check and the append is the
+    /// documented residual; the check makes the already-executed swap — the
+    /// finding's scenario — impossible to survive.)
+    #[cfg(unix)]
+    fn verify_lock_inode(&self) -> Result<(), ardur_governance::GovernanceError> {
+        use std::os::unix::fs::MetadataExt as _;
+        let held = self
+            .events_lock
+            .metadata()
+            .map_err(|e| ardur_governance::GovernanceError::Io(format!("events lock stat: {e}")))?;
+        let named = std::fs::symlink_metadata(&self.events_lock_path).map_err(|e| {
+            ardur_governance::GovernanceError::Io(format!(
+                "events lock path stat: {e} (the lock file was replaced?)"
+            ))
+        })?;
+        if held.dev() != named.dev() || held.ino() != named.ino() {
+            return Err(ardur_governance::GovernanceError::Io(
+                    "the events.lock inode changed under us (unlinked and recreated); journal                  ownership is no longer exclusive"
+                        .to_string(),
+                ));
+        }
+        Ok(())
+    }
+
+    /// Non-unix: unreachable (open fails closed without the ownership
+    /// guard); kept so the crate still compiles there.
+    #[cfg(not(unix))]
+    fn verify_lock_inode(&self) -> Result<(), ardur_governance::GovernanceError> {
+        Ok(())
+    }
+}
 impl GovernanceEmitter for ErMirrorEmitter {
     fn mirror_committed_round(
         &self,
@@ -639,6 +773,10 @@ impl GovernanceEmitter for ErMirrorEmitter {
         if let Some(reason) = state.poisoned.as_deref() {
             return Err(poisoned_error(reason));
         }
+        if let Err(e) = self.verify_lock_inode() {
+            state.poisoned = Some(e.to_string());
+            return Err(e);
+        }
         if state.open_event_ids.contains(&record.event_id)
             || state.closed_event_ids.contains(&record.event_id)
         {
@@ -685,6 +823,10 @@ impl GovernanceEmitter for ErMirrorEmitter {
         let mut state = self.inner.lock();
         if let Some(reason) = state.poisoned.as_deref() {
             return Err(poisoned_error(reason));
+        }
+        if let Err(e) = self.verify_lock_inode() {
+            state.poisoned = Some(e.to_string());
+            return Err(e);
         }
         if !state.open_event_ids.contains(&record.event_id) {
             let err = ardur_governance::GovernanceError::Io(format!(
