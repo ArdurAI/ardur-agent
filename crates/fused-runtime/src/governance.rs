@@ -260,6 +260,17 @@ impl ErMirrorEmitter {
                 "events lock: another emitter owns this evidence journal ({e})"
             ))
         })?;
+        // The workspace MSRV (1.85) predates std's portable file locks, so
+        // non-unix hosts have no exclusive-ownership primitive here: holding
+        // the lock file open would provide NO exclusion and two emitters
+        // could race the fork-check/append transaction. Fail closed rather
+        // than run the mirror without its ownership guard.
+        #[cfg(not(unix))]
+        return Err(ardur_governance::GovernanceError::Io(
+            "the evidence journal's exclusive-ownership guard requires a unix host; \
+             refusing to start the mirror without it"
+                .to_string(),
+        ));
 
         let events_file = open_append_no_follow(&events_path)
             .map_err(|e| ardur_governance::GovernanceError::Io(format!("events open: {e}")))?;
@@ -377,13 +388,35 @@ impl ErMirrorEmitter {
                 })?;
                 let anchor_tail =
                     ardur_governance::verify_evidence_anchor(&events_mac_key, json.trim())?;
-                if let Some((anchor_seq, anchor_mac)) = anchor_tail {
-                    let idx = anchor_seq as usize;
-                    if idx >= line_macs.len() || line_macs[idx] != anchor_mac {
-                        return Err(ardur_governance::GovernanceError::Io(
-                            "the journal/checkpoint tail is below the anchored tail (wholesale                              deletion or rollback of the evidence pair); refusing to replay"
-                                .to_string(),
-                        ));
+                // The write order (journal → checkpoint → anchor) bounds a
+                // benign crash to an anchor that is current or EXACTLY one
+                // transaction behind — anything older is a restored
+                // snapshot, and a null anchor over a multi-line journal is
+                // the initial snapshot restored past the first append. The
+                // only legitimate null anchors are the empty journal and
+                // the first append's crash window (next_seq == 1).
+                match anchor_tail {
+                    None => {
+                        if next_seq > 1 {
+                            return Err(ardur_governance::GovernanceError::Io(
+                                "the evidence anchor is the initial null-tail snapshot but the \
+                                 journal has more than one line (restored anchor); refusing to \
+                                 replay"
+                                    .to_string(),
+                            ));
+                        }
+                    }
+                    Some((anchor_seq, anchor_mac)) => {
+                        let idx = anchor_seq as usize;
+                        let current = next_seq as usize;
+                        if idx >= current || idx + 2 < current || line_macs[idx] != anchor_mac {
+                            return Err(ardur_governance::GovernanceError::Io(
+                                "the journal/checkpoint tail is not the anchored tail or its \
+                                 immediate predecessor (wholesale deletion or rollback of the \
+                                 evidence pair); refusing to replay"
+                                    .to_string(),
+                            ));
+                        }
                     }
                 }
             }
@@ -849,9 +882,16 @@ fn write_durable_sibling(
             Mode::empty(),
         )
         .map_err(|e| std::io::Error::from_raw_os_error(e.raw_os_error()))?;
+        // Atomic publish: write and fsync a temporary sibling, then rename
+        // it onto the target through the anchored parent. A crash between
+        // O_TRUNC and the write could otherwise leave the previous (valid)
+        // document destroyed and the new one absent — with rename, the
+        // previous document remains visible until its durable replacement
+        // exists.
+        let tmp_name = format!("{name}.tmp");
         let mut file = openat(
             &parent,
-            name,
+            tmp_name.as_str(),
             OFlags::RDWR | OFlags::CREATE | OFlags::TRUNC | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::from_raw_mode(0o600),
         )
@@ -859,6 +899,8 @@ fn write_durable_sibling(
         .map_err(|e| std::io::Error::from_raw_os_error(e.raw_os_error()))?;
         file.write_all(contents.as_bytes())?;
         file.sync_all()?;
+        rustix::fs::renameat(&parent, tmp_name.as_str(), &parent, name)
+            .map_err(|e| std::io::Error::from_raw_os_error(e.raw_os_error()))?;
         std::fs::File::from(parent).sync_all()
     })();
     write_result.map_err(|e| {

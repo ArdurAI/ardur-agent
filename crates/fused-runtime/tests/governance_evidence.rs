@@ -2502,3 +2502,77 @@ async fn a_first_initialization_creates_the_anchor_and_reopens_clean() {
     // And a plain reopen of an intact store stays clean.
     ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID).expect("clean reopen");
 }
+
+// ---------------------------------------------------------------------------
+// Ninth review round: atomic publish residue + bounded anchor lag.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn crash_residue_tmp_siblings_do_not_disturb_the_open() {
+    let (_root, mirror, events, receipts) = scratch();
+    one_tool_turn(&mirror, &receipts).await;
+    // A crash mid-publish leaves the temp siblings behind; the next open
+    // must ignore them entirely (the pre-rename document is still live).
+    std::fs::write(events.with_file_name("events.tail.tmp"), "garbage").expect("tmp residue");
+    std::fs::write(events.with_file_name("events.anchor.tmp"), "{\"torn").expect("tmp residue");
+    ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
+        .expect("tmp residue from a crash mid-publish is ignored");
+}
+
+#[tokio::test]
+async fn an_anchor_restored_to_the_initial_snapshot_fails_on_a_multi_line_journal() {
+    let (_root, mirror, events, receipts) = scratch();
+    // Two turns: the journal has 4 lines; restore the initial null anchor.
+    one_tool_turn(&mirror, &receipts).await;
+    one_tool_turn(&mirror, &receipts).await;
+    let null_anchor = ardur_governance::evidence_anchor_json(&test_mac_key(), None);
+    std::fs::write(events.with_file_name("events.anchor"), null_anchor).expect("restore anchor");
+
+    let err = ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
+        .err()
+        .expect("the initial null anchor on a multi-line journal must fail");
+    assert!(
+        err.to_string().contains("null-tail"),
+        "expected the restored-anchor diagnostic, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn an_anchor_more_than_one_transaction_behind_fails() {
+    let (_root, mirror, events, receipts) = scratch();
+    one_tool_turn(&mirror, &receipts).await;
+    // Snapshot the one-line-pair anchor, then run two more turns.
+    let anchor_v1 =
+        std::fs::read_to_string(events.with_file_name("events.anchor")).expect("anchor v1");
+    one_tool_turn(&mirror, &receipts).await;
+    one_tool_turn(&mirror, &receipts).await;
+    std::fs::write(events.with_file_name("events.anchor"), anchor_v1).expect("restore old anchor");
+
+    let err = ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
+        .err()
+        .expect("an anchor two or more transactions behind must fail");
+    assert!(
+        err.to_string().contains("anchored tail"),
+        "expected the rollback diagnostic, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn an_anchor_exactly_one_transaction_behind_is_the_benign_crash() {
+    let (_root, mirror, events, receipts) = scratch();
+    one_tool_turn(&mirror, &receipts).await;
+    // The crash between the checkpoint and anchor writes leaves the anchor
+    // exactly one append behind the strict checkpoint: commit the anchor to
+    // the journal's penultimate line (seq len-2), exactly that state.
+    let content = std::fs::read_to_string(&events).expect("journal");
+    let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
+    let penultimate: serde_json::Value =
+        serde_json::from_str(lines[lines.len() - 2]).expect("envelope");
+    let seq = lines.len() as u64 - 2;
+    let mac = penultimate["mac"].as_str().expect("mac").to_string();
+    let anchor = ardur_governance::evidence_anchor_json(&test_mac_key(), Some((seq, mac.as_str())));
+    std::fs::write(events.with_file_name("events.anchor"), anchor).expect("rewind anchor");
+
+    ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
+        .expect("the one-transaction-behind anchor is the documented benign crash");
+}
