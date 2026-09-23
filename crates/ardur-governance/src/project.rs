@@ -514,29 +514,61 @@ pub fn project_event_execution_receipt(
         ),
         Some(post) => {
             let outcome = match &post.outcome {
-                EventOutcome::Completed(completed) => match completed.output_admission {
-                    EvidenceOutputAdmission::Allowed => AuthOutcome::Compliant,
-                    EvidenceOutputAdmission::Blocked => AuthOutcome::Violation {
-                        public: PublicDenialReason::PolicyDenied,
-                        internal: OUTPUT_SCAN_BLOCKED_CODE.to_string(),
-                    },
-                    EvidenceOutputAdmission::Undetermined => AuthOutcome::InsufficientEvidence {
-                        internal: OUTPUT_SCAN_ERROR_CODE.to_string(),
-                    },
-                },
-                EventOutcome::Denied(denied) => match denied.public {
-                    // A denial whose own classification is "could not
-                    // establish what this authorizes" stays insufficient —
-                    // filing it as a violation would claim knowledge the
-                    // verifier does not have (§9.2).
-                    PublicDenialReason::InsufficientEvidence => AuthOutcome::InsufficientEvidence {
-                        internal: denied.internal.clone(),
-                    },
-                    _ => AuthOutcome::Violation {
-                        public: denied.public,
-                        internal: denied.internal.clone(),
-                    },
-                },
+                EventOutcome::Completed(completed) => {
+                    // The journal is untrusted at replay: a corrupt completed
+                    // observation must fail closed at the open, not be hashed
+                    // into a signed reason.
+                    if !is_lower_hex_sha256(&completed.output_digest) {
+                        return Err(GovernanceError::InvalidClaim(format!(
+                            "evidence integrity: the recorded output digest for event {} is \
+                             not a lowercase-hex SHA-256 (tampered or corrupt journal)",
+                            pre.event_id
+                        )));
+                    }
+                    match completed.output_admission {
+                        EvidenceOutputAdmission::Allowed => AuthOutcome::Compliant,
+                        EvidenceOutputAdmission::Blocked => AuthOutcome::Violation {
+                            public: PublicDenialReason::PolicyDenied,
+                            internal: OUTPUT_SCAN_BLOCKED_CODE.to_string(),
+                        },
+                        EvidenceOutputAdmission::Undetermined => {
+                            AuthOutcome::InsufficientEvidence {
+                                internal: OUTPUT_SCAN_ERROR_CODE.to_string(),
+                            }
+                        }
+                    }
+                }
+                EventOutcome::Denied(denied) => {
+                    // Replay trusts no (public, internal) pair it cannot
+                    // account for: the code must be in the vocabulary and
+                    // carry its canonical public reason, or the record is
+                    // corrupt — never signed.
+                    match canonical_public_for_denial_code(&denied.internal) {
+                        Some(canonical) if canonical == denied.public => {}
+                        _ => {
+                            return Err(GovernanceError::InvalidClaim(format!(
+                                "evidence integrity: the recorded denial code {:?} does not \
+                                 pair with public reason {:?} (tampered or corrupt journal)",
+                                denied.internal, denied.public
+                            )));
+                        }
+                    }
+                    match denied.public {
+                        // A denial whose own classification is "could not
+                        // establish what this authorizes" stays insufficient —
+                        // filing it as a violation would claim knowledge the
+                        // verifier does not have (§9.2).
+                        PublicDenialReason::InsufficientEvidence => {
+                            AuthOutcome::InsufficientEvidence {
+                                internal: denied.internal.clone(),
+                            }
+                        }
+                        _ => AuthOutcome::Violation {
+                            public: denied.public,
+                            internal: denied.internal.clone(),
+                        },
+                    }
+                }
                 EventOutcome::FailedUnknown => AuthOutcome::InsufficientEvidence {
                     internal: EFFECT_UNKNOWN_EXECUTION_CODE.to_string(),
                 },
@@ -639,23 +671,59 @@ pub fn project_event_execution_receipt(
         },
         backend,
     )?;
-    // Bind the terminal observation into the signed claims: the ER's audit
-    // `reason` carries the SHA-256 of the durable post-effect record's
-    // journal line (outcome, observed output digest, incurred cost,
-    // timestamp — the whole terminal fact set, since the v0.1 schema's
-    // `additionalProperties: false` leaves no free field for it). Without
-    // this, editing a completed event's recorded output digest or cost in
-    // the journal would re-project an exactly equal receipt and pass the
-    // reopen reconciliation unchecked.
+    // Bind the durable evidence into the signed claims: the ER's audit
+    // `reason` carries the SHA-256 over the canonical pre-effect journal
+    // line and — when the event reached a terminal observation — the
+    // post-effect line too (the v0.1 schema's `additionalProperties: false`
+    // leaves no free field for it). Without this, editing a chained event's
+    // recorded provenance (kind, iteration, ordinal, call id) or outcome
+    // would re-project an exactly equal receipt and pass the reopen
+    // reconciliation unchecked.
+    let mut evidence =
+        crate::evidence::EvidenceRecord::PreEffect(Box::new(pre.clone())).to_line()?;
     if let Some(post) = post {
-        let line = crate::evidence::EvidenceRecord::PostEffect(post.clone()).to_line()?;
-        receipt.reason = format!(
-            "{}; evidence sha256:{}",
-            receipt.reason,
-            sha256_hex(line.as_bytes())
-        );
+        evidence.push('\n');
+        evidence.push_str(&crate::evidence::EvidenceRecord::PostEffect(post.clone()).to_line()?);
     }
+    receipt.reason = format!(
+        "{}; evidence sha256:{}",
+        receipt.reason,
+        sha256_hex(evidence.as_bytes())
+    );
     Ok(receipt)
+}
+
+/// The canonical public denial reason an event's internal denial code pairs
+/// with, or `None` for a code outside the #543 vocabulary. The journal is
+/// explicitly untrusted at replay: a syntactically valid record pairing e.g.
+/// `revoked` with `approval_rejected` must fail closed at the open, not be
+/// signed with a backend attribution its fields disagree on.
+fn canonical_public_for_denial_code(internal: &str) -> Option<PublicDenialReason> {
+    Some(match internal {
+        "grant_expired"
+        | "tool_not_allowed"
+        | "audience_mismatch"
+        | "capability_not_granted"
+        | "policy_denied"
+        | "unknown_tool"
+        | "approval_required"
+        | "approval_rejected"
+        | "output_scan_blocked"
+        | "memory_capability_denied"
+        | "memory_policy_denied"
+        | "memory_subject_mismatch"
+        | "memory_receipt_required"
+        | "memory_record_malformed"
+        | "memory_write_denied" => PublicDenialReason::PolicyDenied,
+        "revoked" => PublicDenialReason::Revoked,
+        "signature_invalid" => PublicDenialReason::ChainInvalid,
+        "budget_exhausted" => PublicDenialReason::BudgetExhausted,
+        "policy_indeterminate"
+        | "memory_policy_indeterminate"
+        | "approval_evaluation_error"
+        | "tool_invocation_error" => PublicDenialReason::InsufficientEvidence,
+        _ => return None,
+    })
 }
 
 /// The policy backend an event outcome's verdict is attributed to (ER

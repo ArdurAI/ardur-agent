@@ -1972,3 +1972,176 @@ async fn the_signed_reason_binds_the_terminal_evidence() {
         "a compliant event's admission attributes to the cap-token permit"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Fourth review round: pre-record evidence binding, completed-digest
+// validation, denial-pair validation, terminal-before-settlement ordering.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_tampered_pre_record_fails_the_reopen() {
+    let (_root, mirror, events, receipts) = scratch();
+    one_tool_turn(&mirror, &receipts).await;
+
+    // Tamper ONLY pre-effect provenance the projection does not otherwise
+    // consume (the iteration counter): without the pre record in the signed
+    // evidence binding, the reopen would reproduce the chained receipt and
+    // accept the edit.
+    let text = std::fs::read_to_string(&events).expect("journal");
+    let mut lines: Vec<String> = Vec::new();
+    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+        let mut value: serde_json::Value = serde_json::from_str(line).expect("parse");
+        if let Some(pre) = value.get_mut("pre_effect") {
+            pre["iteration"] = json!(99);
+        }
+        lines.push(serde_json::to_string(&value).expect("serialize"));
+    }
+    std::fs::write(&events, lines.join("\n") + "\n").expect("rewrite");
+
+    let err = ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
+        .err()
+        .expect("a tampered pre record must fail the reopen");
+    assert!(
+        err.to_string().contains("does not reproduce"),
+        "expected the re-projection diagnostic, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn a_corrupt_completed_output_digest_fails_the_open() {
+    let (_root, mirror, events, _receipts) = scratch();
+    std::fs::create_dir_all(events.parent().expect("parent")).expect("mkdir");
+    // A completed post whose output digest is not a SHA-256 at all, stranded
+    // before its live mirror: the sweep must fail closed, not hash a
+    // malformed record into a signed reason.
+    let pre = fixture_pre("session-out", 0, "call-out", json!({}));
+    let post = PostEffectRecord::new(
+        &pre,
+        1_750_000_001_000,
+        EventOutcome::Completed(CompletedOutcome {
+            output_digest: "not-a-sha256".to_string(),
+            cost: ardur_runtime::CostTuple::default(),
+            output_admission: EvidenceOutputAdmission::Allowed,
+        }),
+    );
+    use std::io::Write as _;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&events)
+        .expect("create journal");
+    writeln!(
+        file,
+        "{}",
+        EvidenceRecord::PreEffect(Box::new(pre)).to_line().unwrap()
+    )
+    .expect("pre");
+    writeln!(
+        file,
+        "{}",
+        EvidenceRecord::PostEffect(post).to_line().unwrap()
+    )
+    .expect("post");
+    drop(file);
+
+    let err = ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
+        .err()
+        .expect("a corrupt completed digest must fail the open");
+    assert!(
+        err.to_string().contains("evidence integrity"),
+        "expected the integrity diagnostic, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn a_mismatched_denial_pair_fails_the_open() {
+    let (_root, mirror, events, _receipts) = scratch();
+    std::fs::create_dir_all(events.parent().expect("parent")).expect("mkdir");
+    // A syntactically valid but impossible pairing: public `revoked` with
+    // internal `approval_rejected` — the replay must refuse to sign it.
+    let pre = fixture_pre("session-pair", 0, "call-pair", json!({}));
+    let post = PostEffectRecord::new(
+        &pre,
+        1_750_000_001_000,
+        EventOutcome::Denied(ardur_governance::DeniedOutcome {
+            public: PublicDenialReason::Revoked,
+            internal: "approval_rejected".to_string(),
+        }),
+    );
+    use std::io::Write as _;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&events)
+        .expect("create journal");
+    writeln!(
+        file,
+        "{}",
+        EvidenceRecord::PreEffect(Box::new(pre)).to_line().unwrap()
+    )
+    .expect("pre");
+    writeln!(
+        file,
+        "{}",
+        EvidenceRecord::PostEffect(post).to_line().unwrap()
+    )
+    .expect("post");
+    drop(file);
+
+    let err = ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
+        .err()
+        .expect("a mismatched denial pair must fail the open");
+    assert!(
+        err.to_string().contains("does not pair"),
+        "expected the pair diagnostic, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn a_canonical_denial_pair_still_replays() {
+    let (_root, mirror, events, _receipts) = scratch();
+    std::fs::create_dir_all(events.parent().expect("parent")).expect("mkdir");
+    // The live constructors' canonical pairs replay: revoked/revoked sweeps
+    // its ER with the typed classification intact.
+    let pre = fixture_pre("session-rev", 0, "call-rev", json!({}));
+    let post = PostEffectRecord::new(
+        &pre,
+        1_750_000_001_000,
+        EventOutcome::Denied(ardur_governance::DeniedOutcome {
+            public: PublicDenialReason::Revoked,
+            internal: "revoked".to_string(),
+        }),
+    );
+    use std::io::Write as _;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&events)
+        .expect("create journal");
+    writeln!(
+        file,
+        "{}",
+        EvidenceRecord::PreEffect(Box::new(pre)).to_line().unwrap()
+    )
+    .expect("pre");
+    writeln!(
+        file,
+        "{}",
+        EvidenceRecord::PostEffect(post).to_line().unwrap()
+    )
+    .expect("post");
+    drop(file);
+
+    ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
+        .expect("a canonical pair opens and sweeps");
+    let chain = signed_chain(&mirror);
+    assert_eq!(chain.len(), 1);
+    let claims = chain[0].receipt();
+    assert_eq!(claims.verdict, Verdict::Violation);
+    assert_eq!(
+        claims.public_denial_reason,
+        Some(PublicDenialReason::Revoked)
+    );
+    assert_eq!(claims.internal_denial_code.as_deref(), Some("revoked"));
+    assert_eq!(claims.policy_decisions[0].backend, "cap-token");
+}

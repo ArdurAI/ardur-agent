@@ -3669,31 +3669,16 @@ impl FusedRuntime {
 
                     // Scan the tool output before it re-enters the context.
                     let scan_result = self.scan_tool_output(&call.name, &output.content).await;
-                    self.observe_tool(
-                        &mut reservation,
-                        tool_ordinal,
-                        call,
-                        ToolEffect::Completed {
-                            output_digest: GateSha256::of(
-                                &serde_json::to_vec(&output.content)
-                                    .map_err(|e| RuntimeError::Internal(e.into()))?,
-                            ),
-                            cost: output.cost,
-                        },
-                        if scan_result.is_ok() {
-                            OutputAdmission::Allowed
-                        } else {
-                            OutputAdmission::Blocked
-                        },
-                    )?;
                     // #543: the event is terminal at the scan decision — the
                     // observed effect (digest + incurred cost) plus the
-                    // output-admission decision. Recorded BEFORE the cancel
-                    // gate below so a caller disconnect cannot strand a
-                    // completed tool without its evidence. A scanner
-                    // operational failure (a filter error, not a block
-                    // verdict) records admission as undetermined →
-                    // insufficient_evidence, never a guessed violation.
+                    // output-admission decision. Recorded BEFORE the fallible
+                    // settlement observation below: a settlement persistence
+                    // failure must not strand an already-observed result as
+                    // effect_unobserved, and a caller disconnect cannot
+                    // strand it either. A scanner operational failure (a
+                    // filter error, not a block verdict) records admission as
+                    // undetermined → insufficient_evidence, never a guessed
+                    // violation.
                     self.governance_terminal_event(
                         &governance_pre,
                         EventOutcome::Completed(CompletedOutcome {
@@ -3711,6 +3696,23 @@ impl FusedRuntime {
                             },
                         }),
                     );
+                    self.observe_tool(
+                        &mut reservation,
+                        tool_ordinal,
+                        call,
+                        ToolEffect::Completed {
+                            output_digest: GateSha256::of(
+                                &serde_json::to_vec(&output.content)
+                                    .map_err(|e| RuntimeError::Internal(e.into()))?,
+                            ),
+                            cost: output.cost,
+                        },
+                        if scan_result.is_ok() {
+                            OutputAdmission::Allowed
+                        } else {
+                            OutputAdmission::Blocked
+                        },
+                    )?;
                     reservation = match self
                         .abort_if_caller_gone(session_id, reservation, known, &cancel_probe)
                         .await
@@ -4609,13 +4611,13 @@ impl FusedRuntime {
 
                         // Scan the tool output before it re-enters the context.
                         let scan_result = self.scan_tool_output(&call.name, &output.content).await;
-                        self.observe_tool(reservation.as_mut().expect("held"), tool_ordinal, call, ToolEffect::Completed {
-                            output_digest: GateSha256::of(&serde_json::to_vec(&output.content).map_err(|e| RuntimeError::Internal(e.into()))?), cost: output.cost,
-                        }, if scan_result.is_ok() { OutputAdmission::Allowed } else { OutputAdmission::Blocked })?;
                         // #543: terminal at the scan decision — observed
-                        // effect + output-admission decision. A scanner
-                        // operational failure (a filter error, not a block
-                        // verdict) records admission as undetermined →
+                        // effect + output-admission decision, recorded BEFORE
+                        // the fallible settlement observation below (a
+                        // settlement persistence failure must not strand an
+                        // already-observed result as effect_unobserved). A
+                        // scanner operational failure (a filter error, not a
+                        // block verdict) records admission as undetermined →
                         // insufficient_evidence, never a guessed violation.
                         self.governance_terminal_event(
                             &governance_pre,
@@ -4634,6 +4636,9 @@ impl FusedRuntime {
                                 },
                             }),
                         );
+                        self.observe_tool(reservation.as_mut().expect("held"), tool_ordinal, call, ToolEffect::Completed {
+                            output_digest: GateSha256::of(&serde_json::to_vec(&output.content).map_err(|e| RuntimeError::Internal(e.into()))?), cost: output.cost,
+                        }, if scan_result.is_ok() { OutputAdmission::Allowed } else { OutputAdmission::Blocked })?;
                         if let Err(err) = scan_result {
                             yield FusedEvent::StageEnd { stage: StageKind::ToolExec, ok: false };
                             let known = response
