@@ -5020,10 +5020,30 @@ fn capability_effect(cap: &Capability) -> (&'static str, ErActionClass, ErSideEf
 /// permission nor a breach — it is `insufficient_evidence`, never a proven
 /// violation. Any other operational failure classifies the same way: only
 /// the recognized policy-denial shapes mint a violation.
+///
+/// `stage_cap_token_for_tool_at` collapses the typed [`CapTokenError`] into
+/// `RuntimeError::CapDenied`'s display string; the classifications the
+/// mirror distinguishes are re-derived from those exact display strings
+/// (constructed from the enum itself, so a display change breaks the unit
+/// tests loudly rather than silently mis-classifying). This preserves the
+/// repository's existing `revoked`/`revoked` classification for mid-turn
+/// revocations instead of flattening them into `tool_not_allowed`.
 fn tool_auth_denial_classification(err: &RuntimeError) -> (ErPublicDenialReason, &'static str) {
     match err {
         RuntimeError::CapTokenExpired => (ErPublicDenialReason::PolicyDenied, "grant_expired"),
-        RuntimeError::CapDenied { .. } => (ErPublicDenialReason::PolicyDenied, "tool_not_allowed"),
+        RuntimeError::CapDenied { reason } => {
+            if *reason == CapTokenError::Revoked.to_string() {
+                (ErPublicDenialReason::Revoked, "revoked")
+            } else if *reason == CapTokenError::AudienceMismatch.to_string() {
+                (ErPublicDenialReason::PolicyDenied, "audience_mismatch")
+            } else if *reason == CapTokenError::SignatureInvalid.to_string() {
+                (ErPublicDenialReason::ChainInvalid, "signature_invalid")
+            } else if *reason == CapTokenError::BudgetExhausted.to_string() {
+                (ErPublicDenialReason::BudgetExhausted, "budget_exhausted")
+            } else {
+                (ErPublicDenialReason::PolicyDenied, "tool_not_allowed")
+            }
+        }
         RuntimeError::PolicyDenied { reason } if reason.starts_with("indeterminate:") => (
             ErPublicDenialReason::InsufficientEvidence,
             "policy_indeterminate",
@@ -5385,6 +5405,49 @@ mod governance_classification_tests {
         let (public, internal) = tool_auth_denial_classification(&err);
         assert_eq!(public, ErPublicDenialReason::InsufficientEvidence);
         assert_eq!(internal, "tool_invocation_error");
+    }
+
+    #[test]
+    fn a_mid_turn_revocation_keeps_its_typed_classification() {
+        // stage_cap_token_for_tool_at collapses the typed CapTokenError into
+        // the CapDenied display string; the classification must re-derive the
+        // repository's existing shape rather than flattening every cap
+        // failure into tool_not_allowed.
+        let err = RuntimeError::CapDenied {
+            reason: CapTokenError::Revoked.to_string(),
+        };
+        let (public, internal) = tool_auth_denial_classification(&err);
+        assert_eq!(public, ErPublicDenialReason::Revoked);
+        assert_eq!(internal, "revoked");
+
+        let err = RuntimeError::CapDenied {
+            reason: CapTokenError::AudienceMismatch.to_string(),
+        };
+        let (public, internal) = tool_auth_denial_classification(&err);
+        assert_eq!(public, ErPublicDenialReason::PolicyDenied);
+        assert_eq!(internal, "audience_mismatch");
+
+        let err = RuntimeError::CapDenied {
+            reason: CapTokenError::SignatureInvalid.to_string(),
+        };
+        let (public, internal) = tool_auth_denial_classification(&err);
+        assert_eq!(public, ErPublicDenialReason::ChainInvalid);
+        assert_eq!(internal, "signature_invalid");
+
+        let err = RuntimeError::CapDenied {
+            reason: CapTokenError::BudgetExhausted.to_string(),
+        };
+        let (public, internal) = tool_auth_denial_classification(&err);
+        assert_eq!(public, ErPublicDenialReason::BudgetExhausted);
+        assert_eq!(internal, "budget_exhausted");
+
+        // The default stays a policy denial for the remaining shapes.
+        let err = RuntimeError::CapDenied {
+            reason: CapTokenError::ToolNotAllowed.to_string(),
+        };
+        let (public, internal) = tool_auth_denial_classification(&err);
+        assert_eq!(public, ErPublicDenialReason::PolicyDenied);
+        assert_eq!(internal, "tool_not_allowed");
     }
 
     #[test]

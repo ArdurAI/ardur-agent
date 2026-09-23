@@ -485,6 +485,22 @@ fn a_foreign_append_between_ours_fails_closed_instead_of_forking() {
         }
         other => panic!("expected Io, got {other:?}"),
     }
+    // And the fork poisons the emitter: no later receipt may chain past the
+    // omission (a transient-looking failure would otherwise let the chain
+    // skip an evaluated event and keep going).
+    let err = match emitter.mirror_committed_round(&facts_for_step("step-y")) {
+        Ok(()) => panic!("a poisoned emitter must refuse"),
+        Err(err) => err,
+    };
+    match err {
+        ardur_governance::GovernanceError::Io(m) => {
+            assert!(
+                m.contains("poisoned"),
+                "expected the poison diagnostic, got: {m}"
+            );
+        }
+        other => panic!("expected Io, got {other:?}"),
+    }
 }
 
 #[test]

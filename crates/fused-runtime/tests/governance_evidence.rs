@@ -1675,3 +1675,155 @@ async fn the_memory_pre_record_is_durable_before_the_backend_write() {
          BEFORE the memory mutation is invoked"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Second review round: bidirectional chain/journal reconciliation, poisoned
+// chain appends, digest-only replay validation, revoked classification.
+// ---------------------------------------------------------------------------
+
+/// Run one single-tool turn and leave the mirror + journal on disk.
+async fn one_tool_turn(mirror: &std::path::Path, receipts: &std::path::Path) {
+    let provider = ScriptedProvider::new(
+        vec![tool_calls(vec![("call-1", "echo")]), stop("done")],
+        stop("d"),
+    );
+    let runtime = runtime_builder(Arc::new(provider))
+        .receipt_log(receipts)
+        .with_tools(echo_registry())
+        .with_governance(open_emitter(mirror))
+        .build()
+        .expect("runtime builds");
+    runtime
+        .submit(user_request("go", &valid_token()))
+        .await
+        .expect("turn commits");
+}
+
+#[tokio::test]
+async fn a_tampered_chained_journal_fails_the_reopen() {
+    let (_root, mirror, events, receipts) = scratch();
+    one_tool_turn(&mirror, &receipts).await;
+    assert!(
+        signed_chain(&mirror)
+            .iter()
+            .any(|er| er.receipt().step_id.starts_with("ev:")),
+        "the event ER is chained"
+    );
+
+    // Tamper the POST record's outcome (allowed → blocked): the digests are
+    // untouched, so only the re-projection comparison catches it.
+    let text = std::fs::read_to_string(&events).expect("journal");
+    let mut lines: Vec<String> = Vec::new();
+    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+        let mut value: serde_json::Value = serde_json::from_str(line).expect("parse");
+        if let Some(post) = value.get_mut("post_effect") {
+            post["outcome"]["completed"]["output_admission"] = json!("blocked");
+        }
+        lines.push(serde_json::to_string(&value).expect("serialize"));
+    }
+    std::fs::write(&events, lines.join("\n") + "\n").expect("rewrite");
+
+    let result = ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID);
+    let err = match result {
+        Ok(_) => panic!("a tampered journal must fail the reopen"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string().contains("does not reproduce"),
+        "expected the re-projection diagnostic, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn a_deleted_journal_fails_the_reopen() {
+    let (_root, mirror, events, receipts) = scratch();
+    one_tool_turn(&mirror, &receipts).await;
+    assert!(
+        signed_chain(&mirror)
+            .iter()
+            .any(|er| er.receipt().step_id.starts_with("ev:")),
+        "the event ER is chained"
+    );
+
+    // Deleting/replacing the journal after mirroring must not let fresh ERs
+    // chain onto events the mirror can no longer account for.
+    std::fs::write(&events, "").expect("truncate the journal");
+
+    let result = ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID);
+    let err = match result {
+        Ok(_) => panic!("a deleted journal must fail the reopen"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string().contains("no durable evidence"),
+        "expected the missing-evidence diagnostic, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn a_corrupt_digest_only_record_fails_the_reopen() {
+    let (_root, mirror, events, _receipts) = scratch();
+    std::fs::create_dir_all(events.parent().expect("parent")).expect("mkdir");
+    // A digest-only pre (arguments over the inline cap): the recorded
+    // arguments_hash is not a SHA-256 at all. The replay must refuse to sign
+    // it, exactly as the inline-arguments branch refuses a hash mismatch.
+    let pre = fixture_pre("session-digest", 0, "call-digest", json!({"k": "v"}));
+    let mut value = serde_json::to_value(&pre).expect("serialize");
+    value["arguments"] = serde_json::Value::Null;
+    value["arguments_hash"] = json!("not-a-sha256");
+    let line = serde_json::to_string(&json!({ "pre_effect": value })).expect("line");
+    use std::io::Write as _;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&events)
+        .expect("create journal");
+    writeln!(file, "{line}").expect("write");
+    drop(file);
+
+    let result = ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID);
+    let err = match result {
+        Ok(_) => panic!("a corrupt digest-only record must fail the reopen"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string().contains("evidence integrity"),
+        "expected the integrity diagnostic, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn a_wellformed_digest_only_record_replays_as_insufficient_evidence() {
+    let (_root, mirror, events, _receipts) = scratch();
+    std::fs::create_dir_all(events.parent().expect("parent")).expect("mkdir");
+    // The honest digest-only path: well-formed recorded digests over inputs
+    // the journal does not show replay to an explicit insufficient_evidence
+    // orphan (a stranded pre), never to compliance.
+    let args = json!({"blob": "x".repeat(1000)});
+    let pre = fixture_pre("session-digest", 0, "call-digest", args.clone());
+    let (arguments_hash, invocation_digest) =
+        ardur_governance::invocation_digests(&pre.grant_id, &pre.as_tool_invocation(&args));
+    let mut value = serde_json::to_value(&pre).expect("serialize");
+    value["arguments"] = serde_json::Value::Null;
+    value["arguments_hash"] = json!(arguments_hash);
+    value["invocation_digest"] = json!(invocation_digest.value);
+    let line = serde_json::to_string(&json!({ "pre_effect": value })).expect("line");
+    use std::io::Write as _;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&events)
+        .expect("create journal");
+    writeln!(file, "{line}").expect("write");
+    drop(file);
+
+    ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
+        .expect("well-formed digest-only evidence opens and sweeps");
+    let chain = signed_chain(&mirror);
+    assert_eq!(chain.len(), 1, "the stranded event sweeps its orphan ER");
+    assert_eq!(
+        chain[0].receipt().verdict,
+        Verdict::InsufficientEvidence,
+        "inputs the evidence cannot show never mint compliance"
+    );
+}

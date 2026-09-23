@@ -245,7 +245,7 @@ impl ErMirrorEmitter {
         let events = parse_evidence_journal(&events_bytes)?;
 
         let mut state = EmitterState {
-            tail: chain.into_iter().last(),
+            tail: chain.last().cloned(),
             chain_committed_len,
             events_committed_len,
             chained_step_ids,
@@ -253,6 +253,41 @@ impl ErMirrorEmitter {
             closed_event_ids: HashSet::new(),
             poisoned: None,
         };
+
+        // ---- #543: reconcile the chain and the journal bidirectionally. ----
+        // An already-chained event is NOT trusted because it is chained, and
+        // a missing journal is not trusted because it parses: for every
+        // chained event ER the journaled records must exist (a journal
+        // deleted or truncated after mirroring fails closed) AND must
+        // re-project — with their original parent — to the chained receipt
+        // exactly (editing a mirrored event's recorded outcome or arguments
+        // fails closed), even though no new ER needs appending.
+        for (idx, er) in chain.iter().enumerate() {
+            let step_id = &er.receipt().step_id;
+            if !step_id.starts_with("ev:") {
+                continue;
+            }
+            let Some((pre, post)) = events.iter().find(|(pre, _)| &pre.event_id == step_id) else {
+                return Err(ardur_governance::GovernanceError::Io(format!(
+                    "chained event ER {step_id} has no durable evidence record; refusing \
+                     to mirror over missing evidence"
+                )));
+            };
+            let parent = idx.checked_sub(1).map(|p| &chain[p]);
+            let projected = project_event_execution_receipt(
+                pre,
+                post.as_ref(),
+                verifier_id,
+                ER_TTL_SECS,
+                parent,
+            )?;
+            if &projected != er.receipt() {
+                return Err(ardur_governance::GovernanceError::Io(format!(
+                    "chained event ER {step_id} does not reproduce from its journaled \
+                     evidence (tampered journal); refusing to mirror"
+                )));
+            }
+        }
 
         // The crash-recovery sweep: every journaled event the chain does not
         // yet carry is projected from its durable records — a terminal event
@@ -529,22 +564,41 @@ fn append_chain_line(
 ) -> Result<(), ardur_governance::GovernanceError> {
     use std::io::Write as _;
     let step_id = signed.receipt().step_id.clone();
-    let mut file = open_append_no_follow(path)
-        .map_err(|e| ardur_governance::GovernanceError::Io(format!("append open: {e}")))?;
+    // ANY failure here poisons the emitter, not only write/fsync errors: a
+    // failed event-ER append that left the emitter live would let later
+    // receipts chain past the omitted evaluated event — a fully verifiable
+    // chain that silently skips it, reading downstream as continuous
+    // compliance instead of the honest gap (the same argument the round
+    // mirror's poison guard documents). The operator re-opens — which
+    // re-verifies and sweeps — after reconciling the omission.
+    let mut file = match open_append_no_follow(path) {
+        Ok(file) => file,
+        Err(e) => {
+            let err = ardur_governance::GovernanceError::Io(format!("append open: {e}"));
+            state.poisoned = Some(err.to_string());
+            return Err(err);
+        }
+    };
     // Fork guard: the log must still end exactly where our last successful
     // append left it. A concurrent writer (a second emitter over the same
     // path) or an external truncation means the cached tail is stale —
     // appending would fork the chain, so fail closed.
-    let actual = file
-        .metadata()
-        .map_err(|e| ardur_governance::GovernanceError::Io(format!("stat: {e}")))?
-        .len();
+    let actual = match file.metadata() {
+        Ok(meta) => meta.len(),
+        Err(e) => {
+            let err = ardur_governance::GovernanceError::Io(format!("stat: {e}"));
+            state.poisoned = Some(err.to_string());
+            return Err(err);
+        }
+    };
     if actual != state.chain_committed_len {
-        return Err(ardur_governance::GovernanceError::Io(format!(
+        let err = ardur_governance::GovernanceError::Io(format!(
             "mirror log changed under us (len {actual} != committed {}): one emitter must own \
              one mirror log",
             state.chain_committed_len
-        )));
+        ));
+        state.poisoned = Some(err.to_string());
+        return Err(err);
     }
     let append = writeln!(file, "{}", signed.jws_compact()).and_then(|()| file.sync_all());
     match append {

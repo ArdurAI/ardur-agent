@@ -429,6 +429,24 @@ pub const EFFECT_UNOBSERVED_CODE: &str = "effect_unobserved";
 /// compliant outcome cannot be shown compliant without the inputs.
 pub const ARGUMENTS_EVIDENCE_OMITTED_CODE: &str = "arguments_evidence_omitted";
 
+/// The shape of a `sha256_hex` output: 64 lowercase hex characters. Used to
+/// validate recorded digests before they are replayed into a signed ER (the
+/// digest-only replay path cannot recompute them for a cross-check).
+fn is_lower_hex_sha256(s: &str) -> bool {
+    s.len() == 64
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// The shape of a base64url-no-pad encoded SHA-256: 43 characters from the
+/// URL-safe alphabet. Used to validate recorded digests before they are
+/// replayed into a signed ER.
+fn is_base64url_sha256(s: &str) -> bool {
+    s.len() == 43
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
 /// Project one **evaluated event** (#543) into an [`ExecutionReceipt`] from
 /// its durable pre/post-effect evidence records — the same projection whether
 /// the facts arrive live at the event's terminal point or are replayed out of
@@ -541,15 +559,37 @@ pub fn project_event_execution_receipt(
             }
             (recomputed_hash, recomputed_digest)
         }
-        None => (
-            pre.arguments_hash.clone(),
-            DigestObject {
-                alg: DigestAlg::Sha256,
-                canonicalization: Some(Canonicalization::JcsRfc8785),
-                scope: Some(DigestScope::NormalizedInput),
-                value: pre.invocation_digest.clone(),
-            },
-        ),
+        None => {
+            // Replay copies the recorded digest strings into a signed ER;
+            // validate their encodings first. A syntactically valid journal
+            // line carrying a corrupted digest must fail closed here, exactly
+            // as the inline-arguments branch fails on a hash mismatch —
+            // otherwise a tampered journal stranded before its live mirror
+            // would be reopened and signed.
+            if !is_lower_hex_sha256(&pre.arguments_hash) {
+                return Err(GovernanceError::InvalidClaim(format!(
+                    "evidence integrity: the recorded arguments_hash for event {} is not a \
+                     lowercase-hex SHA-256 (tampered or corrupt journal)",
+                    pre.event_id
+                )));
+            }
+            if !is_base64url_sha256(&pre.invocation_digest) {
+                return Err(GovernanceError::InvalidClaim(format!(
+                    "evidence integrity: the recorded invocation_digest for event {} is not a \
+                     base64url SHA-256 (tampered or corrupt journal)",
+                    pre.event_id
+                )));
+            }
+            (
+                pre.arguments_hash.clone(),
+                DigestObject {
+                    alg: DigestAlg::Sha256,
+                    canonicalization: Some(Canonicalization::JcsRfc8785),
+                    scope: Some(DigestScope::NormalizedInput),
+                    value: pre.invocation_digest.clone(),
+                },
+            )
+        }
     };
 
     // Missing reconstruction inputs never mint compliance.
