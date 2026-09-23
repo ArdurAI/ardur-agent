@@ -110,6 +110,11 @@ struct EmitterState {
     chained_step_ids: HashSet<String>,
     /// Events with a durable pre-effect record but no post yet (in-flight).
     open_event_ids: HashSet<String>,
+    /// The records actually journaled, retained so `mirror_evaluated_event`
+    /// can require the caller-supplied records to be EXACTLY these — an ER
+    /// must never claim evidence that was never durable. Seeded from the
+    /// verified parse at open; updated on each successful record append.
+    journaled: std::collections::HashMap<String, (PreEffectRecord, Option<PostEffectRecord>)>,
     /// Events with a durable post-effect record (terminal).
     closed_event_ids: HashSet<String>,
     /// Set when an append's outcome is ambiguous (the line may be on disk
@@ -151,6 +156,15 @@ pub struct ErMirrorEmitter {
     /// different inode.
     events_lock: std::fs::File,
     events_lock_path: PathBuf,
+    /// The (dev, ino) identities of the chain log and the evidence journal
+    /// as opened. Both append paths reopen by pathname; the identity check
+    /// at open protects only startup unless every reopened descriptor is
+    /// re-verified against these — a directory writer could otherwise
+    /// replace `events.jsonl` with a hardlink to the chain after open and
+    /// the next pre-effect append would write a MAC envelope into the ER
+    /// log.
+    chain_identity: (u64, u64),
+    events_identity: (u64, u64),
 }
 
 impl ErMirrorEmitter {
@@ -307,7 +321,7 @@ impl ErMirrorEmitter {
         // journal are the same physical file, and the mirror must refuse to
         // start rather than append MAC envelopes into the ER log.
         #[cfg(unix)]
-        {
+        let (chain_identity, events_identity) = {
             use std::os::unix::fs::MetadataExt as _;
             let chain_meta = file
                 .metadata()
@@ -315,13 +329,22 @@ impl ErMirrorEmitter {
             let events_meta = events_file
                 .metadata()
                 .map_err(|e| ardur_governance::GovernanceError::Io(format!("events stat: {e}")))?;
+            let identities = (
+                (chain_meta.dev(), chain_meta.ino()),
+                (events_meta.dev(), events_meta.ino()),
+            );
             if chain_meta.dev() == events_meta.dev() && chain_meta.ino() == events_meta.ino() {
                 return Err(ardur_governance::GovernanceError::Io(
                     "the mirror chain and the evidence journal are the same physical file                      (case-insensitive alias or hardlink); refusing to open"
                         .to_string(),
                 ));
             }
-        }
+            identities
+        };
+        // Non-unix fails closed at the ownership guard above before any
+        // append, so the stored identities are never consulted there.
+        #[cfg(not(unix))]
+        let (chain_identity, events_identity) = ((0, 0), (0, 0));
         events_file
             .sync_all()
             .map_err(|e| ardur_governance::GovernanceError::Io(format!("events fsync: {e}")))?;
@@ -433,15 +456,22 @@ impl ErMirrorEmitter {
                         &events_mac_key,
                         anchor_json.trim(),
                     )?;
+                    // With the per-append precommit, the anchor in this
+                    // window is the PENDING commitment of the journaled-but-
+                    // not-yet-checkpointed line — the exact signature of the
+                    // write-order crash. (A Committed anchor at the
+                    // checkpoint's tail would mean the line was journaled
+                    // without its precommit — never legitimate.)
+                    let tail_seq = checkpoint_seq + 1;
                     if anchor_tail
-                        != ardur_governance::EvidenceAnchorTail::Committed(
-                            checkpoint_seq,
-                            checkpoint_tail.clone(),
+                        != ardur_governance::EvidenceAnchorTail::Pending(
+                            tail_seq,
+                            line_macs[tail_seq as usize].clone(),
                         )
                     {
                         return Err(ardur_governance::GovernanceError::Io(
                             "the checkpoint is one append behind but the anchor does not \
-                             describe the same pre-append tail (not the write-order crash \
+                             pre-commit the journaled line (not the write-order crash \
                              window); refusing to replay"
                                 .to_string(),
                         ));
@@ -614,36 +644,51 @@ impl ErMirrorEmitter {
                             ));
                         }
                     }
-                    ardur_governance::EvidenceAnchorTail::Pending(0, ref pending_mac) => {
-                        if next_seq == 0 {
+                    ardur_governance::EvidenceAnchorTail::Pending(k, ref pending_mac) => {
+                        let k = k as usize;
+                        let current = next_seq as usize;
+                        if k >= current {
+                            // The precommitted line is absent from the
+                            // journal: it never landed (crash between the
+                            // precommit and the append) or was deleted —
+                            // indistinguishable, so fail closed.
                             return Err(ardur_governance::GovernanceError::Io(
-                                "an authenticated pending first append is missing from the \
-                                 journal (the line never landed, or was deleted — \
-                                 indistinguishable); refusing to replay"
-                                    .to_string(),
-                            ));
-                        }
-                        if next_seq != 1 || line_macs[0] != *pending_mac {
-                            return Err(ardur_governance::GovernanceError::Io(
-                                "the pending anchor does not match the journal's first line; \
+                                "an authenticated pending append is missing from the journal \
+                                 (the line never landed, or was deleted — indistinguishable); \
                                  refusing to replay"
                                     .to_string(),
                             ));
                         }
+                        if line_macs[k] != *pending_mac {
+                            return Err(ardur_governance::GovernanceError::Io(
+                                "the pending anchor does not match the journaled line it \
+                                 pre-commits; refusing to replay"
+                                    .to_string(),
+                            ));
+                        }
+                        if k + 1 != current {
+                            // The write order makes a pending anchor over
+                            // anything but the tail line impossible: a later
+                            // append would have overwritten it.
+                            return Err(ardur_governance::GovernanceError::Io(
+                                "the pending anchor pre-commits a non-tail line (impossible \
+                                 in the legitimate write order); refusing to replay"
+                                    .to_string(),
+                            ));
+                        }
                         // Crash between the checkpoint and committed-anchor
-                        // publishes of the first append: advance now.
+                        // publishes: advance now. (The one-behind-checkpoint
+                        // case recovered itself against this pending state in
+                        // the checkpoint block above and rewrote the anchor
+                        // to Committed, so it does not reach here.)
                         write_events_anchor(
                             &events_path,
                             &events_mac_key,
-                            ardur_governance::EvidenceAnchorTail::Committed(0, pending_mac.clone()),
+                            ardur_governance::EvidenceAnchorTail::Committed(
+                                k as u64,
+                                pending_mac.clone(),
+                            ),
                         )?;
-                    }
-                    ardur_governance::EvidenceAnchorTail::Pending(_, _) => {
-                        return Err(ardur_governance::GovernanceError::Io(
-                            "the anchor pre-commits a non-first append (impossible in the \
-                             legitimate write order); refusing to replay"
-                                .to_string(),
-                        ));
                     }
                     ardur_governance::EvidenceAnchorTail::Committed(anchor_seq, anchor_mac) => {
                         let idx = anchor_seq as usize;
@@ -687,6 +732,10 @@ impl ErMirrorEmitter {
             chained_step_ids,
             open_event_ids: HashSet::new(),
             closed_event_ids: HashSet::new(),
+            journaled: events
+                .iter()
+                .map(|(pre, post)| (pre.event_id.clone(), (pre.clone(), post.clone())))
+                .collect(),
             poisoned: None,
         };
 
@@ -767,7 +816,7 @@ impl ErMirrorEmitter {
             // Recovery appends are chain transactions too: verify journal
             // ownership before each (the live paths do the same).
             verify_lock_inode_for(&events_lock, &lock_path)?;
-            append_chain_line(&path, &mut state, signed)?;
+            append_chain_line(&path, chain_identity, &mut state, signed)?;
             mark_event_recorded(&mut state, pre, post.as_ref());
         }
 
@@ -781,6 +830,8 @@ impl ErMirrorEmitter {
             inner: Mutex::new(state),
             events_lock,
             events_lock_path: lock_path,
+            chain_identity,
+            events_identity,
         })
     }
 
@@ -867,6 +918,38 @@ fn verify_lock_inode_for(
                 .to_string(),
         ));
     }
+    Ok(())
+}
+
+/// The opened-descriptor identity check for every path-based append: the
+/// fresh descriptor must name the same inode we opened at startup (a
+/// directory writer replacing the file — e.g. a hardlink to the OTHER log —
+/// changes it). The opposite-file case is subsumed: a hardlink to the chain
+/// has the chain's inode, not the journal's stored one.
+#[cfg(unix)]
+fn verify_file_identity(
+    file: &std::fs::File,
+    expected: (u64, u64),
+    what: &str,
+) -> Result<(), ardur_governance::GovernanceError> {
+    use std::os::unix::fs::MetadataExt as _;
+    let meta = file
+        .metadata()
+        .map_err(|e| ardur_governance::GovernanceError::Io(format!("{what} identity stat: {e}")))?;
+    if (meta.dev(), meta.ino()) != expected {
+        return Err(ardur_governance::GovernanceError::Io(format!(
+            "the {what} file was replaced since open (identity changed); refusing to append"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn verify_file_identity(
+    _file: &std::fs::File,
+    _expected: (u64, u64),
+    _what: &str,
+) -> Result<(), ardur_governance::GovernanceError> {
     Ok(())
 }
 
@@ -961,7 +1044,7 @@ impl GovernanceEmitter for ErMirrorEmitter {
                 return Err(e);
             }
         };
-        append_chain_line(&self.path, &mut state, signed)
+        append_chain_line(&self.path, self.chain_identity, &mut state, signed)
     }
 
     fn record_pre_effect(
@@ -992,22 +1075,23 @@ impl GovernanceEmitter for ErMirrorEmitter {
             &state.tail_chain_mac,
             &EvidenceRecord::PreEffect(Box::new(record.clone())).to_line()?,
         );
-        // Precommit the FIRST append in the anchor BEFORE the journal write:
-        // a crash after the line fsyncs but before the checkpoint publishes
-        // would otherwise be indistinguishable from pristine initialization
-        // if the journal were subsequently emptied — the pending anchor makes
-        // that erasure detectable (and fail-closed).
-        if state.next_seq == 0 {
-            if let Err(e) = write_events_anchor(
-                &self.events_path,
-                &self.events_mac_key,
-                ardur_governance::EvidenceAnchorTail::Pending(0, chain_mac.clone()),
-            ) {
-                state.poisoned = Some(e.to_string());
-                return Err(e);
-            }
+        // Precommit EVERY append in the anchor BEFORE the journal write: a
+        // crash after the line fsyncs but before the checkpoint publishes
+        // leaves the checkpoint and anchor exactly matching the journal
+        // WITHOUT the new line, so deleting that line afterwards would read
+        // as a clean tail — the pending commitment over the line's chain MAC
+        // makes the deletion fail closed at the next open. (For the first
+        // append it also makes the window distinguishable from pristine
+        // initialization.)
+        if let Err(e) = write_events_anchor(
+            &self.events_path,
+            &self.events_mac_key,
+            ardur_governance::EvidenceAnchorTail::Pending(state.next_seq, chain_mac.clone()),
+        ) {
+            state.poisoned = Some(e.to_string());
+            return Err(e);
         }
-        append_events_line(&self.events_path, &mut state, &line)?;
+        append_events_line(&self.events_path, self.events_identity, &mut state, &line)?;
         if let Err(e) = write_events_checkpoint(
             &self.events_path,
             &self.events_mac_key,
@@ -1026,6 +1110,9 @@ impl GovernanceEmitter for ErMirrorEmitter {
         }
         state.tail_chain_mac = chain_mac;
         state.next_seq += 1;
+        state
+            .journaled
+            .insert(record.event_id.clone(), (record.clone(), None));
         state.open_event_ids.insert(record.event_id.clone());
         Ok(())
     }
@@ -1065,7 +1152,16 @@ impl GovernanceEmitter for ErMirrorEmitter {
             &state.tail_chain_mac,
             &EvidenceRecord::PostEffect(record.clone()).to_line()?,
         );
-        append_events_line(&self.events_path, &mut state, &line)?;
+        // The same per-append precommit as record_pre_effect (see there).
+        if let Err(e) = write_events_anchor(
+            &self.events_path,
+            &self.events_mac_key,
+            ardur_governance::EvidenceAnchorTail::Pending(state.next_seq, chain_mac.clone()),
+        ) {
+            state.poisoned = Some(e.to_string());
+            return Err(e);
+        }
+        append_events_line(&self.events_path, self.events_identity, &mut state, &line)?;
         if let Err(e) = write_events_checkpoint(
             &self.events_path,
             &self.events_mac_key,
@@ -1084,6 +1180,9 @@ impl GovernanceEmitter for ErMirrorEmitter {
         }
         state.tail_chain_mac = chain_mac;
         state.next_seq += 1;
+        if let Some(entry) = state.journaled.get_mut(&record.event_id) {
+            entry.1 = Some(record.clone());
+        }
         state.open_event_ids.remove(&record.event_id);
         state.closed_event_ids.insert(record.event_id.clone());
         Ok(())
@@ -1109,6 +1208,25 @@ impl GovernanceEmitter for ErMirrorEmitter {
         if state.chained_step_ids.contains(&pre.event_id) {
             return Ok(());
         }
+        // The ER must claim only what is durable: the caller-supplied records
+        // must be EXACTLY the journaled ones. A cloned pre with the same
+        // event id but changed actor/arguments would otherwise be signed
+        // over evidence that was never persisted — reconciliation would only
+        // notice at the next restart, after consumers may have accepted it.
+        let journaled = state.journaled.get(&pre.event_id).cloned();
+        match journaled {
+            Some((journaled_pre, Some(journaled_post)))
+                if journaled_pre == *pre && journaled_post == *post => {}
+            _ => {
+                let err = ardur_governance::GovernanceError::Io(format!(
+                    "event {} was not journaled with exactly these records; refusing to \
+                     sign over evidence that was never durable",
+                    pre.event_id
+                ));
+                state.poisoned = Some(err.to_string());
+                return Err(err);
+            }
+        }
         let receipt = match project_event_execution_receipt(
             pre,
             Some(post),
@@ -1129,7 +1247,7 @@ impl GovernanceEmitter for ErMirrorEmitter {
                 return Err(e);
             }
         };
-        append_chain_line(&self.path, &mut state, signed)
+        append_chain_line(&self.path, self.chain_identity, &mut state, signed)
     }
 }
 
@@ -1160,6 +1278,7 @@ fn mark_event_recorded(
 /// later line can chain onto a state we are not sure of.
 fn append_chain_line(
     path: &Path,
+    expected_identity: (u64, u64),
     state: &mut EmitterState,
     signed: SignedExecutionReceipt,
 ) -> Result<(), ardur_governance::GovernanceError> {
@@ -1180,6 +1299,10 @@ fn append_chain_line(
             return Err(err);
         }
     };
+    if let Err(e) = verify_file_identity(&file, expected_identity, "chain") {
+        state.poisoned = Some(e.to_string());
+        return Err(e);
+    }
     // Fork guard: the log must still end exactly where our last successful
     // append left it. A concurrent writer (a second emitter over the same
     // path) or an external truncation means the cached tail is stale —
@@ -1370,6 +1493,7 @@ fn write_events_anchor(
 /// absence otherwise, which the gap-observability obligation forbids.
 fn append_events_line(
     path: &Path,
+    expected_identity: (u64, u64),
     state: &mut EmitterState,
     line: &str,
 ) -> Result<(), ardur_governance::GovernanceError> {
@@ -1386,6 +1510,10 @@ fn append_events_line(
             return Err(err);
         }
     };
+    if let Err(e) = verify_file_identity(&file, expected_identity, "events") {
+        state.poisoned = Some(e.to_string());
+        return Err(e);
+    }
     let actual = match file.metadata() {
         Ok(meta) => meta.len(),
         Err(e) => {

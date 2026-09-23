@@ -2631,8 +2631,9 @@ async fn a_checkpoint_one_append_behind_recovers_and_advances() {
     one_tool_turn(&mirror, &receipts).await;
 
     // Simulate the crash after the last journal append fsync but before the
-    // checkpoint publish: roll BOTH the checkpoint and the anchor back to
-    // the previous line's (seq, mac) — the consistent write-order window.
+    // checkpoint publish: the checkpoint still names the previous line, and
+    // the anchor is the PENDING precommit of the journaled newer line — the
+    // consistent write-order window.
     let content = std::fs::read_to_string(&events).expect("journal");
     let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
     let penultimate: serde_json::Value =
@@ -2642,11 +2643,16 @@ async fn a_checkpoint_one_append_behind_recovers_and_advances() {
     let checkpoint =
         ardur_governance::evidence_checkpoint_json(&test_mac_key(), prev_seq, prev_mac.as_str());
     std::fs::write(events.with_file_name("events.tail"), checkpoint).expect("rewind checkpoint");
+    // The anchor in this window is the pending precommit of the LAST line.
+    let last: serde_json::Value = serde_json::from_str(lines[lines.len() - 1]).expect("envelope");
     let anchor = ardur_governance::evidence_anchor_json(
         &test_mac_key(),
-        ardur_governance::EvidenceAnchorTail::Committed(prev_seq, prev_mac.clone()),
+        ardur_governance::EvidenceAnchorTail::Pending(
+            lines.len() as u64 - 1,
+            last["mac"].as_str().expect("mac").to_string(),
+        ),
     );
-    std::fs::write(events.with_file_name("events.anchor"), anchor).expect("rewind anchor");
+    std::fs::write(events.with_file_name("events.anchor"), anchor).expect("pending anchor");
 
     // The open recovers instead of failing...
     ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
@@ -3188,6 +3194,9 @@ async fn a_mirror_path_named_like_an_evidence_sibling_is_rejected() {
     .expect("a non-colliding basename opens");
 }
 
+// The identity check is cfg(unix): elsewhere the ownership guard fails the
+// open first, so the identity diagnostic is unreachable by design.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_chain_path_hardlinked_to_the_journal_is_rejected() {
     let (_root, _mirror, events, _receipts) = scratch();
@@ -3204,5 +3213,133 @@ async fn a_chain_path_hardlinked_to_the_journal_is_rejected() {
     assert!(
         err.to_string().contains("same physical file"),
         "expected the identity diagnostic, got: {err}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Seventeenth review round: per-append identity + precommit; journaled-record
+// equality for live mirroring.
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_journal_replaced_after_open_fails_the_next_append() {
+    use ardur_governance::GovernanceEmitter as _;
+    let (_root, mirror, events, _receipts) = scratch();
+    let emitter = ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
+        .expect("open holds the identities");
+
+    // A directory writer replaces the journal with a hardlink to the CHAIN
+    // after open: the next append must refuse instead of writing a MAC
+    // envelope into the ER log.
+    std::fs::remove_file(&events).expect("unlink journal");
+    std::fs::hard_link(&mirror, &events).expect("hardlink journal onto chain");
+
+    let pre = fixture_pre("session-swap", 0, "call-swap", json!({}));
+    let err = emitter
+        .record_pre_effect(&pre)
+        .expect_err("a replaced journal must fail the append");
+    assert!(
+        err.to_string().contains("identity"),
+        "expected the identity diagnostic, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn a_deleted_post_with_a_pending_precommit_fails_the_reopen() {
+    let (_root, mirror, events, receipts) = scratch();
+    one_tool_turn(&mirror, &receipts).await;
+
+    // The round-17 window: the post record was journaled and fsynced, the
+    // host died before the checkpoint publish — the anchor is the PENDING
+    // precommit of the post. An editor then deletes the post line: the old
+    // checkpoint matches the surviving pre, but the pending anchor names the
+    // deleted line, so the reopen must fail instead of signing
+    // `effect_unobserved` over a completed outcome.
+    let content = std::fs::read_to_string(&events).expect("journal");
+    let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
+    assert!(lines.len() >= 2, "pre + post");
+    let last: serde_json::Value = serde_json::from_str(lines[lines.len() - 1]).expect("envelope");
+    let last_seq = lines.len() as u64 - 1;
+    let last_mac = last["mac"].as_str().expect("mac").to_string();
+
+    // Truncate the post; restore the checkpoint to the pre's tail; leave the
+    // pending anchor naming the deleted post.
+    let kept: Vec<&str> = lines[..lines.len() - 1].to_vec();
+    std::fs::write(&events, kept.join("\n") + "\n").expect("truncate post");
+    let penultimate: serde_json::Value =
+        serde_json::from_str(lines[lines.len() - 2]).expect("envelope");
+    let checkpoint = ardur_governance::evidence_checkpoint_json(
+        &test_mac_key(),
+        last_seq - 1,
+        penultimate["mac"].as_str().expect("mac"),
+    );
+    std::fs::write(events.with_file_name("events.tail"), checkpoint).expect("checkpoint at pre");
+    let anchor = ardur_governance::evidence_anchor_json(
+        &test_mac_key(),
+        ardur_governance::EvidenceAnchorTail::Pending(last_seq, last_mac),
+    );
+    std::fs::write(events.with_file_name("events.anchor"), anchor).expect("pending anchor");
+
+    let err = ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
+        .err()
+        .expect("the deleted post must fail against its pending precommit");
+    assert!(
+        err.to_string().contains("pending"),
+        "expected the pending diagnostic, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn mirroring_records_that_differ_from_the_journal_fails() {
+    use ardur_governance::GovernanceEmitter as _;
+    let (_root, mirror, _events, _receipts) = scratch();
+    let emitter =
+        ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID).expect("open");
+
+    // Positive arm: the exact journaled records mirror. (This is what a
+    // mutation gutting the equality check must keep passing — it is what
+    // makes the guard killable.)
+    let pre_a = fixture_pre("session-mismatch", 0, "call-a", json!({ "text": "hi" }));
+    emitter.record_pre_effect(&pre_a).expect("pre A journaled");
+    let post_a = PostEffectRecord::new(&pre_a, 1_750_000_000_100, EventOutcome::TimeoutUnknown);
+    emitter
+        .record_post_effect(&post_a)
+        .expect("post A journaled");
+    emitter
+        .mirror_evaluated_event(&pre_a, &post_a)
+        .expect("the exact journaled records mirror");
+
+    // A cloned pre with the same event id but a changed actor: the ER must
+    // not claim evidence that was never durable.
+    let pre_b = fixture_pre("session-mismatch", 0, "call-b", json!({ "text": "hi" }));
+    emitter.record_pre_effect(&pre_b).expect("pre B journaled");
+    let post_b = PostEffectRecord::new(&pre_b, 1_750_000_000_200, EventOutcome::TimeoutUnknown);
+    emitter
+        .record_post_effect(&post_b)
+        .expect("post B journaled");
+    let mut edited = pre_b.clone();
+    edited.actor = "spiffe://ardur/user/someone-else".to_string();
+    let err = emitter
+        .mirror_evaluated_event(&edited, &post_b)
+        .expect_err("records differing from the journal must fail");
+    assert!(
+        err.to_string().contains("never durable"),
+        "expected the never-durable diagnostic, got: {err}"
+    );
+
+    // The mismatch poisons this emitter (an integrity failure), and a fresh
+    // open sweeps both journaled pairs cleanly.
+    drop(emitter);
+    ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
+        .expect("the journaled pairs sweep cleanly on reopen");
+    let chain = signed_chain(&mirror);
+    assert_eq!(
+        chain
+            .iter()
+            .filter(|er| er.receipt().step_id.starts_with("ev:"))
+            .count(),
+        2,
+        "both events are chained after the sweep"
     );
 }
