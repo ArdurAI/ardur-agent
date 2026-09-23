@@ -242,38 +242,48 @@ pub fn verify_evidence_checkpoint(
 }
 
 /// The anchor domain label: the third-artifact tail commitment that survives
-/// deletion of the journal+checkpoint pair. Rewritten after every journal
+/// deletion of the journal+checkpoint pair. Rewritten around every journal
 /// append; its tail sequence is the monotonic state a wholesale deletion
 /// cannot roll back without also deleting the anchor (which the open
 /// distinguishes from first initialization).
 const EVIDENCE_ANCHOR_DOMAIN: &[u8] = b"ardur-governance/evidence-anchor/v1";
 
-/// The authenticated anchor document for a journal whose committed tail is
-/// (`tail_seq`, `tail_chain_mac`) — empty tail (seq none) before the first
-/// append.
-pub fn evidence_anchor_json(key: &[u8; 32], tail: Option<(u64, &str)>) -> String {
-    let (tail_seq, tail_mac) = match tail {
-        Some((seq, mac)) => (seq.to_string(), mac.to_string()),
-        None => ("null".to_string(), String::new()),
+/// The anchor's tail state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EvidenceAnchorTail {
+    /// Fresh store: nothing ever appended.
+    Null,
+    /// The first append is pre-committed: the chain MAC of the line about to
+    /// be appended was published BEFORE the journal write, so a crash in that
+    /// window (or a later deletion of the line) is distinguishable from
+    /// pristine initialization.
+    Pending(u64, String),
+    /// The committed journal tail.
+    Committed(u64, String),
+}
+
+/// The authenticated anchor document for the given tail state.
+pub fn evidence_anchor_json(key: &[u8; 32], tail: EvidenceAnchorTail) -> String {
+    let state = match &tail {
+        EvidenceAnchorTail::Null => "null".to_string(),
+        EvidenceAnchorTail::Pending(seq, mac) => format!("pending:{seq}:{mac}"),
+        EvidenceAnchorTail::Committed(seq, mac) => format!("committed:{seq}:{mac}"),
     };
-    let anchor_mac = hmac_sha256(
-        key,
-        &[
-            EVIDENCE_ANCHOR_DOMAIN,
-            tail_seq.as_bytes(),
-            tail_mac.as_bytes(),
-        ],
-    );
+    let anchor_mac = hmac_sha256(key, &[EVIDENCE_ANCHOR_DOMAIN, state.as_bytes()]);
     match tail {
-        Some((seq, mac)) => {
+        EvidenceAnchorTail::Null => {
+            format!("{{\"anchor_mac\":\"{anchor_mac}\",\"tail_mac\":null,\"tail_seq\":null}}")
+        }
+        EvidenceAnchorTail::Pending(seq, mac) => format!(
+            "{{\"anchor_mac\":\"{anchor_mac}\",\"pending_mac\":\"{mac}\",\"pending_seq\":{seq}}}"
+        ),
+        EvidenceAnchorTail::Committed(seq, mac) => {
             format!("{{\"anchor_mac\":\"{anchor_mac}\",\"tail_mac\":\"{mac}\",\"tail_seq\":{seq}}}")
         }
-        None => format!("{{\"anchor_mac\":\"{anchor_mac}\",\"tail_mac\":null,\"tail_seq\":null}}"),
     }
 }
 
-/// Verify an anchor document and return its committed tail (None before the
-/// first append).
+/// Verify an anchor document and return its tail state.
 ///
 /// # Errors
 ///
@@ -282,7 +292,7 @@ pub fn evidence_anchor_json(key: &[u8; 32], tail: Option<(u64, &str)>) -> String
 pub fn verify_evidence_anchor(
     key: &[u8; 32],
     json: &str,
-) -> Result<Option<(u64, String)>, crate::GovernanceError> {
+) -> Result<EvidenceAnchorTail, crate::GovernanceError> {
     use subtle::ConstantTimeEq as _;
     let value: serde_json::Value = serde_json::from_str(json).map_err(|e| {
         crate::GovernanceError::Io(format!("evidence anchor is not valid JSON: {e}"))
@@ -291,33 +301,40 @@ pub fn verify_evidence_anchor(
         .get("anchor_mac")
         .and_then(|m| m.as_str())
         .ok_or_else(|| crate::GovernanceError::Io("evidence anchor lacks anchor_mac".into()))?;
-    let tail: Option<(u64, String)> = match value.get("tail_seq") {
-        Some(serde_json::Value::Null) | None => None,
-        Some(seq) => {
-            let seq = seq.as_u64().ok_or_else(|| {
-                crate::GovernanceError::Io("evidence anchor tail_seq is not an integer".into())
+    let tail = if let Some(seq) = value.get("pending_seq") {
+        let seq = seq.as_u64().ok_or_else(|| {
+            crate::GovernanceError::Io("evidence anchor pending_seq is not an integer".into())
+        })?;
+        let mac = value
+            .get("pending_mac")
+            .and_then(|m| m.as_str())
+            .ok_or_else(|| {
+                crate::GovernanceError::Io("evidence anchor lacks pending_mac".into())
             })?;
-            let mac = value
-                .get("tail_mac")
-                .and_then(|m| m.as_str())
-                .ok_or_else(|| {
-                    crate::GovernanceError::Io("evidence anchor lacks tail_mac".into())
+        EvidenceAnchorTail::Pending(seq, mac.to_string())
+    } else {
+        match value.get("tail_seq") {
+            Some(serde_json::Value::Null) | None => EvidenceAnchorTail::Null,
+            Some(seq) => {
+                let seq = seq.as_u64().ok_or_else(|| {
+                    crate::GovernanceError::Io("evidence anchor tail_seq is not an integer".into())
                 })?;
-            Some((seq, mac.to_string()))
+                let mac = value
+                    .get("tail_mac")
+                    .and_then(|m| m.as_str())
+                    .ok_or_else(|| {
+                        crate::GovernanceError::Io("evidence anchor lacks tail_mac".into())
+                    })?;
+                EvidenceAnchorTail::Committed(seq, mac.to_string())
+            }
         }
     };
-    let (tail_seq, tail_mac) = match &tail {
-        Some((seq, mac)) => (seq.to_string(), mac.clone()),
-        None => ("null".to_string(), String::new()),
+    let state = match &tail {
+        EvidenceAnchorTail::Null => "null".to_string(),
+        EvidenceAnchorTail::Pending(seq, mac) => format!("pending:{seq}:{mac}"),
+        EvidenceAnchorTail::Committed(seq, mac) => format!("committed:{seq}:{mac}"),
     };
-    let expected = hmac_sha256(
-        key,
-        &[
-            EVIDENCE_ANCHOR_DOMAIN,
-            tail_seq.as_bytes(),
-            tail_mac.as_bytes(),
-        ],
-    );
+    let expected = hmac_sha256(key, &[EVIDENCE_ANCHOR_DOMAIN, state.as_bytes()]);
     if presented.len() != expected.len()
         || presented.as_bytes().ct_eq(expected.as_bytes()).unwrap_u8() != 1
     {

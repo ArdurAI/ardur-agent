@@ -381,10 +381,14 @@ fn write_chained_journal(path: &std::path::Path, raw_lines: &[String]) {
     let (content, tail_mac, next_seq) = mac_raw_lines(&refs);
     std::fs::write(path, content).expect("write journal");
     let anchor = match next_seq {
-        0 => ardur_governance::evidence_anchor_json(&test_mac_key(), None),
-        _ => {
-            ardur_governance::evidence_anchor_json(&test_mac_key(), Some((next_seq - 1, &tail_mac)))
-        }
+        0 => ardur_governance::evidence_anchor_json(
+            &test_mac_key(),
+            ardur_governance::EvidenceAnchorTail::Null,
+        ),
+        _ => ardur_governance::evidence_anchor_json(
+            &test_mac_key(),
+            ardur_governance::EvidenceAnchorTail::Committed(next_seq - 1, tail_mac.clone()),
+        ),
     };
     std::fs::write(path.with_file_name("events.anchor"), anchor).expect("write anchor");
     if next_seq > 0 {
@@ -477,7 +481,10 @@ fn tamper_journal_with(path: &std::path::Path, edit: impl Fn(&mut serde_json::Va
     if remac && !records.is_empty() {
         let checkpoint = ardur_governance::evidence_checkpoint_json(&key, last_seq, &last_mac);
         std::fs::write(path.with_file_name("events.tail"), checkpoint).expect("checkpoint");
-        let anchor = ardur_governance::evidence_anchor_json(&key, Some((last_seq, &last_mac)));
+        let anchor = ardur_governance::evidence_anchor_json(
+            &key,
+            ardur_governance::EvidenceAnchorTail::Committed(last_seq, last_mac.clone()),
+        );
         std::fs::write(path.with_file_name("events.anchor"), anchor).expect("anchor");
     }
 }
@@ -2525,7 +2532,10 @@ async fn an_anchor_restored_to_the_initial_snapshot_fails_on_a_multi_line_journa
     // Two turns: the journal has 4 lines; restore the initial null anchor.
     one_tool_turn(&mirror, &receipts).await;
     one_tool_turn(&mirror, &receipts).await;
-    let null_anchor = ardur_governance::evidence_anchor_json(&test_mac_key(), None);
+    let null_anchor = ardur_governance::evidence_anchor_json(
+        &test_mac_key(),
+        ardur_governance::EvidenceAnchorTail::Null,
+    );
     std::fs::write(events.with_file_name("events.anchor"), null_anchor).expect("restore anchor");
 
     let err = ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
@@ -2570,7 +2580,10 @@ async fn an_anchor_exactly_one_transaction_behind_is_the_benign_crash() {
         serde_json::from_str(lines[lines.len() - 2]).expect("envelope");
     let seq = lines.len() as u64 - 2;
     let mac = penultimate["mac"].as_str().expect("mac").to_string();
-    let anchor = ardur_governance::evidence_anchor_json(&test_mac_key(), Some((seq, mac.as_str())));
+    let anchor = ardur_governance::evidence_anchor_json(
+        &test_mac_key(),
+        ardur_governance::EvidenceAnchorTail::Committed(seq, mac.clone()),
+    );
     std::fs::write(events.with_file_name("events.anchor"), anchor).expect("rewind anchor");
 
     ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
@@ -2631,7 +2644,7 @@ async fn a_checkpoint_one_append_behind_recovers_and_advances() {
     std::fs::write(events.with_file_name("events.tail"), checkpoint).expect("rewind checkpoint");
     let anchor = ardur_governance::evidence_anchor_json(
         &test_mac_key(),
-        Some((prev_seq, prev_mac.as_str())),
+        ardur_governance::EvidenceAnchorTail::Committed(prev_seq, prev_mac.clone()),
     );
     std::fs::write(events.with_file_name("events.anchor"), anchor).expect("rewind anchor");
 
@@ -2680,8 +2693,8 @@ async fn a_checkpoint_one_behind_without_anchor_agreement_fails() {
 #[tokio::test]
 async fn the_first_appends_crash_window_recovers() {
     let (_root, mirror, events, _receipts) = scratch();
-    // One journaled pre line, no checkpoint yet, initial null anchor: the
-    // crash window of the very first append.
+    // One journaled pre line, no checkpoint yet, and the pre-committed
+    // pending anchor: the crash window of the very first append.
     let pre = fixture_pre("session-first", 0, "call-first", json!({}));
     let line = EvidenceRecord::PreEffect(Box::new(pre))
         .to_line()
@@ -2690,7 +2703,10 @@ async fn the_first_appends_crash_window_recovers() {
     assert_eq!(next_seq, 1);
     std::fs::create_dir_all(events.parent().unwrap()).unwrap();
     std::fs::write(&events, content).expect("journal");
-    let anchor = ardur_governance::evidence_anchor_json(&test_mac_key(), None);
+    let anchor = ardur_governance::evidence_anchor_json(
+        &test_mac_key(),
+        ardur_governance::EvidenceAnchorTail::Pending(0, tail_mac.clone()),
+    );
     std::fs::write(events.with_file_name("events.anchor"), anchor).expect("anchor");
 
     ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
@@ -2839,7 +2855,7 @@ async fn a_one_behind_anchor_is_advanced_before_the_sweep() {
     let prev_mac = penultimate["mac"].as_str().expect("mac").to_string();
     let anchor = ardur_governance::evidence_anchor_json(
         &test_mac_key(),
-        Some((prev_seq, prev_mac.as_str())),
+        ardur_governance::EvidenceAnchorTail::Committed(prev_seq, prev_mac.clone()),
     );
     std::fs::write(events.with_file_name("events.anchor"), anchor).expect("rewind anchor");
 
@@ -2888,10 +2904,11 @@ async fn a_one_behind_anchor_is_advanced_before_the_sweep() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn the_null_anchor_advances_after_the_first_append_crash_window() {
+async fn the_pending_anchor_advances_after_the_checkpoint_publish_crash() {
     let (_root, mirror, events, _receipts) = scratch();
-    // The crash between the checkpoint and anchor publishes of the FIRST
-    // append: one journaled line, current checkpoint, initial null anchor.
+    // The crash between the checkpoint publish and the committed-anchor
+    // publish of the FIRST append: one journaled line, current checkpoint,
+    // pending anchor.
     let pre = fixture_pre("session-first", 0, "call-first", json!({}));
     let line = EvidenceRecord::PreEffect(Box::new(pre))
         .to_line()
@@ -2902,7 +2919,10 @@ async fn the_null_anchor_advances_after_the_first_append_crash_window() {
     std::fs::write(&events, content).expect("journal");
     let checkpoint = ardur_governance::evidence_checkpoint_json(&test_mac_key(), 0, &tail_mac);
     std::fs::write(events.with_file_name("events.tail"), checkpoint).expect("checkpoint");
-    let anchor = ardur_governance::evidence_anchor_json(&test_mac_key(), None);
+    let anchor = ardur_governance::evidence_anchor_json(
+        &test_mac_key(),
+        ardur_governance::EvidenceAnchorTail::Pending(0, tail_mac.clone()),
+    );
     std::fs::write(events.with_file_name("events.anchor"), anchor).expect("anchor");
 
     ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
@@ -2914,20 +2934,48 @@ async fn the_null_anchor_advances_after_the_first_append_crash_window() {
     assert_eq!(
         advanced["tail_seq"].as_u64().expect("tail_seq"),
         0,
-        "the null anchor is advanced to line 0 during the open"
+        "the pending anchor is advanced to the committed line-0 tail"
     );
 
-    // Now the second-crash attack: empty the journal and remove the
-    // checkpoint. The advanced anchor commits to line 0 — the open must
-    // fail instead of reading this as pristine initialization.
+    // Now the erasure attack the pre-commit exists to catch: empty the
+    // journal and remove the checkpoint. The committed anchor says the tail
+    // is line 0 — the open must fail instead of reading pristine init.
     std::fs::write(&events, "").expect("empty the journal");
     let _ = std::fs::remove_file(events.with_file_name("events.tail"));
     let err = ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
         .err()
-        .expect("journal-emptying against an advanced anchor must fail");
+        .expect("journal-emptying against a committed anchor must fail");
     assert!(
         err.to_string().contains("anchor"),
         "expected the anchor diagnostic, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn a_pending_first_append_missing_from_the_journal_fails_closed() {
+    let (_root, mirror, events, _receipts) = scratch();
+    // The pending pre-commit survived but the journal line did not (crash
+    // before the append landed, or the line was deleted — indistinguishable,
+    // and the erasure is exactly the attack the pre-commit exists to catch).
+    let pre = fixture_pre("session-first", 0, "call-first", json!({}));
+    let line = EvidenceRecord::PreEffect(Box::new(pre))
+        .to_line()
+        .expect("line");
+    let (_content, tail_mac, _next) = mac_raw_lines(&[&line]);
+    std::fs::create_dir_all(events.parent().unwrap()).unwrap();
+    std::fs::write(&events, "").expect("empty journal");
+    let anchor = ardur_governance::evidence_anchor_json(
+        &test_mac_key(),
+        ardur_governance::EvidenceAnchorTail::Pending(0, tail_mac),
+    );
+    std::fs::write(events.with_file_name("events.anchor"), anchor).expect("anchor");
+
+    let err = ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
+        .err()
+        .expect("a pending append missing from the journal must fail");
+    assert!(
+        err.to_string().contains("pending"),
+        "expected the pending-append diagnostic, got: {err}"
     );
 }
 
@@ -2954,4 +3002,127 @@ async fn a_planted_tmp_hardlink_cannot_truncate_the_journal() {
     // And the store still opens and verifies cleanly.
     ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
         .expect("reopen is clean after the planted-hardlink attempt");
+}
+
+// ---------------------------------------------------------------------------
+// Thirteenth review round: typed tool refusals record as canonical denials.
+// ---------------------------------------------------------------------------
+
+/// A tool that refuses pre-effect under its own configured policy (e.g. a
+/// shell command outside its allowlist): `ToolError::Denied`. Registered
+/// under the "echo" id so the standard token allowlist admits the call and
+/// the REFUSAL comes from the tool itself.
+struct RefusingTool {
+    schema: ToolSchema,
+}
+
+#[async_trait]
+impl Tool for RefusingTool {
+    fn id(&self) -> ToolId {
+        ToolId::new("echo")
+    }
+    fn schema(&self) -> &ToolSchema {
+        &self.schema
+    }
+    async fn invoke(
+        &self,
+        _ctx: &ToolContext,
+        _args: serde_json::Value,
+    ) -> Result<ToolOutput, ToolError> {
+        Err(ToolError::Denied {
+            reason: "command is not on the allowlist".to_string(),
+        })
+    }
+    fn required_capabilities(&self) -> &[Capability] {
+        &[]
+    }
+}
+
+fn refusing_registry() -> Arc<ardur_tool_registry::ToolRegistry> {
+    registry_with(vec![Box::new(RefusingTool { schema: schema() })])
+}
+
+fn assert_tool_refusal_event_er(mirror: &std::path::Path) {
+    let chain = signed_chain(mirror);
+    let event_er = chain
+        .iter()
+        .find(|er| er.receipt().step_id.starts_with("ev:"))
+        .expect("the event ER is chained");
+    let receipt = event_er.receipt();
+    assert_eq!(
+        receipt.policy_decisions[0].decision, "deny",
+        "a typed pre-effect refusal is a denial, never unknown-effect"
+    );
+    assert_eq!(
+        receipt.internal_denial_code.as_deref(),
+        Some("tool_policy_denied")
+    );
+    assert_eq!(
+        receipt.public_denial_reason,
+        Some(ardur_governance::PublicDenialReason::PolicyDenied)
+    );
+    assert_eq!(
+        receipt.policy_decisions[0].backend, "tool-runtime",
+        "the refusal is honestly attributed to the tool runtime"
+    );
+}
+
+#[tokio::test]
+async fn a_typed_tool_refusal_records_a_denial_not_an_unknown_effect() {
+    let (_root, mirror, _events, receipts) = scratch();
+    let provider = ScriptedProvider::new(
+        vec![tool_calls(vec![("call-1", "echo")]), stop("done")],
+        stop("d"),
+    );
+    let runtime = runtime_builder(Arc::new(provider))
+        .receipt_log(&receipts)
+        .with_tools(refusing_registry())
+        .with_governance(open_emitter(&mirror))
+        .build()
+        .expect("runtime builds");
+    let err = runtime
+        .submit(user_request("go", &valid_token()))
+        .await
+        .expect_err("the tool refusal surfaces as the turn's error");
+    assert!(
+        err.to_string().contains("denied"),
+        "the typed refusal propagates: {err}"
+    );
+
+    assert_tool_refusal_event_er(&mirror);
+    // Reopen: replay reproduces the same denial verdict (the runtime's drop
+    // releases the journal lock first).
+    drop(runtime);
+    ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
+        .expect("reopen re-verifies the denial evidence");
+    assert_tool_refusal_event_er(&mirror);
+}
+
+#[tokio::test]
+async fn a_typed_tool_refusal_records_a_denial_on_the_streaming_path() {
+    use futures::StreamExt as _;
+    let (_root, mirror, _events, receipts) = scratch();
+    let provider = ScriptedProvider::new(
+        vec![tool_calls(vec![("call-1", "echo")]), stop("done")],
+        stop("d"),
+    );
+    let runtime = runtime_builder(Arc::new(provider))
+        .receipt_log(&receipts)
+        .with_tools(refusing_registry())
+        .with_governance(open_emitter(&mirror))
+        .build()
+        .expect("runtime builds");
+
+    let outcomes: Vec<_> = Box::pin(runtime.stream(user_request("go", &valid_token())))
+        .collect()
+        .await;
+    assert!(
+        outcomes.iter().any(|item| item
+            .as_ref()
+            .err()
+            .is_some_and(|e| e.to_string().contains("denied"))),
+        "the typed refusal surfaces in the stream: {outcomes:?}"
+    );
+
+    assert_tool_refusal_event_er(&mirror);
 }

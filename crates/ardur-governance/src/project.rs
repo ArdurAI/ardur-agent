@@ -725,14 +725,19 @@ fn canonical_public_for_denial_code(internal: &str) -> Option<PublicDenialReason
         | "memory_write_denied"
         | "pop_required"
         | "pop_key_mismatch"
-        | "pop_invalid" => PublicDenialReason::PolicyDenied,
+        | "pop_invalid"
+        | "tool_policy_denied"
+        | "tool_capability_denied"
+        | "tool_cap_token_denied"
+        | "tool_invalid_arguments" => PublicDenialReason::PolicyDenied,
         "revoked" => PublicDenialReason::Revoked,
         "signature_invalid" | "malformed_token" => PublicDenialReason::ChainInvalid,
-        "budget_exhausted" => PublicDenialReason::BudgetExhausted,
+        "budget_exhausted" | "tool_cost_ceiling_exceeded" => PublicDenialReason::BudgetExhausted,
         "policy_indeterminate"
         | "memory_policy_indeterminate"
         | "approval_evaluation_error"
         | "tool_invocation_error"
+        | "tool_not_implemented"
         | "unprojectable_attenuation" => PublicDenialReason::InsufficientEvidence,
         _ => return None,
     })
@@ -762,6 +767,15 @@ fn decision_backend_for(outcome: &AuthOutcome) -> &'static str {
         "output_scan_blocked" | "output_scan_error" => "injection-scanner",
         "memory_record_malformed" => "memory-control-plane",
         "unknown_tool" => "tool-registry",
+        // Typed in-tool refusals (#543): the tool itself refused before the
+        // effect (allowlist, root escape, missing grant, rejected token,
+        // malformed arguments, cost ceiling, unimplemented backend).
+        "tool_policy_denied"
+        | "tool_capability_denied"
+        | "tool_cap_token_denied"
+        | "tool_invalid_arguments"
+        | "tool_cost_ceiling_exceeded"
+        | "tool_not_implemented" => "tool-runtime",
         "effect_unobserved"
         | "effect_unknown_execution"
         | "effect_unknown_timeout"

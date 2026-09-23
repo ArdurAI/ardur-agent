@@ -389,7 +389,12 @@ impl ErMirrorEmitter {
                         &events_mac_key,
                         anchor_json.trim(),
                     )?;
-                    if anchor_tail != Some((checkpoint_seq, checkpoint_tail.clone())) {
+                    if anchor_tail
+                        != ardur_governance::EvidenceAnchorTail::Committed(
+                            checkpoint_seq,
+                            checkpoint_tail.clone(),
+                        )
+                    {
                         return Err(ardur_governance::GovernanceError::Io(
                             "the checkpoint is one append behind but the anchor does not \
                              describe the same pre-append tail (not the write-order crash \
@@ -408,7 +413,10 @@ impl ErMirrorEmitter {
                     write_events_anchor(
                         &events_path,
                         &events_mac_key,
-                        Some((next_seq - 1, &tail_chain_mac)),
+                        ardur_governance::EvidenceAnchorTail::Committed(
+                            next_seq - 1,
+                            tail_chain_mac.clone(),
+                        ),
                     )?;
                 }
                 Some(_) => {
@@ -420,14 +428,14 @@ impl ErMirrorEmitter {
                 }
                 None => {
                     // The first append's crash window: one journaled line, no
-                    // checkpoint yet, and the anchor must still be the initial
-                    // null snapshot — VERIFY IT BEFORE writing anything. An
-                    // editor who truncates an unmirrored pair to its first
-                    // line and deletes both siblings would otherwise get a
-                    // freshly-written anchor and a signed `effect_unobserved`
-                    // for an event that may have completed: the anchor's
-                    // absence (or a non-null tail) proves this is NOT the
-                    // first append's window.
+                    // checkpoint yet. It is only genuine with the
+                    // PRE-COMMITTED pending anchor (published before the
+                    // journal write) — read and verify it BEFORE writing
+                    // anything. An editor who truncates an unmirrored pair to
+                    // its first line and deletes both siblings cannot
+                    // reproduce the pending commitment over the surviving
+                    // line's chain MAC: the anchor's absence, a null tail, or
+                    // a wrong pending MAC each prove this is NOT the window.
                     if next_seq != 1 {
                         return Err(ardur_governance::GovernanceError::Io(
                             "evidence journal tail checkpoint is missing over a multi-line \
@@ -457,9 +465,11 @@ impl ErMirrorEmitter {
                         &events_mac_key,
                         anchor_json.trim(),
                     )?;
-                    if anchor_tail.is_some() {
+                    if anchor_tail
+                        != ardur_governance::EvidenceAnchorTail::Pending(0, line_macs[0].clone())
+                    {
                         return Err(ardur_governance::GovernanceError::Io(
-                            "the anchor commits to a tail but no checkpoint exists (not the \
+                            "the anchor does not pre-commit the surviving first line (not the \
                              first-append crash window); refusing to replay"
                                 .to_string(),
                         ));
@@ -468,7 +478,7 @@ impl ErMirrorEmitter {
                     write_events_anchor(
                         &events_path,
                         &events_mac_key,
-                        Some((0, tail_chain_mac.as_str())),
+                        ardur_governance::EvidenceAnchorTail::Committed(0, tail_chain_mac.clone()),
                     )?;
                 }
             }
@@ -514,7 +524,11 @@ impl ErMirrorEmitter {
                 // First initialization: create the anchor (empty tail) before
                 // any append, so a later wholesale deletion of the journal
                 // pair is distinguishable from a store that never saw one.
-                write_events_anchor(&events_path, &events_mac_key, None)?;
+                write_events_anchor(
+                    &events_path,
+                    &events_mac_key,
+                    ardur_governance::EvidenceAnchorTail::Null,
+                )?;
             }
             Some(bytes) => {
                 let json = std::str::from_utf8(&bytes).map_err(|e| {
@@ -529,32 +543,65 @@ impl ErMirrorEmitter {
                 // the initial snapshot restored past the first append. The
                 // only legitimate null anchors are the empty journal and
                 // the first append's crash window (next_seq == 1).
+                // The legitimate states, by construction (write order:
+                // pending-anchor → journal → checkpoint → committed-anchor):
+                //
+                // - Null: only ever a store that has not begun its first
+                //   append — the journal must be empty.
+                // - Pending(0, m): the first append's pre-commit survived but
+                //   the committed anchor did not. Reaching this arm means the
+                //   checkpoint block already validated the journal (a missing
+                //   checkpoint recovered itself against this same pending
+                //   state, so the anchor file now reads Committed — Pending
+                //   here implies a present, current checkpoint with the crash
+                //   between the checkpoint and committed-anchor publishes).
+                //   Pending over an EMPTY journal is the erased-or-never-
+                //   landed ambiguity: fail closed.
+                // - Committed(s, m): the steady state, bounded lag
+                //   {current, one behind}.
                 match anchor_tail {
-                    None => {
-                        if next_seq > 1 {
+                    ardur_governance::EvidenceAnchorTail::Null => {
+                        if next_seq != 0 {
                             return Err(ardur_governance::GovernanceError::Io(
                                 "the evidence anchor is the initial null-tail snapshot but the \
-                                 journal has more than one line (restored anchor); refusing to \
+                                 journal has committed lines (restored anchor); refusing to \
                                  replay"
                                     .to_string(),
                             ));
                         }
-                        // next_seq == 1 with a current checkpoint is the
-                        // first append's other crash window (crash between
-                        // the checkpoint and anchor publishes). Advance the
-                        // validated null anchor to line 0 before the sweep:
-                        // left null, a second crash plus journal-emptying and
-                        // checkpoint removal would read as pristine first
-                        // initialization, erasing the stranded event.
-                        if next_seq == 1 {
-                            write_events_anchor(
-                                &events_path,
-                                &events_mac_key,
-                                Some((0, line_macs[0].as_str())),
-                            )?;
-                        }
                     }
-                    Some((anchor_seq, anchor_mac)) => {
+                    ardur_governance::EvidenceAnchorTail::Pending(0, ref pending_mac) => {
+                        if next_seq == 0 {
+                            return Err(ardur_governance::GovernanceError::Io(
+                                "an authenticated pending first append is missing from the \
+                                 journal (the line never landed, or was deleted — \
+                                 indistinguishable); refusing to replay"
+                                    .to_string(),
+                            ));
+                        }
+                        if next_seq != 1 || line_macs[0] != *pending_mac {
+                            return Err(ardur_governance::GovernanceError::Io(
+                                "the pending anchor does not match the journal's first line; \
+                                 refusing to replay"
+                                    .to_string(),
+                            ));
+                        }
+                        // Crash between the checkpoint and committed-anchor
+                        // publishes of the first append: advance now.
+                        write_events_anchor(
+                            &events_path,
+                            &events_mac_key,
+                            ardur_governance::EvidenceAnchorTail::Committed(0, pending_mac.clone()),
+                        )?;
+                    }
+                    ardur_governance::EvidenceAnchorTail::Pending(_, _) => {
+                        return Err(ardur_governance::GovernanceError::Io(
+                            "the anchor pre-commits a non-first append (impossible in the \
+                             legitimate write order); refusing to replay"
+                                .to_string(),
+                        ));
+                    }
+                    ardur_governance::EvidenceAnchorTail::Committed(anchor_seq, anchor_mac) => {
                         let idx = anchor_seq as usize;
                         let current = next_seq as usize;
                         if idx >= current || idx + 2 < current || line_macs[idx] != anchor_mac {
@@ -576,7 +623,10 @@ impl ErMirrorEmitter {
                             write_events_anchor(
                                 &events_path,
                                 &events_mac_key,
-                                Some((next_seq - 1, tail_chain_mac.as_str())),
+                                ardur_governance::EvidenceAnchorTail::Committed(
+                                    next_seq - 1,
+                                    tail_chain_mac.clone(),
+                                ),
                             )?;
                         }
                     }
@@ -891,6 +941,21 @@ impl GovernanceEmitter for ErMirrorEmitter {
             &state.tail_chain_mac,
             &EvidenceRecord::PreEffect(Box::new(record.clone())).to_line()?,
         );
+        // Precommit the FIRST append in the anchor BEFORE the journal write:
+        // a crash after the line fsyncs but before the checkpoint publishes
+        // would otherwise be indistinguishable from pristine initialization
+        // if the journal were subsequently emptied — the pending anchor makes
+        // that erasure detectable (and fail-closed).
+        if state.next_seq == 0 {
+            if let Err(e) = write_events_anchor(
+                &self.events_path,
+                &self.events_mac_key,
+                ardur_governance::EvidenceAnchorTail::Pending(0, chain_mac.clone()),
+            ) {
+                state.poisoned = Some(e.to_string());
+                return Err(e);
+            }
+        }
         append_events_line(&self.events_path, &mut state, &line)?;
         if let Err(e) = write_events_checkpoint(
             &self.events_path,
@@ -902,7 +967,7 @@ impl GovernanceEmitter for ErMirrorEmitter {
             write_events_anchor(
                 &self.events_path,
                 &self.events_mac_key,
-                Some((state.next_seq, &chain_mac)),
+                ardur_governance::EvidenceAnchorTail::Committed(state.next_seq, chain_mac.clone()),
             )
         }) {
             state.poisoned = Some(e.to_string());
@@ -960,7 +1025,7 @@ impl GovernanceEmitter for ErMirrorEmitter {
             write_events_anchor(
                 &self.events_path,
                 &self.events_mac_key,
-                Some((state.next_seq, &chain_mac)),
+                ardur_governance::EvidenceAnchorTail::Committed(state.next_seq, chain_mac.clone()),
             )
         }) {
             state.poisoned = Some(e.to_string());
@@ -1242,7 +1307,7 @@ fn write_events_checkpoint(
 fn write_events_anchor(
     events_path: &Path,
     key: &[u8; 32],
-    tail: Option<(u64, &str)>,
+    tail: ardur_governance::EvidenceAnchorTail,
 ) -> Result<(), ardur_governance::GovernanceError> {
     let json = ardur_governance::evidence_anchor_json(key, tail);
     write_durable_sibling(events_path, "events.anchor", &json)

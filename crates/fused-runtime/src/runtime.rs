@@ -1364,6 +1364,54 @@ impl FusedRuntime {
             .map_err(settlement_error)
     }
 
+    /// The honest event outcome for a tool error: the typed refusal variants
+    /// are requests refused BEFORE the effect (a shell command outside its
+    /// allowlist, a path escaping the tool root, a missing capability grant,
+    /// a rejected token, malformed arguments, a cost ceiling) and must be
+    /// recorded as canonical denials — projecting them as `FailedUnknown`
+    /// would report verifier-attributed `insufficient_evidence` for what was
+    /// in fact a refusal. `FailedUnknown` is reserved for the variants where
+    /// execution may actually have occurred.
+    fn tool_error_event_outcome(err: &ToolError) -> EventOutcome {
+        use ardur_governance::{DeniedOutcome, PublicDenialReason};
+        match err {
+            ToolError::Denied { .. } => EventOutcome::Denied(DeniedOutcome {
+                public: PublicDenialReason::PolicyDenied,
+                internal: "tool_policy_denied".to_string(),
+            }),
+            ToolError::CapabilityDenied(_) => EventOutcome::Denied(DeniedOutcome {
+                public: PublicDenialReason::PolicyDenied,
+                internal: "tool_capability_denied".to_string(),
+            }),
+            ToolError::CapTokenDenied { .. } => EventOutcome::Denied(DeniedOutcome {
+                public: PublicDenialReason::PolicyDenied,
+                internal: "tool_cap_token_denied".to_string(),
+            }),
+            ToolError::InvalidArgs(_) => EventOutcome::Denied(DeniedOutcome {
+                public: PublicDenialReason::PolicyDenied,
+                internal: "tool_invalid_arguments".to_string(),
+            }),
+            ToolError::CostCeilingExceeded => EventOutcome::Denied(DeniedOutcome {
+                public: PublicDenialReason::BudgetExhausted,
+                internal: "tool_cost_ceiling_exceeded".to_string(),
+            }),
+            // Registered but backendless: a deployment gap, not a policy
+            // refusal and not an execution — the denial whose own
+            // classification is "could not establish" stays insufficient
+            // (the projection keeps that mapping).
+            ToolError::NotImplemented(_) => EventOutcome::Denied(DeniedOutcome {
+                public: PublicDenialReason::InsufficientEvidence,
+                internal: "tool_not_implemented".to_string(),
+            }),
+            // Execution may actually have occurred (the tool ran, or its
+            // output was produced but unusable): these stay unknown-effect.
+            ToolError::ExecutionFailed(_)
+            | ToolError::OutputTooLarge { .. }
+            | ToolError::Internal(_) => EventOutcome::FailedUnknown,
+            ToolError::Timeout => EventOutcome::TimeoutUnknown,
+        }
+    }
+
     /// **#543.** Record the immutable authorization inputs of one evaluated
     /// tool event **before** its effect runs (or at its denial point), so a
     /// post-crash replay can reconstruct the event without re-executing
@@ -3521,8 +3569,20 @@ impl FusedRuntime {
                         }
                     };
                     let ctx = self.tool_context(&req.cap_token, session_id);
-                    // #543: every admission gate passed — persist the
-                    // immutable authorization inputs BEFORE the effect runs.
+                    // #543: every admission gate passed. Observe the
+                    // dispatch intent first (it is fallible), then
+                    // persist the pre AFTER it succeeds and BEFORE `invoke`:
+                    // an observation failure then leaves no stranded pre the
+                    // sweep would sign as `effect_unobserved` for a tool that
+                    // never dispatched, and the pre is still durable before
+                    // the effect.
+                    self.observe_tool(
+                        &mut reservation,
+                        tool_ordinal,
+                        call,
+                        ToolEffect::DispatchIntent,
+                        OutputAdmission::NotScanned,
+                    )?;
                     let governance_pre = self.governance_pre_effect(
                         session_id,
                         &iter_request_id,
@@ -3532,13 +3592,6 @@ impl FusedRuntime {
                         &claims,
                         tool.required_capabilities(),
                     );
-                    self.observe_tool(
-                        &mut reservation,
-                        tool_ordinal,
-                        call,
-                        ToolEffect::DispatchIntent,
-                        OutputAdmission::NotScanned,
-                    )?;
                     let tool_result = tokio::time::timeout(
                         self.tool_timeout,
                         tool.invoke(&ctx, call.arguments.clone()),
@@ -3600,14 +3653,15 @@ impl FusedRuntime {
                             known = known.saturating_add(&output.cost);
                             Some(scan_result)
                         }
-                        Ok(Err(_)) => {
-                            // #543: execution error with an unknown effect —
-                            // terminal evidence BEFORE the fallible
+                        Ok(Err(tool_err)) => {
+                            // #543: terminal evidence BEFORE the fallible
                             // settlement observation, so neither a persist
-                            // failure nor a cancel strands the observation.
+                            // failure nor a cancel strands the observation —
+                            // and typed pre-effect refusals record as
+                            // canonical denials, not unknown effects.
                             self.governance_terminal_event(
                                 &governance_pre,
-                                EventOutcome::FailedUnknown,
+                                Self::tool_error_event_outcome(tool_err),
                             );
                             self.observe_tool(
                                 &mut reservation,
@@ -4516,7 +4570,12 @@ impl FusedRuntime {
                             }
                         };
                         let ctx = self.tool_context(&req.cap_token, session_id);
-                        // #543: gates passed — durable inputs before the effect.
+                        // #543: gates passed. Observe the dispatch intent
+                        // first (it is fallible), then persist the durable
+                        // inputs AFTER it succeeds and BEFORE the effect — an
+                        // observation failure leaves no stranded pre the sweep
+                        // would misread as `effect_unobserved`.
+                        self.observe_tool(reservation.as_mut().expect("held"), tool_ordinal, call, ToolEffect::DispatchIntent, OutputAdmission::NotScanned)?;
                         let governance_pre = self.governance_pre_effect(
                             session_id,
                             &iter_request_id,
@@ -4526,7 +4585,6 @@ impl FusedRuntime {
                             &claims,
                             tool.required_capabilities(),
                         );
-                        self.observe_tool(reservation.as_mut().expect("held"), tool_ordinal, call, ToolEffect::DispatchIntent, OutputAdmission::NotScanned)?;
                         let (output, scan_result) = match tokio::time::timeout(
                             self.tool_timeout,
                             tool.invoke(&ctx, call.arguments.clone()),
@@ -4567,12 +4625,13 @@ impl FusedRuntime {
                                 (output, scan_result)
                             }
                             Ok(Err(tool_err)) => {
-                                // #543: execution error with an unknown effect
-                                // — terminal evidence BEFORE the fallible
-                                // settlement observation.
+                                // #543: terminal evidence BEFORE the fallible
+                                // settlement observation — and typed
+                                // pre-effect refusals record as canonical
+                                // denials, not unknown effects.
                                 self.governance_terminal_event(
                                     &governance_pre,
-                                    EventOutcome::FailedUnknown,
+                                    Self::tool_error_event_outcome(&tool_err),
                                 );
                                 self.observe_tool(reservation.as_mut().expect("held"), tool_ordinal, call, ToolEffect::Failed { class: ToolFailureClass::Execution, effect_unknown: true }, OutputAdmission::NotScanned)?;
                                 // Consume-before-invoke: the approval stays
@@ -5368,6 +5427,71 @@ mod governance_classification_tests {
     //! operational error, approval-store error) must never be filed as a
     //! proven violation — only `insufficient_evidence`.
     use super::*;
+
+    #[test]
+    fn every_tool_error_variant_classifies_exhaustively() {
+        // The match in tool_error_event_outcome has no wildcard: a new
+        // ToolError variant breaks this build until it is classified. This
+        // pins each variant's class so a quiet reclassification is a test
+        // failure, not a review surprise.
+        use ardur_governance::{EventOutcome, PublicDenialReason};
+        let cases: Vec<(ToolError, &str, PublicDenialReason)> = vec![
+            (
+                ToolError::Denied { reason: "r".into() },
+                "tool_policy_denied",
+                PublicDenialReason::PolicyDenied,
+            ),
+            (
+                ToolError::CapabilityDenied(Capability::FsWrite),
+                "tool_capability_denied",
+                PublicDenialReason::PolicyDenied,
+            ),
+            (
+                ToolError::CapTokenDenied { reason: "r".into() },
+                "tool_cap_token_denied",
+                PublicDenialReason::PolicyDenied,
+            ),
+            (
+                ToolError::InvalidArgs("r".into()),
+                "tool_invalid_arguments",
+                PublicDenialReason::PolicyDenied,
+            ),
+            (
+                ToolError::CostCeilingExceeded,
+                "tool_cost_ceiling_exceeded",
+                PublicDenialReason::BudgetExhausted,
+            ),
+            (
+                ToolError::NotImplemented("r".into()),
+                "tool_not_implemented",
+                PublicDenialReason::InsufficientEvidence,
+            ),
+        ];
+        for (err, code, public) in cases {
+            match FusedRuntime::tool_error_event_outcome(&err) {
+                EventOutcome::Denied(d) => {
+                    assert_eq!(d.internal, code);
+                    assert_eq!(d.public, public);
+                }
+                other => panic!("{code} must classify as a typed denial, got {other:?}"),
+            }
+        }
+        // The execution-ambiguous variants stay unknown-effect.
+        for err in [
+            ToolError::ExecutionFailed("r".into()),
+            ToolError::OutputTooLarge { actual: 9, max: 1 },
+            ToolError::Internal(anyhow::anyhow!("r")),
+        ] {
+            assert!(matches!(
+                FusedRuntime::tool_error_event_outcome(&err),
+                EventOutcome::FailedUnknown
+            ));
+        }
+        assert!(matches!(
+            FusedRuntime::tool_error_event_outcome(&ToolError::Timeout),
+            EventOutcome::TimeoutUnknown
+        ));
+    }
 
     #[test]
     fn a_cedar_indeterminate_is_insufficient_evidence_not_a_violation() {
