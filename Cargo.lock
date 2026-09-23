@@ -1183,6 +1183,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ardur-provider-opencode"
+version = "0.0.1"
+dependencies = [
+ "ardur-provider-runtime",
+ "ardur-runtime",
+ "ardur-session-journals",
+ "async-trait",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "ardur-provider-openrouter"
 version = "0.0.1"
 dependencies = [
@@ -1245,6 +1258,7 @@ dependencies = [
  "ardur-provider-hermes",
  "ardur-provider-ollama",
  "ardur-provider-openai-compat",
+ "ardur-provider-opencode",
  "ardur-provider-openrouter",
  "ardur-provider-prime",
  "ardur-provider-runtime",

@@ -180,6 +180,16 @@ fn from_env_prime_selects_prime() {
 }
 
 #[test]
+fn from_env_opencode_selects_opencode() {
+    let _guard = env_lock();
+    let env = CleanEnv::new();
+    env.set("ARDUR_PROVIDER", "opencode-agent"); // alias
+
+    let provider = from_env(model()).expect("opencode is infallible");
+    assert_eq!(provider.id().0, "opencode");
+}
+
+#[test]
 fn from_env_unknown_provider_returns_helpful_error() {
     let _guard = env_lock();
     let env = CleanEnv::new();
