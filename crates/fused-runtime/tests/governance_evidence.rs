@@ -1984,9 +1984,8 @@ async fn a_tampered_pre_record_fails_the_reopen() {
     one_tool_turn(&mirror, &receipts).await;
 
     // Tamper ONLY pre-effect provenance the projection does not otherwise
-    // consume (the iteration counter): without the pre record in the signed
-    // evidence binding, the reopen would reproduce the chained receipt and
-    // accept the edit.
+    // consume (the iteration counter): the identity recompute at parse now
+    // catches it before the reconciliation pass even runs.
     let text = std::fs::read_to_string(&events).expect("journal");
     let mut lines: Vec<String> = Vec::new();
     for line in text.lines().filter(|l| !l.trim().is_empty()) {
@@ -2002,8 +2001,8 @@ async fn a_tampered_pre_record_fails_the_reopen() {
         .err()
         .expect("a tampered pre record must fail the reopen");
     assert!(
-        err.to_string().contains("does not reproduce"),
-        "expected the re-projection diagnostic, got: {err}"
+        err.to_string().contains("does not recompute"),
+        "expected the identity-recompute diagnostic, got: {err}"
     );
 }
 
@@ -2144,4 +2143,69 @@ async fn a_canonical_denial_pair_still_replays() {
     );
     assert_eq!(claims.internal_denial_code.as_deref(), Some("revoked"));
     assert_eq!(claims.policy_decisions[0].backend, "cap-token");
+}
+
+// ---------------------------------------------------------------------------
+// Fifth review round: terminal-before-first-observe, full cap-error
+// vocabulary, reconciliation index, stranded-pre identity authentication.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_stranded_pre_with_tampered_provenance_fails_the_open() {
+    let (_root, mirror, events, _receipts) = scratch();
+    std::fs::create_dir_all(events.parent().expect("parent")).expect("mkdir");
+    // A stranded pre (crash before the mirror): editing its provenance in
+    // that window must not be signed — replay recomputes the event identity
+    // from the journaled scope and requires it to match.
+    let pre = fixture_pre("session-stranded", 0, "call-stranded", json!({}));
+    let mut value = serde_json::to_value(&pre).expect("serialize");
+    value["iteration"] = json!(99);
+    let line = serde_json::to_string(&json!({ "pre_effect": value })).expect("line");
+    use std::io::Write as _;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&events)
+        .expect("create journal");
+    writeln!(file, "{line}").expect("write");
+    drop(file);
+
+    let err = ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
+        .err()
+        .expect("a stranded pre with tampered provenance must fail the open");
+    assert!(
+        err.to_string().contains("does not recompute"),
+        "expected the recompute diagnostic, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn an_untampered_stranded_pre_still_sweeps() {
+    let (_root, mirror, events, _receipts) = scratch();
+    std::fs::create_dir_all(events.parent().expect("parent")).expect("mkdir");
+    // The honest path is unaffected by identity authentication: an intact
+    // stranded pre sweeps its effect-unobserved orphan ER as before.
+    let pre = fixture_pre("session-intact", 0, "call-intact", json!({}));
+    let line = serde_json::to_string(
+        &json!({ "pre_effect": serde_json::to_value(&pre).expect("serialize") }),
+    )
+    .expect("line");
+    use std::io::Write as _;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&events)
+        .expect("create journal");
+    writeln!(file, "{line}").expect("write");
+    drop(file);
+
+    ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
+        .expect("an intact stranded pre opens and sweeps");
+    let chain = signed_chain(&mirror);
+    assert_eq!(chain.len(), 1);
+    assert_eq!(chain[0].receipt().verdict, Verdict::InsufficientEvidence);
+    assert_eq!(
+        chain[0].receipt().internal_denial_code.as_deref(),
+        Some("effect_unobserved")
+    );
 }

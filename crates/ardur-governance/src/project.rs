@@ -714,14 +714,18 @@ fn canonical_public_for_denial_code(internal: &str) -> Option<PublicDenialReason
         | "memory_subject_mismatch"
         | "memory_receipt_required"
         | "memory_record_malformed"
-        | "memory_write_denied" => PublicDenialReason::PolicyDenied,
+        | "memory_write_denied"
+        | "pop_required"
+        | "pop_key_mismatch"
+        | "pop_invalid" => PublicDenialReason::PolicyDenied,
         "revoked" => PublicDenialReason::Revoked,
-        "signature_invalid" => PublicDenialReason::ChainInvalid,
+        "signature_invalid" | "malformed_token" => PublicDenialReason::ChainInvalid,
         "budget_exhausted" => PublicDenialReason::BudgetExhausted,
         "policy_indeterminate"
         | "memory_policy_indeterminate"
         | "approval_evaluation_error"
-        | "tool_invocation_error" => PublicDenialReason::InsufficientEvidence,
+        | "tool_invocation_error"
+        | "unprojectable_attenuation" => PublicDenialReason::InsufficientEvidence,
         _ => return None,
     })
 }
@@ -827,4 +831,51 @@ fn validate_len(field: &str, value: &str, min: usize, max: usize) -> Result<(), 
         )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Drift guard: every (public, internal) pair the live cap-token error
+    /// mapping can emit must exist in the replay vocabulary. Without this a
+    /// durably recorded denial would be rejected at replay — poisoning the
+    /// emitter and every restart that replays the record. A new
+    /// [`CapTokenError`] variant forces an author through
+    /// [`AuthOutcome::from_cap_token_error`]'s exhaustive match; this test
+    /// forces the vocabulary to keep pace.
+    #[test]
+    fn every_cap_token_error_pair_is_in_the_replay_vocabulary() {
+        let errors = vec![
+            CapTokenError::Expired,
+            CapTokenError::AudienceMismatch,
+            CapTokenError::BudgetExhausted,
+            CapTokenError::ToolNotAllowed,
+            CapTokenError::Revoked,
+            CapTokenError::SignatureInvalid,
+            CapTokenError::Malformed("m".to_string()),
+            CapTokenError::PopRequired("m".to_string()),
+            CapTokenError::PopKeyMismatch {
+                expected: "e".to_string(),
+                presented: "p".to_string(),
+            },
+            CapTokenError::PopInvalid("m".to_string()),
+            CapTokenError::UnprojectableAttenuation("m".to_string()),
+        ];
+        for err in errors {
+            let outcome = AuthOutcome::from_cap_token_error(&err);
+            let (public, internal) = match &outcome {
+                AuthOutcome::Violation { public, internal } => (*public, internal.clone()),
+                AuthOutcome::InsufficientEvidence { internal } => {
+                    (PublicDenialReason::InsufficientEvidence, internal.clone())
+                }
+                AuthOutcome::Compliant => panic!("a cap error never maps to compliant"),
+            };
+            assert_eq!(
+                canonical_public_for_denial_code(&internal),
+                Some(public),
+                "the pair emitted for {err} must replay canonically"
+            );
+        }
+    }
 }

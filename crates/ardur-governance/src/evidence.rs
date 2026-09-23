@@ -41,7 +41,12 @@ use crate::hash::{sha256, sha256_hex};
 use crate::project::{GrantFacts, ToolInvocation, invocation_digests};
 
 /// The evidence record format version written by this build.
-pub const EVIDENCE_RECORD_VERSION: u32 = 1;
+///
+/// v2 (in-flight with #543, before any shipped journal existed): the pre
+/// record persists the identity discriminator (`request_id`) so replay can
+/// recompute — and therefore authenticate — the event identity instead of
+/// trusting the stored one.
+pub const EVIDENCE_RECORD_VERSION: u32 = 2;
 
 /// Canonical arguments larger than this are not inlined into the durable
 /// record; the record keeps the content-addressing digests only, and the
@@ -164,6 +169,11 @@ pub struct PreEffectRecord {
     pub kind: EventKind,
     /// The session the event belongs to (ER `trace_id`).
     pub session_id: String,
+    /// The identity discriminator: the round's request id for a tool
+    /// invocation (a fresh UUIDv4 per provider round), the owning round's
+    /// receipt id for a memory write. Persisted so replay can recompute the
+    /// event identity from the record instead of trusting the stored one.
+    pub request_id: String,
     /// The tool-loop iteration (1-based) the event was evaluated in; 0 for a
     /// memory write (which is keyed off the round receipt instead).
     pub iteration: u32,
@@ -245,6 +255,7 @@ impl PreEffectRecord {
             event_id,
             kind: EventKind::ToolInvocation,
             session_id: scope.session_id.to_string(),
+            request_id: scope.request_id.to_string(),
             iteration: scope.iteration,
             tool_ordinal: scope.tool_ordinal,
             call_id: scope.call_id.to_string(),
@@ -302,6 +313,7 @@ impl PreEffectRecord {
             event_id,
             kind: EventKind::MemoryWrite,
             session_id: session_id.to_string(),
+            request_id: round_receipt_id.to_string(),
             iteration: 0,
             tool_ordinal: 0,
             call_id: format!("memory.write:{round_receipt_id}"),
@@ -317,6 +329,30 @@ impl PreEffectRecord {
             arguments: Some(arguments),
             arguments_hash,
             invocation_digest: invocation_digest.value,
+        }
+    }
+
+    /// The event id recomputed from this record's journaled provenance —
+    /// the authentication replay applies to the stored identity. For a tool
+    /// invocation the seed is (session, request id, iteration, ordinal,
+    /// call id); for a memory write it is (session, round receipt id), the
+    /// receipt id riding in `request_id`.
+    ///
+    /// # Errors
+    ///
+    /// [`GovernanceError::Io`] on an unknown event kind (unreachable today;
+    /// the error keeps the match non-wildcard so a future kind must make an
+    /// explicit seeding decision).
+    pub fn recomputed_event_id(&self) -> Result<String, GovernanceError> {
+        match self.kind {
+            EventKind::ToolInvocation => Ok(tool_event_id(
+                &self.session_id,
+                &self.request_id,
+                self.iteration,
+                self.tool_ordinal,
+                &self.call_id,
+            )),
+            EventKind::MemoryWrite => Ok(memory_event_id(&self.session_id, &self.request_id)),
         }
     }
 
@@ -413,6 +449,21 @@ impl EvidenceRecord {
                 "evidence record event id {event_id:?} is not an `ev:` event identity; \
                  refusing to replay"
             )));
+        }
+        // Authenticate the identity against the journaled scope: replay
+        // recomputes the event id from the record's provenance and requires
+        // equality with the stored one. A stranded pre whose `iteration`,
+        // `kind`, ordinal, call id, or request id was edited in the crash
+        // window would otherwise be serialized, hashed, and signed with the
+        // tampered provenance endorsed.
+        if let EvidenceRecord::PreEffect(pre) = &record {
+            let recomputed = pre.recomputed_event_id()?;
+            if recomputed != pre.event_id {
+                return Err(GovernanceError::Io(format!(
+                    "evidence record event id {} does not recompute from its journaled                      provenance ({recomputed}); refusing to replay",
+                    pre.event_id
+                )));
+            }
         }
         Ok(record)
     }

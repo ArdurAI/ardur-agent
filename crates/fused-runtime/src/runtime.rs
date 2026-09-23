@@ -3547,8 +3547,35 @@ impl FusedRuntime {
                     // Preserve the verified invocation outcome even if caller
                     // cancellation wins. A timeout has no verified outcome.
                     let mut known = response.cost.saturating_add(&tool_cost);
-                    match &tool_result {
+                    let scan_result = match &tool_result {
                         Ok(Ok(output)) => {
+                            // #543: scan first, then the terminal evidence,
+                            // then the fallible settlement observation — an
+                            // already-observed result is never stranded behind
+                            // a settlement persistence failure or a later
+                            // cancel gate. A scanner operational failure (a
+                            // filter error, not a block verdict) records
+                            // admission as undetermined →
+                            // insufficient_evidence, never a guessed violation.
+                            let scan_result =
+                                self.scan_tool_output(&call.name, &output.content).await;
+                            self.governance_terminal_event(
+                                &governance_pre,
+                                EventOutcome::Completed(CompletedOutcome {
+                                    output_digest: Sha256Digest::of(
+                                        &serde_json::to_vec(&output.content).unwrap_or_default(),
+                                    )
+                                    .to_hex(),
+                                    cost: output.cost,
+                                    output_admission: match &scan_result {
+                                        Ok(()) => EvidenceOutputAdmission::Allowed,
+                                        Err(RuntimeError::InjectionBlocked { .. }) => {
+                                            EvidenceOutputAdmission::Blocked
+                                        }
+                                        Err(_) => EvidenceOutputAdmission::Undetermined,
+                                    },
+                                }),
+                            );
                             self.observe_tool(
                                 &mut reservation,
                                 tool_ordinal,
@@ -3560,15 +3587,28 @@ impl FusedRuntime {
                                     ),
                                     cost: output.cost,
                                 },
-                                OutputAdmission::NotScanned,
+                                if scan_result.is_ok() {
+                                    OutputAdmission::Allowed
+                                } else {
+                                    OutputAdmission::Blocked
+                                },
                             )?;
                             self.record_approval_invocation(
                                 &spent_approval,
                                 InvocationResult::Completed,
                             );
                             known = known.saturating_add(&output.cost);
+                            Some(scan_result)
                         }
                         Ok(Err(_)) => {
+                            // #543: execution error with an unknown effect —
+                            // terminal evidence BEFORE the fallible
+                            // settlement observation, so neither a persist
+                            // failure nor a cancel strands the observation.
+                            self.governance_terminal_event(
+                                &governance_pre,
+                                EventOutcome::FailedUnknown,
+                            );
                             self.observe_tool(
                                 &mut reservation,
                                 tool_ordinal,
@@ -3579,19 +3619,19 @@ impl FusedRuntime {
                                 },
                                 OutputAdmission::NotScanned,
                             )?;
-                            // #543: execution error with an unknown effect —
-                            // recorded now so a cancel at the next gate cannot
-                            // strand the event without an observation.
-                            self.governance_terminal_event(
-                                &governance_pre,
-                                EventOutcome::FailedUnknown,
-                            );
                             self.record_approval_invocation(
                                 &spent_approval,
                                 InvocationResult::Failed,
                             );
+                            None
                         }
                         Err(_) => {
+                            // #543: timeout with a possible effect — terminal
+                            // evidence before the fallible observation.
+                            self.governance_terminal_event(
+                                &governance_pre,
+                                EventOutcome::TimeoutUnknown,
+                            );
                             self.observe_tool(
                                 &mut reservation,
                                 tool_ordinal,
@@ -3599,13 +3639,9 @@ impl FusedRuntime {
                                 ToolEffect::InterruptedUnknown,
                                 OutputAdmission::NotScanned,
                             )?;
-                            // #543: timeout with a possible effect.
-                            self.governance_terminal_event(
-                                &governance_pre,
-                                EventOutcome::TimeoutUnknown,
-                            );
+                            None
                         }
-                    }
+                    };
                     // Failed awaits and timeouts obey the same cancellation
                     // economics as successful returns, before any error hook.
                     reservation = match self
@@ -3667,52 +3703,12 @@ impl FusedRuntime {
                         }
                     };
 
-                    // Scan the tool output before it re-enters the context.
-                    let scan_result = self.scan_tool_output(&call.name, &output.content).await;
-                    // #543: the event is terminal at the scan decision — the
-                    // observed effect (digest + incurred cost) plus the
-                    // output-admission decision. Recorded BEFORE the fallible
-                    // settlement observation below: a settlement persistence
-                    // failure must not strand an already-observed result as
-                    // effect_unobserved, and a caller disconnect cannot
-                    // strand it either. A scanner operational failure (a
-                    // filter error, not a block verdict) records admission as
-                    // undetermined → insufficient_evidence, never a guessed
-                    // violation.
-                    self.governance_terminal_event(
-                        &governance_pre,
-                        EventOutcome::Completed(CompletedOutcome {
-                            output_digest: Sha256Digest::of(
-                                &serde_json::to_vec(&output.content).unwrap_or_default(),
-                            )
-                            .to_hex(),
-                            cost: output.cost,
-                            output_admission: match &scan_result {
-                                Ok(()) => EvidenceOutputAdmission::Allowed,
-                                Err(RuntimeError::InjectionBlocked { .. }) => {
-                                    EvidenceOutputAdmission::Blocked
-                                }
-                                Err(_) => EvidenceOutputAdmission::Undetermined,
-                            },
-                        }),
-                    );
-                    self.observe_tool(
-                        &mut reservation,
-                        tool_ordinal,
-                        call,
-                        ToolEffect::Completed {
-                            output_digest: GateSha256::of(
-                                &serde_json::to_vec(&output.content)
-                                    .map_err(|e| RuntimeError::Internal(e.into()))?,
-                            ),
-                            cost: output.cost,
-                        },
-                        if scan_result.is_ok() {
-                            OutputAdmission::Allowed
-                        } else {
-                            OutputAdmission::Blocked
-                        },
-                    )?;
+                    // The scan decision and its terminal evidence were made
+                    // in the success arm above (before the first fallible
+                    // settlement observation); this path only handles the
+                    // admission outcome.
+                    let scan_result =
+                        scan_result.expect("the success arm produced the scan decision");
                     reservation = match self
                         .abort_if_caller_gone(session_id, reservation, known, &cancel_probe)
                         .await
@@ -4531,30 +4527,54 @@ impl FusedRuntime {
                             tool.required_capabilities(),
                         );
                         self.observe_tool(reservation.as_mut().expect("held"), tool_ordinal, call, ToolEffect::DispatchIntent, OutputAdmission::NotScanned)?;
-                        let output = match tokio::time::timeout(
+                        let (output, scan_result) = match tokio::time::timeout(
                             self.tool_timeout,
                             tool.invoke(&ctx, call.arguments.clone()),
                         )
                         .await
                         {
                             Ok(Ok(output)) => {
+                                // #543: scan, terminal evidence, then the
+                                // fallible settlement observation — an
+                                // already-observed result is never stranded
+                                // behind a persist failure.
+                                let scan_result = self.scan_tool_output(&call.name, &output.content).await;
+                                self.governance_terminal_event(
+                                    &governance_pre,
+                                    EventOutcome::Completed(CompletedOutcome {
+                                        output_digest: Sha256Digest::of(
+                                            &serde_json::to_vec(&output.content).unwrap_or_default(),
+                                        )
+                                        .to_hex(),
+                                        cost: output.cost,
+                                        output_admission: match &scan_result {
+                                            Ok(()) => EvidenceOutputAdmission::Allowed,
+                                            Err(RuntimeError::InjectionBlocked { .. }) => {
+                                                EvidenceOutputAdmission::Blocked
+                                            }
+                                            Err(_) => EvidenceOutputAdmission::Undetermined,
+                                        },
+                                    }),
+                                );
                                 self.observe_tool(reservation.as_mut().expect("held"), tool_ordinal, call, ToolEffect::Completed {
                                     output_digest: GateSha256::of(&serde_json::to_vec(&output.content).map_err(|e| RuntimeError::Internal(e.into()))?),
                                     cost: output.cost,
-                                }, OutputAdmission::NotScanned)?;
+                                }, if scan_result.is_ok() { OutputAdmission::Allowed } else { OutputAdmission::Blocked })?;
                                 self.record_approval_invocation(
                                     &spent_approval,
                                     InvocationResult::Completed,
                                 );
-                                output
+                                (output, scan_result)
                             }
                             Ok(Err(tool_err)) => {
-                                self.observe_tool(reservation.as_mut().expect("held"), tool_ordinal, call, ToolEffect::Failed { class: ToolFailureClass::Execution, effect_unknown: true }, OutputAdmission::NotScanned)?;
-                                // #543: execution error with an unknown effect.
+                                // #543: execution error with an unknown effect
+                                // — terminal evidence BEFORE the fallible
+                                // settlement observation.
                                 self.governance_terminal_event(
                                     &governance_pre,
                                     EventOutcome::FailedUnknown,
                                 );
+                                self.observe_tool(reservation.as_mut().expect("held"), tool_ordinal, call, ToolEffect::Failed { class: ToolFailureClass::Execution, effect_unknown: true }, OutputAdmission::NotScanned)?;
                                 // Consume-before-invoke: the approval stays
                                 // spent; the card records the call resolved
                                 // as failed.
@@ -4576,12 +4596,14 @@ impl FusedRuntime {
                                 unreachable!()
                             }
                             Err(_elapsed) => {
-                                self.observe_tool(reservation.as_mut().expect("held"), tool_ordinal, call, ToolEffect::InterruptedUnknown, OutputAdmission::NotScanned)?;
-                                // #543: timeout with a possible effect.
+                                // #543: timeout with a possible effect —
+                                // terminal evidence BEFORE the fallible
+                                // settlement observation.
                                 self.governance_terminal_event(
                                     &governance_pre,
                                     EventOutcome::TimeoutUnknown,
                                 );
+                                self.observe_tool(reservation.as_mut().expect("held"), tool_ordinal, call, ToolEffect::InterruptedUnknown, OutputAdmission::NotScanned)?;
                                 // Timed out with the invocation's effect
                                 // unknown: the spent card is deliberately
                                 // left WITHOUT an outcome record — the
@@ -4609,36 +4631,10 @@ impl FusedRuntime {
                             }
                         };
 
-                        // Scan the tool output before it re-enters the context.
-                        let scan_result = self.scan_tool_output(&call.name, &output.content).await;
-                        // #543: terminal at the scan decision — observed
-                        // effect + output-admission decision, recorded BEFORE
-                        // the fallible settlement observation below (a
-                        // settlement persistence failure must not strand an
-                        // already-observed result as effect_unobserved). A
-                        // scanner operational failure (a filter error, not a
-                        // block verdict) records admission as undetermined →
-                        // insufficient_evidence, never a guessed violation.
-                        self.governance_terminal_event(
-                            &governance_pre,
-                            EventOutcome::Completed(CompletedOutcome {
-                                output_digest: Sha256Digest::of(
-                                    &serde_json::to_vec(&output.content).unwrap_or_default(),
-                                )
-                                .to_hex(),
-                                cost: output.cost,
-                                output_admission: match &scan_result {
-                                    Ok(()) => EvidenceOutputAdmission::Allowed,
-                                    Err(RuntimeError::InjectionBlocked { .. }) => {
-                                        EvidenceOutputAdmission::Blocked
-                                    }
-                                    Err(_) => EvidenceOutputAdmission::Undetermined,
-                                },
-                            }),
-                        );
-                        self.observe_tool(reservation.as_mut().expect("held"), tool_ordinal, call, ToolEffect::Completed {
-                            output_digest: GateSha256::of(&serde_json::to_vec(&output.content).map_err(|e| RuntimeError::Internal(e.into()))?), cost: output.cost,
-                        }, if scan_result.is_ok() { OutputAdmission::Allowed } else { OutputAdmission::Blocked })?;
+                        // The scan decision and its terminal evidence were
+                        // made in the success arm above (before the first
+                        // fallible settlement observation); only the
+                        // admission outcome is handled here.
                         if let Err(err) = scan_result {
                             yield FusedEvent::StageEnd { stage: StageKind::ToolExec, ok: false };
                             let known = response

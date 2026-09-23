@@ -262,12 +262,23 @@ impl ErMirrorEmitter {
         // re-project — with their original parent — to the chained receipt
         // exactly (editing a mirrored event's recorded outcome or arguments
         // fails closed), even though no new ER needs appending.
+        //
+        // The lookup index is built once: both files are append-only and
+        // unbounded, so a per-event linear scan would make every restart
+        // quadratic in the lifetime event count.
+        let events_by_id: std::collections::HashMap<
+            &str,
+            &(PreEffectRecord, Option<PostEffectRecord>),
+        > = events
+            .iter()
+            .map(|pair| (pair.0.event_id.as_str(), pair))
+            .collect();
         for (idx, er) in chain.iter().enumerate() {
             let step_id = &er.receipt().step_id;
             if !step_id.starts_with("ev:") {
                 continue;
             }
-            let Some((pre, post)) = events.iter().find(|(pre, _)| &pre.event_id == step_id) else {
+            let Some((pre, post)) = events_by_id.get(step_id.as_str()).copied() else {
                 return Err(ardur_governance::GovernanceError::Io(format!(
                     "chained event ER {step_id} has no durable evidence record; refusing \
                      to mirror over missing evidence"
