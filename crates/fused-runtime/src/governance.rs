@@ -539,6 +539,20 @@ impl ErMirrorEmitter {
                                     .to_string(),
                             ));
                         }
+                        // next_seq == 1 with a current checkpoint is the
+                        // first append's other crash window (crash between
+                        // the checkpoint and anchor publishes). Advance the
+                        // validated null anchor to line 0 before the sweep:
+                        // left null, a second crash plus journal-emptying and
+                        // checkpoint removal would read as pristine first
+                        // initialization, erasing the stranded event.
+                        if next_seq == 1 {
+                            write_events_anchor(
+                                &events_path,
+                                &events_mac_key,
+                                Some((0, line_macs[0].as_str())),
+                            )?;
+                        }
                     }
                     Some((anchor_seq, anchor_mac)) => {
                         let idx = anchor_seq as usize;
@@ -1119,16 +1133,43 @@ fn write_durable_sibling(
         // O_TRUNC and the write could otherwise leave the previous (valid)
         // document destroyed and the new one absent — with rename, the
         // previous document remains visible until its durable replacement
-        // exists.
+        // exists. The temporary is created EXCLUSIVELY: NOFOLLOW rejects
+        // symlinks but not hardlinks, and a pre-planted `events.tail.tmp`
+        // hardlink to the journal would otherwise be truncated in place,
+        // destroying the record whose publish is about to be reported as
+        // durable. A pre-existing tmp is crash residue or attack residue —
+        // the flock holder owns the directory, so it is unlinked and the
+        // create retried once; a second failure is an active race and fails
+        // closed.
         let tmp_name = format!("{name}.tmp");
-        let mut file = openat(
+        let tmp_flags =
+            OFlags::RDWR | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let mut file = match openat(
             &parent,
             tmp_name.as_str(),
-            OFlags::RDWR | OFlags::CREATE | OFlags::TRUNC | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            tmp_flags,
             Mode::from_raw_mode(0o600),
-        )
-        .map(std::fs::File::from)
-        .map_err(|e| std::io::Error::from_raw_os_error(e.raw_os_error()))?;
+        ) {
+            Ok(fd) => std::fs::File::from(fd),
+            Err(first) => {
+                rustix::fs::unlinkat(&parent, tmp_name.as_str(), rustix::fs::AtFlags::empty())
+                    .map_err(|e| std::io::Error::from_raw_os_error(e.raw_os_error()))?;
+                openat(
+                    &parent,
+                    tmp_name.as_str(),
+                    tmp_flags,
+                    Mode::from_raw_mode(0o600),
+                )
+                .map(std::fs::File::from)
+                .map_err(|_| std::io::Error::from_raw_os_error(first.raw_os_error()))?
+            }
+        };
+        if !file.metadata()?.is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "evidence tmp sibling is not a regular file",
+            ));
+        }
         file.write_all(contents.as_bytes())?;
         file.sync_all()?;
         rustix::fs::renameat(&parent, tmp_name.as_str(), &parent, name)
@@ -1149,13 +1190,26 @@ fn write_durable_sibling(
 ) -> Result<(), ardur_governance::GovernanceError> {
     use std::io::Write as _;
     (|| {
-        let mut file = std::fs::OpenOptions::new()
+        let tmp = events_path.with_file_name(format!("{name}.tmp"));
+        let mut file = match std::fs::OpenOptions::new()
             .write(true)
-            .create(true)
-            .truncate(true)
-            .open(events_path.with_file_name(name))?;
+            .create_new(true)
+            .open(&tmp)
+        {
+            Ok(file) => file,
+            Err(first) => {
+                // Stale or planted residue: the holder owns the directory.
+                std::fs::remove_file(&tmp)?;
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&tmp)
+                    .map_err(|_| first)?
+            }
+        };
         file.write_all(contents.as_bytes())?;
         file.sync_all()?;
+        std::fs::rename(&tmp, events_path.with_file_name(name))?;
         if let Some(parent) = events_path.parent() {
             std::fs::File::open(parent)?.sync_all()?;
         }

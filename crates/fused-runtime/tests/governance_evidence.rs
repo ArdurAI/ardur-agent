@@ -2882,3 +2882,76 @@ async fn a_one_behind_anchor_is_advanced_before_the_sweep() {
         "expected the rollback diagnostic, got: {err}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Twelfth review round: advance the null anchor; exclusive tmp creation.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn the_null_anchor_advances_after_the_first_append_crash_window() {
+    let (_root, mirror, events, _receipts) = scratch();
+    // The crash between the checkpoint and anchor publishes of the FIRST
+    // append: one journaled line, current checkpoint, initial null anchor.
+    let pre = fixture_pre("session-first", 0, "call-first", json!({}));
+    let line = EvidenceRecord::PreEffect(Box::new(pre))
+        .to_line()
+        .expect("line");
+    let (content, tail_mac, next_seq) = mac_raw_lines(&[&line]);
+    assert_eq!(next_seq, 1);
+    std::fs::create_dir_all(events.parent().unwrap()).unwrap();
+    std::fs::write(&events, content).expect("journal");
+    let checkpoint = ardur_governance::evidence_checkpoint_json(&test_mac_key(), 0, &tail_mac);
+    std::fs::write(events.with_file_name("events.tail"), checkpoint).expect("checkpoint");
+    let anchor = ardur_governance::evidence_anchor_json(&test_mac_key(), None);
+    std::fs::write(events.with_file_name("events.anchor"), anchor).expect("anchor");
+
+    ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
+        .expect("the checkpoint-published crash window is accepted");
+    let advanced: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(events.with_file_name("events.anchor")).expect("anchor"),
+    )
+    .expect("anchor json");
+    assert_eq!(
+        advanced["tail_seq"].as_u64().expect("tail_seq"),
+        0,
+        "the null anchor is advanced to line 0 during the open"
+    );
+
+    // Now the second-crash attack: empty the journal and remove the
+    // checkpoint. The advanced anchor commits to line 0 — the open must
+    // fail instead of reading this as pristine initialization.
+    std::fs::write(&events, "").expect("empty the journal");
+    let _ = std::fs::remove_file(events.with_file_name("events.tail"));
+    let err = ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
+        .err()
+        .expect("journal-emptying against an advanced anchor must fail");
+    assert!(
+        err.to_string().contains("anchor"),
+        "expected the anchor diagnostic, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn a_planted_tmp_hardlink_cannot_truncate_the_journal() {
+    let (_root, mirror, events, receipts) = scratch();
+    one_tool_turn(&mirror, &receipts).await;
+    let before = std::fs::read_to_string(&events).expect("journal");
+
+    // Plant the attack: events.tail.tmp as a HARDLINK to the journal. The
+    // next checkpoint publish must not truncate the journal through it.
+    let tmp = events.with_file_name("events.tail.tmp");
+    let _ = std::fs::remove_file(&tmp);
+    std::fs::hard_link(&events, &tmp).expect("plant hardlink");
+
+    one_tool_turn(&mirror, &receipts).await;
+    let after = std::fs::read_to_string(&events).expect("journal");
+    assert!(
+        after.starts_with(&before),
+        "the planted hardlink must not truncate the journal\nbefore: {before:?}\nafter: {after:?}"
+    );
+    assert!(after.len() > before.len(), "the second turn appended");
+
+    // And the store still opens and verifies cleanly.
+    ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
+        .expect("reopen is clean after the planted-hardlink attempt");
+}
