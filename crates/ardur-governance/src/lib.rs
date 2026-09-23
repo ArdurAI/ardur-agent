@@ -83,6 +83,7 @@ pub use evidence::{
     memory_event_id, tool_event_id,
 };
 pub use grant::{GrantDescriptor, MissionRef};
+pub use hash::{evidence_record_mac_key, unwrap_evidence_line, wrap_evidence_line};
 pub use mirror::{ErRoundFacts, GovernanceEmitter, MirroredToolCall};
 pub use mission::{
     BudgetPair, DelegationPolicy, EFFECT_CLASSES, EffectPolicy, FlowPolicy, GovernedMemoryStore,

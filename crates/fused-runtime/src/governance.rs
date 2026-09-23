@@ -115,6 +115,10 @@ pub struct ErMirrorEmitter {
     path: PathBuf,
     events_path: PathBuf,
     key: ErSigningKey,
+    /// The journal-line MAC key, derived from the ER signing key under a
+    /// domain-separated label (#543 review: stranded records must be
+    /// unforgeable in the crash window between append and mirror).
+    events_mac_key: [u8; 32],
     verifier_id: String,
     run_nonce: String,
     inner: Mutex<EmitterState>,
@@ -150,6 +154,7 @@ impl ErMirrorEmitter {
             .to_pkcs8_pem()
             .map_err(|e| ardur_governance::GovernanceError::Key(format!("pem: {e}")))?;
         let key = ErSigningKey::from_pkcs8_pem(&pem)?;
+        let events_mac_key = ardur_governance::evidence_record_mac_key(pem.as_bytes());
         let run_nonce = run_nonce();
 
         // The hardened descriptor-relative open needs an absolute path; a
@@ -242,7 +247,7 @@ impl ErMirrorEmitter {
             .map_err(|e| ardur_governance::GovernanceError::Io(format!("events read open: {e}")))?;
         let events_bytes = read_all_from(&events_reader)
             .map_err(|e| ardur_governance::GovernanceError::Io(format!("events read: {e}")))?;
-        let events = parse_evidence_journal(&events_bytes)?;
+        let events = parse_evidence_journal(&events_bytes, &events_mac_key)?;
 
         let mut state = EmitterState {
             tail: chain.last().cloned(),
@@ -329,6 +334,7 @@ impl ErMirrorEmitter {
             path,
             events_path,
             key,
+            events_mac_key,
             verifier_id: verifier_id.to_string(),
             run_nonce,
             inner: Mutex::new(state),
@@ -467,7 +473,10 @@ impl GovernanceEmitter for ErMirrorEmitter {
             state.poisoned = Some(err.to_string());
             return Err(err);
         }
-        let line = EvidenceRecord::PreEffect(Box::new(record.clone())).to_line()?;
+        let line = ardur_governance::wrap_evidence_line(
+            &self.events_mac_key,
+            &EvidenceRecord::PreEffect(Box::new(record.clone())).to_line()?,
+        );
         append_events_line(&self.events_path, &mut state, &line)?;
         state.open_event_ids.insert(record.event_id.clone());
         Ok(())
@@ -498,7 +507,10 @@ impl GovernanceEmitter for ErMirrorEmitter {
             state.poisoned = Some(err.to_string());
             return Err(err);
         }
-        let line = EvidenceRecord::PostEffect(record.clone()).to_line()?;
+        let line = ardur_governance::wrap_evidence_line(
+            &self.events_mac_key,
+            &EvidenceRecord::PostEffect(record.clone()).to_line()?,
+        );
         append_events_line(&self.events_path, &mut state, &line)?;
         state.open_event_ids.remove(&record.event_id);
         state.closed_event_ids.insert(record.event_id.clone());
@@ -689,6 +701,7 @@ fn append_events_line(
 /// let the mirror chain onto evidence it cannot account for.
 fn parse_evidence_journal(
     bytes: &[u8],
+    mac_key: &[u8; 32],
 ) -> Result<Vec<(PreEffectRecord, Option<PostEffectRecord>)>, ardur_governance::GovernanceError> {
     use std::collections::HashMap;
     if bytes.is_empty() {
@@ -706,7 +719,14 @@ fn parse_evidence_journal(
     let mut pre_index: HashMap<String, usize> = HashMap::new();
     let mut posts: HashMap<String, PostEffectRecord> = HashMap::new();
     for (i, line) in text.lines().filter(|l| !l.trim().is_empty()).enumerate() {
-        let record = EvidenceRecord::from_line(line).map_err(|e| {
+        // Verify the keyed MAC BEFORE any semantic check: without it an
+        // editor of the crash window could falsify a stranded record's
+        // provenance AND its publicly recomputable identity, and the sweep
+        // would sign the forgery.
+        let line = ardur_governance::unwrap_evidence_line(mac_key, line).map_err(|e| {
+            ardur_governance::GovernanceError::Io(format!("evidence journal line {i}: {e}"))
+        })?;
+        let record = EvidenceRecord::from_line(&line).map_err(|e| {
             ardur_governance::GovernanceError::Io(format!("evidence journal line {i}: {e}"))
         })?;
         match record {

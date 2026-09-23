@@ -65,6 +65,50 @@ pub enum AuthOutcome {
     },
 }
 
+/// The single, exhaustive (public reason, internal code) mapping every
+/// cap-token verification failure classifies under — shared by
+/// [`AuthOutcome::from_cap_token_error`] (live classification) and the
+/// replay-vocabulary drift guard, so the two can never drift apart.
+///
+/// The match is deliberately **exhaustive with no wildcard arm**: a new
+/// [`CapTokenError`] variant must break this build and force an explicit
+/// classification decision, and the author adding it must also extend the
+/// replay vocabulary in `canonical_public_for_denial_code` and the drift
+/// guard's case list (the guard asserts whatever this mapping emits replays
+/// canonically).
+fn cap_error_pair(err: &CapTokenError) -> (PublicDenialReason, &'static str) {
+    match err {
+        CapTokenError::Expired => (PublicDenialReason::PolicyDenied, "grant_expired"),
+        CapTokenError::AudienceMismatch => (PublicDenialReason::PolicyDenied, "audience_mismatch"),
+        CapTokenError::BudgetExhausted => (PublicDenialReason::BudgetExhausted, "budget_exhausted"),
+        CapTokenError::ToolNotAllowed => (PublicDenialReason::PolicyDenied, "tool_not_allowed"),
+        CapTokenError::Revoked => (PublicDenialReason::Revoked, "revoked"),
+        CapTokenError::SignatureInvalid => (PublicDenialReason::ChainInvalid, "signature_invalid"),
+        CapTokenError::Malformed(_) => (PublicDenialReason::ChainInvalid, "malformed_token"),
+        // Proof-of-possession (#363). These are POLICY denials, not chain
+        // failures: the token itself may be perfectly well-formed and
+        // correctly signed — what failed is the presenter's binding to it.
+        // Mapping them to `ChainInvalid` would misdirect an operator toward
+        // the issuer when the real problem is the caller.
+        //
+        // Missing proof and wrong proof stay distinct internally, because
+        // "the client never sent one" (a misconfiguration) and "the key does
+        // not match" (a stolen token being presented) demand different
+        // responses, even though both are `PolicyDenied` publicly.
+        CapTokenError::PopRequired(_) => (PublicDenialReason::PolicyDenied, "pop_required"),
+        CapTokenError::PopKeyMismatch { .. } => {
+            (PublicDenialReason::PolicyDenied, "pop_key_mismatch")
+        }
+        CapTokenError::PopInvalid(_) => (PublicDenialReason::PolicyDenied, "pop_invalid"),
+        // The caller handles this case as `insufficient_evidence` before
+        // delegating; the arm keeps the match exhaustive without a wildcard.
+        CapTokenError::UnprojectableAttenuation(_) => (
+            PublicDenialReason::InsufficientEvidence,
+            "unprojectable_attenuation",
+        ),
+    }
+}
+
 impl AuthOutcome {
     /// Map a cap-token verification failure to an ER outcome, following the
     /// verifier-contract §9 fail-closed table.
@@ -99,43 +143,7 @@ impl AuthOutcome {
             };
         }
 
-        let (public, internal) = match err {
-            CapTokenError::Expired => (PublicDenialReason::PolicyDenied, "grant_expired"),
-            CapTokenError::AudienceMismatch => {
-                (PublicDenialReason::PolicyDenied, "audience_mismatch")
-            }
-            CapTokenError::BudgetExhausted => {
-                (PublicDenialReason::BudgetExhausted, "budget_exhausted")
-            }
-            CapTokenError::ToolNotAllowed => (PublicDenialReason::PolicyDenied, "tool_not_allowed"),
-            CapTokenError::Revoked => (PublicDenialReason::Revoked, "revoked"),
-            CapTokenError::SignatureInvalid => {
-                (PublicDenialReason::ChainInvalid, "signature_invalid")
-            }
-            CapTokenError::Malformed(_) => (PublicDenialReason::ChainInvalid, "malformed_token"),
-            // Proof-of-possession (#363). These are POLICY denials, not chain
-            // failures: the token itself may be perfectly well-formed and
-            // correctly signed — what failed is the presenter's binding to it.
-            // Mapping them to `ChainInvalid` would misdirect an operator toward
-            // the issuer when the real problem is the caller.
-            //
-            // Missing proof and wrong proof stay distinct internally, because
-            // "the client never sent one" (a misconfiguration) and "the key does
-            // not match" (a stolen token being presented) demand different
-            // responses, even though both are `PolicyDenied` publicly.
-            CapTokenError::PopRequired(_) => (PublicDenialReason::PolicyDenied, "pop_required"),
-            CapTokenError::PopKeyMismatch { .. } => {
-                (PublicDenialReason::PolicyDenied, "pop_key_mismatch")
-            }
-            CapTokenError::PopInvalid(_) => (PublicDenialReason::PolicyDenied, "pop_invalid"),
-            // Handled above as `insufficient_evidence`; repeated here so the
-            // match stays exhaustive without a wildcard.
-            CapTokenError::UnprojectableAttenuation(_) => {
-                return AuthOutcome::InsufficientEvidence {
-                    internal: "unprojectable_attenuation".to_string(),
-                };
-            }
-        };
+        let (public, internal) = cap_error_pair(err);
         AuthOutcome::Violation {
             public,
             internal: internal.to_string(),
@@ -837,13 +845,16 @@ fn validate_len(field: &str, value: &str, min: usize, max: usize) -> Result<(), 
 mod tests {
     use super::*;
 
-    /// Drift guard: every (public, internal) pair the live cap-token error
-    /// mapping can emit must exist in the replay vocabulary. Without this a
-    /// durably recorded denial would be rejected at replay — poisoning the
-    /// emitter and every restart that replays the record. A new
-    /// [`CapTokenError`] variant forces an author through
-    /// [`AuthOutcome::from_cap_token_error`]'s exhaustive match; this test
-    /// forces the vocabulary to keep pace.
+    /// Drift guard: every (public, internal) pair the shared exhaustive
+    /// cap-error mapping emits must exist in the replay vocabulary. Without
+    /// this a durably recorded denial would be rejected at replay —
+    /// poisoning the emitter and every restart that replays the record. The
+    /// mapping itself is exhaustive, so a new [`CapTokenError`] variant
+    /// breaks THIS crate's build in `cap_error_pair` first; the author
+    /// fixing it must extend the vocabulary and this case list (Rust enums
+    /// are not enumerable at compile time, so the case list is the remaining
+    /// manual step — the shared mapping guarantees the pairs themselves
+    /// cannot drift from the live classification).
     #[test]
     fn every_cap_token_error_pair_is_in_the_replay_vocabulary() {
         let errors = vec![
@@ -863,19 +874,26 @@ mod tests {
             CapTokenError::UnprojectableAttenuation("m".to_string()),
         ];
         for err in errors {
-            let outcome = AuthOutcome::from_cap_token_error(&err);
-            let (public, internal) = match &outcome {
-                AuthOutcome::Violation { public, internal } => (*public, internal.clone()),
-                AuthOutcome::InsufficientEvidence { internal } => {
-                    (PublicDenialReason::InsufficientEvidence, internal.clone())
+            let (public, internal) = cap_error_pair(&err);
+            assert_eq!(
+                canonical_public_for_denial_code(internal),
+                Some(public),
+                "the pair {public:?}/{internal} from the shared mapping must replay canonically"
+            );
+            // And the live classification emits exactly the shared pair.
+            match AuthOutcome::from_cap_token_error(&err) {
+                AuthOutcome::Violation {
+                    public: p,
+                    internal: i,
+                } => assert_eq!((p, i.as_str()), (public, internal)),
+                AuthOutcome::InsufficientEvidence { internal: i } => {
+                    assert_eq!(
+                        (PublicDenialReason::InsufficientEvidence, i.as_str()),
+                        (public, internal)
+                    );
                 }
                 AuthOutcome::Compliant => panic!("a cap error never maps to compliant"),
-            };
-            assert_eq!(
-                canonical_public_for_denial_code(&internal),
-                Some(public),
-                "the pair emitted for {err} must replay canonically"
-            );
+            }
         }
     }
 }

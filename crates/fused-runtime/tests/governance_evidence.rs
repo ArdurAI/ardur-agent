@@ -246,13 +246,15 @@ impl Tool for EvidenceAssertingTool {
         // call must already be on disk (the runtime wrote + fsynced it before
         // dispatching).
         let text = std::fs::read_to_string(&self.events_path).unwrap_or_default();
-        let found =
-            text.lines().filter(|l| !l.trim().is_empty()).any(
-                |line| match EvidenceRecord::from_line(line) {
-                    Ok(EvidenceRecord::PreEffect(pre)) => pre.call_id == self.call_id,
-                    _ => false,
-                },
-            );
+        let mac_key = test_mac_key();
+        let found = text.lines().filter(|l| !l.trim().is_empty()).any(|line| {
+            let line =
+                ardur_governance::unwrap_evidence_line(&mac_key, line).expect("envelope verifies");
+            match EvidenceRecord::from_line(&line) {
+                Ok(EvidenceRecord::PreEffect(pre)) => pre.call_id == self.call_id,
+                _ => false,
+            }
+        });
         if found {
             self.found.fetch_add(1, Ordering::SeqCst);
         }
@@ -326,15 +328,76 @@ fn mirror_lines(path: &std::path::Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn test_mac_key() -> [u8; 32] {
+    ardur_governance::evidence_record_mac_key(
+        support::receipt_key()
+            .to_pkcs8_pem()
+            .expect("pem")
+            .as_bytes(),
+    )
+}
+
+/// Wrap a canonical record line in its authenticated journal envelope, as
+/// the emitter does.
+fn mac_line(record: &EvidenceRecord) -> String {
+    ardur_governance::wrap_evidence_line(&test_mac_key(), &record.to_line().expect("line"))
+}
+
+/// Wrap a raw (possibly semantically corrupt) crafted line in a valid
+/// envelope — simulating a buggy writer: the MAC verifies, and the semantic
+/// validations are what must fail closed.
+fn mac_raw_line(raw_line: &str) -> String {
+    ardur_governance::wrap_evidence_line(&test_mac_key(), raw_line)
+}
+
 fn event_lines(path: &std::path::Path) -> Vec<EvidenceRecord> {
     std::fs::read_to_string(path)
         .map(|s| {
             s.lines()
                 .filter(|l| !l.trim().is_empty())
-                .map(|l| EvidenceRecord::from_line(l).expect("journal line parses"))
+                .map(|l| {
+                    let line = ardur_governance::unwrap_evidence_line(&test_mac_key(), l)
+                        .expect("envelope verifies");
+                    EvidenceRecord::from_line(&line).expect("journal line parses")
+                })
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Edit the journaled records in place, keeping the ORIGINAL macs: a
+/// post-hoc tamper that must fail the MAC check at the next open.
+fn tamper_journal(path: &std::path::Path, edit: impl Fn(&mut serde_json::Value)) {
+    tamper_journal_with(path, edit, false);
+}
+
+/// Edit the journaled records in place and RE-MAC them (a validly
+/// authenticated but semantically corrupt journal — the semantic validations
+/// are what must fail closed).
+fn tamper_journal_remaced(path: &std::path::Path, edit: impl Fn(&mut serde_json::Value)) {
+    tamper_journal_with(path, edit, true);
+}
+
+fn tamper_journal_with(path: &std::path::Path, edit: impl Fn(&mut serde_json::Value), remac: bool) {
+    let text = std::fs::read_to_string(path).expect("journal");
+    let mut lines: Vec<String> = Vec::new();
+    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+        let mut envelope: serde_json::Value = serde_json::from_str(line).expect("envelope");
+        let record_str = envelope["record"]
+            .as_str()
+            .expect("record field")
+            .to_string();
+        let mut record: serde_json::Value = serde_json::from_str(&record_str).expect("record");
+        edit(&mut record);
+        let record_str = serde_json::to_string(&record).expect("serialize");
+        if remac {
+            lines.push(mac_raw_line(&record_str));
+        } else {
+            envelope["record"] = serde_json::Value::String(record_str);
+            lines.push(serde_json::to_string(&envelope).expect("envelope"));
+        }
+    }
+    std::fs::write(path, lines.join("\n") + "\n").expect("rewrite");
 }
 
 fn signed_chain(path: &std::path::Path) -> Vec<SignedExecutionReceipt> {
@@ -942,10 +1005,7 @@ fn a_stranded_pre_effect_record_becomes_explicit_insufficient_evidence() {
 fn a_torn_journal_tail_fails_the_open_instead_of_replaying_past_it() {
     let (_root, mirror, events, _receipts) = scratch();
     let pre = fixture_pre("session-1", 0, "call-x", json!({}));
-    let mut bytes = EvidenceRecord::PreEffect(Box::new(pre))
-        .to_line()
-        .expect("serialize")
-        .into_bytes();
+    let mut bytes = mac_line(&EvidenceRecord::PreEffect(Box::new(pre))).into_bytes();
     bytes.push(b'\n');
     bytes.extend_from_slice(b"{\"pre_effect\":{\"v\":1,\"event_id\":\"ev:partial");
     std::fs::create_dir_all(events.parent().unwrap()).unwrap();
@@ -967,9 +1027,7 @@ fn a_post_without_its_pre_fails_the_open() {
     let (_root, mirror, events, _receipts) = scratch();
     let pre = fixture_pre("session-1", 0, "call-x", json!({}));
     let post = PostEffectRecord::new(&pre, 1_750_000_000_100, EventOutcome::TimeoutUnknown);
-    let mut line = EvidenceRecord::PostEffect(post)
-        .to_line()
-        .expect("serialize");
+    let mut line = mac_line(&EvidenceRecord::PostEffect(post));
     line.push('\n');
     std::fs::create_dir_all(events.parent().unwrap()).unwrap();
     std::fs::write(&events, line).unwrap();
@@ -1187,15 +1245,9 @@ fn arguments_that_do_not_match_the_recorded_digests_fail_the_open() {
             output_admission: EvidenceOutputAdmission::Allowed,
         }),
     );
-    let mut journal = EvidenceRecord::PreEffect(Box::new(tampered))
-        .to_line()
-        .expect("serialize");
+    let mut journal = mac_line(&EvidenceRecord::PreEffect(Box::new(tampered)));
     journal.push('\n');
-    journal.push_str(
-        &EvidenceRecord::PostEffect(post)
-            .to_line()
-            .expect("serialize"),
-    );
+    journal.push_str(&mac_line(&EvidenceRecord::PostEffect(post)));
     journal.push('\n');
     std::fs::create_dir_all(events.parent().unwrap()).unwrap();
     std::fs::write(&events, journal).unwrap();
@@ -1599,7 +1651,7 @@ async fn an_unsupported_record_version_fails_closed() {
         .append(true)
         .open(&events)
         .expect("create journal");
-    writeln!(file, "{line}").expect("write");
+    writeln!(file, "{}", mac_raw_line(&line)).expect("write");
     drop(file);
 
     let result = ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID);
@@ -1722,18 +1774,14 @@ async fn a_tampered_chained_journal_fails_the_reopen() {
         "the event ER is chained"
     );
 
-    // Tamper the POST record's outcome (allowed → blocked): the digests are
-    // untouched, so only the re-projection comparison catches it.
-    let text = std::fs::read_to_string(&events).expect("journal");
-    let mut lines: Vec<String> = Vec::new();
-    for line in text.lines().filter(|l| !l.trim().is_empty()) {
-        let mut value: serde_json::Value = serde_json::from_str(line).expect("parse");
-        if let Some(post) = value.get_mut("post_effect") {
+    // Tamper the POST record's outcome (allowed → blocked) AND re-mac the
+    // line (a validly authenticated but semantically corrupt journal): the
+    // digests are untouched, so only the re-projection comparison catches it.
+    tamper_journal_remaced(&events, |record| {
+        if let Some(post) = record.get_mut("post_effect") {
             post["outcome"]["completed"]["output_admission"] = json!("blocked");
         }
-        lines.push(serde_json::to_string(&value).expect("serialize"));
-    }
-    std::fs::write(&events, lines.join("\n") + "\n").expect("rewrite");
+    });
 
     let result = ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID);
     let err = match result {
@@ -1790,7 +1838,7 @@ async fn a_corrupt_digest_only_record_fails_the_reopen() {
         .append(true)
         .open(&events)
         .expect("create journal");
-    writeln!(file, "{line}").expect("write");
+    writeln!(file, "{}", mac_raw_line(&line)).expect("write");
     drop(file);
 
     let result = ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID);
@@ -1826,7 +1874,7 @@ async fn a_wellformed_digest_only_record_replays_as_insufficient_evidence() {
         .append(true)
         .open(&events)
         .expect("create journal");
-    writeln!(file, "{line}").expect("write");
+    writeln!(file, "{}", mac_raw_line(&line)).expect("write");
     drop(file);
 
     ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
@@ -1862,7 +1910,7 @@ async fn a_journal_record_without_the_event_namespace_fails_closed() {
         .append(true)
         .open(&events)
         .expect("create journal");
-    writeln!(file, "{line}").expect("write");
+    writeln!(file, "{}", mac_raw_line(&line)).expect("write");
     drop(file);
 
     let err = ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
@@ -1905,7 +1953,7 @@ async fn a_noncanonical_base64url_digest_fails_the_reopen() {
         .append(true)
         .open(&events)
         .expect("create journal");
-    writeln!(file, "{line}").expect("write");
+    writeln!(file, "{}", mac_raw_line(&line)).expect("write");
     drop(file);
 
     let err = ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
@@ -1928,20 +1976,15 @@ async fn a_tampered_output_digest_fails_the_reopen() {
         "the event ER is chained"
     );
 
-    // Tamper ONLY the completed observation's output digest: nothing else in
-    // the record changes, and the digest itself is well-formed — only the
+    // Tamper ONLY the completed observation's output digest (re-maced):
+    // nothing else changes and the digest itself is well-formed — only the
     // evidence binding in the signed reason catches this.
-    let text = std::fs::read_to_string(&events).expect("journal");
-    let mut lines: Vec<String> = Vec::new();
-    for line in text.lines().filter(|l| !l.trim().is_empty()) {
-        let mut value: serde_json::Value = serde_json::from_str(line).expect("parse");
-        if let Some(post) = value.get_mut("post_effect") {
+    tamper_journal_remaced(&events, |record| {
+        if let Some(post) = record.get_mut("post_effect") {
             post["outcome"]["completed"]["output_digest"] =
                 json!("0000000000000000000000000000000000000000000000000000000000000000");
         }
-        lines.push(serde_json::to_string(&value).expect("serialize"));
-    }
-    std::fs::write(&events, lines.join("\n") + "\n").expect("rewrite");
+    });
 
     let err = ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
         .err()
@@ -1984,18 +2027,13 @@ async fn a_tampered_pre_record_fails_the_reopen() {
     one_tool_turn(&mirror, &receipts).await;
 
     // Tamper ONLY pre-effect provenance the projection does not otherwise
-    // consume (the iteration counter): the identity recompute at parse now
-    // catches it before the reconciliation pass even runs.
-    let text = std::fs::read_to_string(&events).expect("journal");
-    let mut lines: Vec<String> = Vec::new();
-    for line in text.lines().filter(|l| !l.trim().is_empty()) {
-        let mut value: serde_json::Value = serde_json::from_str(line).expect("parse");
-        if let Some(pre) = value.get_mut("pre_effect") {
+    // consume (the iteration counter), re-maced: the identity recompute at
+    // parse catches it before the reconciliation pass even runs.
+    tamper_journal_remaced(&events, |record| {
+        if let Some(pre) = record.get_mut("pre_effect") {
             pre["iteration"] = json!(99);
         }
-        lines.push(serde_json::to_string(&value).expect("serialize"));
-    }
-    std::fs::write(&events, lines.join("\n") + "\n").expect("rewrite");
+    });
 
     let err = ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
         .err()
@@ -2032,15 +2070,10 @@ async fn a_corrupt_completed_output_digest_fails_the_open() {
     writeln!(
         file,
         "{}",
-        EvidenceRecord::PreEffect(Box::new(pre)).to_line().unwrap()
+        mac_line(&EvidenceRecord::PreEffect(Box::new(pre)))
     )
     .expect("pre");
-    writeln!(
-        file,
-        "{}",
-        EvidenceRecord::PostEffect(post).to_line().unwrap()
-    )
-    .expect("post");
+    writeln!(file, "{}", mac_line(&EvidenceRecord::PostEffect(post))).expect("post");
     drop(file);
 
     let err = ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
@@ -2076,15 +2109,10 @@ async fn a_mismatched_denial_pair_fails_the_open() {
     writeln!(
         file,
         "{}",
-        EvidenceRecord::PreEffect(Box::new(pre)).to_line().unwrap()
+        mac_line(&EvidenceRecord::PreEffect(Box::new(pre)))
     )
     .expect("pre");
-    writeln!(
-        file,
-        "{}",
-        EvidenceRecord::PostEffect(post).to_line().unwrap()
-    )
-    .expect("post");
+    writeln!(file, "{}", mac_line(&EvidenceRecord::PostEffect(post))).expect("post");
     drop(file);
 
     let err = ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
@@ -2120,15 +2148,10 @@ async fn a_canonical_denial_pair_still_replays() {
     writeln!(
         file,
         "{}",
-        EvidenceRecord::PreEffect(Box::new(pre)).to_line().unwrap()
+        mac_line(&EvidenceRecord::PreEffect(Box::new(pre)))
     )
     .expect("pre");
-    writeln!(
-        file,
-        "{}",
-        EvidenceRecord::PostEffect(post).to_line().unwrap()
-    )
-    .expect("post");
+    writeln!(file, "{}", mac_line(&EvidenceRecord::PostEffect(post))).expect("post");
     drop(file);
 
     ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
@@ -2167,7 +2190,7 @@ async fn a_stranded_pre_with_tampered_provenance_fails_the_open() {
         .append(true)
         .open(&events)
         .expect("create journal");
-    writeln!(file, "{line}").expect("write");
+    writeln!(file, "{}", mac_raw_line(&line)).expect("write");
     drop(file);
 
     let err = ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
@@ -2196,7 +2219,7 @@ async fn an_untampered_stranded_pre_still_sweeps() {
         .append(true)
         .open(&events)
         .expect("create journal");
-    writeln!(file, "{line}").expect("write");
+    writeln!(file, "{}", mac_raw_line(&line)).expect("write");
     drop(file);
 
     ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
@@ -2207,5 +2230,83 @@ async fn an_untampered_stranded_pre_still_sweeps() {
     assert_eq!(
         chain[0].receipt().internal_denial_code.as_deref(),
         Some("effect_unobserved")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Sixth review round: keyed MAC over journal lines; exhaustive drift mapping.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_posthoc_journal_edit_fails_the_mac_check() {
+    let (_root, mirror, events, receipts) = scratch();
+    one_tool_turn(&mirror, &receipts).await;
+
+    // A post-hoc editor changes provenance WITHOUT the key — the line's MAC
+    // no longer verifies, and the open fails closed before any semantic
+    // check runs. This is the stranded-window forgery the self-consistency
+    // recompute could not stop: the editor can recompute the public event
+    // id, but not the keyed MAC.
+    tamper_journal(&events, |record| {
+        if let Some(pre) = record.get_mut("pre_effect") {
+            let recomputed = {
+                let pre_record: PreEffectRecord = serde_json::from_value(pre.clone()).expect("pre");
+                // The editor knows the public recompute and forges a
+                // self-consistent identity...
+                pre_record.recomputed_event_id().expect("recompute")
+            };
+            pre["iteration"] = json!(99);
+            pre["event_id"] = json!(recomputed);
+        }
+    });
+
+    let err = ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
+        .err()
+        .expect("a post-hoc edit must fail the MAC check");
+    assert!(
+        err.to_string().contains("MAC"),
+        "expected the MAC diagnostic, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn a_forged_self_consistent_identity_still_fails_the_mac_check() {
+    let (_root, mirror, events, _receipts) = scratch();
+    std::fs::create_dir_all(events.parent().expect("parent")).expect("mkdir");
+    // The exact forgery the keyed MAC exists to stop: a stranded pre whose
+    // provenance AND publicly-recomputed event id were both rewritten. The
+    // editor can recompute the identity; without the key the line is
+    // unforgeable.
+    let pre = fixture_pre("session-forge", 0, "call-forge", json!({}));
+    let mut value = serde_json::to_value(&pre).expect("serialize");
+    value["iteration"] = json!(77);
+    // The forged record is self-consistent: recompute the id over the edited
+    // provenance and install it, exactly what an editor without the key can do.
+    let forged: PreEffectRecord = serde_json::from_value(value.clone()).expect("pre");
+    value["event_id"] = json!(forged.recomputed_event_id().expect("recompute"));
+    let line = serde_json::to_string(&json!({ "pre_effect": value })).expect("line");
+    use std::io::Write as _;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&events)
+        .expect("create journal");
+    // Written with a well-formed envelope but a MAC the editor cannot
+    // compute (they have no key): the comparison must fail, not just the
+    // envelope structure.
+    let forged_line = serde_json::to_string(&json!({
+        "mac": "0000000000000000000000000000000000000000000000000000000000000000",
+        "record": line,
+    }))
+    .expect("envelope");
+    writeln!(file, "{forged_line}").expect("write");
+    drop(file);
+
+    let err = ErMirrorEmitter::open(&mirror, &support::receipt_key(), VERIFIER_ID)
+        .err()
+        .expect("a self-consistent forgery must fail the MAC check");
+    assert!(
+        err.to_string().contains("MAC"),
+        "expected the MAC diagnostic, got: {err}"
     );
 }
