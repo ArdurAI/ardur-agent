@@ -300,6 +300,28 @@ impl ErMirrorEmitter {
 
         let events_file = open_append_no_follow(&events_path)
             .map_err(|e| ardur_governance::GovernanceError::Io(format!("events open: {e}")))?;
+        // The basename check is lexical: on a case-insensitive volume
+        // `EVENTS.JSONL` aliases `events.jsonl`, and a differently named
+        // mirror path can be pre-hardlinked to it. Compare the OPENED files'
+        // identities — matching device/inode pairs mean the chain and the
+        // journal are the same physical file, and the mirror must refuse to
+        // start rather than append MAC envelopes into the ER log.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            let chain_meta = file
+                .metadata()
+                .map_err(|e| ardur_governance::GovernanceError::Io(format!("chain stat: {e}")))?;
+            let events_meta = events_file
+                .metadata()
+                .map_err(|e| ardur_governance::GovernanceError::Io(format!("events stat: {e}")))?;
+            if chain_meta.dev() == events_meta.dev() && chain_meta.ino() == events_meta.ino() {
+                return Err(ardur_governance::GovernanceError::Io(
+                    "the mirror chain and the evidence journal are the same physical file                      (case-insensitive alias or hardlink); refusing to open"
+                        .to_string(),
+                ));
+            }
+        }
         events_file
             .sync_all()
             .map_err(|e| ardur_governance::GovernanceError::Io(format!("events fsync: {e}")))?;

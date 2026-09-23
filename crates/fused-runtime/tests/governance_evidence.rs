@@ -3187,3 +3187,22 @@ async fn a_mirror_path_named_like_an_evidence_sibling_is_rejected() {
     )
     .expect("a non-colliding basename opens");
 }
+
+#[tokio::test]
+async fn a_chain_path_hardlinked_to_the_journal_is_rejected() {
+    let (_root, _mirror, events, _receipts) = scratch();
+    // Lexically distinct names, one physical file: the lexical basename check
+    // passes, so the opened-file identity check is what must refuse.
+    let chain_path = events.with_file_name("er-chain-hardlinked.jsonl");
+    std::fs::create_dir_all(events.parent().expect("parent")).expect("mkdir governance");
+    std::fs::write(&events, "").expect("journal");
+    std::fs::hard_link(&events, &chain_path).expect("hardlink the chain onto the journal");
+
+    let err = ErMirrorEmitter::open(&chain_path, &support::receipt_key(), VERIFIER_ID)
+        .err()
+        .expect("a hardlinked chain/journal pair must be rejected");
+    assert!(
+        err.to_string().contains("same physical file"),
+        "expected the identity diagnostic, got: {err}"
+    );
+}
