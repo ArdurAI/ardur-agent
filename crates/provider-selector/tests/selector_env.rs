@@ -190,6 +190,16 @@ fn from_env_opencode_selects_opencode() {
 }
 
 #[test]
+fn from_env_kimi_selects_kimi() {
+    let _guard = env_lock();
+    let env = CleanEnv::new();
+    env.set("ARDUR_PROVIDER", "kimi-agent"); // alias
+
+    let provider = from_env(model()).expect("kimi is infallible");
+    assert_eq!(provider.id().0, "kimi");
+}
+
+#[test]
 fn from_env_unknown_provider_returns_helpful_error() {
     let _guard = env_lock();
     let env = CleanEnv::new();

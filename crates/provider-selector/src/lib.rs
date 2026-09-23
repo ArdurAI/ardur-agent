@@ -17,10 +17,11 @@
 //! | `prime`          | `PrimeProvider` (RPC subprocess wrap)| `ardur-provider-prime`      |
 //! | `hermes`         | `HermesProvider` (CLI subprocess wrap)| `ardur-provider-hermes`    |
 //! | `opencode`       | `OpenCodeProvider` (CLI subprocess wrap)| `ardur-provider-opencode` |
+//! | `kimi`           | `KimiProvider` (CLI subprocess wrap) | `ardur-provider-kimi`      |
 //!
 //! (`claude-cli` also answers to the alias `claude-subscription`, `prime` to
-//! `prime-agent`, `hermes` to `hermes-agent`, and `opencode` to
-//! `opencode-agent`.)
+//! `prime-agent`, `hermes` to `hermes-agent`, `opencode` to
+//! `opencode-agent`, and `kimi` to `kimi-agent`.)
 //!
 //! Parsing is case-insensitive; an unset (or empty) value selects the default,
 //! `anthropic`. An unrecognized value is returned as a [`ProviderError`] whose
@@ -33,7 +34,8 @@
 //! `Err(ProviderError)`, distinct from the panic on an unknown selector. The
 //! credential-free backends
 //! ([`ProviderKind::Ollama`], [`ProviderKind::Codex`], [`ProviderKind::ClaudeCli`],
-//! [`ProviderKind::Prime`], [`ProviderKind::Hermes`], [`ProviderKind::OpenCode`])
+//! [`ProviderKind::Prime`], [`ProviderKind::Hermes`], [`ProviderKind::OpenCode`],
+//! [`ProviderKind::Kimi`])
 //! never fail.
 //!
 //! # Why a standalone crate
@@ -53,6 +55,7 @@ use std::sync::Arc;
 use ardur_provider_claude_cli::ClaudeCliProvider;
 use ardur_provider_codex::CodexProvider;
 use ardur_provider_hermes::HermesProvider;
+use ardur_provider_kimi::KimiProvider;
 use ardur_provider_ollama::OllamaProvider;
 use ardur_provider_openai_compat::OpenAiCompatProvider;
 use ardur_provider_opencode::OpenCodeProvider;
@@ -94,6 +97,9 @@ pub enum ProviderKind {
     /// OpenCode CLI, wrapped as a one-shot subprocess (#567). Also selected by
     /// the alias `opencode-agent`.
     OpenCode,
+    /// Kimi Code CLI, wrapped as a one-shot subprocess (#569). Also selected
+    /// by the alias `kimi-agent`.
+    Kimi,
 }
 
 impl ProviderKind {
@@ -102,7 +108,7 @@ impl ProviderKind {
 
     /// Every recognized selector spelling, in selection order — the canonical
     /// list surfaced in the unknown-value error.
-    pub const ALL: [ProviderKind; 10] = [
+    pub const ALL: [ProviderKind; 11] = [
         ProviderKind::Anthropic,
         ProviderKind::OpenRouter,
         ProviderKind::OpenAiCompat,
@@ -112,6 +118,7 @@ impl ProviderKind {
         ProviderKind::Prime,
         ProviderKind::Hermes,
         ProviderKind::OpenCode,
+        ProviderKind::Kimi,
         ProviderKind::OpenAiCompat, // openai alias
     ];
 
@@ -128,6 +135,7 @@ impl ProviderKind {
             ProviderKind::Prime => "prime",
             ProviderKind::Hermes => "hermes",
             ProviderKind::OpenCode => "opencode",
+            ProviderKind::Kimi => "kimi",
         }
     }
 
@@ -149,6 +157,7 @@ impl ProviderKind {
             "prime" | "prime-agent" => Ok(ProviderKind::Prime),
             "hermes" | "hermes-agent" => Ok(ProviderKind::Hermes),
             "opencode" | "opencode-agent" => Ok(ProviderKind::OpenCode),
+            "kimi" | "kimi-agent" => Ok(ProviderKind::Kimi),
             _ => Err(UnknownProvider(raw.to_string())),
         }
     }
@@ -180,7 +189,8 @@ impl ProviderKind {
     /// The credential-free backends
     /// ([`ProviderKind::Ollama`] / [`ProviderKind::Codex`] /
     /// [`ProviderKind::ClaudeCli`] / [`ProviderKind::Prime`] /
-    /// [`ProviderKind::Hermes`] / [`ProviderKind::OpenCode`]) never fail.
+    /// [`ProviderKind::Hermes`] / [`ProviderKind::OpenCode`] /
+    /// [`ProviderKind::Kimi`]) never fail.
     pub fn build(self, model: ModelId) -> Result<Arc<dyn Provider>, ProviderError> {
         let provider: Arc<dyn Provider> = match self {
             ProviderKind::Anthropic => Arc::new(AnthropicProvider::from_env(model)?),
@@ -192,6 +202,7 @@ impl ProviderKind {
             ProviderKind::Prime => Arc::new(PrimeProvider::from_env()),
             ProviderKind::Hermes => Arc::new(HermesProvider::from_env()),
             ProviderKind::OpenCode => Arc::new(OpenCodeProvider::from_env()),
+            ProviderKind::Kimi => Arc::new(KimiProvider::from_env()),
         };
         Ok(provider)
     }
@@ -215,7 +226,7 @@ impl fmt::Display for UnknownProvider {
         write!(
             f,
             "unknown {SELECTOR_ENV} value {:?}: supported values are \
-             anthropic (default), openrouter, openai-compat, ollama, codex, claude-cli, prime, hermes, opencode",
+             anthropic (default), openrouter, openai-compat, ollama, codex, claude-cli, prime, hermes, opencode, kimi",
             self.0
         )
     }
@@ -411,6 +422,23 @@ mod tests {
     }
 
     #[test]
+    fn kimi_selects_kimi_under_both_spellings() {
+        // The Kimi backend wraps the local `kimi` binary as a one-shot
+        // subprocess; from_env is infallible (no API key, no probe until a
+        // turn runs). Both the canonical spelling and the `kimi-agent` alias
+        // resolve to it.
+        for v in ["kimi", "Kimi", "KIMI", "kimi-agent", "  kimi-agent  "] {
+            assert_eq!(
+                ProviderKind::resolve(Some(v)).unwrap(),
+                ProviderKind::Kimi,
+                "{v:?} should select kimi"
+            );
+        }
+        let provider = select(Some("kimi"), model()).expect("kimi is infallible");
+        assert_eq!(provider.id().0, "kimi");
+    }
+
+    #[test]
     fn claude_cli_selects_claude_cli() {
         // The Claude CLI backend wraps the local `claude` binary; from_env is
         // infallible (no API key, no probe until a turn runs). Both the canonical
@@ -456,6 +484,7 @@ mod tests {
             ProviderKind::Prime,
             ProviderKind::Hermes,
             ProviderKind::OpenCode,
+            ProviderKind::Kimi,
         ] {
             let provider = kind.build(model()).expect("infallible backend");
             assert_eq!(
