@@ -1292,6 +1292,7 @@ impl FusedRuntime {
             CAPABILITY_SETTLEMENT => Disposition::Refusal(RefusalClass::MissingCapability),
             APPROVAL_SETTLEMENT => Disposition::Refusal(RefusalClass::ApprovalRequired),
             APPROVAL_REJECTED_SETTLEMENT => Disposition::Refusal(RefusalClass::ApprovalRejected),
+            APPROVAL_ERROR_SETTLEMENT => Disposition::Refusal(RefusalClass::ApprovalError),
             SCAN_SETTLEMENT => Disposition::Refusal(RefusalClass::OutputBlocked),
             SCAN_ERROR_SETTLEMENT => Disposition::Refusal(RefusalClass::ScannerError),
             _ => Disposition::Infrastructure(InfrastructureFailureClass::Provider),
@@ -2941,6 +2942,10 @@ const TOOL_AUTH_SETTLEMENT: &str = "refusal:tool_authorization";
 const CAPABILITY_SETTLEMENT: &str = "refusal:capability_denied";
 const APPROVAL_SETTLEMENT: &str = "refusal:approval_required";
 const APPROVAL_REJECTED_SETTLEMENT: &str = "refusal:approval_rejected";
+/// #543: an approval-store or evaluation failure is NOT a human rejection —
+/// it settles under its own class so durable evidence never attributes an
+/// operational failure to a human denial.
+const APPROVAL_ERROR_SETTLEMENT: &str = "refusal:approval_evaluation_error";
 const TOOL_ERROR_SETTLEMENT: &str = "refusal:tool_error";
 const TOOL_TIMEOUT_SETTLEMENT: &str = "refusal:tool_timeout_uncertain_effect";
 const SCAN_SETTLEMENT: &str = "refusal:output_scan";
@@ -3583,8 +3588,12 @@ impl FusedRuntime {
                             let known = response.cost.saturating_add(&tool_cost);
                             let reason = if matches!(err, RuntimeError::ApprovalRequired { .. }) {
                                 APPROVAL_SETTLEMENT
-                            } else {
+                            } else if matches!(err, RuntimeError::ApprovalRejected { .. }) {
                                 APPROVAL_REJECTED_SETTLEMENT
+                            } else {
+                                // An evaluation/store failure is not a human
+                                // rejection.
+                                APPROVAL_ERROR_SETTLEMENT
                             };
                             let settlement = self
                                 .settle_refusal(session_id, reservation, known, reason)
@@ -4599,8 +4608,12 @@ impl FusedRuntime {
                                 let known = response.cost.saturating_add(&tool_cost);
                                 let reason = if matches!(err, RuntimeError::ApprovalRequired { .. }) {
                                     APPROVAL_SETTLEMENT
-                                } else {
+                                } else if matches!(err, RuntimeError::ApprovalRejected { .. }) {
                                     APPROVAL_REJECTED_SETTLEMENT
+                                } else {
+                                    // An evaluation/store failure is not a
+                                    // human rejection.
+                                    APPROVAL_ERROR_SETTLEMENT
                                 };
                                 let settlement = self
                                     .settle_refusal(

@@ -3343,3 +3343,77 @@ async fn mirroring_records_that_differ_from_the_journal_fails() {
         "both events are chained after the sweep"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Nineteenth review round: swept events reject late posts; record-time
+// validation.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_swept_pre_only_event_rejects_a_late_post() {
+    let (_root, mirror, _events, _receipts) = scratch();
+    let pre = fixture_pre("session-1", 0, "call-1", json!({ "command": "true" }));
+    let post = PostEffectRecord::new(
+        &pre,
+        1_750_000_000_100,
+        EventOutcome::Completed(CompletedOutcome {
+            output_digest: "b".repeat(64),
+            cost: ardur_runtime::CostTuple::default(),
+            output_admission: EvidenceOutputAdmission::Allowed,
+        }),
+    );
+    {
+        let emitter = open_emitter(&mirror);
+        use ardur_governance::GovernanceEmitter as _;
+        emitter.record_pre_effect(&pre).expect("pre durable");
+        // "crash": drop without any post or ER.
+    }
+    {
+        let emitter = open_emitter(&mirror); // sweeps and chains effect_unobserved
+        use ardur_governance::GovernanceEmitter as _;
+        let err = emitter
+            .record_post_effect(&post)
+            .expect_err("a late post for a swept event is rejected");
+        assert!(
+            err.to_string().contains("immutable"),
+            "the rejection explains the event's ER is immutable: {err}"
+        );
+    }
+    // The chained ER still says the effect was never observed: the late post
+    // changed nothing durable.
+    let chain = signed_chain(&mirror);
+    assert_eq!(chain.len(), 1);
+    assert_eq!(chain[0].receipt().verdict, Verdict::InsufficientEvidence);
+    assert_eq!(
+        chain[0].receipt().internal_denial_code.as_deref(),
+        Some("effect_unobserved")
+    );
+}
+
+#[test]
+fn a_record_failing_reopen_validation_is_never_journaled() {
+    let (_root, mirror, events, _receipts) = scratch();
+    let mut pre = fixture_pre("session-1", 0, "call-1", json!({ "command": "true" }));
+    // Tamper the identity AFTER construction: the record no longer passes the
+    // recomputed-identity check `from_line` runs at reopen.
+    pre.event_id = "ev:0000000000000000000000000000000000000000".to_string();
+    {
+        let emitter = open_emitter(&mirror);
+        use ardur_governance::GovernanceEmitter as _;
+        let err = emitter
+            .record_pre_effect(&pre)
+            .expect_err("an invalid record is rejected before journaling");
+        assert!(
+            err.to_string().contains("does not recompute"),
+            "the rejection names the identity check: {err}"
+        );
+        let err = emitter
+            .record_pre_effect(&fixture_pre("session-1", 0, "call-2", json!({})))
+            .expect_err("the emitter is poisoned by the invalid record");
+        assert!(err.to_string().contains("poisoned"), "{err}");
+    }
+    assert!(
+        !events.exists() || std::fs::read_to_string(&events).unwrap().is_empty(),
+        "nothing was journaled from the invalid record"
+    );
+}

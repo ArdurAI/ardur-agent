@@ -1113,6 +1113,7 @@ fn projection_reason(decision: Option<&SettlementDecision>) -> &'static str {
             RefusalClass::MissingCapability => "refusal:capability_denied",
             RefusalClass::ApprovalRequired => "refusal:approval_required",
             RefusalClass::ApprovalRejected => "refusal:approval_rejected",
+            RefusalClass::ApprovalError => "refusal:approval_evaluation_error",
             RefusalClass::OutputBlocked => "refusal:output_scan",
             RefusalClass::ScannerError => "refusal:output_scan_error",
             RefusalClass::IterationLimit => "refusal:iteration_limit",
@@ -3239,5 +3240,29 @@ mod owner_spec_tests {
         assert_eq!(application.applied_debit, CostTuple::ZERO);
         assert_eq!(application.reserved_credit, CostTuple::cents(10));
         assert_eq!(f.coordinator.status().executing, None);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn approval_and_scanner_errors_project_their_own_reason_strings() {
+        // #543: an operational approval failure and an operational scanner
+        // failure each project their own refusal reason — neither is ever
+        // readable as a human rejection or a policy block.
+        assert_eq!(
+            projection_reason(Some(&SettlementDecision::Refusal(
+                RefusalClass::ApprovalError
+            ))),
+            "refusal:approval_evaluation_error"
+        );
+        assert_eq!(
+            projection_reason(Some(&SettlementDecision::Refusal(
+                RefusalClass::ScannerError
+            ))),
+            "refusal:output_scan_error"
+        );
     }
 }

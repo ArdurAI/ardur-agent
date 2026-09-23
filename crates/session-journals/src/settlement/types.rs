@@ -194,6 +194,9 @@ pub enum RefusalClass {
     ApprovalRequired,
     /// Approval explicitly rejected.
     ApprovalRejected,
+    /// The approval machinery failed operationally (store or receipt append
+    /// error) — no human decision was made. Never readable as a rejection.
+    ApprovalError,
     /// Returned output blocked by scanning.
     OutputBlocked,
     /// The output scanner failed operationally — no policy decision was

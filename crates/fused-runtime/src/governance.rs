@@ -1075,11 +1075,20 @@ impl GovernanceEmitter for ErMirrorEmitter {
             state.poisoned = Some(err.to_string());
             return Err(err);
         }
+        // Validate the serialized record through the SAME path the reopen
+        // runs (`from_line`: version, ev: namespace, recomputed identity,
+        // digest shapes) before the durable append — the live path must
+        // never journal a record the next restart would reject.
+        let plain_line = EvidenceRecord::PreEffect(Box::new(record.clone())).to_line()?;
+        if let Err(e) = EvidenceRecord::from_line(&plain_line) {
+            state.poisoned = Some(e.to_string());
+            return Err(e);
+        }
         let (line, chain_mac) = ardur_governance::wrap_evidence_line(
             &self.events_mac_key,
             state.next_seq,
             &state.tail_chain_mac,
-            &EvidenceRecord::PreEffect(Box::new(record.clone())).to_line()?,
+            &plain_line,
         );
         // Precommit EVERY append in the anchor BEFORE the journal write: a
         // crash after the line fsyncs but before the checkpoint publishes
@@ -1135,6 +1144,15 @@ impl GovernanceEmitter for ErMirrorEmitter {
             state.poisoned = Some(e.to_string());
             return Err(e);
         }
+        if state.chained_step_ids.contains(&record.event_id) {
+            let err = ardur_governance::GovernanceError::Io(format!(
+                "post-effect record for event {} arrived after its ER was chained (a swept \
+                 pre-only event is immutable); the journal would no longer replay",
+                record.event_id
+            ));
+            state.poisoned = Some(err.to_string());
+            return Err(err);
+        }
         if !state.open_event_ids.contains(&record.event_id) {
             let err = ardur_governance::GovernanceError::Io(format!(
                 "post-effect record for event {} has no pre-effect record; the journal would \
@@ -1152,11 +1170,19 @@ impl GovernanceEmitter for ErMirrorEmitter {
             state.poisoned = Some(err.to_string());
             return Err(err);
         }
+        // Validate the serialized record through the SAME path the reopen
+        // runs (`from_line`: version, ev: namespace, recomputed identity,
+        // digest shapes) before the durable append.
+        let plain_line = EvidenceRecord::PostEffect(record.clone()).to_line()?;
+        if let Err(e) = EvidenceRecord::from_line(&plain_line) {
+            state.poisoned = Some(e.to_string());
+            return Err(e);
+        }
         let (line, chain_mac) = ardur_governance::wrap_evidence_line(
             &self.events_mac_key,
             state.next_seq,
             &state.tail_chain_mac,
-            &EvidenceRecord::PostEffect(record.clone()).to_line()?,
+            &plain_line,
         );
         // The same per-append precommit as record_pre_effect (see there).
         if let Err(e) = write_events_anchor(
@@ -1278,11 +1304,14 @@ fn mark_event_recorded(
     pre: &PreEffectRecord,
     post: Option<&PostEffectRecord>,
 ) {
-    if post.is_some() {
-        state.closed_event_ids.insert(pre.event_id.clone());
-    } else {
-        state.open_event_ids.insert(pre.event_id.clone());
-    }
+    // Called only for events already chained (the sweep's skip path): the
+    // event's ER is immutable from then on, so a late terminal observation
+    // must NOT re-open journaling for it — a swept pre-only event that later
+    // accepted a post would reproject differently from the chained
+    // `effect_unobserved` ER and brick the next open.
+    let _ = post;
+    state.closed_event_ids.insert(pre.event_id.clone());
+    state.open_event_ids.remove(&pre.event_id);
 }
 
 /// Append one signed ER to the chain log with the fork guard, advancing the
