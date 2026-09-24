@@ -185,6 +185,18 @@ fn auth_failure(diagnostic: &str) -> ProviderError {
     ))
 }
 
+/// The first auth-shaped diagnostic among the captured streams, if any:
+/// stdout noise is preferred (print mode reports failures there as plain
+/// text), then stderr. Returning the stream that actually matched — rather
+/// than a pre-picked "detail" — is what keeps the carried diagnostic
+/// relevant: an unrelated stderr session hint must not replace the 401 line
+/// that triggered the classification (and vice versa).
+fn matched_auth_diagnostic<'a>(noise: &'a str, stderr: &'a str) -> Option<&'a str> {
+    [noise.trim(), stderr.trim()]
+        .into_iter()
+        .find(|text| !text.is_empty() && looks_like_auth_error(text))
+}
+
 /// Agent specification staged for the child when child tools are denied (the
 /// default). `extend: default` resolves against Kimi Code's *builtin* default
 /// agent (not a project file), and the explicit `tools: []` overrides the
@@ -439,6 +451,23 @@ impl Provider for KimiProvider {
 /// Counter making each staged deny-spec filename unique within this process.
 static DENY_SPEC_COUNTER: AtomicU32 = AtomicU32::new(0);
 
+/// Removes staged per-turn files when dropped, so an early `return` (a pipe
+/// or spawn failure, a stdout overflow) or the outer timeout cancelling this
+/// future still cleans up — not only the happy path after `child.wait()`.
+/// Best-effort, like the inline removal it replaces: a leftover file in the
+/// temp dir is harmless, and the next turn stages fresh unique names.
+struct StagedDenyFiles {
+    agent_spec: PathBuf,
+    mcp_config: PathBuf,
+}
+
+impl Drop for StagedDenyFiles {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.agent_spec);
+        let _ = std::fs::remove_file(&self.mcp_config);
+    }
+}
+
 /// Stage the deny-all artifacts — the agent spec and the empty MCP config —
 /// as uniquely-named files in `dir` and return their paths. The caller
 /// deletes both after the turn; a leaked file is harmless (the OS reaps the
@@ -480,9 +509,11 @@ impl KimiProvider {
         // failure must fail the turn *before* spawn* — running without them
         // would hand the child the default agent's full tool list (and the
         // global `~/.kimi/mcp.json` servers) under `--print`'s
-        // auto-approval.
-        let (deny_spec, deny_mcp) = if self.config.allow_child_tools {
-            (None, None)
+        // auto-approval. The guard removes both staged files on every exit
+        // path, including early returns and the outer timeout's
+        // cancellation.
+        let _deny_guard = if self.config.allow_child_tools {
+            None
         } else {
             let (agent_spec, mcp_config) =
                 write_deny_artifacts(&std::env::temp_dir()).map_err(|e| {
@@ -494,7 +525,10 @@ impl KimiProvider {
             // Suppress the global ~/.kimi/mcp.json fallback: MCP tools load
             // independently of the agent spec's (empty) tool list.
             cmd.arg("--mcp-config-file").arg(&mcp_config);
-            (Some(agent_spec), Some(mcp_config))
+            Some(StagedDenyFiles {
+                agent_spec,
+                mcp_config,
+            })
         };
         if let Some(cwd) = &self.config.working_directory {
             cmd.current_dir(cwd);
@@ -599,13 +633,9 @@ impl KimiProvider {
             .await
             .map_err(|e| ProviderError::Upstream(format!("waiting on kimi subprocess: {e}")))?;
         let stderr_text = stderr_task.await.unwrap_or_default();
-        // The staged deny artifacts are only needed while the child runs;
-        // remove them once the child has exited. Best-effort: a leftover
-        // file in the temp dir is harmless, and the next turn stages fresh
-        // unique names.
-        for path in [&deny_spec, &deny_mcp].into_iter().flatten() {
-            let _ = std::fs::remove_file(path);
-        }
+        // The staged deny artifacts are removed when `deny_guard` drops at
+        // the end of this function — on success, on any error return, and
+        // on cancellation by the outer timeout.
 
         let parsed = parse_events(&stdout_text);
 
@@ -626,10 +656,7 @@ impl KimiProvider {
             // matched: print mode reports failures on stdout, so an auth
             // line there must not be replaced by an unrelated stderr
             // session hint (which is what `detail` alone would pick).
-            let auth_detail = [parsed.noise.trim(), stderr_text.trim()]
-                .into_iter()
-                .find(|text| !text.is_empty() && looks_like_auth_error(text));
-            if let Some(text) = auth_detail {
+            if let Some(text) = matched_auth_diagnostic(&parsed.noise, &stderr_text) {
                 return Err(auth_failure(text));
             }
             if looks_like_rate_limit(&detail)
@@ -653,8 +680,8 @@ impl KimiProvider {
         }
 
         if parsed.content.trim().is_empty() {
-            if looks_like_auth_error(&stderr_text) || looks_like_auth_error(&parsed.noise) {
-                return Err(auth_failure(&parsed.noise));
+            if let Some(text) = matched_auth_diagnostic(&parsed.noise, &stderr_text) {
+                return Err(auth_failure(text));
             }
             return Err(ProviderError::Upstream(
                 "kimi turn produced no assistant text".into(),
@@ -1172,6 +1199,23 @@ mod tests {
         // child with the default (tool-enabled) agent / the global MCP set.
         let missing = Path::new("/nonexistent/ardur-kimi-no-such-dir");
         assert!(write_deny_artifacts(missing).is_err());
+    }
+
+    #[test]
+    fn staged_deny_files_are_removed_on_drop() {
+        // Early returns (pipe/spawn/read failures, stdout overflow) and the
+        // outer timeout's cancellation all exit `run_turn` by dropping the
+        // guard rather than reaching the inline cleanup — this pins the
+        // drop-glue itself.
+        let dir = std::env::temp_dir();
+        let (agent_spec, mcp_config) = write_deny_artifacts(&dir).expect("stage");
+        assert!(agent_spec.exists() && mcp_config.exists());
+        drop(StagedDenyFiles {
+            agent_spec: agent_spec.clone(),
+            mcp_config: mcp_config.clone(),
+        });
+        assert!(!agent_spec.exists(), "drop must remove the agent spec");
+        assert!(!mcp_config.exists(), "drop must remove the MCP config");
     }
 
     #[test]
