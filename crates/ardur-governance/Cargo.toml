@@ -40,6 +40,14 @@ chrono = { workspace = true }
 # records `insufficient_evidence`, and the offending statement belongs in the
 # operator log rather than in the receipt's public denial text.
 tracing = { workspace = true }
+# #544: the typed plane-outage client (POST /evaluate classification + the
+# MAC-chained reconnect-replay journal). rustls matches the workspace's
+# no-native-tls posture; `json` carries the /evaluate bodies.
+reqwest = { workspace = true }
+url = { workspace = true }
+# The plane client's journal lock and async consult path run on the caller's
+# runtime (the fused runtime is tokio-based).
+tokio = { workspace = true }
 
 [dev-dependencies]
 # The E2E test mints a real cap-token and native receipt through the actual
@@ -51,3 +59,8 @@ ardur-receipt = { workspace = true }
 ardur-observed-events = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
+# #544 plane guard tests: a stand-in for the governance plane's /evaluate
+# endpoint (permit/deny/403/503 kill switch/timeout/corrupt bodies), and the
+# async runtime to drive the client.
+wiremock = { workspace = true }
+tempfile = { workspace = true }
