@@ -50,7 +50,7 @@ startup (`using provider provider=<id>`).
 | `prime` (alias `prime-agent`) | Prime Agent CLI (local RPC subprocess wrap) | `PRIME_AGENT_BINARY` (default: `prime-agent` on `PATH`), `PRIME_AGENT_PROVIDER`, `PRIME_AGENT_DEFAULT_MODEL`, `PRIME_AGENT_WORKING_DIR`, `PRIME_AGENT_TIMEOUT_SECS`, `PRIME_AGENT_MAX_TOKENS_FLOOR` (default `4096`). Run `prime-agent /login` once; no Ardur-side API key |
 | `hermes` (alias `hermes-agent`) | Hermes Agent CLI (local subprocess wrap) | `HERMES_BINARY` (default: `hermes` on `PATH`), `HERMES_PROVIDER`, `HERMES_DEFAULT_MODEL`, `HERMES_WORKING_DIR`, `HERMES_TIMEOUT_SECS`, `HERMES_MAX_TOKENS_FLOOR` (default `4096`). Run `hermes auth` / `hermes model` once; no Ardur-side API key |
 | `opencode` (alias `opencode-agent`) | OpenCode CLI (local one-shot subprocess wrap) | `OPENCODE_BINARY` (default: `opencode` on `PATH`), `OPENCODE_DEFAULT_MODEL`, `OPENCODE_WORKING_DIR`, `OPENCODE_TIMEOUT_SECS`, `OPENCODE_MAX_TOKENS_FLOOR` (default `4096`). Install: `curl -fsSL https://opencode.ai/install \| bash` (or `npm i -g opencode-ai` / `brew install sst/tap/opencode`), then run `opencode auth login` once; no Ardur-side API key |
-| `kimi` (alias `kimi-agent`) | Kimi Code CLI (local one-shot subprocess wrap) | `KIMI_BINARY` (default: `kimi` on `PATH`), `KIMI_DEFAULT_MODEL`, `KIMI_WORKING_DIR`, `KIMI_TIMEOUT_SECS`, `KIMI_MAX_TOKENS_FLOOR` (default `4096`). Run `kimi login` once; no Ardur-side API key |
+| `kimi` (alias `kimi-agent`) | Kimi Code CLI (local one-shot subprocess wrap) | `KIMI_BINARY` (default: `kimi` on `PATH`), `KIMI_DEFAULT_MODEL`, `KIMI_WORKING_DIR`, `KIMI_TIMEOUT_SECS`, `KIMI_MAX_TOKENS_FLOOR` (default `4096`). Run `kimi login` once; subscription auth is kimi-cli managed (`managed:kimi-code`) — no Ardur-side API key |
 
 One-liners (CLI shown; the server reads the same variables from its `.env`):
 
@@ -100,6 +100,13 @@ the daemon/binary is unreachable or the CLI is not logged in. For OpenCode, a
 missing binary is a typed `ProviderError::Upstream` whose message carries the
 install one-liner, so smoke can distinguish "not installed" from auth or
 rate-limit failures.
+
+A Kimi backend whose CLI login is missing or expired fails that turn with an
+upstream error **prefixed by the stable marker `kimi auth failed:`** (followed
+by `kimi login` / `~/.kimi` guidance — subscription auth is kimi-cli's own,
+there is no Ardur-side credential). A smoke can match that marker (exported as
+`ardur_provider_kimi::AUTH_FAILURE_MARKER`) to tell an auth gap apart from any
+other upstream failure; the carried diagnostic is secret-redacted.
 
 ## Model router (task-class lanes, failover, credential pools)
 
