@@ -49,27 +49,48 @@
 //! resolved agent then has no tool definitions at all, so no tool call can
 //! be emitted — this is stronger than an approval deny, and it holds even
 //! though `--print` auto-approves tool calls (which this crate never relies
-//! on either way). That is the fail-closed default for a *completion*
-//! backend.
+//! on either way). MCP tools need a second lock: `load_agent` registers
+//! them independently of the spec's tool list, and print mode falls back to
+//! the operator's global `~/.kimi/mcp.json` — so the child is also given
+//! `--mcp-config-file` pointing at a staged **empty server set**, which
+//! suppresses that fallback (see [`DENY_ALL_MCP_CONFIG`]). kimi-cli *plugin*
+//! tools (`~/.kimi/plugins/`) cannot be suppressed by any flag and are the
+//! documented residual surface. That is the fail-closed default for a
+//! *completion* backend.
 //!
 //! # Auth & install requirements
 //!
 //! The host must have the `kimi` binary on `PATH` (or
 //! [`KimiConfig::binary`] pointed at it) and a usable account configured in
-//! `~/.kimi` (`kimi login`). A missing binary surfaces as
-//! [`ProviderError::Upstream`] ("Kimi Code CLI not installed …"); a missing
-//! or expired login surfaces as [`ProviderError::Unauthorized`].
+//! `~/.kimi` (`kimi login`). The subscription login is Kimi Code's own — its
+//! config names the provider `managed:kimi-code` — so this crate holds **no
+//! API key** and there is no Ardur-side credential to rotate or leak. A
+//! missing binary surfaces as [`ProviderError::Upstream`] ("Kimi Code CLI not
+//! installed …"); a missing or expired login also surfaces as
+//! [`ProviderError::Upstream`], prefixed with the stable
+//! [`AUTH_FAILURE_MARKER`] plus operator guidance, so a smoke run can tell a
+//! credential failure apart from any other upstream error — and from an
+//! Ardur-side authorization fault — without any secret material in the
+//! message.
 //!
 //! # Error-taxonomy mapping
 //!
 //! | Failure | [`ProviderError`] |
 //! |----------------------------------|----------------------------------|
 //! | binary not found on `PATH` | [`Upstream`](ProviderError::Upstream) ("Kimi Code CLI not installed …") |
-//! | no usable account / expired login | [`Unauthorized`](ProviderError::Unauthorized) |
+//! | no usable account / expired login | [`Upstream`](ProviderError::Upstream) prefixed with [`AUTH_FAILURE_MARKER`] + `kimi login` / `~/.kimi` guidance (see [`auth_failure`]) |
 //! | turn exceeded `request_timeout` | [`NetworkFailure`](ProviderError::NetworkFailure) |
 //! | exit 75 (retryable upstream: connection/timeout/429/5xx) | [`NetworkFailure`](ProviderError::NetworkFailure) (or [`RateLimited`](ProviderError::RateLimited) when the diagnostic names a quota) |
 //! | non-zero exit / error line | [`Upstream`](ProviderError::Upstream) (stderr / stdout, secret-redacted) |
 //! | turn finished with empty text | [`Upstream`](ProviderError::Upstream) |
+//!
+//! Auth failures are deliberately **not** mapped to
+//! [`ProviderError::Unauthorized`]: that variant means "the provider rejected
+//! the credential Ardur presented", and the model router answers it by
+//! advancing to the next pooled credential. Kimi Code's credential lives in
+//! the child CLI's own login, so there is nothing to advance to — the
+//! actionable failure is upstream of Ardur, with guidance the operator can
+//! act on.
 //!
 //! # Not in this phase
 //!
@@ -141,6 +162,41 @@ const SPAWN_ETXTBSY_RETRIES: u32 = 6;
 /// (`ui/print/__init__.py::_classify_provider_error`).
 const EXIT_RETRYABLE: i32 = 75;
 
+/// Stable prefix on the [`ProviderError::Upstream`] message this backend
+/// returns for a credential failure (missing/expired kimi-cli login). A smoke
+/// run can match this marker to tell "run `kimi login`" apart from every
+/// other upstream error without pattern-matching on vendor text.
+pub const AUTH_FAILURE_MARKER: &str = "kimi auth failed";
+
+/// Operator guidance appended to every auth-failure diagnostic.
+const AUTH_GUIDANCE: &str = "the kimi CLI's own subscription login (managed:kimi-code) \
+is missing or expired; run `kimi login` (or inspect ~/.kimi) on this host — \
+this crate holds no API key, so there is no Ardur-side credential to rotate";
+
+/// Build the [`ProviderError::Upstream`] for a credential failure. The
+/// upstream diagnostic (already classified as auth-shaped by
+/// [`looks_like_auth_error`]) is redacted and carried after the stable
+/// [`AUTH_FAILURE_MARKER`] prefix and the operator guidance, so the operator
+/// sees both *what* the child said (sanitized) and *what to do about it*.
+fn auth_failure(diagnostic: &str) -> ProviderError {
+    let redacted = redact_child_diagnostic(diagnostic.trim());
+    ProviderError::Upstream(format!(
+        "{AUTH_FAILURE_MARKER}: {AUTH_GUIDANCE}; upstream said: {redacted}"
+    ))
+}
+
+/// The first auth-shaped diagnostic among the captured streams, if any:
+/// stdout noise is preferred (print mode reports failures there as plain
+/// text), then stderr. Returning the stream that actually matched — rather
+/// than a pre-picked "detail" — is what keeps the carried diagnostic
+/// relevant: an unrelated stderr session hint must not replace the 401 line
+/// that triggered the classification (and vice versa).
+fn matched_auth_diagnostic<'a>(noise: &'a str, stderr: &'a str) -> Option<&'a str> {
+    [noise.trim(), stderr.trim()]
+        .into_iter()
+        .find(|text| !text.is_empty() && looks_like_auth_error(text))
+}
+
 /// Agent specification staged for the child when child tools are denied (the
 /// default). `extend: default` resolves against Kimi Code's *builtin* default
 /// agent (not a project file), and the explicit `tools: []` overrides the
@@ -151,6 +207,25 @@ const EXIT_RETRYABLE: i32 = 75;
 /// (it is only reachable through the `Agent` tool, but an empty registry is
 /// the honest reading of "no tools").
 const DENY_ALL_AGENT_SPEC: &str = "version: 1\nagent:\n  extend: default\n  name: ardur-completion\n  tools: []\n  subagents: {}\n";
+
+/// An empty MCP server set, staged for the child when child tools are denied
+/// (the default) and passed as `--mcp-config-file`. Kimi Code's `load_agent`
+/// registers MCP tools (and plugin tools) **independently of the agent
+/// spec's tool list**, and print mode falls back to the operator's global
+/// `~/.kimi/mcp.json` when no config file is given (`cli/__init__.py`:
+/// `file_configs or [get_global_mcp_config_file()]`). A non-empty
+/// `--mcp-config-file` list suppresses that fallback, so pointing it at this
+/// staged empty set is what actually denies MCP tools — under `--print`'s
+/// auto-approval an MCP tool would otherwise run ungoverned outside Ardur's
+/// grant ledger. (Verified against kimi-cli 1.49.0 `soul/agent.py`,
+/// `cli/__init__.py`, `cli/mcp.py`, and a live probe of the real binary.)
+///
+/// Residual surface, documented rather than mitigated: tools installed as
+/// kimi-cli *plugins* (`~/.kimi/plugins/`) also bypass the agent spec's tool
+/// list and cannot be suppressed by any CLI flag. There is no flag to refuse
+/// them; an operator who installs Kimi Code plugins accepts that a
+/// completion turn can call them.
+const DENY_ALL_MCP_CONFIG: &str = "{\"mcpServers\":{}}\n";
 
 /// Env var [`KimiConfig::from_env`] reads the binary path from.
 pub const BINARY_ENV: &str = "KIMI_BINARY";
@@ -376,18 +451,41 @@ impl Provider for KimiProvider {
 /// Counter making each staged deny-spec filename unique within this process.
 static DENY_SPEC_COUNTER: AtomicU32 = AtomicU32::new(0);
 
-/// Stage the deny-all agent specification as a uniquely-named file in `dir`
-/// and return its path. The caller deletes the file after the turn; a leaked
-/// file is harmless (the OS reaps the temp dir) but a name collision is not,
-/// so names carry the pid and a monotonic counter.
-fn write_deny_agent_spec(dir: &Path) -> std::io::Result<PathBuf> {
+/// Removes staged per-turn files when dropped, so an early `return` (a pipe
+/// or spawn failure, a stdout overflow) or the outer timeout cancelling this
+/// future still cleans up — not only the happy path after `child.wait()`.
+/// Best-effort, like the inline removal it replaces: a leftover file in the
+/// temp dir is harmless, and the next turn stages fresh unique names.
+struct StagedDenyFiles {
+    agent_spec: PathBuf,
+    mcp_config: PathBuf,
+}
+
+impl Drop for StagedDenyFiles {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.agent_spec);
+        let _ = std::fs::remove_file(&self.mcp_config);
+    }
+}
+
+/// Stage the deny-all artifacts — the agent spec and the empty MCP config —
+/// as uniquely-named files in `dir` and return their paths. The caller
+/// deletes both after the turn; a leaked file is harmless (the OS reaps the
+/// temp dir) but a name collision is not, so names carry the pid and a
+/// monotonic counter.
+fn write_deny_artifacts(dir: &Path) -> std::io::Result<(PathBuf, PathBuf)> {
     let seq = DENY_SPEC_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let path = dir.join(format!(
+    let agent_spec = dir.join(format!(
         "ardur-kimi-deny-agent-{}-{seq}.yaml",
         std::process::id()
     ));
-    std::fs::write(&path, DENY_ALL_AGENT_SPEC)?;
-    Ok(path)
+    std::fs::write(&agent_spec, DENY_ALL_AGENT_SPEC)?;
+    let mcp_config = dir.join(format!(
+        "ardur-kimi-deny-mcp-{}-{seq}.json",
+        std::process::id()
+    ));
+    std::fs::write(&mcp_config, DENY_ALL_MCP_CONFIG)?;
+    Ok((agent_spec, mcp_config))
 }
 
 impl KimiProvider {
@@ -407,19 +505,30 @@ impl KimiProvider {
             cmd.arg("-m").arg(model);
         }
         // Tools denied (the default): stage the empty-tools agent spec and
-        // point the child at it. A staging failure must fail the turn *before
-        // spawn* — running without the spec would hand the child the default
-        // agent's full tool list under `--print`'s auto-approval.
-        let deny_spec = if self.config.allow_child_tools {
+        // the empty MCP config, and point the child at both. A staging
+        // failure must fail the turn *before* spawn* — running without them
+        // would hand the child the default agent's full tool list (and the
+        // global `~/.kimi/mcp.json` servers) under `--print`'s
+        // auto-approval. The guard removes both staged files on every exit
+        // path, including early returns and the outer timeout's
+        // cancellation.
+        let _deny_guard = if self.config.allow_child_tools {
             None
         } else {
-            let path = write_deny_agent_spec(&std::env::temp_dir()).map_err(|e| {
-                ProviderError::Upstream(format!(
-                    "cannot stage the deny-by-default agent spec (refusing to run kimi with tools enabled): {e}"
-                ))
-            })?;
-            cmd.arg("--agent-file").arg(&path);
-            Some(path)
+            let (agent_spec, mcp_config) =
+                write_deny_artifacts(&std::env::temp_dir()).map_err(|e| {
+                    ProviderError::Upstream(format!(
+                        "cannot stage the deny-by-default agent/MCP spec (refusing to run kimi with tools enabled): {e}"
+                    ))
+                })?;
+            cmd.arg("--agent-file").arg(&agent_spec);
+            // Suppress the global ~/.kimi/mcp.json fallback: MCP tools load
+            // independently of the agent spec's (empty) tool list.
+            cmd.arg("--mcp-config-file").arg(&mcp_config);
+            Some(StagedDenyFiles {
+                agent_spec,
+                mcp_config,
+            })
         };
         if let Some(cwd) = &self.config.working_directory {
             cmd.current_dir(cwd);
@@ -524,12 +633,9 @@ impl KimiProvider {
             .await
             .map_err(|e| ProviderError::Upstream(format!("waiting on kimi subprocess: {e}")))?;
         let stderr_text = stderr_task.await.unwrap_or_default();
-        // The staged deny spec is only needed while the child runs; remove it
-        // once the child has exited. Best-effort: a leftover file in the temp
-        // dir is harmless, and the next turn stages a fresh unique name.
-        if let Some(path) = &deny_spec {
-            let _ = std::fs::remove_file(path);
-        }
+        // The staged deny artifacts are removed when `deny_guard` drops at
+        // the end of this function — on success, on any error return, and
+        // on cancellation by the outer timeout.
 
         let parsed = parse_events(&stdout_text);
 
@@ -545,12 +651,13 @@ impl KimiProvider {
                 "kimi exited with a non-zero status".to_string()
             };
             // Classify stderr and stdout noise independently so an unrelated
-            // warning cannot mask an auth/rate-limit result.
-            if looks_like_auth_error(&detail)
-                || looks_like_auth_error(&stderr_text)
-                || looks_like_auth_error(&parsed.noise)
-            {
-                return Err(ProviderError::Unauthorized);
+            // warning cannot mask an auth/rate-limit result. The diagnostic
+            // carried into the auth error is the stream that actually
+            // matched: print mode reports failures on stdout, so an auth
+            // line there must not be replaced by an unrelated stderr
+            // session hint (which is what `detail` alone would pick).
+            if let Some(text) = matched_auth_diagnostic(&parsed.noise, &stderr_text) {
+                return Err(auth_failure(text));
             }
             if looks_like_rate_limit(&detail)
                 || looks_like_rate_limit(&stderr_text)
@@ -573,8 +680,8 @@ impl KimiProvider {
         }
 
         if parsed.content.trim().is_empty() {
-            if looks_like_auth_error(&stderr_text) || looks_like_auth_error(&parsed.noise) {
-                return Err(ProviderError::Unauthorized);
+            if let Some(text) = matched_auth_diagnostic(&parsed.noise, &stderr_text) {
+                return Err(auth_failure(text));
             }
             return Err(ProviderError::Upstream(
                 "kimi turn produced no assistant text".into(),
@@ -721,7 +828,7 @@ fn looks_like_rate_limit(text: &str) -> bool {
 fn classify_child_failure(detail: &str, exit_code: Option<i64>) -> ProviderError {
     let redacted = redact_child_diagnostic(detail);
     if looks_like_auth_error(detail) {
-        return ProviderError::Unauthorized;
+        return auth_failure(detail);
     }
     if looks_like_rate_limit(detail) {
         return ProviderError::RateLimited { retry_after_ms: 0 };
@@ -917,6 +1024,60 @@ mod tests {
     }
 
     #[test]
+    fn auth_failures_map_to_upstream_with_marker_and_guidance() {
+        // The exact shape observed from the real CLI (1.49.0) on an expired
+        // login, with a real-shaped fake secret appended: the redaction set
+        // masks `\bsk-[a-z0-9_-]{16,}`.
+        let raw = "Error code: 401 - {'error': {'message': 'The API Key appears to be invalid or may have expired. Key: sk-abcdefghijklmnopqrstuvwxyz012345', 'type': 'invalid_authentication_error'}}";
+        let ProviderError::Upstream(msg) = auth_failure(raw) else {
+            panic!("auth failures must be Upstream (see AUTH_FAILURE_MARKER), not Unauthorized");
+        };
+        assert!(
+            msg.starts_with(AUTH_FAILURE_MARKER),
+            "the stable marker must lead the message: {msg}"
+        );
+        for needle in [
+            "kimi login",
+            "~/.kimi",
+            "managed:kimi-code",
+            "no Ardur-side credential",
+        ] {
+            assert!(
+                msg.contains(needle),
+                "operator guidance must mention {needle}: {msg}"
+            );
+        }
+        assert!(
+            msg.contains("Error code: 401"),
+            "the sanitized upstream diagnostic must be carried: {msg}"
+        );
+        assert!(
+            !msg.contains("sk-abcdefghijklmnopqrstuvwxyz012345"),
+            "an echoed secret must not survive into the error: {msg}"
+        );
+        // And the diagnostic still classifies as auth-shaped, so the marker
+        // and the classification cannot drift apart.
+        assert!(looks_like_auth_error(raw));
+    }
+
+    #[test]
+    fn non_auth_upstream_errors_do_not_carry_the_auth_marker() {
+        let ProviderError::Upstream(msg) =
+            classify_child_failure("kimi exploded mid-turn", Some(3))
+        else {
+            panic!("a plain crash must stay Upstream");
+        };
+        assert!(
+            !msg.contains(AUTH_FAILURE_MARKER),
+            "the auth marker is reserved for credential failures: {msg}"
+        );
+        assert!(
+            !msg.contains("kimi login"),
+            "no login guidance on crashes: {msg}"
+        );
+    }
+
+    #[test]
     fn rate_limits_naming_a_key_are_not_credential_failures() {
         for retryable in [
             "Error code: 429 - rate limit exceeded for API key sk-abc",
@@ -997,22 +1158,64 @@ mod tests {
     #[test]
     fn deny_agent_spec_stages_a_uniquely_named_file() {
         let dir = std::env::temp_dir();
-        let first = write_deny_agent_spec(&dir).expect("stage first");
-        let second = write_deny_agent_spec(&dir).expect("stage second");
-        assert_ne!(first, second, "names must not collide across turns");
-        let staged = std::fs::read_to_string(&first).expect("read staged spec");
+        let (first_spec, first_mcp) = write_deny_artifacts(&dir).expect("stage first");
+        let (second_spec, second_mcp) = write_deny_artifacts(&dir).expect("stage second");
+        assert_ne!(
+            first_spec, second_spec,
+            "names must not collide across turns"
+        );
+        assert_ne!(first_mcp, second_mcp, "names must not collide across turns");
+        let staged = std::fs::read_to_string(&first_spec).expect("read staged spec");
         assert_eq!(staged, DENY_ALL_AGENT_SPEC);
-        let _ = std::fs::remove_file(&first);
-        let _ = std::fs::remove_file(&second);
+        let staged_mcp = std::fs::read_to_string(&first_mcp).expect("read staged MCP config");
+        assert_eq!(staged_mcp, DENY_ALL_MCP_CONFIG);
+        let _ = std::fs::remove_file(&first_spec);
+        let _ = std::fs::remove_file(&first_mcp);
+        let _ = std::fs::remove_file(&second_spec);
+        let _ = std::fs::remove_file(&second_mcp);
     }
 
     #[test]
-    fn deny_agent_spec_staging_failure_is_an_error_not_a_fallback() {
+    fn deny_mcp_config_is_valid_json_with_no_servers() {
+        // The staged MCP config must actually parse as the schema kimi-cli's
+        // `--mcp-config-file` expects, with zero servers — anything else and
+        // the child aborts at startup (or silently keeps the global set).
+        let parsed: serde_json::Value =
+            serde_json::from_str(DENY_ALL_MCP_CONFIG).expect("staged MCP config must be JSON");
+        let servers = parsed
+            .get("mcpServers")
+            .and_then(serde_json::Value::as_object)
+            .expect("mcpServers must be an object");
+        assert!(
+            servers.is_empty(),
+            "no MCP servers may be declared: {parsed}"
+        );
+    }
+
+    #[test]
+    fn deny_artifacts_staging_failure_is_an_error_not_a_fallback() {
         // Staging into a directory that does not exist must fail: the
         // provider turns this into a pre-spawn error rather than running the
-        // child with the default (tool-enabled) agent.
+        // child with the default (tool-enabled) agent / the global MCP set.
         let missing = Path::new("/nonexistent/ardur-kimi-no-such-dir");
-        assert!(write_deny_agent_spec(missing).is_err());
+        assert!(write_deny_artifacts(missing).is_err());
+    }
+
+    #[test]
+    fn staged_deny_files_are_removed_on_drop() {
+        // Early returns (pipe/spawn/read failures, stdout overflow) and the
+        // outer timeout's cancellation all exit `run_turn` by dropping the
+        // guard rather than reaching the inline cleanup — this pins the
+        // drop-glue itself.
+        let dir = std::env::temp_dir();
+        let (agent_spec, mcp_config) = write_deny_artifacts(&dir).expect("stage");
+        assert!(agent_spec.exists() && mcp_config.exists());
+        drop(StagedDenyFiles {
+            agent_spec: agent_spec.clone(),
+            mcp_config: mcp_config.clone(),
+        });
+        assert!(!agent_spec.exists(), "drop must remove the agent spec");
+        assert!(!mcp_config.exists(), "drop must remove the MCP config");
     }
 
     #[test]

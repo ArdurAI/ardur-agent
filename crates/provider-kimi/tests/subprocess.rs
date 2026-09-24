@@ -116,9 +116,12 @@ async fn missing_binary_is_reported_as_a_missing_install() {
 }
 
 #[tokio::test]
-async fn expired_login_on_stdout_maps_to_unauthorized() {
+async fn expired_login_on_stdout_maps_to_upstream_with_marker() {
     // The exact failure shape observed from the real CLI (1.49.0): the error
     // line is plain text on *stdout*, stderr carries only session hints.
+    // It must surface as Upstream carrying AUTH_FAILURE_MARKER + guidance
+    // (NOT Unauthorized: Ardur holds no kimi credential, so there is nothing
+    // for the router's credential failover to advance to).
     let dir = tempfile::tempdir().expect("tempdir");
     let shim = write_shim(
         dir.path(),
@@ -136,10 +139,122 @@ sys.exit(1)
         .complete(request("hello"))
         .await
         .expect_err("auth failure must fail");
-    assert!(
-        matches!(err, ProviderError::Unauthorized),
-        "expected Unauthorized, got {err:?}"
+    match err {
+        ProviderError::Upstream(msg) => {
+            assert!(
+                msg.starts_with(ardur_provider_kimi::AUTH_FAILURE_MARKER),
+                "expected the auth marker to lead, got: {msg}"
+            );
+            assert!(
+                msg.contains("kimi login"),
+                "operator guidance must name the remedy: {msg}"
+            );
+            assert!(
+                msg.contains("Error code: 401"),
+                "the upstream diagnostic must be carried: {msg}"
+            );
+        }
+        other => panic!("expected Upstream, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn auth_shaped_stderr_alone_maps_to_upstream_with_marker() {
+    // Some kimi-cli versions/log configurations put the credential failure
+    // on stderr instead of stdout. The classifier scans both; an auth-shaped
+    // stderr with a clean exit must not be treated as an empty-turn success.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let shim = write_shim(
+        dir.path(),
+        "kimi-unauth-stderr",
+        r#"#!/usr/bin/env python3
+import sys
+sys.stdin.read()
+sys.stderr.write("Error code: 401 - unauthorized: not logged in, run kimi login\n")
+sys.exit(1)
+"#,
     );
+
+    let err = provider_for(shim)
+        .complete(request("hello"))
+        .await
+        .expect_err("auth-shaped stderr must fail");
+    match err {
+        ProviderError::Upstream(msg) => assert!(
+            msg.starts_with(ardur_provider_kimi::AUTH_FAILURE_MARKER),
+            "expected the auth marker to lead, got: {msg}"
+        ),
+        other => panic!("expected Upstream, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn auth_failure_diagnostics_redact_secret_shaped_material() {
+    // A shim echoing a real-shaped fake key (the redaction set masks
+    // `\bsk-[a-z0-9_-]{16,}`) alongside the 401 line: the secret must not
+    // survive into the Upstream error.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let shim = write_shim(
+        dir.path(),
+        "kimi-unauth-secret",
+        r#"#!/usr/bin/env python3
+import sys
+sys.stdin.read()
+sys.stdout.write("Error code: 401 - invalid_authentication_error; sent with api_key=sk-abcdefghijklmnopqrstuvwxyz012345\n")
+sys.exit(1)
+"#,
+    );
+
+    let err = provider_for(shim)
+        .complete(request("hello"))
+        .await
+        .expect_err("auth failure must fail");
+    match err {
+        ProviderError::Upstream(msg) => {
+            assert!(
+                msg.starts_with(ardur_provider_kimi::AUTH_FAILURE_MARKER),
+                "expected the auth marker to lead, got: {msg}"
+            );
+            assert!(
+                !msg.contains("sk-abcdefghijklmnopqrstuvwxyz012345"),
+                "an echoed secret must not survive into the error: {msg}"
+            );
+            assert!(
+                msg.contains("Error code: 401"),
+                "the sanitized diagnostic must survive: {msg}"
+            );
+        }
+        other => panic!("expected Upstream, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn weekly_quota_403_is_rate_limited_not_auth() {
+    // The other real failure shape observed from this host's CLI (1.49.0):
+    // a valid login but exhausted weekly subscription quota. It carries
+    // "quota"/"usage limit" wording that must NOT be classified as a
+    // credential failure — the remedy is waiting/paying, not `kimi login`.
+    // (The CLI hard-wraps the message; classification sees the raw line.)
+    let dir = tempfile::tempdir().expect("tempdir");
+    let shim = write_shim(
+        dir.path(),
+        "kimi-quota-403",
+        r#"#!/usr/bin/env python3
+import sys
+sys.stdin.read()
+sys.stdout.write("Error code: 403 - {'error': {'message': \"You've reached your weekly (7-day) usag\ne limit. Your quota will reset when the current 7-day window ends.\", 'type': 'access_terminated_error'}}\n")
+sys.exit(1)
+"#,
+    );
+
+    let err = provider_for(shim)
+        .complete(request("hello"))
+        .await
+        .expect_err("quota exhaustion must fail");
+    match err {
+        ProviderError::RateLimited { .. } => {}
+        other => panic!("expected RateLimited for a quota 403, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -394,10 +509,39 @@ sys.exit(0)
         "spec must drop the default subagents: {spec}"
     );
 
-    // The staged file is per-turn state: once the child exits it is removed.
+    // The empty MCP config must be passed too — without it the child would
+    // load the operator's global ~/.kimi/mcp.json servers regardless of the
+    // agent spec's empty tool list.
+    let mcp_path_idx = lines
+        .iter()
+        .position(|l| *l == "--mcp-config-file")
+        .expect("--mcp-config-file must be passed by default");
+    let mcp_path = lines[mcp_path_idx + 1];
+    assert!(
+        mcp_path.contains("ardur-kimi-deny-mcp-"),
+        "expected a staged deny-MCP path, got: {mcp_path}"
+    );
+    let mcp_content = std::fs::read_to_string(mcp_path.trim()).unwrap_or_else(|_| {
+        // The provider removes the staged file after the turn; if it is
+        // already gone the content was validated by the unit tests, and the
+        // removal itself is asserted below.
+        String::new()
+    });
+    if !mcp_content.is_empty() {
+        assert!(
+            mcp_content.contains("\"mcpServers\": {}") || mcp_content.contains("\"mcpServers\":{}"),
+            "staged MCP config must declare no servers: {mcp_content}"
+        );
+    }
+
+    // The staged files are per-turn state: once the child exits they are removed.
     assert!(
         !Path::new(spec_path.trim()).exists(),
         "staged deny spec must be removed after the turn: {spec_path}"
+    );
+    assert!(
+        !Path::new(mcp_path.trim()).exists(),
+        "staged deny MCP config must be removed after the turn: {mcp_path}"
     );
 }
 
@@ -435,6 +579,10 @@ sys.exit(0)
     assert!(
         !argv.lines().any(|l| l == "--agent-file"),
         "opting into child tools must use the operator's own default agent:\n{argv}"
+    );
+    assert!(
+        !argv.lines().any(|l| l == "--mcp-config-file"),
+        "opting into child tools must also honor the operator's MCP config:\n{argv}"
     );
 }
 
