@@ -90,7 +90,7 @@ default-features = false
 features = [ "trace",]
 
 [workspace.dependencies.opentelemetry_sdk]
-version = "0.32.1"
+version = "0.33.0"
 default-features = false
 features = [ "rt-tokio", "trace",]
 
