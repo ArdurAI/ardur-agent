@@ -27,7 +27,19 @@ OpenCode's published interface, verified against `packages/opencode/src/cli/cmd/
 
 ## Requirements
 
-- `opencode` on `PATH` (or `OPENCODE_BINARY` pointed at it).
+- `opencode` on `PATH` (or `OPENCODE_BINARY` pointed at it). Install it with
+  one of:
+
+  ```sh
+  curl -fsSL https://opencode.ai/install | bash   # official installer
+  npm i -g opencode-ai                            # npm / bun / pnpm
+  brew install sst/tap/opencode                   # macOS Homebrew
+  ```
+
+  Verify with `opencode --version`. A missing binary fails the turn with a
+  typed `ProviderError::Upstream` ("OpenCode CLI not installed …") carrying
+  this install line, so smoke can tell "not installed" apart from auth and
+  rate-limit failures.
 - A model provider configured inside OpenCode (`opencode auth login`).
   This crate holds no API key of its own.
 

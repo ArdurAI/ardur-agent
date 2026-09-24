@@ -44,14 +44,16 @@
 //! The host must have the `opencode` binary on `PATH` (or
 //! [`OpenCodeConfig::binary`] pointed at it) and a usable model provider
 //! configured inside OpenCode. A missing binary surfaces as
-//! [`ProviderError::Upstream`] ("OpenCode CLI not installed …"); a missing or
-//! expired login surfaces as [`ProviderError::Unauthorized`].
+//! [`ProviderError::Upstream`] ("OpenCode CLI not installed …") carrying the
+//! install one-liner ([`INSTALL_HINT`]) so the failure is actionable without
+//! opening the docs; a missing or expired login surfaces as
+//! [`ProviderError::Unauthorized`].
 //!
 //! # Error-taxonomy mapping
 //!
 //! | Failure | [`ProviderError`] |
 //! |----------------------------------|----------------------------------|
-//! | binary not found on `PATH` | [`Upstream`](ProviderError::Upstream) ("OpenCode CLI not installed …") |
+//! | binary not found on `PATH` / via `OPENCODE_BINARY` | [`Upstream`](ProviderError::Upstream) ("OpenCode CLI not installed …" + install one-liner) |
 //! | no usable model / not logged in | [`Unauthorized`](ProviderError::Unauthorized) |
 //! | turn exceeded `request_timeout` | [`NetworkFailure`](ProviderError::NetworkFailure) |
 //! | non-zero exit / in-band `error` event | [`Upstream`](ProviderError::Upstream) (stderr / error, secret-redacted) |
@@ -132,6 +134,13 @@ const SHARE_DISABLED_INLINE_CONFIG: &str = r#"{"share":"disabled"}"#;
 
 /// Env var [`OpenCodeConfig::from_env`] reads the binary path from.
 pub const BINARY_ENV: &str = "OPENCODE_BINARY";
+/// Install guidance carried in the missing-binary
+/// [`ProviderError::Upstream`] message, so an operator — or a smoke run —
+/// can act on a "not installed" failure without opening the docs. Verified
+/// against sst/opencode: the curl one-liner is the official installer; npm
+/// and Homebrew are the packaged alternatives.
+pub const INSTALL_HINT: &str = "curl -fsSL https://opencode.ai/install | bash \
+     (or `npm i -g opencode-ai` / `brew install sst/tap/opencode`)";
 /// Env var [`OpenCodeConfig::from_env`] reads the default model from. OpenCode
 /// models are named in `provider/model` form (its `--model` flag).
 pub const DEFAULT_MODEL_ENV: &str = "OPENCODE_DEFAULT_MODEL";
@@ -390,10 +399,7 @@ impl OpenCodeProvider {
 
         let mut child = spawn_opencode(&mut cmd).await.map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
-                ProviderError::Upstream(format!(
-                    "OpenCode CLI not installed (binary {:?} not found on PATH): {e}",
-                    self.config.binary
-                ))
+                missing_binary_error(&self.config.binary, &e)
             } else {
                 ProviderError::Upstream(format!("failed to spawn opencode: {e}"))
             }
@@ -689,6 +695,22 @@ async fn spawn_opencode(
     }
 }
 
+/// Build the typed error for a missing `opencode` binary.
+///
+/// This is the smoke gap from #571: "not installed" must be distinguishable
+/// from auth, rate-limit, and general child failures, and the message must
+/// carry the install one-liner ([`INSTALL_HINT`]) so the operator can act on
+/// it directly. The attempted binary is named so an `OPENCODE_BINARY`
+/// override pointing at a missing file is distinguishable from a plain
+/// not-on-`PATH`.
+fn missing_binary_error(binary: &std::path::Path, source: &std::io::Error) -> ProviderError {
+    ProviderError::Upstream(format!(
+        "OpenCode CLI not installed (binary {binary:?} not found on PATH or via \
+         {BINARY_ENV}): {source}. Install: {INSTALL_HINT}, \
+         then run `opencode auth login` once"
+    ))
+}
+
 /// Strip secret-shaped substrings from a child diagnostic before it enters a
 /// [`ProviderError`]. OpenCode (or a shim) may echo an API key in stderr / an
 /// `error` event; AGENTS.md forbids surfacing those values.
@@ -805,6 +827,61 @@ mod tests {
             content: content.to_string(),
             tool_calls: Vec::new(),
             tool_call_id: None,
+        }
+    }
+
+    #[test]
+    fn missing_binary_is_typed_upstream_with_install_guidance() {
+        // #571: a missing opencode binary must be a typed Upstream (no
+        // panic, no generic error), distinguishable from auth / rate-limit /
+        // general child failures, and the message must carry the install
+        // one-liner so the operator can act on it without opening the docs.
+        let err = missing_binary_error(
+            std::path::Path::new("opencode"),
+            &std::io::Error::from(std::io::ErrorKind::NotFound),
+        );
+        match err {
+            ProviderError::Upstream(msg) => {
+                assert!(msg.contains("not installed"), "install diagnostic: {msg}");
+                assert!(
+                    msg.contains("curl -fsSL https://opencode.ai/install | bash"),
+                    "install one-liner must ride in the message: {msg}"
+                );
+                assert!(
+                    msg.contains("opencode auth login"),
+                    "auth step must be named: {msg}"
+                );
+                assert!(
+                    msg.contains("\"opencode\""),
+                    "attempted binary must be named: {msg}"
+                );
+            }
+            other => panic!("expected Upstream, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn missing_binary_message_names_an_explicit_override_path() {
+        // OPENCODE_BINARY pointed at a missing file: the message names that
+        // path, so a misconfigured override is distinguishable from a plain
+        // not-on-PATH.
+        let err = missing_binary_error(
+            std::path::Path::new("/opt/opencode/bin/opencode"),
+            &std::io::Error::from(std::io::ErrorKind::NotFound),
+        );
+        match err {
+            ProviderError::Upstream(msg) => {
+                assert!(msg.contains("not installed"), "install diagnostic: {msg}");
+                assert!(
+                    msg.contains("/opt/opencode/bin/opencode"),
+                    "override path must be named: {msg}"
+                );
+                assert!(
+                    msg.contains(BINARY_ENV),
+                    "override env var must be named: {msg}"
+                );
+            }
+            other => panic!("expected Upstream, got {other:?}"),
         }
     }
 
