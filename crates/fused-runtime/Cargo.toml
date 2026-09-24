@@ -95,6 +95,9 @@ async-stream = "0.3"
 ardur-fused-runtime = { path = ".", features = ["test-support"] }
 tokio = { workspace = true }
 tempfile = { workspace = true }
+# #544 plane gate tests: wiremock stands in for the governance plane's
+# /evaluate endpoint.
+wiremock = { workspace = true }
 serde_json = { workspace = true }
 assert_matches = "1"
 biscuit-auth = { workspace = true }

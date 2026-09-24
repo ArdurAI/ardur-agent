@@ -100,6 +100,7 @@ pub fn test_config(data_dir: &TempDir, slack_base: Option<String>) -> Config {
         // #502 Seam B7 follow-up: default-off governance ER mirror, matching a
         // default deployment. The dedicated boot tests set it explicitly.
         governance_mirror: false,
+        governance_plane_url: None,
         http_turn_timeout: std::time::Duration::from_secs(30),
     }
 }

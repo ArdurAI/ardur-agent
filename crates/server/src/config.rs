@@ -226,6 +226,17 @@ pub struct Config {
     /// mirror file, no admission change. Fail-closed: a corrupt or foreign-key
     /// mirror log fails the boot rather than re-genesis.
     pub governance_mirror: bool,
+    /// **#544.** Opt-in typed governance-plane consult
+    /// (`ARDUR_GOVERNANCE_PLANE_URL`, default unset = no plane). When set,
+    /// boot opens the [`ardur_governance::PlaneClient`] against that URL
+    /// (bearer token from `ARDUR_GOVERNANCE_PLANE_TOKEN`, root PEM from
+    /// `ARDUR_GOVERNANCE_PLANE_ROOT_PEM`, journal under
+    /// `<data_dir>/governance/plane.jsonl`) and hands it to the fused
+    /// runtime. Every native gate still applies; the plane adds a typed
+    /// consult after them — only the owner-authorized unavailable class
+    /// proceeds (minting `governance.plane.unreachable.v1`). Fail-closed:
+    /// an unopenable journal or foreign root fails the boot.
+    pub governance_plane_url: Option<String>,
     /// How long a synchronous `POST /chat` (and ACP) turn may run before the
     /// HTTP surface stops waiting on it (`ARDUR_HTTP_TURN_TIMEOUT_SECS`, default
     /// `30`). When the wait elapses the client receives `504`; the worker
@@ -594,6 +605,7 @@ impl Config {
             governance_mirror: optional("ARDUR_GOVERNANCE")
                 .as_deref()
                 .is_some_and(is_truthy),
+            governance_plane_url: optional("ARDUR_GOVERNANCE_PLANE_URL"),
             http_turn_timeout,
         })
     }

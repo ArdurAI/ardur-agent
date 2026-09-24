@@ -438,6 +438,15 @@ pub fn dev_permissive_policy_enabled() -> bool {
 /// (`ARDUR_GOVERNANCE`). Same normalized truthy rule as
 /// [`dev_permissive_policy_enabled`]; default off. Public so the engine's boot
 /// path and any operator surface read the same decision.
+/// #544: the opt-in typed plane-consult endpoint (`ARDUR_GOVERNANCE_PLANE_URL`,
+/// default unset = no plane). Set = boot opens the plane client against it.
+pub fn governance_plane_url() -> Option<String> {
+    std::env::var("ARDUR_GOVERNANCE_PLANE_URL")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
 pub fn governance_mirror_enabled() -> bool {
     std::env::var("ARDUR_GOVERNANCE")
         .map(|value| {

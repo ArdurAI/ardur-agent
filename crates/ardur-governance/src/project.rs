@@ -727,8 +727,15 @@ fn canonical_public_for_denial_code(internal: &str) -> Option<PublicDenialReason
         | "pop_key_mismatch"
         | "pop_invalid"
         | "tool_capability_denied"
-        | "tool_invalid_arguments" => PublicDenialReason::PolicyDenied,
-        "revoked" => PublicDenialReason::Revoked,
+        | "tool_invalid_arguments"
+        // #544: the plane's authenticated decision and the operator kill
+        // switch are policy denials (the plane was UP and refused). A plane
+        // REVOCATION is a revocation — the runtime records it as
+        // (Revoked, "plane_revoked"), and this table must agree with the
+        // producer or the evidence journal rejects the pair on replay
+        // (review P1).
+        | "plane_denied" | "plane_kill_switch" => PublicDenialReason::PolicyDenied,
+        "revoked" | "plane_revoked" => PublicDenialReason::Revoked,
         "signature_invalid" | "malformed_token" => PublicDenialReason::ChainInvalid,
         "budget_exhausted" | "tool_cost_ceiling_exceeded" => PublicDenialReason::BudgetExhausted,
         "policy_indeterminate"
@@ -736,7 +743,12 @@ fn canonical_public_for_denial_code(internal: &str) -> Option<PublicDenialReason
         | "approval_evaluation_error"
         | "tool_invocation_error"
         | "tool_not_implemented"
-        | "unprojectable_attenuation" => PublicDenialReason::InsufficientEvidence,
+        | "unprojectable_attenuation"
+        // #544: ambiguous delivery and corrupt plane evidence establish
+        // neither permission nor a breach — insufficient, never a guessed
+        // violation, and never fallback.
+        | "plane_ambiguous_delivery"
+        | "plane_corrupt_evidence" => PublicDenialReason::InsufficientEvidence,
         _ => return None,
     })
 }
@@ -765,6 +777,12 @@ fn decision_backend_for(outcome: &AuthOutcome) -> &'static str {
         "output_scan_blocked" | "output_scan_error" => "injection-scanner",
         "memory_record_malformed" => "memory-control-plane",
         "unknown_tool" => "tool-registry",
+        // #544: the typed plane classes attribute to the plane gate.
+        "plane_denied"
+        | "plane_revoked"
+        | "plane_kill_switch"
+        | "plane_ambiguous_delivery"
+        | "plane_corrupt_evidence" => "governance-plane",
         // Typed in-tool refusals (#543): the tool itself refused before the
         // effect (allowlist, root escape, missing grant, rejected token,
         // malformed arguments, cost ceiling, unimplemented backend).

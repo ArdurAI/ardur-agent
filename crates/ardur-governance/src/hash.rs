@@ -147,7 +147,9 @@ const EVIDENCE_LINE_DOMAIN: &[u8] = b"ardur-governance/evidence-line/v1";
 /// tail is as detectable as a mid-journal deletion.
 const EVIDENCE_CHECKPOINT_DOMAIN: &[u8] = b"ardur-governance/evidence-checkpoint/v1";
 
-fn hmac_sha256(key: &[u8; 32], parts: &[&[u8]]) -> String {
+/// `#`-visible for the plane journal (#544), which chains its own MAC-ed
+/// envelope under a different domain label but shares this primitive.
+pub fn hmac_sha256(key: &[u8; 32], parts: &[&[u8]]) -> String {
     use hmac::{Hmac, KeyInit, Mac};
     use sha2::Sha256;
     let mut mac =

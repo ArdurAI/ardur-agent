@@ -295,6 +295,15 @@ pub struct FusedRuntime {
     /// untouched; `Some` receives only committed rounds, under the commit
     /// lock, immediately after the native receipt append.
     pub(crate) governance: Option<Arc<dyn GovernanceEmitter>>,
+    /// #544 — the opt-in typed plane-outage client consulted at the tool
+    /// gates after every native gate passes. `None` (the builder default)
+    /// is byte-identical to a runtime without the plane. `Some` adds no
+    /// parallel authorization: the consult classifies into the typed
+    /// taxonomy and only the owner-authorized unavailable class proceeds.
+    pub(crate) plane: Option<Arc<ardur_governance::PlaneClient>>,
+    /// #544 — the outage window the last `governance.plane.unreachable.v1`
+    /// marker receipt was minted for (debounce state), with its timestamp.
+    pub(crate) plane_marker: parking_lot::Mutex<Option<(ardur_governance::OutageWindow, u64)>>,
 }
 
 /// Which cost predicate a control-plane receipt verifies under.
@@ -1295,6 +1304,7 @@ impl FusedRuntime {
             APPROVAL_ERROR_SETTLEMENT => Disposition::Refusal(RefusalClass::ApprovalError),
             SCAN_SETTLEMENT => Disposition::Refusal(RefusalClass::OutputBlocked),
             SCAN_ERROR_SETTLEMENT => Disposition::Refusal(RefusalClass::ScannerError),
+            PLANE_AUTH_SETTLEMENT => Disposition::Refusal(RefusalClass::Authorization),
             _ => Disposition::Infrastructure(InfrastructureFailureClass::Provider),
         };
         reservation
@@ -1882,6 +1892,211 @@ impl FusedRuntime {
                 reason: format!("indeterminate: {reason}"),
             }),
         }
+    }
+
+    /// **#544.** The gate form of [`consult_plane`](Self::consult_plane):
+    /// `Ok(())` when the plane permits or the owner-authorized unavailable
+    /// class applies (minting the debounced window marker), and the typed
+    /// `RuntimeError` denial for every other class. No plane configured →
+    /// `Ok(())` unchanged.
+    #[allow(clippy::too_many_arguments)]
+    async fn consult_plane_outcome(
+        &self,
+        session_id: SessionId,
+        request_id: &str,
+        iteration: u32,
+        tool_ordinal: usize,
+        call: &ToolCall,
+        claims: &VerifiedClaims,
+        cap_token: &CapTokenRef,
+    ) -> Result<(), RuntimeError> {
+        let Some(outcome) = self
+            .consult_plane(
+                session_id,
+                request_id,
+                iteration,
+                tool_ordinal,
+                call,
+                claims,
+            )
+            .await?
+        else {
+            return Ok(());
+        };
+        use ardur_governance::PlaneOutcome;
+        match outcome {
+            PlaneOutcome::Permitted => Ok(()),
+            PlaneOutcome::Unreachable { window } => {
+                // #502 B5: the owner-authorized fallback class. Native
+                // governance still fully applies; the marker makes the
+                // window auditable. A marker mint failure (e.g. an
+                // unwritable receipt log) PROPAGATES and stops dispatch
+                // (review P1): executing the tool without the
+                // governance.plane.unreachable.v1 evidence would make the
+                // outage unauditable — fallback is only as good as its
+                // proof.
+                self.mint_plane_unreachable_marker(&window, session_id, cap_token)
+                    .await?;
+                Ok(())
+            }
+            PlaneOutcome::Denied { reason } => Err(RuntimeError::PolicyDenied {
+                reason: format!(
+                    "governance plane denied the tool call`{}`",
+                    reason.unwrap_or_default()
+                ),
+            }),
+            PlaneOutcome::Revoked => Err(RuntimeError::PolicyDenied {
+                reason: "governance plane reported the credential revoked".to_string(),
+            }),
+            PlaneOutcome::KillSwitch => Err(RuntimeError::PolicyDenied {
+                reason: "governance plane kill switch active".to_string(),
+            }),
+            PlaneOutcome::AmbiguousDelivery => Err(RuntimeError::PolicyDenied {
+                reason: "governance plane delivery ambiguous".to_string(),
+            }),
+            PlaneOutcome::CorruptEvidence { .. } => Err(RuntimeError::PolicyDenied {
+                reason: "governance plane returned corrupt evidence".to_string(),
+            }),
+        }
+    }
+
+    /// **#544.** Consult the governance plane for one tool event, AFTER every
+    /// native admission gate has passed and BEFORE dispatch. Adds no
+    /// parallel authorization: the consult reuses the turn's already
+    /// verified claims and the existing gates' decisions; the plane's
+    /// answer is classified into the typed taxonomy
+    /// ([`ardur_governance::PlaneOutcome`]) and every non-permitting class
+    /// is a typed denial routed through the existing refusal paths.
+    ///
+    /// The consult is bound to the exact MD/DG/manifest the runtime holds:
+    /// the manifest digest over the registered tool ids, the DG snapshot
+    /// from the verified claims, and the stable #543 event id (also the
+    /// plane's `risk_request_id` idempotency key) — so a reconnect replay
+    /// of the missed window re-attests the same event, never re-runs the
+    /// tool and never double-debits.
+    ///
+    /// `Ok(None)` — no plane configured (the default); proceed natively.
+    /// `Ok(Some(PlaneOutcome::Permitted))` — proceed (all native gates
+    /// already passed). `Ok(Some(Unreachable))` — the owner-authorized
+    /// (#502 B5) unavailable class: proceed under native governance; the
+    /// CALLER mints the debounced `governance.plane.unreachable.v1` marker.
+    /// `Ok(Some(_))` — a typed denial; the caller refuses with the paired
+    /// classification. `Err` — a LOCAL plane-journal failure; surfaced as
+    /// an operational error (never as fallback).
+    #[allow(clippy::too_many_arguments)]
+    async fn consult_plane(
+        &self,
+        session_id: SessionId,
+        request_id: &str,
+        iteration: u32,
+        tool_ordinal: usize,
+        call: &ToolCall,
+        claims: &VerifiedClaims,
+    ) -> Result<Option<ardur_governance::PlaneOutcome>, RuntimeError> {
+        let Some(plane) = self.plane.as_ref() else {
+            return Ok(None);
+        };
+        // The stable #543 event identity: deterministic over (session,
+        // round request id, iteration, ordinal, call id), so the consult,
+        // the ER, and any reconnect replay agree on one id per event.
+        let event_id = ardur_governance::tool_event_id(
+            &session_id.0.to_string(),
+            request_id,
+            iteration,
+            tool_ordinal as u32,
+            &call.id,
+        );
+        // Exact manifest snapshot over the registered tool ids (sorted,
+        // deduped — the shared INTER-01 digest).
+        let manifest_digest = {
+            let mut ids: Vec<String> = self
+                .tools
+                .list()
+                .into_iter()
+                .map(|tool| tool.id().0.clone())
+                .collect();
+            ids.sort();
+            ids.dedup();
+            ardur_governance::tool_manifest_digest(&ids)
+        };
+        let grant = ardur_governance::GrantDescriptor::from_claims(claims, None);
+        // The REAL canonical arguments travel to the plane (#544 review:
+        // argument-dependent policy must see what the tool will run). The
+        // digest of these bytes is what the journal persists.
+        let canonical_arguments =
+            serde_json::to_vec(&call.arguments).map_err(|e| RuntimeError::Internal(e.into()))?;
+        let now_unix = self.clock.now_ms().get() / 1000;
+        let outcome = plane
+            .evaluate(
+                &event_id,
+                &session_id.0.to_string(),
+                &call.name,
+                canonical_arguments.as_slice(),
+                &manifest_digest,
+                &grant,
+                now_unix,
+            )
+            .await
+            .map_err(|e| {
+                RuntimeError::Internal(anyhow::anyhow!("governance plane journal failed: {e}"))
+            })?;
+        Ok(Some(outcome))
+    }
+
+    /// **#544.** Mint the `governance.plane.unreachable.v1` control receipt
+    /// for an outage window — DEBOUNCED to exactly one marker per window
+    /// per runtime. Idempotent by construction: the window key is checked
+    /// under the marker lock before minting, so retries and repeated
+    /// fallbacks within one window mint nothing further. The payload
+    /// digest covers the plane identity material (window key + start),
+    /// never tokens or secrets.
+    async fn mint_plane_unreachable_marker(
+        &self,
+        window: &ardur_governance::OutageWindow,
+        session_id: SessionId,
+        cap_token: &CapTokenRef,
+    ) -> Result<(), RuntimeError> {
+        // Reserve the window UNDER the lock before the async receipt commit
+        // (review P2): two concurrent turns in one window must not both
+        // pass the check and double-mint. Reservation rolls back on a mint
+        // failure so the next consult retries.
+        {
+            let mut marker = self.plane_marker.lock();
+            if let Some((marked, _)) = marker.as_ref() {
+                if marked == window {
+                    return Ok(());
+                }
+            }
+            *marker = Some((window.clone(), self.clock.now_ms().get()));
+        }
+        let payload = format!(
+            "plane_outage_window:{}/{}",
+            window.key, window.started_unix_secs
+        );
+        if let Err(err) = self
+            .commit_control_receipt(
+                session_id,
+                cap_token,
+                &self.tool.clone(),
+                PLANE_UNREACHABLE_VERB,
+                Sha256Digest::of(payload.as_bytes()),
+                ardur_receipt::CostTuple {
+                    tokens_in: 0,
+                    tokens_out: 0,
+                    cents: 0,
+                    wall_ms: 0,
+                    attention_score: 0,
+                },
+                ControlVerifyCost::RuntimeDefault,
+            )
+            .await
+        {
+            // Roll the reservation back so the next consult retries the
+            // mint instead of treating this window as already marked.
+            *self.plane_marker.lock() = None;
+            return Err(err);
+        }
+        Ok(())
     }
 
     fn authorize_tool_invocation(
@@ -2953,6 +3168,34 @@ const SCAN_SETTLEMENT: &str = "refusal:output_scan";
 /// under its own class so the durable settlement evidence and the event ER
 /// (which reports insufficient evidence) never contradict each other.
 const SCAN_ERROR_SETTLEMENT: &str = "refusal:output_scan_error";
+/// **#544.** The plane-consult refusal settlement reason — an authorization
+/// refusal (the plane denied, revoked, kill-switched, answered corruptly or
+/// ambiguously), routed through the existing refusal settlement.
+const PLANE_AUTH_SETTLEMENT: &str = "refusal:plane_authorization";
+/// **#544 review P2.** Select the refusal settlement label from the actual
+/// consult error: typed plane classes are authorization refusals, but a
+/// LOCAL plane-journal failure (disk/i/o) is infrastructure — settling it
+/// as a policy denial would durably misclassify an operational outage.
+fn plane_consult_settlement(err: &RuntimeError) -> &'static str {
+    match err {
+        RuntimeError::PolicyDenied { .. } => PLANE_AUTH_SETTLEMENT,
+        RuntimeError::Internal(_) => PLANE_INFRA_SETTLEMENT,
+        _ => PLANE_INFRA_SETTLEMENT,
+    }
+}
+/// **#544.** The B5 plane-outage marker verb (pre-registered in the #537
+/// verb grammar; this is its first minter).
+const PLANE_UNREACHABLE_VERB: &str = "governance.plane.unreachable.v1";
+/// **#544 review P2.** A local plane-journal failure settles as
+/// infrastructure (the plane never answered — nothing was refused).
+const PLANE_INFRA_SETTLEMENT: &str = "refusal:plane_infrastructure";
+/// #544 plane refusal message prefixes (matched with `starts_with` on the
+/// policy-denial reason; each carries no plane-controlled free text).
+const PLANE_DENIED_PREFIX: &str = "governance plane denied the tool call";
+const PLANE_REVOKED_PREFIX: &str = "governance plane reported the credential revoked";
+const PLANE_KILL_PREFIX: &str = "governance plane kill switch active";
+const PLANE_AMBIGUOUS_PREFIX: &str = "governance plane delivery ambiguous";
+const PLANE_CORRUPT_PREFIX: &str = "governance plane returned corrupt evidence";
 
 #[async_trait::async_trait]
 impl ChatRuntime for FusedRuntime {
@@ -3606,6 +3849,49 @@ impl FusedRuntime {
                             };
                         }
                     };
+                    // #544: every native gate — INCLUDING the approval
+                    // gate — has now passed; consult the plane (when
+                    // configured) immediately before dispatch. Placement
+                    // matters (review P2): consulting earlier would record
+                    // plane decisions (and mint outage markers) for calls
+                    // that are then refused pending human approval, and a
+                    // plane refusal would suppress the approval proposal.
+                    if let Err(err) = self
+                        .consult_plane_outcome(
+                            session_id,
+                            &iter_request_id,
+                            iteration,
+                            tool_ordinal,
+                            call,
+                            &claims,
+                            &req.cap_token,
+                        )
+                        .await
+                    {
+                        let (public, internal) = tool_auth_denial_classification(&err);
+                        self.governance_denied_event(
+                            session_id,
+                            &iter_request_id,
+                            iteration,
+                            tool_ordinal,
+                            call,
+                            &claims,
+                            tool.required_capabilities(),
+                            public,
+                            internal,
+                        );
+                        let known = response.cost.saturating_add(&tool_cost);
+                        let reason = plane_consult_settlement(&err);
+                        let settlement = self
+                            .settle_refusal(session_id, reservation, known, reason)
+                            .await;
+                        self.fire_error(session_id, LifecyclePhase::Submit, &err)
+                            .await;
+                        return match settlement {
+                            Ok(()) => Err(err),
+                            Err(settle_err) => Err(settle_err),
+                        };
+                    }
                     let ctx = self.tool_context(&req.cap_token, session_id);
                     // #543: every admission gate passed. Observe the
                     // dispatch intent first (it is fallible), then
@@ -4629,6 +4915,51 @@ impl FusedRuntime {
                                 unreachable!()
                             }
                         };
+                        // #544: every native gate — INCLUDING the approval
+                        // gate — has now passed; consult the plane (when
+                        // configured) immediately before dispatch, exactly
+                        // as the non-streaming loop (placement rationale
+                        // there applies here too).
+                        if let Err(err) = self
+                            .consult_plane_outcome(
+                                session_id,
+                                &iter_request_id,
+                                iteration,
+                                tool_ordinal,
+                                call,
+                                &claims,
+                                &req.cap_token,
+                            )
+                            .await
+                        {
+                            let (public, internal) = tool_auth_denial_classification(&err);
+                            self.governance_denied_event(
+                                session_id,
+                                &iter_request_id,
+                                iteration,
+                                tool_ordinal,
+                                call,
+                                &claims,
+                                tool.required_capabilities(),
+                                public,
+                                internal,
+                            );
+                            yield FusedEvent::StageEnd { stage: StageKind::ToolExec, ok: false };
+                            let known = response.cost.saturating_add(&tool_cost);
+                            let reason = plane_consult_settlement(&err);
+                            let settlement = self
+                                .settle_refusal(
+                                    session_id,
+                                    reservation.take().expect("reservation held"),
+                                    known,
+                                    reason,
+                                )
+                                .await;
+                            self.fire_error(session_id, LifecyclePhase::Submit, &err).await;
+                            settlement?;
+                            Err(err)?;
+                            unreachable!()
+                        }
                         let ctx = self.tool_context(&req.cap_token, session_id);
                         // #543: gates passed. Observe the dispatch intent
                         // first (it is fallible), then persist the durable
@@ -5179,6 +5510,28 @@ fn tool_auth_denial_classification(err: &RuntimeError) -> (ErPublicDenialReason,
         RuntimeError::PolicyDenied { reason } if reason.starts_with("indeterminate:") => (
             ErPublicDenialReason::InsufficientEvidence,
             "policy_indeterminate",
+        ),
+        // #544: the typed plane classes. Authenticated decisions and the
+        // kill switch are violations (the plane is up and refused);
+        // ambiguous delivery and corrupt evidence establish nothing, so
+        // they are insufficient evidence — never a proven violation and
+        // never fallback.
+        RuntimeError::PolicyDenied { reason } if reason.starts_with(PLANE_DENIED_PREFIX) => {
+            (ErPublicDenialReason::PolicyDenied, "plane_denied")
+        }
+        RuntimeError::PolicyDenied { reason } if reason.starts_with(PLANE_REVOKED_PREFIX) => {
+            (ErPublicDenialReason::Revoked, "plane_revoked")
+        }
+        RuntimeError::PolicyDenied { reason } if reason.starts_with(PLANE_KILL_PREFIX) => {
+            (ErPublicDenialReason::PolicyDenied, "plane_kill_switch")
+        }
+        RuntimeError::PolicyDenied { reason } if reason.starts_with(PLANE_AMBIGUOUS_PREFIX) => (
+            ErPublicDenialReason::InsufficientEvidence,
+            "plane_ambiguous_delivery",
+        ),
+        RuntimeError::PolicyDenied { reason } if reason.starts_with(PLANE_CORRUPT_PREFIX) => (
+            ErPublicDenialReason::InsufficientEvidence,
+            "plane_corrupt_evidence",
         ),
         RuntimeError::PolicyDenied { .. } => (ErPublicDenialReason::PolicyDenied, "policy_denied"),
         _ => (

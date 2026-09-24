@@ -793,6 +793,7 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+ "wiremock",
 ]
 
 [[package]]
@@ -812,15 +813,21 @@ dependencies = [
  "ardur-receipt",
  "base64 0.23.1",
  "chrono",
+ "futures-util",
  "hmac 0.13.0",
  "p256 0.14.0",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "sha2 0.11.0",
  "subtle",
+ "tempfile",
  "thiserror 2.0.20",
+ "tokio",
  "tracing",
+ "url",
  "uuid",
+ "wiremock",
 ]
 
 [[package]]

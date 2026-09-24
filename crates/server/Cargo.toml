@@ -33,6 +33,9 @@ path = "src/bin/ardur-server.rs"
 # runtime, then fronts it with the Slack adapter.
 ardur-acp = { workspace = true }
 ardur-fused-runtime = { workspace = true }
+# #544: the boot opens the opt-in typed plane client
+# (`ARDUR_GOVERNANCE_PLANE_URL`) and hands it to the fused runtime.
+ardur-governance = { workspace = true }
 ardur-slack-adapter = { workspace = true }
 # The §4.X Matrix channel adapter — a second `MessagingGateway` backend the boot
 # sequence wires alongside Slack when `ARDUR_CHANNEL_MATRIX=true`.
@@ -123,10 +126,6 @@ async-trait = { workspace = true }
 assert_cmd = { workspace = true }
 hmac = { workspace = true }
 sha2 = { workspace = true }
-# The governance-boot tests verify the mirrored ER chain against the boot's
-# own receipt custody key (re-exported path: ardur-fused-runtime →
-# ardur-governance), through the same public verify API #560's suite uses.
-ardur-governance = { workspace = true }
 ardur-receipt = { workspace = true }
 hex = { workspace = true }
 serde_json = { workspace = true }

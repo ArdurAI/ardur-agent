@@ -58,6 +58,7 @@ mod hash;
 mod jcs;
 pub mod mirror;
 mod mission;
+mod plane;
 mod project;
 mod sign;
 
@@ -94,6 +95,11 @@ pub use mission::{
     GrantRecord, LineageBudgets, MissionAuthoringError, MissionDeclaration, MissionIdentity,
     ReceiptPolicy, ResourcePolicy, SUPPORTED_TELEMETRY, ToolManifestEntry,
     author_mission_declaration, mission_digest, tool_manifest_digest, tool_manifest_digest_of,
+};
+pub use plane::{
+    KILL_SWITCH_ACTIVE, OUTAGE_WINDOW_SECS, OutageWindow, PASSPORT_REVOKED, PLANE_RECORD_VERSION,
+    PlaneClient, PlaneClientError, PlaneEventRecord, PlaneEventStatus, PlaneGrantSnapshot,
+    PlaneOutcome,
 };
 pub use project::{
     ARGUMENTS_EVIDENCE_OMITTED_CODE, AuthOutcome, EFFECT_UNKNOWN_EXECUTION_CODE,
