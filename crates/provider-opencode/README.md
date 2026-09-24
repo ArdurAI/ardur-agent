@@ -17,7 +17,7 @@ no upstream license text is embedded; the credit below is the attribution that
 applies.
 
 > **OpenCode** — MIT License.
-> Copyright (c) SST.
+> Copyright (c) 2025 opencode.
 > <https://github.com/sst/opencode>
 
 The one-shot / JSONL vocabulary this crate speaks (`opencode run --format json`,
