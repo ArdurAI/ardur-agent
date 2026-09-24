@@ -222,7 +222,7 @@ async fn enumerated_transport_shapes_are_the_only_fallback_class() {
     );
     assert!(refused.fallback_eligible());
 
-    for status in [404u16, 502, 504] {
+    for status in [404u16, 405, 408, 501] {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/evaluate"))
@@ -238,6 +238,31 @@ async fn enumerated_transport_shapes_are_the_only_fallback_class() {
             "status {status} must be Unreachable, got {outcome:?}"
         );
         assert!(outcome.fallback_eligible());
+    }
+}
+
+#[tokio::test]
+async fn gateway_failures_after_forwarding_are_ambiguous_never_fallback() {
+    // 502/504: the gateway may have forwarded to a plane that decided and
+    // recorded a DENY before its response was lost. Response unknown —
+    // ambiguous, never owner-authorized fallback (review round 2).
+    let journal = tempfile::tempdir().expect("tempdir");
+    for status in [502u16, 504] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/evaluate"))
+            .respond_with(ResponseTemplate::new(status).set_body_json(json!({
+                "error": "upstream",
+            })))
+            .mount(&server)
+            .await;
+        let client = open_client(&server, &journal.path().join(format!("g{status}.jsonl")));
+        let outcome = consult(&client).await;
+        assert!(
+            matches!(outcome, PlaneOutcome::AmbiguousDelivery),
+            "status {status} must be AmbiguousDelivery, got {outcome:?}"
+        );
+        assert!(!outcome.fallback_eligible());
     }
 }
 

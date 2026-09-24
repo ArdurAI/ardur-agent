@@ -321,6 +321,11 @@ struct JournalState {
     pending: Vec<PlaneEventRecord>,
     /// Events dispatched with no durable decision (response-unknown).
     deliver: Vec<PlaneEventRecord>,
+    /// Set when an append's durable outcome is uncertain (write or fsync
+    /// failed): the in-memory view may not match disk, so every later
+    /// journal operation fails closed until a fresh open re-verifies the
+    /// chain (review round 2).
+    poisoned: bool,
 }
 
 /// A typed client for the plane's `POST /evaluate`, with the MAC-chained
@@ -389,6 +394,18 @@ impl PlaneClient {
                 "refusing plaintext http for non-loopback plane host {host:?}; \
                  use https or an explicit loopback endpoint"
             )));
+        }
+        // Credential-bearing URLs are refused outright (review round 2):
+        // userinfo or a query string can carry passwords/signed tokens
+        // that a plain URL log line would disclose.
+        if !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+        {
+            return Err(PlaneClientError::InvalidBaseUrl(
+                "plane URL must not carry userinfo, query, or fragment".to_string(),
+            ));
         }
         let plane_identity = parsed.to_string();
         let mac_key = plane_mac_key(root_public_key_pem, custody_private_pem);
@@ -465,6 +482,34 @@ impl PlaneClient {
         now_unix: u64,
     ) -> Result<PlaneOutcome, PlaneClientError> {
         let arguments_digest = &crate::hash::sha256_hex(canonical_arguments);
+        {
+            let state = self.journal.lock().await;
+            if state.poisoned {
+                return Err(PlaneClientError::CorruptJournal(
+                    "journal view poisoned by an earlier uncertain append; \
+                     reopen to re-verify the chain"
+                        .to_string(),
+                ));
+            }
+            // A deferred backlog (a boot replay that failed, or events
+            // stranded by an earlier outage) is retried BEFORE this
+            // consult (review round 2): the missed window is re-attested
+            // without waiting for a restart. A retry failure logs and the
+            // consult proceeds — the backlog stays for the next one.
+            if !state.pending.is_empty() || !state.deliver.is_empty() {
+                drop(state);
+                match self.replay_backlog().await {
+                    Ok(replayed) if replayed > 0 => {
+                        tracing::info!(replayed, "governance plane backlog replayed")
+                    }
+                    Ok(_) => {}
+                    Err(err) => tracing::warn!(
+                        error = %err,
+                        "governance plane backlog replay failed; kept for the next consult"
+                    ),
+                }
+            }
+        }
         let record = PlaneEventRecord {
             v: PLANE_RECORD_VERSION,
             event_id: event_id.to_string(),
@@ -542,16 +587,14 @@ impl PlaneClient {
         let response = match request.send().await {
             Ok(response) => response,
             Err(err) if err.is_timeout() => return Ok(PlaneOutcome::AmbiguousDelivery),
-            // Connection refused, DNS, TLS identity, body already sent but
-            // connection reset before any status: the enumerated
-            // no-decision transport failures. (A connect-phase failure can
-            // never have delivered the request; a post-send reset without a
-            // status is also `is_connect` in reqwest, which is the one
-            // shape this conservatively shares with them — see the
-            // AmbiguousDelivery docs for why timeouts alone never
-            // auto-fallback, and note a reset request is not retryable
-            // server-side without the idempotency key, which IS sent.)
-            Err(_) => return Ok(self.unreachable(now_unix)),
+            // ONLY a confirmed connect-phase failure is Unreachable
+            // (review round 2): connection refused, DNS, TLS identity —
+            // the request provably never left. Every OTHER send error
+            // (e.g. a reset after the body was transmitted) leaves the
+            // response unknown: the plane may have recorded a decision, so
+            // it is AmbiguousDelivery, never fallback.
+            Err(err) if err.is_connect() => return Ok(self.unreachable(now_unix)),
+            Err(_) => return Ok(PlaneOutcome::AmbiguousDelivery),
         };
         let status = response.status().as_u16();
         // Read the body ONCE, BOUNDED: a malformed or hostile plane must not
@@ -618,13 +661,19 @@ impl PlaneClient {
                     detail: "400 malformed request (client/plane schema mismatch)".to_string(),
                 })
             }
-            404 | 405 | 408 | 501 | 502 | 504 => {
+            404 | 405 | 408 | 501 => {
                 // 404/405/501: the endpoint is not there — enumerated
-                // transport refusal. 502/504: gateway/upstream shapes the
-                // HTTP contract defines as no-decision by the origin. 408:
-                // the server closed the request while the client was still
-                // sending — no evaluation occurred.
+                // transport refusal. 408: the server closed the request
+                // while the client was still sending — no evaluation
+                // occurred.
                 Ok(self.unreachable(now_unix))
+            }
+            502 | 504 => {
+                // Gateway failures AFTER forwarding (review round 2): the
+                // upstream plane may have received, evaluated and recorded
+                // a decision before its response was lost. Response
+                // unknown — ambiguous, never fallback-eligible.
+                Ok(PlaneOutcome::AmbiguousDelivery)
             }
             _ if (500..600).contains(&status) => {
                 // Any other 5xx: unknown server failure. The request WAS
@@ -654,29 +703,55 @@ impl PlaneClient {
     /// - DupExplain closes it.
     async fn append(&self, record: PlaneEventRecord) -> Result<(), PlaneClientError> {
         let mut state = self.journal.lock().await;
+        // Compute the post-append backlog FIRST, apply it ONLY after the
+        // durable write succeeds (review round 2): mutating the in-memory
+        // lists before `append_locked` reports success let a transient
+        // write failure silently drop the event from the live backlog, and
+        // a sync failure could leave `next_seq` stale. On any append
+        // error the client is POISONED — the durable/observed states may
+        // disagree — and every later operation fails closed.
+        let mut next = JournalState {
+            next_seq: state.next_seq,
+            tail_mac: state.tail_mac.clone(),
+            pending: state.pending.clone(),
+            deliver: state.deliver.clone(),
+            poisoned: false,
+        };
         let event_id = record.event_id.clone();
-        state.pending.retain(|r| r.event_id != event_id);
-        state.deliver.retain(|r| r.event_id != event_id);
+        next.pending.retain(|r| r.event_id != event_id);
+        next.deliver.retain(|r| r.event_id != event_id);
         match (&record.status, &record.outcome) {
-            (PlaneEventStatus::Pending, _) => state.pending.push(record.clone()),
-            (PlaneEventStatus::Deliver, _) => state.deliver.push(record.clone()),
+            (PlaneEventStatus::Pending, _) => next.pending.push(record.clone()),
+            (PlaneEventStatus::Deliver, _) => next.deliver.push(record.clone()),
             (PlaneEventStatus::Terminal, Some(PlaneOutcome::AmbiguousDelivery))
             | (PlaneEventStatus::Terminal, Some(PlaneOutcome::Unreachable { .. })) => {
                 // Non-definitive outcomes never close the event: the
                 // reconnect replay must still be able to attest it once
                 // the plane actually returns (#544 review).
-                state.deliver.push(record.clone());
+                next.deliver.push(record.clone());
             }
             (PlaneEventStatus::Terminal, _) | (PlaneEventStatus::DupExplain, _) => {}
         }
-        append_locked(
+        let result = append_locked(
             &self.journal_path,
-            &mut state,
+            &mut next,
             &self.mac_key,
             &self.plane_identity,
             &self.root_fp,
             &record,
-        )
+        );
+        match result {
+            Ok(()) => {
+                *state = next;
+                Ok(())
+            }
+            Err(err) => {
+                // Poison: keep the pre-append view (it may or may not
+                // match disk), and refuse every later journal use.
+                state.poisoned = true;
+                Err(err)
+            }
+        }
     }
 
     /// Reconnect replay, gh#544 requirement 3: drain the backlog exactly
@@ -707,6 +782,13 @@ impl PlaneClient {
         // are slow; the journal lock guards appends only).
         let backlog: Vec<PlaneEventRecord> = {
             let state = self.journal.lock().await;
+            if state.poisoned {
+                return Err(PlaneClientError::CorruptJournal(
+                    "journal view poisoned by an earlier uncertain append; \
+                     reopen to re-verify the chain"
+                        .to_string(),
+                ));
+            }
             state
                 .pending
                 .iter()
