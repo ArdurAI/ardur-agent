@@ -36,6 +36,30 @@ upstream source, and carries its license text alongside the copied file.
 
 ---
 
+## OpenCode
+
+- **License:** MIT
+- **Copyright:** (c) 2025 opencode
+- **Upstream:** <https://github.com/sst/opencode>
+
+| Component | Relationship | Notes |
+| --- | --- | --- |
+| `crates/provider-opencode` | **Wrapped** (subprocess) | Spawns the `opencode` CLI in one-shot mode (`opencode run --format json`, transcript on stdin, JSONL events on stdout) with child tools denied by default via inline config. No upstream source is copied. Protocol verified against `packages/opencode/src/cli/cmd/run.ts` (v1.0.165 and master). |
+
+---
+
+## Kimi Code CLI
+
+- **License:** Apache-2.0
+- **Copyright:** (c) 2025 Moonshot AI
+- **Upstream:** <https://github.com/MoonshotAI/kimi-cli>
+
+| Component | Relationship | Notes |
+| --- | --- | --- |
+| `crates/provider-kimi` | **Wrapped** (subprocess) | Spawns the `kimi` CLI in one-shot print mode (`kimi --print --output-format stream-json`, transcript on stdin, JSONL messages on stdout) with child tools denied by default via a staged `--agent-file`. No upstream source is copied. Interface verified against the installed kimi-cli 1.49.0 sources and a live probe of the binary. |
+
+---
+
 ## Adding an entry
 
 When adopting a new upstream component, record it here with its license,

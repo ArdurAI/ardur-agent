@@ -11,12 +11,13 @@ Cedar authorization, the cost gate, a signed receipt, and the durable journal.
 
 ## Upstream attribution
 
-Kimi Code CLI is published by Moonshot AI and is **not** vendored here — this
-crate spawns the binary and speaks its published CLI interface. No upstream
-source is copied, so no upstream license text is embedded; the credit below is
-the attribution that applies.
+Kimi Code CLI is published by Moonshot AI under the Apache License 2.0 and is
+**not** vendored here — this crate spawns the binary and speaks its published
+CLI interface. No upstream source is copied, so no upstream license text is
+embedded; the credit below is the attribution that applies.
 
-> **Kimi Code CLI** — Moonshot AI.
+> **Kimi Code CLI** — Apache License 2.0.
+> Copyright (c) 2025 Moonshot AI.
 > <https://github.com/MoonshotAI/kimi-cli>
 
 The one-shot / JSON vocabulary this crate speaks (`--print`,
