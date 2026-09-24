@@ -162,6 +162,8 @@ pub struct FusedRuntimeBuilder {
     approvals: Option<ApprovalStore>,
     approval_gated_capabilities: HashSet<String>,
     governance: Option<Arc<dyn GovernanceEmitter>>,
+    /// #544: the typed plane-outage client consulted at the tool gates.
+    plane: Option<Arc<ardur_governance::PlaneClient>>,
 }
 
 impl FusedRuntimeBuilder {
@@ -214,6 +216,7 @@ impl FusedRuntimeBuilder {
             approvals: None,
             approval_gated_capabilities: HashSet::new(),
             governance: None,
+            plane: None,
         }
     }
 
@@ -490,6 +493,32 @@ impl FusedRuntimeBuilder {
         self
     }
 
+    /// **#544** — opt in to consulting the Ardur governance plane at the
+    /// existing tool-admission gates. Every native gate still applies first
+    /// (this adds no parallel authorization); the plane's answer is then
+    /// classified into the typed outage taxonomy
+    /// ([`ardur_governance::PlaneOutcome`]): an authenticated decision,
+    /// revocation, kill switch, corrupt evidence or ambiguous delivery is a
+    /// typed denial through the existing refusal paths, and only the
+    /// owner-authorized unavailable class (#502 B5) proceeds under native
+    /// governance while the runtime mints one
+    /// `governance.plane.unreachable.v1` marker receipt per outage window.
+    #[must_use]
+    pub fn with_plane(mut self, plane: Arc<ardur_governance::PlaneClient>) -> Self {
+        self.plane = Some(plane);
+        self
+    }
+
+    /// The `Option` half of [`with_plane`](Self::with_plane), mirroring
+    /// [`maybe_with_governance`](Self::maybe_with_governance).
+    #[must_use]
+    pub fn maybe_with_plane(self, plane: Option<Arc<ardur_governance::PlaneClient>>) -> Self {
+        match plane {
+            Some(plane) => self.with_plane(plane),
+            None => self,
+        }
+    }
+
     /// The `Option` half of [`with_governance`](Self::with_governance): boot
     /// helpers whose governance emitter is conditional (an env flag defaulting
     /// off) pass `None` to keep the default behaviour, without forking the
@@ -708,6 +737,8 @@ impl FusedRuntimeBuilder {
             approvals: self.approvals,
             approval_gated_capabilities: self.approval_gated_capabilities,
             governance: self.governance,
+            plane: self.plane,
+            plane_marker: parking_lot::Mutex::new(None),
         })
     }
 
