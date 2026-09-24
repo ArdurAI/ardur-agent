@@ -20,8 +20,8 @@
 //! | `kimi`           | `KimiProvider` (CLI subprocess wrap) | `ardur-provider-kimi`      |
 //!
 //! (`claude-cli` also answers to the alias `claude-subscription`, `prime` to
-//! `prime-agent`, `hermes` to `hermes-agent`, `opencode` to
-//! `opencode-agent`, and `kimi` to `kimi-agent`.)
+//! `prime-agent`, `hermes` to `hermes-agent`, `opencode` to `opencode-agent`,
+//! `kimi` to `kimi-agent`, and `codex` to `codex-agent`.)
 //!
 //! Parsing is case-insensitive; an unset (or empty) value selects the default,
 //! `anthropic`. An unrecognized value is returned as a [`ProviderError`] whose
@@ -85,7 +85,8 @@ pub enum ProviderKind {
     OpenAiCompat,
     /// Ollama local daemon or hosted cloud (§3.3).
     Ollama,
-    /// OpenAI Codex CLI subscription, wrapped as a subprocess (§3.3b).
+    /// OpenAI Codex CLI subscription, wrapped as a one-shot subprocess
+    /// (§3.3b). Also selected by the alias `codex-agent`.
     Codex,
     /// Claude Code CLI subscription, wrapped as a subprocess (§3.3c). Also
     /// selected by the alias `claude-subscription`.
@@ -152,7 +153,7 @@ impl ProviderKind {
             "openrouter" => Ok(ProviderKind::OpenRouter),
             "openai-compat" | "openai_compat" | "openai" => Ok(ProviderKind::OpenAiCompat),
             "ollama" => Ok(ProviderKind::Ollama),
-            "codex" => Ok(ProviderKind::Codex),
+            "codex" | "codex-agent" => Ok(ProviderKind::Codex),
             "claude-cli" | "claude-subscription" => Ok(ProviderKind::ClaudeCli),
             "prime" | "prime-agent" => Ok(ProviderKind::Prime),
             "hermes" | "hermes-agent" => Ok(ProviderKind::Hermes),
@@ -355,6 +356,14 @@ mod tests {
     fn codex_selects_codex() {
         // Codex wraps the local `codex` CLI; from_env is infallible (it does not
         // probe the binary until a turn runs), so selection always succeeds.
+        // Both the canonical spelling and the `codex-agent` alias resolve.
+        for v in ["codex", "Codex", "CODEX", "codex-agent", "  codex-agent  "] {
+            assert_eq!(
+                ProviderKind::resolve(Some(v)).unwrap(),
+                ProviderKind::Codex,
+                "{v:?} should select codex"
+            );
+        }
         let provider = select(Some("codex"), model()).expect("codex is infallible");
         assert_eq!(provider.id().0, "codex");
     }

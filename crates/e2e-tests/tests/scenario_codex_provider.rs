@@ -59,8 +59,12 @@ async fn turn_through_fused_substrate_with_codex_backend() {
     ));
     assert_eq!(provider.id().0, "codex");
 
-    // ---- The fused runtime, wired with the Codex backend.
+    // ---- The fused runtime, wired with the Codex backend. The explicit
+    // max_tokens keeps the turn at/above the provider's max-tokens floor
+    // (the builder default of 1024 is below it and would be refused — the
+    // floor refuses ceilings `codex exec` cannot enforce).
     let runtime = fixtures::fused_builder(provider)
+        .max_tokens(8_192)
         .build()
         .expect("the fused runtime wires with the Codex provider");
 
