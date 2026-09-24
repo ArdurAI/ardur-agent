@@ -85,7 +85,7 @@ version = "0.27"
 features = [ "axum",]
 
 [workspace.dependencies.opentelemetry]
-version = "0.32"
+version = "0.33"
 default-features = false
 features = [ "trace",]
 
