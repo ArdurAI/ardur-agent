@@ -636,10 +636,18 @@ impl AppState {
         // byte-identical boot.
         let plane = match &config.governance_plane_url {
             Some(url) => Some(
-                ardur_governance::PlaneClient::open(
+                ardur_governance::PlaneClient::open_with_custody(
                     url,
                     &std::env::var("ARDUR_GOVERNANCE_PLANE_TOKEN").unwrap_or_default(),
                     &std::env::var("ARDUR_GOVERNANCE_PLANE_ROOT_PEM").unwrap_or_default(),
+                    // The journal MAC is keyed by the receipt custody
+                    // PRIVATE key (review P1): a MAC derivable from public
+                    // configuration is tamper detection without
+                    // authentication.
+                    receipt_key
+                        .to_pkcs8_pem()
+                        .ok()
+                        .as_deref(),
                     &data_dir.join("governance").join("plane.jsonl"),
                 )
                 .map_err(|e| {

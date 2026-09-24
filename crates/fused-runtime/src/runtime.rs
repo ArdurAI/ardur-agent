@@ -1929,18 +1929,14 @@ impl FusedRuntime {
             PlaneOutcome::Unreachable { window } => {
                 // #502 B5: the owner-authorized fallback class. Native
                 // governance still fully applies; the marker makes the
-                // window auditable. A marker mint failure is an operational
-                // error — surfaced, never swallowed (and never a fallback
-                // suppressor: the step already proceeds).
-                if let Err(err) = self
-                    .mint_plane_unreachable_marker(&window, session_id, cap_token)
-                    .await
-                {
-                    tracing::error!(
-                        error = %err,
-                        "governance plane unreachable marker mint failed"
-                    );
-                }
+                // window auditable. A marker mint failure (e.g. an
+                // unwritable receipt log) PROPAGATES and stops dispatch
+                // (review P1): executing the tool without the
+                // governance.plane.unreachable.v1 evidence would make the
+                // outage unauditable — fallback is only as good as its
+                // proof.
+                self.mint_plane_unreachable_marker(&window, session_id, cap_token)
+                    .await?;
                 Ok(())
             }
             PlaneOutcome::Denied { reason } => Err(RuntimeError::PolicyDenied {
@@ -2024,17 +2020,18 @@ impl FusedRuntime {
             ardur_governance::tool_manifest_digest(&ids)
         };
         let grant = ardur_governance::GrantDescriptor::from_claims(claims, None);
-        let arguments_digest = Sha256Digest::of(
-            &serde_json::to_vec(&call.arguments).map_err(|e| RuntimeError::Internal(e.into()))?,
-        )
-        .to_hex();
+        // The REAL canonical arguments travel to the plane (#544 review:
+        // argument-dependent policy must see what the tool will run). The
+        // digest of these bytes is what the journal persists.
+        let canonical_arguments =
+            serde_json::to_vec(&call.arguments).map_err(|e| RuntimeError::Internal(e.into()))?;
         let now_unix = self.clock.now_ms().get() / 1000;
         let outcome = plane
             .evaluate(
                 &event_id,
                 &session_id.0.to_string(),
                 &call.name,
-                &arguments_digest,
+                canonical_arguments.as_slice(),
                 &manifest_digest,
                 &grant,
                 now_unix,
@@ -2059,35 +2056,46 @@ impl FusedRuntime {
         session_id: SessionId,
         cap_token: &CapTokenRef,
     ) -> Result<(), RuntimeError> {
+        // Reserve the window UNDER the lock before the async receipt commit
+        // (review P2): two concurrent turns in one window must not both
+        // pass the check and double-mint. Reservation rolls back on a mint
+        // failure so the next consult retries.
         {
-            let marker = self.plane_marker.lock();
+            let mut marker = self.plane_marker.lock();
             if let Some((marked, _)) = marker.as_ref() {
                 if marked == window {
                     return Ok(());
                 }
             }
+            *marker = Some((window.clone(), self.clock.now_ms().get()));
         }
         let payload = format!(
             "plane_outage_window:{}/{}",
             window.key, window.started_unix_secs
         );
-        self.commit_control_receipt(
-            session_id,
-            cap_token,
-            &self.tool.clone(),
-            PLANE_UNREACHABLE_VERB,
-            Sha256Digest::of(payload.as_bytes()),
-            ardur_receipt::CostTuple {
-                tokens_in: 0,
-                tokens_out: 0,
-                cents: 0,
-                wall_ms: 0,
-                attention_score: 0,
-            },
-            ControlVerifyCost::RuntimeDefault,
-        )
-        .await?;
-        *self.plane_marker.lock() = Some((window.clone(), self.clock.now_ms().get()));
+        if let Err(err) = self
+            .commit_control_receipt(
+                session_id,
+                cap_token,
+                &self.tool.clone(),
+                PLANE_UNREACHABLE_VERB,
+                Sha256Digest::of(payload.as_bytes()),
+                ardur_receipt::CostTuple {
+                    tokens_in: 0,
+                    tokens_out: 0,
+                    cents: 0,
+                    wall_ms: 0,
+                    attention_score: 0,
+                },
+                ControlVerifyCost::RuntimeDefault,
+            )
+            .await
+        {
+            // Roll the reservation back so the next consult retries the
+            // mint instead of treating this window as already marked.
+            *self.plane_marker.lock() = None;
+            return Err(err);
+        }
         Ok(())
     }
 
@@ -3164,9 +3172,23 @@ const SCAN_ERROR_SETTLEMENT: &str = "refusal:output_scan_error";
 /// refusal (the plane denied, revoked, kill-switched, answered corruptly or
 /// ambiguously), routed through the existing refusal settlement.
 const PLANE_AUTH_SETTLEMENT: &str = "refusal:plane_authorization";
+/// **#544 review P2.** Select the refusal settlement label from the actual
+/// consult error: typed plane classes are authorization refusals, but a
+/// LOCAL plane-journal failure (disk/i/o) is infrastructure — settling it
+/// as a policy denial would durably misclassify an operational outage.
+fn plane_consult_settlement(err: &RuntimeError) -> &'static str {
+    match err {
+        RuntimeError::PolicyDenied { .. } => PLANE_AUTH_SETTLEMENT,
+        RuntimeError::Internal(_) => PLANE_INFRA_SETTLEMENT,
+        _ => PLANE_INFRA_SETTLEMENT,
+    }
+}
 /// **#544.** The B5 plane-outage marker verb (pre-registered in the #537
 /// verb grammar; this is its first minter).
 const PLANE_UNREACHABLE_VERB: &str = "governance.plane.unreachable.v1";
+/// **#544 review P2.** A local plane-journal failure settles as
+/// infrastructure (the plane never answered — nothing was refused).
+const PLANE_INFRA_SETTLEMENT: &str = "refusal:plane_infrastructure";
 /// #544 plane refusal message prefixes (matched with `starts_with` on the
 /// policy-denial reason; each carries no plane-controlled free text).
 const PLANE_DENIED_PREFIX: &str = "governance plane denied the tool call";
@@ -3752,46 +3774,6 @@ impl FusedRuntime {
                             Err(settle_err) => Err(settle_err),
                         };
                     }
-                    // #544: every native gate passed — consult the plane
-                    // (when configured) before the approval gate and
-                    // dispatch. A typed non-permitting outcome is a refusal
-                    // through the existing settlement; the unavailable
-                    // class proceeds and mints the window marker.
-                    if let Err(err) = self
-                        .consult_plane_outcome(
-                            session_id,
-                            &iter_request_id,
-                            iteration,
-                            tool_ordinal,
-                            call,
-                            &claims,
-                            &req.cap_token,
-                        )
-                        .await
-                    {
-                        let (public, internal) = tool_auth_denial_classification(&err);
-                        self.governance_denied_event(
-                            session_id,
-                            &iter_request_id,
-                            iteration,
-                            tool_ordinal,
-                            call,
-                            &claims,
-                            tool.required_capabilities(),
-                            public,
-                            internal,
-                        );
-                        let known = response.cost.saturating_add(&tool_cost);
-                        let settlement = self
-                            .settle_refusal(session_id, reservation, known, PLANE_AUTH_SETTLEMENT)
-                            .await;
-                        self.fire_error(session_id, LifecyclePhase::Submit, &err)
-                            .await;
-                        return match settlement {
-                            Ok(()) => Err(err),
-                            Err(settle_err) => Err(settle_err),
-                        };
-                    }
                     // ARD-139: a call whose required capabilities include an
                     // approval-gated one needs human sign-off even though the
                     // cap-token/cedar checks above already allow it. gh#497:
@@ -3867,6 +3849,49 @@ impl FusedRuntime {
                             };
                         }
                     };
+                    // #544: every native gate — INCLUDING the approval
+                    // gate — has now passed; consult the plane (when
+                    // configured) immediately before dispatch. Placement
+                    // matters (review P2): consulting earlier would record
+                    // plane decisions (and mint outage markers) for calls
+                    // that are then refused pending human approval, and a
+                    // plane refusal would suppress the approval proposal.
+                    if let Err(err) = self
+                        .consult_plane_outcome(
+                            session_id,
+                            &iter_request_id,
+                            iteration,
+                            tool_ordinal,
+                            call,
+                            &claims,
+                            &req.cap_token,
+                        )
+                        .await
+                    {
+                        let (public, internal) = tool_auth_denial_classification(&err);
+                        self.governance_denied_event(
+                            session_id,
+                            &iter_request_id,
+                            iteration,
+                            tool_ordinal,
+                            call,
+                            &claims,
+                            tool.required_capabilities(),
+                            public,
+                            internal,
+                        );
+                        let known = response.cost.saturating_add(&tool_cost);
+                        let reason = plane_consult_settlement(&err);
+                        let settlement = self
+                            .settle_refusal(session_id, reservation, known, reason)
+                            .await;
+                        self.fire_error(session_id, LifecyclePhase::Submit, &err)
+                            .await;
+                        return match settlement {
+                            Ok(()) => Err(err),
+                            Err(settle_err) => Err(settle_err),
+                        };
+                    }
                     let ctx = self.tool_context(&req.cap_token, session_id);
                     // #543: every admission gate passed. Observe the
                     // dispatch intent first (it is fallible), then
@@ -4830,48 +4855,6 @@ impl FusedRuntime {
                             unreachable!()
                         }
 
-                        // #544: every native gate passed — consult the
-                        // plane (when configured) before the approval gate
-                        // and dispatch, exactly as the non-streaming loop.
-                        if let Err(err) = self
-                            .consult_plane_outcome(
-                                session_id,
-                                &iter_request_id,
-                                iteration,
-                                tool_ordinal,
-                                call,
-                                &claims,
-                                &req.cap_token,
-                            )
-                            .await
-                        {
-                            let (public, internal) = tool_auth_denial_classification(&err);
-                            self.governance_denied_event(
-                                session_id,
-                                &iter_request_id,
-                                iteration,
-                                tool_ordinal,
-                                call,
-                                &claims,
-                                tool.required_capabilities(),
-                                public,
-                                internal,
-                            );
-                            yield FusedEvent::StageEnd { stage: StageKind::ToolExec, ok: false };
-                            let known = response.cost.saturating_add(&tool_cost);
-                            let settlement = self
-                                .settle_refusal(
-                                    session_id,
-                                    reservation.take().expect("reservation held"),
-                                    known,
-                                    PLANE_AUTH_SETTLEMENT,
-                                )
-                                .await;
-                            self.fire_error(session_id, LifecyclePhase::Submit, &err).await;
-                            settlement?;
-                            Err(err)?;
-                            unreachable!()
-                        }
                         // ARD-139: a call whose required capabilities include
                         // an approval-gated one needs human sign-off even
                         // though the cap-token/cedar checks above already
@@ -4932,6 +4915,51 @@ impl FusedRuntime {
                                 unreachable!()
                             }
                         };
+                        // #544: every native gate — INCLUDING the approval
+                        // gate — has now passed; consult the plane (when
+                        // configured) immediately before dispatch, exactly
+                        // as the non-streaming loop (placement rationale
+                        // there applies here too).
+                        if let Err(err) = self
+                            .consult_plane_outcome(
+                                session_id,
+                                &iter_request_id,
+                                iteration,
+                                tool_ordinal,
+                                call,
+                                &claims,
+                                &req.cap_token,
+                            )
+                            .await
+                        {
+                            let (public, internal) = tool_auth_denial_classification(&err);
+                            self.governance_denied_event(
+                                session_id,
+                                &iter_request_id,
+                                iteration,
+                                tool_ordinal,
+                                call,
+                                &claims,
+                                tool.required_capabilities(),
+                                public,
+                                internal,
+                            );
+                            yield FusedEvent::StageEnd { stage: StageKind::ToolExec, ok: false };
+                            let known = response.cost.saturating_add(&tool_cost);
+                            let reason = plane_consult_settlement(&err);
+                            let settlement = self
+                                .settle_refusal(
+                                    session_id,
+                                    reservation.take().expect("reservation held"),
+                                    known,
+                                    reason,
+                                )
+                                .await;
+                            self.fire_error(session_id, LifecyclePhase::Submit, &err).await;
+                            settlement?;
+                            Err(err)?;
+                            unreachable!()
+                        }
                         let ctx = self.tool_context(&req.cap_token, session_id);
                         // #543: gates passed. Observe the dispatch intent
                         // first (it is fallible), then persist the durable

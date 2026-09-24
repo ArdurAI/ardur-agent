@@ -603,10 +603,13 @@ impl FusedEngine {
         // fail-closed open, default unset constructs nothing.
         let plane = (governance_plane_url())
             .map(|url| {
-                ardur_governance::PlaneClient::open(
+                ardur_governance::PlaneClient::open_with_custody(
                     &url,
                     &std::env::var("ARDUR_GOVERNANCE_PLANE_TOKEN").unwrap_or_default(),
                     &std::env::var("ARDUR_GOVERNANCE_PLANE_ROOT_PEM").unwrap_or_default(),
+                    // Custody-keyed journal MAC, same rationale as the
+                    // server boot.
+                    receipt_key.to_pkcs8_pem().ok().as_deref(),
                     &dirs.root.join("governance").join("plane.jsonl"),
                 )
                 .map_err(|e| {

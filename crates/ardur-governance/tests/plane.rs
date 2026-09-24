@@ -41,19 +41,22 @@ fn journal_records(path: &std::path::Path) -> Vec<PlaneEventRecord> {
             .get("record")
             .and_then(|r| r.as_str())
             .expect("envelope carries the record");
-        records.push(serde_json::from_str(record_line).expect("record parses"));
+        // The first line is the identity header (plane endpoint + root
+        // fingerprint), not an event record.
+        let value: serde_json::Value =
+            serde_json::from_str(record_line).expect("record/header json");
+        if value.get("plane").is_some() {
+            continue;
+        }
+        records.push(serde_json::from_value(value).expect("record parses"));
     }
     records
 }
 
+const ROOT_PEM: &str = "-----BEGIN PUBLIC KEY-----\nfake-root\n-----END PUBLIC KEY-----";
+
 fn open_client(server: &MockServer, journal: &std::path::Path) -> PlaneClient {
-    PlaneClient::open(
-        &server.uri(),
-        "test-token",
-        "-----BEGIN PUBLIC KEY-----\nfake-root\n-----END PUBLIC KEY-----",
-        journal,
-    )
-    .expect("client opens")
+    PlaneClient::open(&server.uri(), "test-token", ROOT_PEM, journal).expect("client opens")
 }
 
 async fn consult(client: &PlaneClient) -> PlaneOutcome {
@@ -62,7 +65,7 @@ async fn consult(client: &PlaneClient) -> PlaneOutcome {
             "ev:0123456789abcdef0123456789abcdef01234567",
             "session-1",
             "echo",
-            "a".repeat(64).as_str(),
+            br#"{"msg":"hi"}"#.as_slice(),
             "b".repeat(64).as_str(),
             &grant(),
             1_750_000_000,
@@ -127,8 +130,8 @@ async fn authenticated_permit_and_deny_are_values_not_outages() {
             "ev:1111111111111111111111111111111111111111",
             "session-1",
             "echo",
-            &"c".repeat(64),
-            &"d".repeat(64),
+            br#"{"msg":"hi"}"#.as_slice(),
+            "d".repeat(64).as_str(),
             &grant(),
             1_750_000_000,
         )
@@ -201,9 +204,17 @@ async fn an_unknown_503_is_corrupt_evidence_never_generic_unavailability() {
 #[tokio::test]
 async fn enumerated_transport_shapes_are_the_only_fallback_class() {
     // 404 (no endpoint), 502/504 (gateway no-decision), and connection
-    // refused all classify Unreachable and are fallback-eligible.
+    // refused all classify Unreachable and are fallback-eligible. The
+    // refused case targets the discard port (nothing listens there — a
+    // dropped MockServer's port can be reused by a parallel test's server).
     let journal = tempfile::tempdir().expect("tempdir");
-    let client = open_client(&MockServer::start().await, &journal.path().join("p.jsonl"));
+    let client = PlaneClient::open(
+        "http://127.0.0.1:9",
+        "test-token",
+        ROOT_PEM,
+        &journal.path().join("p.jsonl"),
+    )
+    .expect("client opens");
     let refused = consult(&client).await;
     assert!(
         matches!(refused, PlaneOutcome::Unreachable { .. }),
@@ -255,14 +266,17 @@ async fn a_timeout_is_ambiguous_delivery_and_never_falls_back() {
 #[tokio::test]
 async fn corrupt_bodies_are_corrupt_evidence_never_compliance() {
     let cases: Vec<(serde_json::Value, &str)> = vec![
-        (json!({"decision": "MAYBE"}), "unknown decision word"),
+        (
+            json!({"decision": "MAYBE", "session_id": "session-1"}),
+            "unknown decision word",
+        ),
         (json!({"session_id": "s"}), "missing decision"),
         (
-            json!({"decision": "PERMIT", "reason": "why"}),
+            json!({"decision": "PERMIT", "session_id": "session-1", "reason": "why"}),
             "reason riding a PERMIT",
         ),
         (
-            json!({"decision": "DENY", "reason": 7}),
+            json!({"decision": "DENY", "session_id": "session-1", "reason": 7}),
             "non-string reason",
         ),
     ];
@@ -368,9 +382,22 @@ async fn replay_of_a_decided_event_is_idempotent_and_conflicts_fail_closed() {
     {
         let text = std::fs::read_to_string(&journal3).expect("journal readable");
         let lines: Vec<&str> = text.lines().collect();
-        assert!(lines.len() >= 3, "pending+deliver+terminal were written");
-        let truncated = format!("{}\n", lines[..2].join("\n"));
-        std::fs::write(&journal3, truncated).expect("write");
+        // header + pending + deliver (the terminal line is the crash gap)
+        assert!(
+            lines.len() >= 4,
+            "header+pending+deliver+terminal were written"
+        );
+        let truncated = format!("{}\n", lines[..3].join("\n"));
+        std::fs::write(&journal3, &truncated).expect("write");
+        // Model the checkpoint a REAL crash-before-terminal leaves: the
+        // deliver append (and its checkpoint) landed, the terminal never
+        // did. (Deleting the terminal of a checkpointed journal is exactly
+        // the truncation the checkpoint exists to catch — guarded below.)
+        std::fs::write(
+            journal3.with_extension("jsonl.checkpoint"),
+            truncated.len().to_string(),
+        )
+        .expect("checkpoint");
     }
     let client = open_client(&server, &journal3);
     let replayed = client.replay_backlog().await.expect("replay completes");
@@ -427,15 +454,7 @@ async fn a_tampered_journal_refuses_to_load() {
     if lines.len() >= 2 {
         let gapped = format!("{}\n", lines[1..].join("\n"));
         std::fs::write(&journal, gapped).expect("write");
-        assert!(
-            PlaneClient::open(
-                &server.uri(),
-                "test-token",
-                "-----BEGIN PUBLIC KEY-----\nfake-root\n-----END PUBLIC KEY-----",
-                &journal,
-            )
-            .is_err()
-        );
+        assert!(PlaneClient::open(&server.uri(), "test-token", ROOT_PEM, &journal,).is_err());
     }
 }
 
@@ -460,7 +479,13 @@ async fn the_journal_records_the_exact_md_dg_and_manifest_snapshots() {
     );
     assert_eq!(pending.tool, "echo");
     assert_eq!(pending.manifest_digest, "b".repeat(64));
-    assert_eq!(pending.arguments_digest, "a".repeat(64));
+    // The digest is derived from the canonical argument bytes sent to the
+    // plane (#544 review: real arguments travel, digest stays journaled).
+    assert_eq!(
+        pending.arguments_digest,
+        // sha256 of {"msg":"hi"}
+        "d95808527f6e74a7a4cc2d3dfc056424bea5dce3940f31f158d06ad5098fbdd8"
+    );
     assert_eq!(
         pending.grant.grant_id,
         "7c9e6679-7425-40de-944b-e07fc1f90ae7"
@@ -561,5 +586,137 @@ fn status_wire_spellings() {
     assert_eq!(
         serde_json::to_string(&PlaneEventStatus::Deliver).expect("serde"),
         "\"deliver\""
+    );
+}
+
+#[tokio::test]
+async fn plaintext_http_is_refused_for_non_loopback_planes() {
+    let journal = tempfile::tempdir().expect("tempdir");
+    let err = PlaneClient::open(
+        "http://plane.example.com:8443",
+        "t",
+        ROOT_PEM,
+        &journal.path().join("p.jsonl"),
+    )
+    .err()
+    .expect("non-loopback http must be refused");
+    assert!(err.to_string().contains("plaintext http"), "got: {err}");
+    // Loopback http stays the explicit development exception.
+    assert!(
+        PlaneClient::open(
+            "http://127.0.0.1:9",
+            "t",
+            ROOT_PEM,
+            &journal.path().join("loop.jsonl"),
+        )
+        .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn a_400_is_corrupt_evidence_never_fallback() {
+    // The plane is UP and rejected the request as malformed — schema drift
+    // must fail closed, not silently bypass the plane (review P1).
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/evaluate"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+            "error": "invalid_request",
+        })))
+        .mount(&server)
+        .await;
+    let journal = tempfile::tempdir().expect("tempdir");
+    let client = open_client(&server, &journal.path().join("p.jsonl"));
+    let outcome = consult(&client).await;
+    assert!(
+        matches!(outcome, PlaneOutcome::CorruptEvidence { .. }),
+        "400 must be corrupt evidence, got {outcome:?}"
+    );
+    assert!(!outcome.fallback_eligible());
+}
+
+#[tokio::test]
+async fn a_permit_for_another_session_is_corrupt_evidence() {
+    // A stale/cached/cross-session PERMIT authorizes nothing here.
+    let server = MockServer::start().await;
+    permit_or_deny_body(json!({
+        "decision": "PERMIT",
+        "session_id": "session-OTHER",
+    }))
+    .mount(&server)
+    .await;
+    let journal = tempfile::tempdir().expect("tempdir");
+    let client = open_client(&server, &journal.path().join("p.jsonl"));
+    let outcome = consult(&client).await;
+    assert!(
+        matches!(outcome, PlaneOutcome::CorruptEvidence { .. }),
+        "cross-session PERMIT must be corrupt evidence, got {outcome:?}"
+    );
+    assert!(!outcome.fallback_eligible());
+}
+
+#[tokio::test]
+async fn a_journal_from_another_plane_endpoint_fails_closed() {
+    let server = MockServer::start().await;
+    permit_mock().mount(&server).await;
+    let journal_dir = tempfile::tempdir().expect("tempdir");
+    let journal = journal_dir.path().join("p.jsonl");
+    let client = open_client(&server, &journal);
+    let _ = consult(&client).await;
+
+    // Same journal, DIFFERENT plane endpoint: the identity header must
+    // refuse the mismatch instead of letting the new plane close the old
+    // plane's backlog.
+    let other = MockServer::start().await;
+    permit_mock().mount(&other).await;
+    let err = PlaneClient::open(&other.uri(), "test-token", ROOT_PEM, &journal)
+        .err()
+        .expect("journal belongs to another plane");
+    assert!(err.to_string().contains("belongs to plane"), "got: {err}");
+}
+
+#[tokio::test]
+async fn truncating_complete_tail_records_fails_closed() {
+    // The checkpoint must catch a deleted Terminal line even though the
+    // remaining prefix is a valid MAC chain.
+    let server = MockServer::start().await;
+    permit_mock().mount(&server).await;
+    let journal_dir = tempfile::tempdir().expect("tempdir");
+    let journal = journal_dir.path().join("p.jsonl");
+    let client = open_client(&server, &journal);
+    let _ = consult(&client).await;
+
+    let text = std::fs::read_to_string(&journal).expect("journal readable");
+    let lines: Vec<&str> = text.lines().collect();
+    let truncated = format!("{}\n", lines[..lines.len() - 1].join("\n"));
+    std::fs::write(&journal, &truncated).expect("write");
+
+    let err = PlaneClient::open(&server.uri(), "test-token", ROOT_PEM, &journal)
+        .err()
+        .expect("truncation of complete lines must fail closed");
+    assert!(err.to_string().contains("journal shrank"), "got: {err}");
+}
+
+#[tokio::test]
+async fn an_interrupted_200_body_is_ambiguous_never_fallback() {
+    // The dangerous case from the review: the plane decided, then the body
+    // stream broke. The decision is unknown — ambiguous, not unavailable.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/evaluate"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(b"partial-decision".to_vec(), "application/json"),
+        )
+        .mount(&server)
+        .await;
+    let journal = tempfile::tempdir().expect("tempdir");
+    let client = open_client(&server, &journal.path().join("p.jsonl"));
+    let outcome = consult(&client).await;
+    // A truncated non-JSON body classifies as corrupt/ambiguous by shape;
+    // what must NEVER happen is fallback.
+    assert!(
+        !outcome.fallback_eligible(),
+        "interrupted body must never be fallback-eligible, got {outcome:?}"
     );
 }

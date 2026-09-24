@@ -728,12 +728,14 @@ fn canonical_public_for_denial_code(internal: &str) -> Option<PublicDenialReason
         | "pop_invalid"
         | "tool_capability_denied"
         | "tool_invalid_arguments"
-        // #544: the plane's authenticated decisions and the operator kill
-        // switch are policy denials (the plane was UP and refused).
-        | "plane_denied"
-        | "plane_revoked"
-        | "plane_kill_switch" => PublicDenialReason::PolicyDenied,
-        "revoked" => PublicDenialReason::Revoked,
+        // #544: the plane's authenticated decision and the operator kill
+        // switch are policy denials (the plane was UP and refused). A plane
+        // REVOCATION is a revocation — the runtime records it as
+        // (Revoked, "plane_revoked"), and this table must agree with the
+        // producer or the evidence journal rejects the pair on replay
+        // (review P1).
+        | "plane_denied" | "plane_kill_switch" => PublicDenialReason::PolicyDenied,
+        "revoked" | "plane_revoked" => PublicDenialReason::Revoked,
         "signature_invalid" | "malformed_token" => PublicDenialReason::ChainInvalid,
         "budget_exhausted" | "tool_cost_ceiling_exceeded" => PublicDenialReason::BudgetExhausted,
         "policy_indeterminate"

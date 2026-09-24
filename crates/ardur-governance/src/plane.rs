@@ -281,6 +281,20 @@ struct PlaneJournalLine {
     seq: u64,
 }
 
+/// The journal's first line: binds every subsequent record to one plane
+/// identity (normalized base URL) and root fingerprint, MAC-chained like
+/// any other line so the binding itself is tamper-evident (#544 review:
+/// without it, repointing `ARDUR_GOVERNANCE_PLANE_URL` while keeping the
+/// data dir would let a different plane's decisions close another
+/// plane's backlog).
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlaneJournalHeader {
+    v: u32,
+    plane: String,
+    root_fp: String,
+}
+
 /// Failures of the plane client/journal itself (plane verdicts and outages
 /// are VALUES, not errors).
 #[derive(Debug, thiserror::Error)]
@@ -318,6 +332,8 @@ pub struct PlaneClient {
     window_key: String,
     journal_path: PathBuf,
     mac_key: [u8; 32],
+    plane_identity: String,
+    root_fp: String,
     journal: Mutex<JournalState>,
 }
 
@@ -339,6 +355,20 @@ impl PlaneClient {
         root_public_key_pem: &str,
         journal_path: &Path,
     ) -> Result<Self, PlaneClientError> {
+        Self::open_with_custody(base_url, api_token, root_public_key_pem, None, journal_path)
+    }
+
+    /// [`Self::open`], with the ER custody signing key's private PEM as the
+    /// journal MAC key source (#544 review: deriving the MAC from the PUBLIC
+    /// root PEM gave anyone the key — tamper detection without
+    /// authentication). The root PEM stays the identity/window input.
+    pub fn open_with_custody(
+        base_url: &str,
+        api_token: &str,
+        root_public_key_pem: &str,
+        custody_private_pem: Option<&str>,
+        journal_path: &Path,
+    ) -> Result<Self, PlaneClientError> {
         let parsed = url::Url::parse(base_url)
             .map_err(|e| PlaneClientError::InvalidBaseUrl(format!("{e} (url: {base_url})")))?;
         if !matches!(parsed.scheme(), "http" | "https") {
@@ -347,14 +377,29 @@ impl PlaneClient {
                 parsed.scheme()
             )));
         }
-        let mac_key = plane_mac_key(root_public_key_pem);
+        // The consult transmits a bearer token and consumes a
+        // security-critical PERMIT: plaintext HTTP is refused for any
+        // non-loopback host (an on-path attacker could steal the token or
+        // replace a denial with a permit). Loopback is the explicit
+        // development exception (the wiremock tests live there).
+        let host = parsed.host_str().unwrap_or_default();
+        let is_loopback = matches!(host, "127.0.0.1" | "::1" | "localhost");
+        if parsed.scheme() == "http" && !is_loopback {
+            return Err(PlaneClientError::InvalidBaseUrl(format!(
+                "refusing plaintext http for non-loopback plane host {host:?}; \
+                 use https or an explicit loopback endpoint"
+            )));
+        }
+        let plane_identity = parsed.to_string();
+        let mac_key = plane_mac_key(root_public_key_pem, custody_private_pem);
+        let root_fp = crate::hash::sha256_hex(root_public_key_pem.as_bytes());
         let window_key = window_key(&sha256(root_public_key_pem.as_bytes()), base_url);
         let journal_path = journal_path.to_path_buf();
         if let Some(parent) = journal_path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| PlaneClientError::Io(format!("mkdir: {e}")))?;
         }
-        let state = load_journal(&journal_path, &mac_key)?;
+        let state = load_journal(&journal_path, &mac_key, &plane_identity, &root_fp)?;
         Ok(Self {
             // rustls-only workspace client (no native-tls); redirects are
             // refused so a decision can never be sourced from a different
@@ -368,6 +413,8 @@ impl PlaneClient {
             window_key,
             journal_path,
             mac_key,
+            plane_identity,
+            root_fp,
             journal: Mutex::new(state),
         })
     }
@@ -412,17 +459,18 @@ impl PlaneClient {
         event_id: &str,
         session_id: &str,
         tool: &str,
-        arguments_digest: &str,
+        canonical_arguments: &[u8],
         manifest_digest: &str,
         grant: &crate::GrantDescriptor,
         now_unix: u64,
     ) -> Result<PlaneOutcome, PlaneClientError> {
+        let arguments_digest = &crate::hash::sha256_hex(canonical_arguments);
         let record = PlaneEventRecord {
             v: PLANE_RECORD_VERSION,
             event_id: event_id.to_string(),
             session_id: session_id.to_string(),
             tool: tool.to_string(),
-            arguments_digest: arguments_digest.to_string(),
+            arguments_digest: arguments_digest.clone(),
             manifest_digest: manifest_digest.to_string(),
             grant: PlaneGrantSnapshot::from(grant),
             status: PlaneEventStatus::Pending,
@@ -431,18 +479,18 @@ impl PlaneClient {
         };
         // Durable intent BEFORE the request: a crash after send but before
         // the outcome journal leaves a Deliver record the replay path can
-        // explain, never a silent gap.
+        // explain, never a silent gap. The Deliver record lands BEFORE the
+        // request leaves (review: awaiting the send first left a crash
+        // window where bytes reached the plane with only a Pending record —
+        // replay would then misrecord the resend as a first delivery).
         self.append(record.clone()).await?;
-        // Dispatch, then durably mark the delivery BEFORE classifying: the
-        // window between the send resolving and this append is the one a
-        // crash strands as response-unknown.
-        let outcome = self
-            .send_evaluate(event_id, session_id, tool, arguments_digest, now_unix)
-            .await;
         let mut delivered = record.clone();
         delivered.status = PlaneEventStatus::Deliver;
         delivered.outcome = None;
         self.append(delivered).await?;
+        let outcome = self
+            .send_evaluate(event_id, session_id, tool, canonical_arguments, now_unix)
+            .await;
         let outcome = match outcome {
             Ok(outcome) => outcome,
             Err(err) => {
@@ -469,13 +517,20 @@ impl PlaneClient {
         event_id: &str,
         session_id: &str,
         tool: &str,
-        arguments_digest: &str,
+        canonical_arguments: &[u8],
         now_unix: u64,
     ) -> Result<PlaneOutcome, PlaneClientError> {
+        // The REAL canonical arguments travel to the plane (review: a
+        // digest-only envelope let argument-dependent policy — shell
+        // commands, hosts, paths — evaluate a different payload than the
+        // tool will run). The stable `risk_request_id` provides
+        // idempotency; the digest stays in the durable journal.
+        let arguments_value: Value =
+            serde_json::from_slice(canonical_arguments).unwrap_or(Value::Null);
         let body = serde_json::json!({
             "session_id": session_id,
             "tool_name": tool,
-            "arguments": {"arguments_digest": arguments_digest},
+            "arguments": arguments_value,
             "risk_request_id": event_id,
         });
         let request = self
@@ -499,19 +554,31 @@ impl PlaneClient {
             Err(_) => return Ok(self.unreachable(now_unix)),
         };
         let status = response.status().as_u16();
-        // Read the body text ONCE, bounded by reqwest's default limits: the
-        // plane is trusted for governance, not for buffer discipline.
-        let text = match response.text().await {
-            Ok(text) => text,
-            Err(_) if (500..600).contains(&status) => {
-                // Body unreadable on a server-failure status: the server may
-                // have acted — ambiguous, never unavailable.
+        // Read the body ONCE, BOUNDED: a malformed or hostile plane must not
+        // be able to exhaust memory with an unbounded body. Over-limit or
+        // interrupted bodies are corrupt/ambiguous — never fallback.
+        let text = match read_body_bounded(response, PLANE_MAX_BODY_BYTES).await {
+            Ok(Some(text)) => text,
+            Ok(None) => {
+                // Over the byte cap: the plane misbehaved on a body we
+                // cannot trust — corrupt evidence.
+                return Ok(PlaneOutcome::CorruptEvidence {
+                    detail: format!(
+                        "/evaluate body exceeded the {} byte cap",
+                        PLANE_MAX_BODY_BYTES
+                    ),
+                });
+            }
+            Err(_) => {
+                // ANY interrupted body stream — the decision is unknown
+                // whatever the status said (a 200 interrupted after the
+                // plane recorded a DENY is the dangerous case). Ambiguous,
+                // never unavailable (review P1).
                 return Ok(PlaneOutcome::AmbiguousDelivery);
             }
-            Err(_) => return Ok(self.unreachable(now_unix)),
         };
         match status {
-            200 => Ok(classify_evaluate_body(&text)),
+            200 => Ok(classify_evaluate_body(&text, session_id)),
             401 | 403 => {
                 // Deny-shaped: the plane is up and refused the exchange.
                 // 403 + the pinned revoked body is Revoked; anything else in
@@ -541,15 +608,22 @@ impl PlaneClient {
                     })
                 }
             }
-            400 | 404 | 405 | 408 | 501 | 502 | 504 => {
+            400 => {
+                // The plane is UP and rejected this client's request as
+                // malformed: request-schema drift or a serialization
+                // incompatibility. Fail-closed as corrupt evidence —
+                // grouping it with transport failures would silently
+                // bypass the plane on every consult (review P1).
+                Ok(PlaneOutcome::CorruptEvidence {
+                    detail: "400 malformed request (client/plane schema mismatch)".to_string(),
+                })
+            }
+            404 | 405 | 408 | 501 | 502 | 504 => {
                 // 404/405/501: the endpoint is not there — enumerated
                 // transport refusal. 502/504: gateway/upstream shapes the
                 // HTTP contract defines as no-decision by the origin. 408:
                 // the server closed the request while the client was still
-                // sending — no evaluation occurred. 400: the request is
-                // malformed against this plane — a configuration-level
-                // mismatch; the consult cannot happen, and nothing was
-                // refused, so it is unavailable rather than a denial.
+                // sending — no evaluation occurred.
                 Ok(self.unreachable(now_unix))
             }
             _ if (500..600).contains(&status) => {
@@ -586,13 +660,23 @@ impl PlaneClient {
         match (&record.status, &record.outcome) {
             (PlaneEventStatus::Pending, _) => state.pending.push(record.clone()),
             (PlaneEventStatus::Deliver, _) => state.deliver.push(record.clone()),
-            (PlaneEventStatus::Terminal, Some(outcome @ PlaneOutcome::AmbiguousDelivery)) => {
-                let _ = outcome;
+            (PlaneEventStatus::Terminal, Some(PlaneOutcome::AmbiguousDelivery))
+            | (PlaneEventStatus::Terminal, Some(PlaneOutcome::Unreachable { .. })) => {
+                // Non-definitive outcomes never close the event: the
+                // reconnect replay must still be able to attest it once
+                // the plane actually returns (#544 review).
                 state.deliver.push(record.clone());
             }
             (PlaneEventStatus::Terminal, _) | (PlaneEventStatus::DupExplain, _) => {}
         }
-        append_locked(&self.journal_path, &mut state, &self.mac_key, &record)
+        append_locked(
+            &self.journal_path,
+            &mut state,
+            &self.mac_key,
+            &self.plane_identity,
+            &self.root_fp,
+            &record,
+        )
     }
 
     /// Reconnect replay, gh#544 requirement 3: drain the backlog exactly
@@ -631,28 +715,36 @@ impl PlaneClient {
                 .collect()
         };
         let mut replayed = 0;
-        for record in backlog {
+        for mut record in backlog {
             replayed += 1;
             let now = now_secs();
+            // Replay presents the SAME `risk_request_id`: the plane's
+            // idempotency key returns its recorded decision instead of
+            // re-evaluating. The arguments envelope carries the journaled
+            // digest (the canonical bytes are not retained durably — the
+            // plane already holds the original request under this key).
+            let replay_arguments = serde_json::to_vec(&serde_json::json!({
+                "arguments_digest": record.arguments_digest,
+            }))
+            .map_err(|e| PlaneClientError::Io(format!("serialize: {e}")))?;
             let outcome = self
                 .send_evaluate(
                     &record.event_id,
                     &record.session_id,
                     &record.tool,
-                    &record.arguments_digest,
+                    &replay_arguments,
                     now,
                 )
                 .await?;
-            let mut terminal = record;
-            let previous = terminal.outcome.clone();
+            let previous = record.outcome.clone();
             let was_dispatched =
-                matches!(terminal.status, PlaneEventStatus::Deliver) || previous.is_some();
+                matches!(record.status, PlaneEventStatus::Deliver) || previous.is_some();
             let (status, outcome) =
                 replay_classification(previous.as_ref(), was_dispatched, &outcome);
-            terminal.status = status;
-            terminal.outcome = Some(outcome);
-            terminal.recorded_at_ms = now.saturating_mul(1000);
-            self.append(terminal).await?;
+            record.status = status;
+            record.outcome = Some(outcome);
+            record.recorded_at_ms = now.saturating_mul(1000);
+            self.append(record).await?;
         }
         Ok(replayed)
     }
@@ -671,6 +763,36 @@ fn error_code(text: &str) -> Option<String> {
 
 /// The current Unix second from the std clock (replay timestamps only — the
 /// live consult path carries the caller's clock).
+/// The /evaluate response body cap: a governance plane is trusted for
+/// decisions, not for buffer discipline (#544 review). Over-cap bodies are
+/// corrupt evidence.
+const PLANE_MAX_BODY_BYTES: usize = 1 << 20;
+
+/// Read a response body up to `cap` bytes. `Ok(None)` = over cap;
+/// `Err` = the stream failed (interrupted body — decision unknown).
+async fn read_body_bounded(
+    response: reqwest::Response,
+    cap: usize,
+) -> Result<Option<String>, reqwest::Error> {
+    let mut body: Vec<u8> = Vec::with_capacity(1024);
+    use futures_util::StreamExt as _;
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        if body.len() + chunk.len() > cap {
+            return Ok(None);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    match String::from_utf8(body) {
+        Ok(text) => Ok(Some(text)),
+        // Non-utf-8 body: not a shape the pinned revision produces. The
+        // empty string cannot match any pinned shape, so classification
+        // lands on corrupt evidence — the fail-closed outcome.
+        Err(_) => Ok(Some(String::new())),
+    }
+}
+
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -680,7 +802,7 @@ fn now_secs() -> u64 {
 
 /// Classify a 200 body against the pinned /evaluate contract. Corrupt
 /// evidence — never a guess, never fallback.
-fn classify_evaluate_body(text: &str) -> PlaneOutcome {
+fn classify_evaluate_body(text: &str, expected_session: &str) -> PlaneOutcome {
     let value: Value = match serde_json::from_str(text) {
         Ok(value) => value,
         Err(_) => {
@@ -694,6 +816,18 @@ fn classify_evaluate_body(text: &str) -> PlaneOutcome {
             detail: "200 body lacks a string `decision`".to_string(),
         };
     };
+    // #544 review: the pinned 200 contract carries `session_id`; a PERMIT
+    // for a missing or different session (stale/cached/cross-session
+    // response) authorizes nothing here — corrupt evidence.
+    let session = value.get("session_id").and_then(Value::as_str);
+    if session != Some(expected_session) {
+        return PlaneOutcome::CorruptEvidence {
+            detail: format!(
+                "session_id {:?} does not match the consulted session",
+                session
+            ),
+        };
+    }
     let reason = value.get("reason");
     match decision {
         DECISION_PERMIT => {
@@ -740,10 +874,26 @@ fn classify_evaluate_body(text: &str) -> PlaneOutcome {
 /// a domain-separated label — the same construction as the #543
 /// `evidence_record_mac_key`, under the plane label so the two journals
 /// cannot verify each other's lines.
-fn plane_mac_key(pkcs8_pem: &str) -> [u8; 32] {
+fn plane_mac_key(root_public_pem: &str, custody_private_pem: Option<&str>) -> [u8; 32] {
+    // #544 review: the journal MAC must be keyed by material an attacker
+    // who can rewrite plane.jsonl does NOT hold. The public root PEM alone
+    // fails that (it is configuration); the ER custody PRIVATE key is the
+    // secret already guarding the sibling evidence journals. When no
+    // custody key is available (embedded/test contexts), the derivation is
+    // domain-separated over the public root AND flagged by absence — but
+    // production wiring (server/CLI) always passes the custody PEM.
     let mut h = Sha256::new();
     h.update(PLANE_JOURNAL_DOMAIN);
-    h.update(pkcs8_pem.as_bytes());
+    match custody_private_pem {
+        Some(secret) => {
+            h.update(b"custody\0");
+            h.update(secret.as_bytes());
+        }
+        None => {
+            h.update(b"public-root-only\0");
+            h.update(root_public_pem.as_bytes());
+        }
+    }
     h.finalize().into()
 }
 
@@ -763,12 +913,18 @@ fn hmac_plane_line(key: &[u8; 32], seq: u64, prev_tail_mac: &str, line: &str) ->
 
 /// Load (and check) the journal. Missing file → empty state; anything else
 /// is verified line by line and fails closed on the first inconsistency.
-fn load_journal(path: &Path, key: &[u8; 32]) -> Result<JournalState, PlaneClientError> {
+fn load_journal(
+    path: &Path,
+    key: &[u8; 32],
+    plane_identity: &str,
+    root_fp: &str,
+) -> Result<JournalState, PlaneClientError> {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             // Establish the journal durably (file + parent dir fsync) so a
-            // crash right after open cannot lose the empty-file fact.
+            // crash right after open cannot lose the empty-file fact. The
+            // identity header lands with the first appended record.
             let file = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
@@ -796,7 +952,10 @@ fn load_journal(path: &Path, key: &[u8; 32]) -> Result<JournalState, PlaneClient
     let text = std::str::from_utf8(&bytes)
         .map_err(|_| PlaneClientError::CorruptJournal("journal is not utf-8".into()))?;
     let mut state = JournalState::default();
+    let mut header_seen = false;
+    let mut line_count: u64 = 0;
     for line in text.lines().filter(|l| !l.trim().is_empty()) {
+        line_count += 1;
         let envelope: PlaneJournalLine = serde_json::from_str(line)
             .map_err(|e| PlaneClientError::CorruptJournal(format!("envelope parse: {e}")))?;
         if envelope.seq != state.next_seq {
@@ -810,6 +969,31 @@ fn load_journal(path: &Path, key: &[u8; 32]) -> Result<JournalState, PlaneClient
             return Err(PlaneClientError::CorruptJournal(
                 "MAC mismatch (record tampered or a line deleted); refusing to replay".to_string(),
             ));
+        }
+        if line_count == 1 {
+            // The first line is the identity header: the journal must
+            // belong to THIS plane endpoint and root, or the backlog
+            // belongs to a different configuration — fail closed rather
+            // than letting another plane's decisions close it.
+            let header: PlaneJournalHeader = serde_json::from_str(&envelope.record)
+                .map_err(|e| PlaneClientError::CorruptJournal(format!("header parse: {e}")))?;
+            if header.v != PLANE_RECORD_VERSION {
+                return Err(PlaneClientError::CorruptJournal(format!(
+                    "journal header version {} is not supported by this build (v{})",
+                    header.v, PLANE_RECORD_VERSION
+                )));
+            }
+            if header.plane != plane_identity || header.root_fp != root_fp {
+                return Err(PlaneClientError::CorruptJournal(format!(
+                    "journal belongs to plane {} (root {}), not {} (root {}); \
+                     refusing to replay another configuration's backlog",
+                    header.plane, header.root_fp, plane_identity, root_fp
+                )));
+            }
+            header_seen = true;
+            state.tail_mac = expected;
+            state.next_seq += 1;
+            continue;
         }
         let record: PlaneEventRecord = serde_json::from_str(&envelope.record)
             .map_err(|e| PlaneClientError::CorruptJournal(format!("record parse: {e}")))?;
@@ -828,12 +1012,71 @@ fn load_journal(path: &Path, key: &[u8; 32]) -> Result<JournalState, PlaneClient
             (PlaneEventStatus::Terminal, Some(PlaneOutcome::AmbiguousDelivery)) => {
                 state.deliver.push(record);
             }
+            // #544 review: a Terminal record whose outcome is STILL
+            // non-definitive (e.g. Unreachable after a replay attempt
+            // during an ongoing outage) must NOT close the event — it
+            // stays in the deliver backlog so the advertised reconnect
+            // replay can still attest it once the plane returns.
+            (PlaneEventStatus::Terminal, Some(PlaneOutcome::Unreachable { .. })) => {
+                state.deliver.push(record);
+            }
             (PlaneEventStatus::Terminal, _) | (PlaneEventStatus::DupExplain, _) => {}
         }
         state.tail_mac = expected;
         state.next_seq += 1;
     }
+    if line_count > 0 && !header_seen {
+        return Err(PlaneClientError::CorruptJournal(
+            "journal has records but no identity header; refusing to replay".to_string(),
+        ));
+    }
+    // #544 review: a valid MAC-chained PREFIX is indistinguishable from a
+    // fully-written journal whose tail records were deleted. Durably
+    // checkpoint the observed byte length: on reopen, a shorter-but-valid
+    // file (truncation of complete lines) fails closed instead of
+    // resurrecting already-closed events for replay.
+    let observed_len = bytes.len() as u64;
+    let checkpoint_path = journal_checkpoint_path(path);
+    let recorded_len: Option<u64> = std::fs::read_to_string(&checkpoint_path)
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok());
+    match recorded_len {
+        Some(prev) if observed_len < prev => {
+            return Err(PlaneClientError::CorruptJournal(format!(
+                "journal shrank ({} bytes now, {} durably checkpointed); \
+                 complete tail records were deleted",
+                observed_len, prev
+            )));
+        }
+        _ => {
+            write_checkpoint(&checkpoint_path, observed_len)?;
+        }
+    }
     Ok(state)
+}
+
+/// The sidecar checkpoint path for a journal (`plane.jsonl.checkpoint`).
+fn journal_checkpoint_path(path: &Path) -> std::path::PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".checkpoint");
+    path.with_file_name(name)
+}
+
+/// Durably record the journal length we verified (best-effort atomic
+/// replace; a failure to checkpoint is not corruption — the next
+/// successful open retries).
+fn write_checkpoint(path: &std::path::PathBuf, len: u64) -> Result<(), PlaneClientError> {
+    let tmp = path.with_extension("checkpoint.tmp");
+    std::fs::write(&tmp, len.to_string())
+        .and_then(|()| {
+            std::fs::rename(&tmp, path).or_else(|_| {
+                // rename across a same-dir tmp is atomic on our platforms;
+                // a plain rewrite is the fallback.
+                std::fs::write(path, len.to_string())
+            })
+        })
+        .map_err(|e| PlaneClientError::Io(format!("checkpoint: {e}")))?;
+    Ok(())
 }
 
 /// Append one record to the journal file (append-only, fsync'd) and advance
@@ -842,15 +1085,41 @@ fn append_locked(
     path: &Path,
     state: &mut JournalState,
     key: &[u8; 32],
+    plane_identity: &str,
+    root_fp: &str,
     record: &PlaneEventRecord,
 ) -> Result<(), PlaneClientError> {
+    // First append writes the identity header line ahead of the record, so
+    // every journal is self-describing (plane endpoint + root fingerprint,
+    // MAC-chained like any other line).
+    let mut out = String::new();
+    if state.next_seq == 0 {
+        let header = PlaneJournalHeader {
+            v: PLANE_RECORD_VERSION,
+            plane: plane_identity.to_string(),
+            root_fp: root_fp.to_string(),
+        };
+        let hline = serde_json::to_string(&header)
+            .map_err(|e| PlaneClientError::Io(format!("serialize header: {e}")))?;
+        let hmac = hmac_plane_line(key, 0, &state.tail_mac, &hline);
+        let henv = serde_json::json!({"mac": hmac, "record": hline, "seq": 0});
+        out.push_str(
+            &serde_json::to_string(&henv)
+                .map_err(|e| PlaneClientError::Io(format!("envelope header: {e}")))?,
+        );
+        out.push('\n');
+        state.next_seq = 1;
+        state.tail_mac = hmac;
+    }
     let line = serde_json::to_string(record)
         .map_err(|e| PlaneClientError::Io(format!("serialize: {e}")))?;
     let seq = state.next_seq;
     let mac = hmac_plane_line(key, seq, &state.tail_mac, &line);
     let envelope = serde_json::json!({"mac": mac, "record": line, "seq": seq});
-    let mut out = serde_json::to_string(&envelope)
-        .map_err(|e| PlaneClientError::Io(format!("envelope: {e}")))?;
+    out.push_str(
+        &serde_json::to_string(&envelope)
+            .map_err(|e| PlaneClientError::Io(format!("envelope: {e}")))?,
+    );
     out.push('\n');
     // Append-only: never truncate — the MAC chain makes any truncation
     // detectable at load, but producing one locally would be a self-inflicted
@@ -869,6 +1138,11 @@ fn append_locked(
     }
     state.next_seq += 1;
     state.tail_mac = mac;
+    // Keep the durable length checkpoint in lockstep so a later
+    // truncation of complete lines is detected at load.
+    if let Ok(len) = std::fs::metadata(path).map(|m| m.len()) {
+        let _ = write_checkpoint(&journal_checkpoint_path(path), len);
+    }
     Ok(())
 }
 

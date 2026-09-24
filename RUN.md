@@ -574,10 +574,11 @@ native stack: cost, capability, policy, approval and scan gates all still
 apply exactly as before — the consult adds a typed plane answer on top,
 never a parallel guard.
 
-Configuration: `ARDUR_GOVERNANCE_PLANE_URL` (the plane base URL),
-`ARDUR_GOVERNANCE_PLANE_TOKEN` (bearer token), and
-`ARDUR_GOVERNANCE_PLANE_ROOT_PEM` (the plane's root public key PEM, bound
-into the journal MAC). The client keeps its own append-only journal at
+Configuration: `ARDUR_GOVERNANCE_PLANE_URL` (the plane base URL — https
+required for non-loopback hosts), `ARDUR_GOVERNANCE_PLANE_TOKEN` (bearer
+token), and `ARDUR_GOVERNANCE_PLANE_ROOT_PEM` (the plane's root public key
+PEM, bound into the journal identity). The client keeps its own append-only
+journal at
 `governance/plane.jsonl`, MAC-chained with a key derived from the root PEM:
 every consult is recorded with a durable #543 event id (also the plane's
 `risk_request_id` idempotency key), the exact manifest digest over the
@@ -590,6 +591,15 @@ explained duplicate
 re-attest: the same event ids are re-sent with their idempotency keys, the
 plane's answers close the backlog, and no tool is re-run and no cost is
 double-debited (the native cost gate remains the only debit authority).
+
+The journal is MAC-chained with a key derived from the node's receipt
+custody private key (never from the public root PEM), and each journal is
+bound to its plane endpoint and root fingerprint — repointing the URL
+against another plane's journal fails the boot. A durable length
+checkpoint makes truncation of complete tail records detectable. The plane
+sees the tool call's REAL canonical arguments (the journal persists their
+digest), and a 200 PERMIT whose `session_id` is not the consulting session
+is corrupt evidence, never authorization.
 
 Enabling is fail-closed: a corrupt, truncated or MAC-mismatched plane
 journal fails the boot rather than silently dropping the backlog. The

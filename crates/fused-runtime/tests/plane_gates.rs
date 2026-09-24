@@ -52,23 +52,52 @@ fn plane_client(server_uri: &str, journal: &std::path::Path) -> Arc<PlaneClient>
     )
 }
 
+/// A stand-in plane answering PERMIT/DENY with the REQUEST's session id
+/// echoed back — the session-binding guard (#544 review) must see the
+/// consulting session, and a fixed id cannot know it.
+struct EchoDecision {
+    decision: &'static str,
+    reason: Option<&'static str>,
+}
+
+impl wiremock::Respond for EchoDecision {
+    fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+        let session = request
+            .body_json::<serde_json::Value>()
+            .ok()
+            .and_then(|body| {
+                body.get("session_id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            })
+            .unwrap_or_default();
+        let mut body = json!({
+            "decision": self.decision,
+            "session_id": session,
+        });
+        if let Some(reason) = self.reason {
+            body["reason"] = json!(reason);
+        }
+        ResponseTemplate::new(200).set_body_json(body)
+    }
+}
+
 fn permit_mock() -> Mock {
     Mock::given(method("POST"))
         .and(path("/evaluate"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "decision": "PERMIT",
-            "session_id": "s",
-        })))
+        .respond_with(EchoDecision {
+            decision: "PERMIT",
+            reason: None,
+        })
 }
 
 fn deny_mock() -> Mock {
     Mock::given(method("POST"))
         .and(path("/evaluate"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "decision": "DENY",
-            "session_id": "s",
-            "reason": "tool_not_allowed",
-        })))
+        .respond_with(EchoDecision {
+            decision: "DENY",
+            reason: Some("tool_not_allowed"),
+        })
 }
 
 fn status_mock(status: u16, body: serde_json::Value) -> Mock {
