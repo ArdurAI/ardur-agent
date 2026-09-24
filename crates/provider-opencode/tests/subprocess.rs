@@ -105,6 +105,17 @@ async fn missing_binary_is_reported_as_a_missing_install() {
                 msg.contains("not installed"),
                 "expected an install diagnostic, got: {msg}"
             );
+            // #571: the failure must be actionable without opening the docs,
+            // and smoke must be able to tell "not installed" apart from
+            // auth / rate-limit / general child failures.
+            assert!(
+                msg.contains("curl -fsSL https://opencode.ai/install | bash"),
+                "install one-liner must ride in the message, got: {msg}"
+            );
+            assert!(
+                msg.contains("/nonexistent/opencode-does-not-exist"),
+                "attempted binary must be named, got: {msg}"
+            );
         }
         other => panic!("expected Upstream, got {other:?}"),
     }

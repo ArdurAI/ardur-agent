@@ -5291,7 +5291,14 @@ fn estimate_tokens(messages: &[ChatMessage]) -> u64 {
 fn map_provider_error(err: &ProviderError) -> RuntimeError {
     match err {
         ProviderError::CostCeilingExceeded => RuntimeError::CostCeilingExceeded,
-        _ => RuntimeError::ProviderUnavailable,
+        other => {
+            // The public error is the canonical dispatch-failure signal, but
+            // the provider's own diagnostic (e.g. a wrapped-CLI "not
+            // installed" message with the install one-liner, #571) must not
+            // be swallowed: smoke and operators read it from the log line.
+            tracing::warn!(error = %other, "provider dispatch failed");
+            RuntimeError::ProviderUnavailable
+        }
     }
 }
 

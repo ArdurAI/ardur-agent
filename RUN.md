@@ -49,7 +49,7 @@ startup (`using provider provider=<id>`).
 | `claude-cli` (alias `claude-subscription`) | Claude Code CLI (Anthropic subscription) | `CLAUDE_CLI_BINARY` (default: `claude` on `PATH`), `CLAUDE_CLI_DEFAULT_MODEL`, `CLAUDE_CLI_PERMISSION_MODE` (`default` \| `acceptEdits` \| `auto` \| `bypassPermissions` \| `dontAsk` \| `plan`), `CLAUDE_CLI_WORKING_DIR`, `CLAUDE_CLI_ALLOWED_TOOLS`. Run `claude login` once; spends the **Agent SDK Credit pool** ($20–$200/mo, plan-dependent), not unbounded |
 | `prime` (alias `prime-agent`) | Prime Agent CLI (local RPC subprocess wrap) | `PRIME_AGENT_BINARY` (default: `prime-agent` on `PATH`), `PRIME_AGENT_PROVIDER`, `PRIME_AGENT_DEFAULT_MODEL`, `PRIME_AGENT_WORKING_DIR`, `PRIME_AGENT_TIMEOUT_SECS`, `PRIME_AGENT_MAX_TOKENS_FLOOR` (default `4096`). Run `prime-agent /login` once; no Ardur-side API key |
 | `hermes` (alias `hermes-agent`) | Hermes Agent CLI (local subprocess wrap) | `HERMES_BINARY` (default: `hermes` on `PATH`), `HERMES_PROVIDER`, `HERMES_DEFAULT_MODEL`, `HERMES_WORKING_DIR`, `HERMES_TIMEOUT_SECS`, `HERMES_MAX_TOKENS_FLOOR` (default `4096`). Run `hermes auth` / `hermes model` once; no Ardur-side API key |
-| `opencode` (alias `opencode-agent`) | OpenCode CLI (local one-shot subprocess wrap) | `OPENCODE_BINARY` (default: `opencode` on `PATH`), `OPENCODE_DEFAULT_MODEL`, `OPENCODE_WORKING_DIR`, `OPENCODE_TIMEOUT_SECS`, `OPENCODE_MAX_TOKENS_FLOOR` (default `4096`). Run `opencode auth login` once; no Ardur-side API key |
+| `opencode` (alias `opencode-agent`) | OpenCode CLI (local one-shot subprocess wrap) | `OPENCODE_BINARY` (default: `opencode` on `PATH`), `OPENCODE_DEFAULT_MODEL`, `OPENCODE_WORKING_DIR`, `OPENCODE_TIMEOUT_SECS`, `OPENCODE_MAX_TOKENS_FLOOR` (default `4096`). Install: `curl -fsSL https://opencode.ai/install \| bash` (or `npm i -g opencode-ai` / `brew install sst/tap/opencode`), then run `opencode auth login` once; no Ardur-side API key |
 | `kimi` (alias `kimi-agent`) | Kimi Code CLI (local one-shot subprocess wrap) | `KIMI_BINARY` (default: `kimi` on `PATH`), `KIMI_DEFAULT_MODEL`, `KIMI_WORKING_DIR`, `KIMI_TIMEOUT_SECS`, `KIMI_MAX_TOKENS_FLOOR` (default `4096`). Run `kimi login` once; no Ardur-side API key |
 
 One-liners (CLI shown; the server reads the same variables from its `.env`):
@@ -83,6 +83,10 @@ ARDUR_PROVIDER=prime ardur chat
 ARDUR_PROVIDER=hermes ardur chat
 # OpenCode — uses your locally configured OpenCode CLI
 ARDUR_PROVIDER=opencode ardur chat
+# Smoke tip: the CLI's default output ceiling (1024) trips OpenCode's
+# max-tokens floor before any spawn; set OPENCODE_MAX_TOKENS_FLOOR=0 (or a
+# ceiling >= 4096) to reach the child. A missing binary then logs a typed
+# Upstream diagnostic carrying the install one-liner.
 # Kimi — uses your locally configured Kimi Code CLI
 ARDUR_PROVIDER=kimi ardur chat
 ```
@@ -92,7 +96,10 @@ API key is missing (the CLI then falls back to a network-free stub and prints an
 offline notice; the server aborts). `OPENAI_COMPAT_BASE_URL` must use HTTPS
 unless it targets loopback HTTP for local tests. The Ollama, Codex, Claude-CLI, Prime,
 Hermes, OpenCode, and Kimi backends need no credentials to wire — they fail later, per-turn, if
-the daemon/binary is unreachable or the CLI is not logged in.
+the daemon/binary is unreachable or the CLI is not logged in. For OpenCode, a
+missing binary is a typed `ProviderError::Upstream` whose message carries the
+install one-liner, so smoke can distinguish "not installed" from auth or
+rate-limit failures.
 
 ## Model router (task-class lanes, failover, credential pools)
 
