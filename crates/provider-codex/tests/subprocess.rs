@@ -1,13 +1,12 @@
-//! Subprocess round-trip tests for the §3.3b Codex provider.
+//! Subprocess round-trip tests for the Codex provider.
 //!
 //! These drive [`CodexProvider::complete`] against a tiny executable shim that
 //! stands in for the real `codex` binary — emitting known JSONL on success, or
-//! failing on purpose — so the spawn + stdin + parse plumbing is exercised with
-//! no codex install and no ChatGPT subscription spend. The shim is a POSIX `sh`
-//! script, so the suite is `#[cfg(unix)]` (CI runs on macOS/Linux).
-//!
-//! A gated live test (`codex_live_smoke`) hits the real CLI only when
-//! `CODEX_LIVE_TEST=1` is set.
+//! failing on purpose — so the spawn + stdin + parse plumbing, the
+//! deny-by-default sandbox flags, the max-tokens floor, redaction, and the
+//! fail-closed mappings are all exercised with no codex install and no
+//! ChatGPT subscription spend. The shim is a POSIX `sh` script, so the suite
+//! is `#[cfg(unix)]` (CI runs on macOS/Linux).
 
 #![cfg(unix)]
 
@@ -32,11 +31,21 @@ fn write_shim(body: &str) -> (TempDir, PathBuf) {
     (dir, path)
 }
 
+/// A shim that records its argv next to itself and then replies with a known
+/// JSONL event stream.
+const ARGS_SHIM: &str = "#!/bin/sh\n\
+cat > /dev/null\n\
+printf '%s\\n' \"$@\" > \"$(dirname \"$0\")/argv.txt\"\n\
+printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"ARGS-OK\"}}'\n";
+
 fn simple_request() -> CompletionRequest {
     CompletionRequest::new(
         vec![ChatMessage::user("ping")],
         ModelId::new("gpt-5-codex"),
-        64,
+        // At/above the default `max_tokens_floor`: this backend refuses a
+        // ceiling it cannot enforce, so the shared fixture must ask for one it
+        // can honour. The refusal path has its own dedicated test.
+        8_192,
     )
 }
 
@@ -63,7 +72,7 @@ async fn binary_not_found_returns_config_error() {
 #[tokio::test]
 async fn mocked_subprocess_returns_response() {
     // Shim consumes stdin and emits a known JSONL event stream.
-    let (_dir, shim) = write_shim(
+    let (dir, shim) = write_shim(
         "#!/bin/sh\n\
          cat > /dev/null\n\
          printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"t1\"}'\n\
@@ -89,7 +98,86 @@ async fn mocked_subprocess_returns_response() {
     assert_eq!(resp.cost.tokens_in, 12);
     assert_eq!(resp.cost.tokens_out, 3);
     assert_eq!(resp.cost.cents, 0);
-    assert!(resp.raw_provider_response.is_some());
+    let raw = resp.raw_provider_response.expect("raw retained");
+    let obj = raw.as_object().expect("object with events");
+    assert!(obj.contains_key("events"), "raw body retains events");
+    assert_eq!(
+        obj.get("model").and_then(|m| m.as_str()),
+        Some("gpt-5-codex"),
+        "the chosen model is recorded on the raw body"
+    );
+    drop(dir);
+}
+
+#[tokio::test]
+async fn deny_by_default_sandbox_flag_is_passed() {
+    // The default sandbox must be the most restrictive codex accepts; the
+    // recorded argv proves the child actually ran under it.
+    let (dir, shim) = write_shim(ARGS_SHIM);
+    let provider = CodexProvider::new(CodexConfig::new().codex_binary(&shim), ModelId::new(""));
+
+    let resp = provider
+        .complete(simple_request())
+        .await
+        .expect("completion");
+    assert_eq!(resp.content, "ARGS-OK");
+
+    let argv = fs::read_to_string(dir.path().join("argv.txt")).expect("argv file");
+    let lines: Vec<&str> = argv.lines().collect();
+    assert!(lines.contains(&"exec"), "expected exec subcommand:\n{argv}");
+    assert!(lines.contains(&"--json"), "expected --json:\n{argv}");
+    assert!(
+        lines.contains(&"--ephemeral"),
+        "expected --ephemeral:\n{argv}"
+    );
+    assert!(
+        lines.contains(&"--skip-git-repo-check"),
+        "expected --skip-git-repo-check:\n{argv}"
+    );
+    assert!(
+        lines.windows(2).any(|w| w == ["-s", "read-only"]),
+        "expected -s read-only (deny-by-default sandbox):\n{argv}"
+    );
+    assert!(
+        lines.windows(2).any(|w| w == ["--color", "never"]),
+        "expected --color never:\n{argv}"
+    );
+    for forbidden in [
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--approve-for-me",
+        "danger-full-access",
+        "workspace-write",
+    ] {
+        assert!(
+            !lines.contains(&forbidden),
+            "{forbidden} must never be passed by default:\n{argv}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn opting_into_a_looser_sandbox_passes_its_flag() {
+    let (dir, shim) = write_shim(ARGS_SHIM);
+    let provider = CodexProvider::new(
+        CodexConfig::new()
+            .codex_binary(&shim)
+            .sandbox_mode(SandboxMode::WorkspaceWrite),
+        ModelId::new(""),
+    );
+
+    provider
+        .complete(simple_request())
+        .await
+        .expect("completion");
+
+    let argv = fs::read_to_string(dir.path().join("argv.txt")).expect("argv file");
+    assert!(
+        argv.lines()
+            .collect::<Vec<_>>()
+            .windows(2)
+            .any(|w| w == ["-s", "workspace-write"]),
+        "expected -s workspace-write after the explicit opt-in:\n{argv}"
+    );
 }
 
 #[tokio::test]
@@ -138,6 +226,81 @@ async fn mocked_login_failure_returns_unauthorized() {
 }
 
 #[tokio::test]
+async fn mocked_rate_limit_returns_rate_limited() {
+    // Shim exits non-zero with a quota-style stderr → RateLimited, not a
+    // credential failure even though the diagnostic names a key.
+    let (_dir, shim) = write_shim(
+        "#!/bin/sh\n\
+         echo 'Error code: 429 - rate limit exceeded for this API key' >&2\n\
+         exit 1\n",
+    );
+    let provider = CodexProvider::new(
+        CodexConfig::new().codex_binary(shim),
+        ModelId::new("gpt-5-codex"),
+    );
+
+    let err = provider.complete(simple_request()).await.unwrap_err();
+    assert!(
+        matches!(err, ProviderError::RateLimited { .. }),
+        "expected RateLimited, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_echoed_secret_is_redacted_from_the_error() {
+    // Shim exits non-zero echoing a secret-shaped key on stderr → the
+    // diagnostic must reach ProviderError redacted.
+    let (_dir, shim) = write_shim(
+        "#!/bin/sh\n\
+         echo 'request failed for API key sk-abcdefghij0123456789' >&2\n\
+         exit 1\n",
+    );
+    let provider = CodexProvider::new(
+        CodexConfig::new().codex_binary(shim),
+        ModelId::new("gpt-5-codex"),
+    );
+
+    let err = provider.complete(simple_request()).await.unwrap_err();
+    match err {
+        ProviderError::Upstream(msg) => {
+            assert!(
+                !msg.contains("sk-abcdefghij0123456789"),
+                "secret must not survive redaction: {msg}"
+            );
+            assert!(
+                msg.contains("<REDACTED>"),
+                "expected a redaction marker, got: {msg}"
+            );
+        }
+        other => panic!("expected Upstream, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn turn_failed_event_fails_closed_even_on_zero_exit() {
+    // A child that exits 0 but emitted turn.failed must not look like a
+    // clean success.
+    let (_dir, shim) = write_shim(
+        "#!/bin/sh\n\
+         cat > /dev/null\n\
+         printf '%s\\n' '{\"type\":\"turn.failed\",\"error\":{\"message\":\"model overloaded\"}}'\n",
+    );
+    let provider = CodexProvider::new(
+        CodexConfig::new().codex_binary(shim),
+        ModelId::new("gpt-5-codex"),
+    );
+
+    let err = provider.complete(simple_request()).await.unwrap_err();
+    match err {
+        ProviderError::Upstream(msg) => assert!(
+            msg.contains("model overloaded"),
+            "expected the event diagnostic, got: {msg}"
+        ),
+        other => panic!("expected Upstream, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn plain_text_output_falls_back_to_stripped_stdout() {
     // Shim emits no JSON events, just ANSI-colored plain text → the fallback
     // path strips ANSI and uses the raw stdout as content.
@@ -162,6 +325,45 @@ async fn plain_text_output_falls_back_to_stripped_stdout() {
 }
 
 #[tokio::test]
+async fn non_json_stdout_noise_does_not_abort_a_valid_turn() {
+    let (_dir, shim) = write_shim(
+        "#!/bin/sh\n\
+         cat > /dev/null\n\
+         echo 'INFO codex-core: workspace scanned'\n\
+         printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"SURVIVED-THE-NOISE\"}}'\n",
+    );
+    let provider = CodexProvider::new(
+        CodexConfig::new().codex_binary(shim),
+        ModelId::new("gpt-5-codex"),
+    );
+
+    let resp = provider
+        .complete(simple_request())
+        .await
+        .expect("noise must not abort an otherwise valid turn");
+    assert_eq!(resp.content, "SURVIVED-THE-NOISE");
+}
+
+#[tokio::test]
+async fn empty_output_is_a_failure_not_an_empty_success() {
+    // Shim drains stdin and prints nothing at all, exiting 0.
+    let (_dir, shim) = write_shim("#!/bin/sh\ncat > /dev/null\n");
+    let provider = CodexProvider::new(
+        CodexConfig::new().codex_binary(shim),
+        ModelId::new("gpt-5-codex"),
+    );
+
+    let err = provider.complete(simple_request()).await.unwrap_err();
+    match err {
+        ProviderError::Upstream(msg) => assert!(
+            msg.contains("no parseable output"),
+            "expected an empty-output diagnostic, got: {msg}"
+        ),
+        other => panic!("expected Upstream, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn timeout_returns_network_failure() {
     use std::time::Duration;
     // Shim sleeps past the configured timeout; kill_on_drop reaps it.
@@ -175,9 +377,97 @@ async fn timeout_returns_network_failure() {
 
     let err = provider.complete(simple_request()).await.unwrap_err();
     match err {
-        ProviderError::NetworkFailure(msg) => assert!(msg.contains("timed out"), "got: {msg}"),
+        ProviderError::NetworkFailure(msg) => {
+            assert!(msg.contains("exceeded"), "got: {msg}")
+        }
         other => panic!("expected NetworkFailure timeout, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn empty_prompt_is_rejected_before_spawning_a_child() {
+    let provider = CodexProvider::new(
+        CodexConfig::new().codex_binary("/nonexistent/must-not-spawn"),
+        ModelId::new("gpt-5-codex"),
+    );
+    let mut req = simple_request();
+    req.messages.clear();
+
+    let err = provider
+        .complete(req)
+        .await
+        .expect_err("an empty prompt must be rejected");
+    assert!(
+        matches!(err, ProviderError::InvalidRequest(_)),
+        "expected InvalidRequest (not a spawn failure), got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_unenforceable_output_ceiling_is_refused_not_ignored() {
+    // codex exec has no per-request output cap, so a ceiling below the floor
+    // must fail rather than be silently discarded.
+    let provider = CodexProvider::new(
+        CodexConfig::new().codex_binary("/nonexistent/must-not-spawn"),
+        ModelId::new("gpt-5-codex"),
+    );
+    let mut req = simple_request();
+    req.max_tokens = 64;
+
+    let err = provider
+        .complete(req)
+        .await
+        .expect_err("an unenforceable ceiling must be refused");
+    match err {
+        ProviderError::InvalidRequest(msg) => assert!(
+            msg.contains("cannot enforce"),
+            "expected an enforcement diagnostic, got: {msg}"
+        ),
+        other => panic!("expected InvalidRequest (not a spawn failure), got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_zero_floor_delegates_enforcement_and_accepts_any_ceiling() {
+    let (dir, shim) = write_shim(
+        "#!/bin/sh\n\
+         cat > /dev/null\n\
+         printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"FLOOR-OK\"}}'\n",
+    );
+    let provider = CodexProvider::new(
+        CodexConfig::new().codex_binary(shim).max_tokens_floor(0),
+        ModelId::new("gpt-5-codex"),
+    );
+
+    let mut req = simple_request();
+    req.max_tokens = 64;
+    let resp = provider
+        .complete(req)
+        .await
+        .expect("zero floor must accept any ceiling");
+    assert_eq!(resp.content, "FLOOR-OK");
+    drop(dir);
+}
+
+#[tokio::test]
+async fn a_zero_max_tokens_delegates_regardless_of_floor() {
+    let (_dir, shim) = write_shim(
+        "#!/bin/sh\n\
+         cat > /dev/null\n\
+         printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"ZERO-CEILING-OK\"}}'\n",
+    );
+    let provider = CodexProvider::new(
+        CodexConfig::new().codex_binary(shim),
+        ModelId::new("gpt-5-codex"),
+    );
+
+    let mut req = simple_request();
+    req.max_tokens = 0;
+    let resp = provider
+        .complete(req)
+        .await
+        .expect("max_tokens=0 must delegate");
+    assert_eq!(resp.content, "ZERO-CEILING-OK");
 }
 
 /// Regression for the §3.3b `ETXTBSY` ("Text file busy") spawn flake on Linux.
@@ -229,26 +519,4 @@ async fn spawn_after_write_no_etxtbsy() {
     for h in handles {
         h.await.expect("spawn-stress task panicked");
     }
-}
-
-/// Gated live smoke test against the real `codex` CLI. Off by default; runs only
-/// when `CODEX_LIVE_TEST=1` and a logged-in codex install is present.
-#[tokio::test]
-async fn codex_live_smoke() {
-    if std::env::var("CODEX_LIVE_TEST").as_deref() != Ok("1") {
-        eprintln!("skipping codex_live_smoke (set CODEX_LIVE_TEST=1 to run)");
-        return;
-    }
-    let provider = CodexProvider::from_env(ModelId::new(""));
-    let req = CompletionRequest::new(
-        vec![ChatMessage::user("Reply with exactly the word: pong")],
-        ModelId::new(""),
-        64,
-    );
-    let resp = provider.complete(req).await.expect("live codex completion");
-    assert!(
-        !resp.content.is_empty(),
-        "live codex returned empty content"
-    );
-    eprintln!("live codex replied: {:?}", resp.content);
 }
