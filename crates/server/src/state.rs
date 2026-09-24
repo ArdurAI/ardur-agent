@@ -627,6 +627,55 @@ impl AppState {
             );
         }
 
+        // #544: the opt-in typed plane consult. Opened from the same data
+        // dir the ER mirror uses (`<data_dir>/governance/plane.jsonl`), so
+        // one custody location holds all governance evidence. The open is
+        // fail-closed: a corrupt or MAC-mismatched journal (e.g. a root PEM
+        // rotation without replay) fails the boot rather than silently
+        // dropping the backlog. Default unset constructs nothing —
+        // byte-identical boot.
+        let plane = match &config.governance_plane_url {
+            Some(url) => Some(
+                ardur_governance::PlaneClient::open(
+                    url,
+                    &std::env::var("ARDUR_GOVERNANCE_PLANE_TOKEN").unwrap_or_default(),
+                    &std::env::var("ARDUR_GOVERNANCE_PLANE_ROOT_PEM").unwrap_or_default(),
+                    &data_dir.join("governance").join("plane.jsonl"),
+                )
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "opening the governance plane journal in {}: {e} (unset ARDUR_GOVERNANCE_PLANE_URL or repair the journal)",
+                        data_dir.display()
+                    )
+                })?,
+            ),
+            None => None,
+        };
+        if let Some(plane) = &plane {
+            tracing::info!(
+                url = %plane.url(),
+                journal = %data_dir.join("governance").join("plane.jsonl").display(),
+                "governance plane consult enabled"
+            );
+            // #544 reconnect replay: close any backlog left by a previous
+            // outage before serving turns. Pure re-attest: the same durable
+            // event ids are re-sent with their idempotency keys, no tool
+            // re-runs, no double debit. A replay failure is logged and
+            // retried by the next consult — it never blocks the boot (the
+            // native gates are the admission authority; the plane adds the
+            // typed consult on top).
+            match plane.replay_backlog().await {
+                Ok(replayed) if replayed > 0 => {
+                    tracing::info!(replayed, "governance plane backlog replayed")
+                }
+                Ok(_) => {}
+                Err(err) => tracing::warn!(
+                    error = %err,
+                    "governance plane backlog replay failed; the next consult retries"
+                ),
+            }
+        }
+
         // 5. The fused runtime. Single instance, single receipt chain-tail mutex
         //    — so receipts chain correctly across turns.
         let envelope = per_turn_envelope(config.cost_budget_cents);
@@ -687,6 +736,9 @@ impl AppState {
         .maybe_with_governance(
             governance.map(|emitter| Arc::new(emitter) as Arc<dyn GovernanceEmitter>),
         )
+        // #544: the typed plane consult — same opt-in posture as the ER
+        // mirror above; `None` (the default) is byte-identical.
+        .maybe_with_plane(plane.map(Arc::new))
         .build_reconciled()
         .await
         .map_err(|e| anyhow::anyhow!("building/reconciling fused runtime: {e}"))?;

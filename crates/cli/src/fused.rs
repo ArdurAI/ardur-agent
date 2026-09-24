@@ -56,7 +56,9 @@ use ardur_tool_registry::{
 use crate::config::Config;
 use crate::engine::TurnOutcome;
 use crate::error::CliError;
-use crate::state::{GrantRecord, StateDirs, governance_mirror_enabled, read_grant_records};
+use crate::state::{
+    GrantRecord, StateDirs, governance_mirror_enabled, governance_plane_url, read_grant_records,
+};
 use crate::stream::{StreamOutcome, drive_fused_turn};
 
 /// The audience the session cap-token is scoped to (matches the runtime's
@@ -596,6 +598,45 @@ impl FusedEngine {
                     })
             })
             .transpose()?;
+        // #544: the opt-in typed plane consult, same posture as the ER
+        // mirror above — journal at `<root>/governance/plane.jsonl`,
+        // fail-closed open, default unset constructs nothing.
+        let plane = (governance_plane_url())
+            .map(|url| {
+                ardur_governance::PlaneClient::open(
+                    &url,
+                    &std::env::var("ARDUR_GOVERNANCE_PLANE_TOKEN").unwrap_or_default(),
+                    &std::env::var("ARDUR_GOVERNANCE_PLANE_ROOT_PEM").unwrap_or_default(),
+                    &dirs.root.join("governance").join("plane.jsonl"),
+                )
+                .map_err(|e| {
+                    CliError::State(format!(
+                        "opening the governance plane journal in {}: {e} \
+                         (unset ARDUR_GOVERNANCE_PLANE_URL or repair the journal)",
+                        dirs.root.join("governance").display()
+                    ))
+                })
+            })
+            .transpose()?;
+        if let Some(plane) = &plane {
+            tracing::info!(
+                url = %plane.url(),
+                journal = %dirs.root.join("governance").join("plane.jsonl").display(),
+                "governance plane consult enabled"
+            );
+            // #544 reconnect replay (same posture as the server boot): a
+            // failure warns and defers to the next consult, never blocks.
+            match plane.replay_backlog().await {
+                Ok(replayed) if replayed > 0 => {
+                    tracing::info!(replayed, "governance plane backlog replayed")
+                }
+                Ok(_) => {}
+                Err(err) => tracing::warn!(
+                    error = %err,
+                    "governance plane backlog replay failed; the next consult retries"
+                ),
+            }
+        }
         if let Some(emitter) = &governance {
             tracing::info!(
                 mirror = %emitter.path().display(),
@@ -643,6 +684,9 @@ impl FusedEngine {
         .maybe_with_governance(
             governance.map(|emitter| Arc::new(emitter) as Arc<dyn GovernanceEmitter>),
         )
+        // #544: the typed plane consult — `None` (the default) keeps the
+        // session byte-identical to one built before the seam.
+        .maybe_with_plane(plane.map(Arc::new))
         .build_reconciled()
         .await
         .map_err(|e| CliError::State(format!("building/reconciling the fused runtime: {e}")))?;

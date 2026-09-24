@@ -552,6 +552,49 @@ The default (unset) is byte-identical to running without the feature: no
 log is corrupt or was signed by a different key, the boot (or chat session)
 fails with an error rather than silently starting a new chain.
 
+### Governance plane consult (opt-in, default off — #544)
+
+`ARDUR_GOVERNANCE_PLANE_URL` (server and `ardur chat` alike) turns on the
+typed governance-plane consult: after every native admission gate passes
+and before tool dispatch, the runtime consults the plane's `/evaluate` for
+that exact tool event and classifies the answer:
+
+| Plane answer | Runtime behavior |
+| --- | --- |
+| 200 `PERMIT` | proceed (native gates already passed) |
+| 200 `DENY` | refuse the call — typed `plane_denied` refusal |
+| 403 (`passport_revoked`) | refuse — typed `plane_revoked` refusal |
+| 503 `{"error":"kill_switch_active"}` | refuse — typed `plane_kill_switch` refusal |
+| malformed/unknown response shape | refuse — `plane_corrupt_evidence` (never fallback) |
+| timeout / response unknown | refuse — `plane_ambiguous_delivery` (never fallback) |
+| connection refused/DNS/reset (transport) | proceed under native governance and mint one `governance.plane.unreachable.v1` receipt per outage window |
+
+Only that last, owner-authorized class falls back. It never weakens the
+native stack: cost, capability, policy, approval and scan gates all still
+apply exactly as before — the consult adds a typed plane answer on top,
+never a parallel guard.
+
+Configuration: `ARDUR_GOVERNANCE_PLANE_URL` (the plane base URL),
+`ARDUR_GOVERNANCE_PLANE_TOKEN` (bearer token), and
+`ARDUR_GOVERNANCE_PLANE_ROOT_PEM` (the plane's root public key PEM, bound
+into the journal MAC). The client keeps its own append-only journal at
+`governance/plane.jsonl`, MAC-chained with a key derived from the root PEM:
+every consult is recorded with a durable #543 event id (also the plane's
+`risk_request_id` idempotency key), the exact manifest digest over the
+registered tools, the DG snapshot from the verified claims, and the
+arguments digest — so evidence is exact and replay-safe.
+
+On reconnect (the next boot with the plane still configured, or the next
+consult after the plane returns), the missed window is replayed as an
+explained duplicate
+re-attest: the same event ids are re-sent with their idempotency keys, the
+plane's answers close the backlog, and no tool is re-run and no cost is
+double-debited (the native cost gate remains the only debit authority).
+
+Enabling is fail-closed: a corrupt, truncated or MAC-mismatched plane
+journal fails the boot rather than silently dropping the backlog. The
+default (unset) is byte-identical: no plane client, no consult, no journal.
+
 ## MCP (Model Context Protocol)
 
 ardur speaks MCP both ways, built on the official [`rmcp`](https://crates.io/crates/rmcp)

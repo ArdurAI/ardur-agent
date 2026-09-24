@@ -46,6 +46,7 @@ async fn spawn_server(bearer: &str) -> String {
         approval_gated_capabilities: Vec::new(),
         // #502 Seam B7 follow-up: default-off governance ER mirror.
         governance_mirror: false,
+        governance_plane_url: None,
         http_turn_timeout: std::time::Duration::from_secs(30),
         slack_enabled: true,
         slack_bot_token: Some("xoxb-e2e".to_string()),
