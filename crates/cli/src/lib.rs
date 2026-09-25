@@ -1237,6 +1237,13 @@ fn print_missing_policy_hint() {
 
 /// Render one turn by streaming the provider directly to stdout, then record the
 /// assembled reply in `history` and fold the turn's cost into the session tally.
+///
+/// gh#539: what this turn durably committed is taken from the journal delta
+/// (replayed before and after the turn), not from the reducer's receipt
+/// notifications — a cancel landing between Finalize and Receipt leaves
+/// committed assistant rounds the reducer never saw, and speculative trailing
+/// deltas never reach the journal. The reducer outcome remains the fallback
+/// when the journal cannot be replayed.
 async fn run_streamed_message(
     fused: &FusedEngine,
     state: &mut ReplState,
@@ -1247,16 +1254,14 @@ async fn run_streamed_message(
         width: state.width(),
         osc8: state.osc8,
     };
+    // Baseline before the turn: everything already durably committed. A failed
+    // read downgrades the whole turn to the reducer-outcome fallback.
+    let baseline = fused.replayed_entries().await.ok();
     let mut stdout = std::io::stdout();
-    match fused.stream_turn(history, &mut stdout, &ctx).await {
+    let streamed = fused.stream_turn(history, &mut stdout, &ctx).await;
+    let replayed = fused.replayed_entries().await;
+    match streamed {
         Ok(outcome) => {
-            if let Some(usage) = outcome.usage {
-                state.cost.record(
-                    u64::from(usage.tokens_in),
-                    u64::from(usage.tokens_out),
-                    outcome.cost_cents.unwrap_or(0) as f64 / 100.0,
-                );
-            }
             // #408: streamed turns render a Cedar denial into `outcome.error`
             // (no typed error crosses this boundary) — emit the same narrowly
             // gated hint when the denial is a policy denial and no policy file
@@ -1267,15 +1272,159 @@ async fn run_streamed_message(
                     print_missing_policy_hint();
                 }
             }
-            apply_streamed_outcome_to_history(history, outcome);
+            match settle_streamed_turn(baseline.as_deref(), replayed.as_deref().ok()) {
+                Some(settlement) => {
+                    if settlement.drop_user {
+                        // No durable turn exists for this input — a retry
+                        // starts clean.
+                        history.pop();
+                    } else {
+                        // Extend, never replace: `/compact` and `/rollback`
+                        // deliberately hold live history back from the full
+                        // journal, and only this turn's committed rounds may
+                        // join it.
+                        history.extend(
+                            settlement
+                                .committed_rounds
+                                .into_iter()
+                                .map(ChatMessage::assistant),
+                        );
+                    }
+                    // Displayed committed cost equals the durable ledger: the
+                    // settlement projections this turn actually wrote.
+                    if let Some(cents) = settlement.committed_cents {
+                        if let Some(usage) = outcome.usage.filter(|_| cents > 0) {
+                            state.cost.record(
+                                u64::from(usage.tokens_in),
+                                u64::from(usage.tokens_out),
+                                cents as f64 / 100.0,
+                            );
+                        }
+                    }
+                }
+                None => {
+                    tracing::warn!("could not reconcile durable history; applying reducer outcome");
+                    if let Some(usage) = outcome.usage {
+                        state.cost.record(
+                            u64::from(usage.tokens_in),
+                            u64::from(usage.tokens_out),
+                            outcome.cost_cents.unwrap_or(0) as f64 / 100.0,
+                        );
+                    }
+                    apply_streamed_outcome_to_history(history, outcome);
+                }
+            }
         }
         Err(e) => {
-            // An I/O failure writing to stdout (not a provider error) — drop the
-            // unanswered user message and report.
-            history.pop();
+            // An I/O failure writing to stdout (not a provider error). The
+            // journal delta still says whether a round durably committed — a
+            // committed turn must not disappear because rendering failed, but
+            // an unanswered user message (nothing committed) is dropped so a
+            // retry starts clean.
+            if let Some(settlement) =
+                settle_streamed_turn(baseline.as_deref(), replayed.as_deref().ok())
+            {
+                if settlement.drop_user {
+                    history.pop();
+                } else {
+                    history.extend(
+                        settlement
+                            .committed_rounds
+                            .into_iter()
+                            .map(ChatMessage::assistant),
+                    );
+                }
+            } else {
+                history.pop();
+            }
             eprintln!("error: {e}");
         }
     }
+}
+
+/// What one streamed turn durably settled, derived from the journal delta
+/// between a pre-turn and post-turn replay (gh#539).
+///
+/// Receipt notifications can lag durable commit: a consumer cancelled between
+/// the Finalize and Receipt boundaries has committed assistant rounds the
+/// reducer outcome never saw, and speculative trailing deltas never reach the
+/// journal — so the delta, not the outcome, decides live history.
+///
+/// Returns `None` when either replay is unavailable (callers fall back to the
+/// reducer outcome).
+fn settle_streamed_turn(
+    pre: Option<&[JournalEntry]>,
+    post: Option<&[JournalEntry]>,
+) -> Option<DurableTurnSettlement> {
+    let (pre, post) = (pre?, post?);
+    let delta = journal_delta(pre, post);
+    let committed_rounds: Vec<String> = delta
+        .iter()
+        .filter_map(|entry| match entry {
+            JournalEntry::AssistantMessage { content, .. } => Some(content.clone()),
+            _ => None,
+        })
+        .collect();
+    // A turn that durably committed at least one assistant round keeps its user
+    // message (and gains those rounds below) — even when the stream was
+    // cancelled or output failed after the commit (gh#539). A turn with no
+    // committed round — precommit cancel, refusal, provider failure — leaves
+    // an unanswered user message that must not seed the next request.
+    let drop_user = committed_rounds.is_empty();
+    let committed_cents = (delta
+        .iter()
+        .any(|entry| matches!(entry, JournalEntry::CostFinalized { reason: None, .. })))
+    .then(|| durable_committed_cents(delta));
+    Some(DurableTurnSettlement {
+        committed_rounds,
+        committed_cents,
+        drop_user,
+    })
+}
+
+/// The durable outcome of one streamed turn, from the journal delta.
+struct DurableTurnSettlement {
+    /// Assistant rounds this turn durably committed, in journal order.
+    committed_rounds: Vec<String>,
+    /// The committed cost the journal billed for those rounds, when the turn
+    /// settled as a completion. `None` means nothing was billed as committed
+    /// spend (a cancelled/refused turn whose reservation was released).
+    committed_cents: Option<u64>,
+    /// Whether the input user message must be dropped: the turn errored with
+    /// no durable round, so a retry starts clean.
+    drop_user: bool,
+}
+
+/// The entries `post` gained over `pre`. The journal is append-only, so `pre`
+/// is a strict prefix of `post`; if that ever fails to hold (truncation,
+/// corruption), no delta is reported — callers then keep their own view.
+fn journal_delta<'a>(pre: &[JournalEntry], post: &'a [JournalEntry]) -> &'a [JournalEntry] {
+    let prefix = pre
+        .iter()
+        .zip(post.iter())
+        .take_while(|(before, after)| before == after)
+        .count();
+    if prefix == pre.len() {
+        &post[prefix..]
+    } else {
+        &[]
+    }
+}
+
+/// The durable committed cost in cents over a journal delta: the settlement
+/// projections recorded for committed turns. A reason-bearing `CostFinalized`
+/// is an unreceipted refusal/cancellation projection and `OperatorExpense` is
+/// refunded caller cost (gh#452) — neither is committed spend for `/cost`.
+fn durable_committed_cents(delta: &[JournalEntry]) -> u64 {
+    delta
+        .iter()
+        .filter_map(|entry| match entry {
+            JournalEntry::CostFinalized { actual, reason, .. } => {
+                reason.is_none().then_some(actual.cents)
+            }
+            _ => None,
+        })
+        .sum()
 }
 
 fn apply_streamed_outcome_to_history(history: &mut Vec<ChatMessage>, outcome: StreamOutcome) {
@@ -1491,5 +1640,542 @@ mod journal_entries_to_history_tests {
         let entries = vec![user("a"), rollback(uuid::Uuid::new_v4()), user("b")];
         let history = journal_entries_to_history(&entries);
         assert_eq!(history.len(), 2);
+    }
+}
+
+/// gh#539 — the REPL streamed path at the durable-commit/receipt-notification
+/// cancellation boundary, against the real engine with nonzero usage.
+///
+/// Each test drives the real owning stream to one boundary (precommit,
+/// Finalize-before-Receipt, post-Receipt), drops the owner (the early return
+/// inside `consume_stream`'s callback — never a pinned reference), then applies
+/// the same journal-delta settle the REPL uses, comparing live next-turn
+/// history with the reopened journal and the durable ledger's committed cost.
+#[cfg(test)]
+mod receipt_boundary_history_tests {
+    use super::*;
+    use ardur_fused_runtime::StageKind;
+    use ardur_provider_runtime::{
+        CompletionRequest, CompletionResponse, FinishReason, Provider, ProviderError, ProviderId,
+        RateCard, StreamEvent, Usage,
+    };
+    use ardur_runtime::{CostTuple, ToolCall};
+    use async_trait::async_trait;
+    use futures::StreamExt;
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    /// A streaming provider with NONZERO usage billing `cents` per round:
+    /// round 1 asks for a tool call, round 2 delivers the final text. The
+    /// usage passthrough (`cost_cents: Some`) is authoritative for the
+    /// receipt chain and the cost ledger.
+    struct CostedRoundProvider {
+        round_two: Mutex<bool>,
+        cents: u64,
+        rate_card: RateCard,
+    }
+
+    impl CostedRoundProvider {
+        fn new(cents: u64) -> Self {
+            Self {
+                round_two: Mutex::new(false),
+                cents,
+                rate_card: RateCard::anthropic_2026_q2_v1(),
+            }
+        }
+
+        fn usage(&self) -> Usage {
+            Usage {
+                tokens_in: 11,
+                tokens_out: 7,
+                cost_cents: Some(self.cents),
+            }
+        }
+
+        fn round(&self) -> (String, Option<ToolCall>) {
+            let mut second = self.round_two.lock().expect("round lock");
+            if *second {
+                ("final after tool".to_string(), None)
+            } else {
+                *second = true;
+                (
+                    "checking".to_string(),
+                    Some(ToolCall {
+                        id: "call_1".to_string(),
+                        name: "shell.run".to_string(),
+                        arguments: serde_json::json!({"command": "echo probe"}),
+                    }),
+                )
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Provider for CostedRoundProvider {
+        async fn complete(
+            &self,
+            _req: CompletionRequest,
+        ) -> Result<CompletionResponse, ProviderError> {
+            let (content, tool_call) = self.round();
+            Ok(CompletionResponse {
+                content,
+                finish_reason: match tool_call {
+                    Some(call) => FinishReason::ToolUse(vec![call]),
+                    None => FinishReason::Stop,
+                },
+                usage: self.usage(),
+                cost: CostTuple {
+                    tokens_in: 11,
+                    tokens_out: 7,
+                    cents: self.cents,
+                    wall_ms: 0,
+                    attention_score: 0,
+                },
+                raw_provider_response: None,
+            })
+        }
+
+        async fn stream(
+            &self,
+            _req: CompletionRequest,
+        ) -> Result<ardur_provider_runtime::ProviderStream, ProviderError> {
+            let (content, tool_call) = self.round();
+            let usage = self.usage();
+            let mut events = vec![
+                StreamEvent::ContentDelta(content),
+                StreamEvent::Usage(usage),
+            ];
+            let finish = match tool_call {
+                Some(call) => {
+                    events.push(StreamEvent::ToolCallStart(call.clone()));
+                    FinishReason::ToolUse(vec![call])
+                }
+                None => FinishReason::Stop,
+            };
+            events.push(StreamEvent::Finish(finish));
+            Ok(Box::pin(futures::stream::iter(events.into_iter().map(Ok))))
+        }
+
+        fn id(&self) -> ProviderId {
+            ProviderId("costed-round-stream".to_string())
+        }
+
+        fn supports_streaming(&self) -> bool {
+            true
+        }
+
+        fn rate_card(&self) -> &RateCard {
+            &self.rate_card
+        }
+    }
+
+    /// A cancel boundary the consumer can stop at.
+    enum StopAt {
+        /// Stop after the first content delta — nothing committed.
+        Precommit,
+        /// Stop at StageEnd{CostGateFinalize, ok:true} — durable commit done,
+        /// Receipt notification never delivered.
+        FinalizeBeforeReceipt,
+        /// Consume to EOF — every Receipt delivered.
+        PostReceipt,
+    }
+
+    fn test_dirs(temp: &tempfile::TempDir) -> StateDirs {
+        let root = temp.path().canonicalize().expect("canonical tempdir");
+        StateDirs {
+            memory: root.join("memory"),
+            journals: root.join("journals"),
+            receipts: root.join("receipts"),
+            keys: root.join("keys"),
+            root,
+        }
+    }
+
+    /// Seed a durable `shell.run` grant (ledger entry + chained
+    /// `tool.grant.allow.v1` receipt) exactly as `ardur grant allow` would,
+    /// so the engine's registry really carries the tool the scripted provider
+    /// asks for and the later tool round runs through the real owning stream.
+    fn seed_shell_grant(dirs: &StateDirs, scope: &str) {
+        use ardur_receipt::{
+            CostTuple as ReceiptCost, HolderId, Sha256Digest, TokenId, VerbObject,
+        };
+        let subject = dirs.local_subject();
+        let granted_at_ms = 1_u64;
+        let payload = serde_json::json!({
+            "tool": "shell.run",
+            "capabilities": ["cap.shell_exec", "cap.process_spawn"],
+            "scope": scope,
+            "subject": subject,
+            "granted_at_ms": granted_at_ms,
+        });
+        let key = dirs.load_or_create_receipt_key().expect("receipt key");
+        let writer = ardur_fused_runtime::ControlReceiptWriter::open(&dirs.receipt_log(), &key)
+            .expect("grant receipt writer");
+        let receipt = writer
+            .mint(
+                VerbObject::new("tool.grant.allow.v1").expect("verb"),
+                Sha256Digest::of(&serde_json::to_vec(&payload).expect("payload serializes")),
+                HolderId(subject.clone()),
+                TokenId(uuid::Uuid::from_bytes(*b"ardur-op-grant!!")),
+                None,
+                ReceiptCost {
+                    tokens_in: 0,
+                    tokens_out: 0,
+                    cents: 0,
+                    wall_ms: 0,
+                    attention_score: 0,
+                },
+                granted_at_ms,
+            )
+            .expect("grant receipt mints");
+        let ledger = serde_json::json!([{
+            "tool": "shell.run",
+            "capabilities": ["cap.shell_exec", "cap.process_spawn"],
+            "scope": scope,
+            "subject": subject,
+            "granted_at_ms": granted_at_ms,
+            "receipt_id": receipt.receipt_id.to_string(),
+        }]);
+        std::fs::write(
+            dirs.root.join("grants.json"),
+            serde_json::to_vec_pretty(&ledger).expect("ledger serializes"),
+        )
+        .expect("grant ledger written");
+    }
+
+    fn journal_file(temp: &tempfile::TempDir, engine: &FusedEngine) -> PathBuf {
+        temp.path()
+            .join("journals/sessions")
+            .join(engine.session_id().0.to_string())
+            .join("journal.jsonl")
+    }
+
+    fn read_journal(path: &std::path::Path) -> Vec<JournalEntry> {
+        std::fs::read_to_string(path)
+            .expect("journal readable")
+            .lines()
+            .map(|l| serde_json::from_str(l).expect("journal line parses"))
+            .collect()
+    }
+
+    fn assistant_rounds(entries: &[JournalEntry]) -> Vec<String> {
+        entries
+            .iter()
+            .filter_map(|e| match e {
+                JournalEntry::AssistantMessage { content, .. } => Some(content.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn ledger_cents(entries: &[JournalEntry]) -> u64 {
+        durable_committed_cents(entries)
+    }
+
+    async fn engine_with(cents: u64) -> (tempfile::TempDir, FusedEngine) {
+        // The holder budget must cover a per-round envelope reservation for
+        // every round of a multi-round turn (the envelope is reserved per
+        // round, cumulatively against the holder), not just one round's price.
+        let holder_cents = 100 * (cents + 14) / 14 + 100;
+        engine_with_budget(cents, holder_cents).await
+    }
+
+    async fn engine_with_budget(cents: u64, holder_cents: u64) -> (tempfile::TempDir, FusedEngine) {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dirs = test_dirs(&temp);
+        dirs.create().expect("state tree");
+        dirs.write_starter_cedar_policy_if_absent().expect("policy");
+        seed_shell_grant(&dirs, "echo");
+        let engine = FusedEngine::new_with_provider(
+            &Config::default(),
+            &dirs,
+            holder_cents,
+            std::sync::Arc::new(CostedRoundProvider::new(cents)),
+        )
+        .await
+        .expect("engine");
+        (temp, engine)
+    }
+
+    /// Drive one streamed turn to `stop`, dropping the owning stream by
+    /// returning early inside `consume_stream` (the same drop the REPL's
+    /// cancelled future produces), then settle exactly as the REPL does.
+    async fn turn_at_boundary(
+        engine: &FusedEngine,
+        state: &mut ReplState,
+        history: &mut Vec<ChatMessage>,
+        stop: StopAt,
+    ) {
+        let baseline = engine.replayed_entries().await.expect("baseline replay");
+        let outcome = engine
+            .consume_stream(history, async |source| {
+                let mut updates = crate::UpdateStream::new(source);
+                while let Some(update) = updates.next().await {
+                    match (&stop, &update) {
+                        (StopAt::Precommit, crate::Update::ContentDelta(_)) => {
+                            return Ok(updates.into_outcome());
+                        }
+                        (
+                            StopAt::FinalizeBeforeReceipt,
+                            crate::Update::StageEnd {
+                                stage: StageKind::CostGateFinalize,
+                                ok: true,
+                            },
+                        ) => return Ok(updates.into_outcome()),
+                        _ => {}
+                    }
+                }
+                Ok(updates.into_outcome())
+            })
+            .await
+            .expect("streamed turn");
+        let replayed = engine.replayed_entries().await.expect("post replay");
+        // The same settle the REPL performs in run_streamed_message.
+        let settlement = settle_streamed_turn(Some(&baseline), Some(&replayed))
+            .expect("journal replay available");
+        if settlement.drop_user {
+            history.pop();
+        } else {
+            history.extend(
+                settlement
+                    .committed_rounds
+                    .into_iter()
+                    .map(ChatMessage::assistant),
+            );
+        }
+        if let Some(cents) = settlement.committed_cents {
+            if let Some(usage) = outcome.usage.filter(|_| cents > 0) {
+                state.cost.record(
+                    u64::from(usage.tokens_in),
+                    u64::from(usage.tokens_out),
+                    cents as f64 / 100.0,
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn precommit_cancel_drops_user_and_charges_nothing() {
+        let holder_cents = 250_u64;
+        let (temp, engine) = engine_with_budget(7, holder_cents).await;
+        let mut state = ReplState {
+            theme: Theme::default(),
+            cost: SessionCost::default(),
+            osc8: false,
+        };
+        let mut history = vec![ChatMessage::user("precommit question")];
+        turn_at_boundary(&engine, &mut state, &mut history, StopAt::Precommit).await;
+        assert!(
+            history.is_empty(),
+            "no unanswered user message may survive a precommit cancel"
+        );
+        let entries = read_journal(&journal_file(&temp, &engine));
+        assert!(
+            assistant_rounds(&entries).is_empty(),
+            "nothing committed pre-receipt-boundary"
+        );
+        assert_eq!(state.cost.dollars, 0.0, "nothing displayed as committed");
+        assert_eq!(state.cost.turns, 0);
+        assert_eq!(
+            engine.remaining_cents(),
+            holder_cents,
+            "reservation released; full holder budget restored"
+        );
+        let status = engine.settlement_supervisor().status();
+        assert!(
+            status.turns.is_empty() && status.busy.is_none() && status.executing.is_none(),
+            "owning stream dropped and drained: {status:?}"
+        );
+        engine.shutdown().await.expect("clean shutdown");
+    }
+
+    #[tokio::test]
+    async fn finalize_before_receipt_keeps_committed_turn_and_ledger_cost() {
+        let (temp, engine) = engine_with(7).await;
+        let mut state = ReplState {
+            theme: Theme::default(),
+            cost: SessionCost::default(),
+            osc8: false,
+        };
+        let mut history = vec![ChatMessage::user("boundary question")];
+        turn_at_boundary(
+            &engine,
+            &mut state,
+            &mut history,
+            StopAt::FinalizeBeforeReceipt,
+        )
+        .await;
+        let entries = read_journal(&journal_file(&temp, &engine));
+        let rounds = assistant_rounds(&entries);
+        assert_eq!(rounds.len(), 1, "the durable commit landed: {entries:?}");
+        assert_eq!(rounds[0], "checking");
+        // Live next-turn history equals the reopened journal.
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[1].content, "checking");
+        assert_eq!(
+            journal_entries_to_history(&entries),
+            history,
+            "live history must equal a fresh journal replay"
+        );
+        // Nonzero usage: displayed committed cost equals the durable ledger.
+        assert_eq!(ledger_cents(&entries), 7);
+        assert_eq!(state.cost.dollars, 0.07);
+        assert_eq!(state.cost.turns, 1);
+        engine.shutdown().await.expect("clean shutdown");
+    }
+
+    #[tokio::test]
+    async fn post_receipt_full_turn_commits_all_rounds_without_double_charge() {
+        let (temp, engine) = engine_with(7).await;
+        let mut state = ReplState {
+            theme: Theme::default(),
+            cost: SessionCost::default(),
+            osc8: false,
+        };
+        let mut history = vec![ChatMessage::user("complete question")];
+        turn_at_boundary(&engine, &mut state, &mut history, StopAt::PostReceipt).await;
+        let entries = read_journal(&journal_file(&temp, &engine));
+        let rounds = assistant_rounds(&entries);
+        assert_eq!(rounds.len(), 2, "both rounds committed: {entries:?}");
+        assert_eq!(rounds[0], "checking");
+        assert_eq!(rounds[1], "final after tool");
+        assert_eq!(history.len(), 3);
+        assert_eq!(
+            journal_entries_to_history(&entries),
+            history,
+            "live history equals reopened journal"
+        );
+        // Round 2 only ran because round 1's shell.run tool executed and fed
+        // its result back — the tool evidence rides the bound receipt body.
+        assert_eq!(ledger_cents(&entries), 14, "two rounds at 7c");
+        assert_eq!(state.cost.dollars, 0.14, "no double charge");
+        assert_eq!(state.cost.turns, 1);
+        // Idempotent hydration: a second settle over the same journal delta
+        // cannot re-record cost (the delta is per-turn, not cumulative).
+        let again = settle_streamed_turn(Some(&entries), Some(&entries)).expect("re-settle");
+        assert!(
+            again.committed_rounds.is_empty(),
+            "an empty delta commits nothing"
+        );
+        assert_eq!(
+            again.committed_cents, None,
+            "an empty delta bills nothing further"
+        );
+        engine.shutdown().await.expect("clean shutdown");
+    }
+
+    #[tokio::test]
+    async fn speculative_trailing_text_never_becomes_committed() {
+        let (temp, engine) = engine_with(3).await;
+        let state = ReplState {
+            theme: Theme::default(),
+            cost: SessionCost::default(),
+            osc8: false,
+        };
+        let mut history = vec![ChatMessage::user("speculative")];
+        // Stop in round 2 after its content delta (speculative, uncommitted
+        // trailing text) but before its receipt: exactly the display-only
+        // residue the reducer must not promote.
+        let baseline = engine.replayed_entries().await.expect("baseline");
+        engine
+            .consume_stream(&history, async |source| {
+                let mut updates = crate::UpdateStream::new(source);
+                let mut receipts = 0;
+                let mut bail = false;
+                while let Some(update) = updates.next().await {
+                    match update {
+                        crate::Update::ReceiptMinted { .. } => receipts += 1,
+                        crate::Update::ContentDelta(_) if receipts >= 1 => bail = true,
+                        _ => {}
+                    }
+                    if bail {
+                        break;
+                    }
+                }
+                Ok(updates.into_outcome())
+            })
+            .await
+            .expect("streamed turn");
+        let replayed = engine.replayed_entries().await.expect("post replay");
+        let settlement = settle_streamed_turn(Some(&baseline), Some(&replayed)).expect("settle");
+        assert!(
+            !settlement.drop_user,
+            "round 1 committed, so the user message stays"
+        );
+        history.extend(
+            settlement
+                .committed_rounds
+                .into_iter()
+                .map(ChatMessage::assistant),
+        );
+        let entries = read_journal(&journal_file(&temp, &engine));
+        let rounds = assistant_rounds(&entries);
+        assert_eq!(rounds.len(), 1, "only the receipted round is committed");
+        assert_eq!(
+            history.len(),
+            2,
+            "speculative text did not commit: {history:?}"
+        );
+        assert!(
+            !history[1].content.contains("final"),
+            "the uncommitted round-2 trailing text must not appear in history"
+        );
+        let _ = state;
+        engine.shutdown().await.expect("clean shutdown");
+    }
+
+    #[test]
+    fn journal_delta_rejects_non_prefix_and_empty_inputs() {
+        let user = |text: &str| JournalEntry::UserMessage {
+            content: text.to_string(),
+            at: ardur_session_journals::UnixTsMillis(0),
+        };
+        // Prefix relationship: delta is the tail.
+        assert_eq!(journal_delta(&[], &[user("a")]).len(), 1);
+        assert_eq!(
+            journal_delta(&[user("a")], &[user("a"), user("b")]).len(),
+            1
+        );
+        // Non-prefix (truncation/corruption): no delta reported.
+        assert!(journal_delta(&[user("a"), user("a")], &[user("b")]).is_empty());
+        // Identical replays: empty delta.
+        assert!(journal_delta(&[user("a"), user("a")], &[user("a")]).is_empty());
+    }
+
+    #[test]
+    fn durable_committed_cents_ignores_refusals_and_operator_expense() {
+        let finalized = |cents: u64, reason: Option<String>| JournalEntry::CostFinalized {
+            reservation_id: ardur_session_journals::ReservationId::new(),
+            actual: ardur_cost_gate::CostTuple {
+                tokens_in: 0,
+                tokens_out: 0,
+                cents,
+                wall_ms: 0,
+                attention_score: 0,
+            },
+            refunded: ardur_cost_gate::CostDelta::full_credit(&ardur_cost_gate::CostTuple::ZERO),
+            at: ardur_session_journals::UnixTsMillis(0),
+            reason,
+        };
+        let operator = JournalEntry::OperatorExpense {
+            session_id: SessionId::new(),
+            reservation_id: ardur_session_journals::ReservationId::new(),
+            provider_cost: ardur_cost_gate::CostTuple {
+                tokens_in: 0,
+                tokens_out: 0,
+                cents: 9,
+                wall_ms: 0,
+                attention_score: 0,
+            },
+            class: "cancelled_precommit".to_string(),
+            reason: "settlement cancellation".to_string(),
+            at: ardur_session_journals::UnixTsMillis(0),
+        };
+        let entries = vec![
+            finalized(7, None),
+            finalized(4, Some("projection:cancelled".to_string())),
+            operator,
+        ];
+        assert_eq!(durable_committed_cents(&entries), 7);
     }
 }

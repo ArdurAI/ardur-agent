@@ -467,6 +467,48 @@ impl FusedEngine {
                 }
             };
 
+        Self::finish_wiring(
+            config,
+            dirs,
+            budget_cents,
+            session_id,
+            model,
+            provider,
+            offline,
+        )
+        .await
+    }
+
+    /// Complete engine wiring over an already-selected provider. gh#539: the
+    /// receipt-boundary regression tests inject a nonzero-usage streaming
+    /// provider through this seam — every other construction step is identical
+    /// to the env-selected path of
+    /// [`new_for_session`](Self::new_for_session).
+    #[cfg(test)]
+    pub(crate) async fn new_with_provider(
+        config: &Config,
+        dirs: &StateDirs,
+        budget_cents: u64,
+        provider: Arc<dyn Provider>,
+    ) -> Result<Self, CliError> {
+        let model = ModelId::new(&config.model);
+        Self::finish_wiring(config, dirs, budget_cents, None, model, provider, false).await
+    }
+
+    /// The shared tail of both constructors: instrumenting the provider, loading
+    /// keys/policies/grants, minting the session cap-token, provisioning the
+    /// budget, building the reconciled runtime, and recording session metadata.
+    /// `config` supplies the model name only at the call sites; the model is
+    /// passed through `model` here.
+    async fn finish_wiring(
+        _config: &Config,
+        dirs: &StateDirs,
+        budget_cents: u64,
+        session_id: Option<SessionId>,
+        model: ModelId,
+        provider: Arc<dyn Provider>,
+        offline: bool,
+    ) -> Result<Self, CliError> {
         // Instrument the selected provider so each dispatch emits a `provider.send`
         // span carrying the OpenTelemetry GenAI semconv attributes; those export to
         // an OTLP backend when `ARDUR_OTEL_ENABLED=true`, and otherwise route to the
@@ -1127,15 +1169,26 @@ impl FusedEngine {
         &self,
         history: &mut Vec<ChatMessage>,
     ) -> Result<(), CliError> {
+        self.replayed_entries()
+            .await
+            .map(|entries| *history = crate::journal_entries_to_history(&entries))
+    }
+
+    /// The drained, replayed journal entries for this session — the durable
+    /// ground truth [`reconcile_history`](Self::reconcile_history) rebuilds
+    /// history from, exposed so the REPL can also derive its committed-cost
+    /// tally from the same read (gh#539: displayed committed cost must equal
+    /// the durable ledger even when the Receipt notification was never
+    /// delivered).
+    pub(crate) async fn replayed_entries(
+        &self,
+    ) -> Result<Vec<ardur_session_journals::JournalEntry>, CliError> {
         self.settlements.drain().await?;
-        let entries = self
-            .settlements
+        self.settlements
             .journal
             .replay(self.session_id)
             .await
-            .map_err(|_| CliError::State("could not reconcile durable chat history".into()))?;
-        *history = crate::journal_entries_to_history(&entries);
-        Ok(())
+            .map_err(|_| CliError::State("could not reconcile durable chat history".into()))
     }
 
     /// Run one chat turn over `messages` through the full fused pipeline, then
