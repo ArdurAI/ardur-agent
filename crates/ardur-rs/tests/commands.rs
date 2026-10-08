@@ -118,3 +118,152 @@ async fn failures_emit_one_safe_envelope_and_correct_exit() {
     assert_eq!(out.status.code(), Some(2));
     object(&out);
 }
+
+fn stage3_object(out: &std::process::Output) -> Value {
+    let text = std::str::from_utf8(&out.stdout).unwrap();
+    assert_eq!(text.lines().count(), 1);
+    assert!(!text.contains("sensitive-canary"));
+    assert!(!text.contains("PRIVATE KEY"));
+    assert!(out.stderr.is_empty());
+    let result: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(result["version"], 1);
+    for field in [
+        "command",
+        "bot",
+        "runId",
+        "taskId",
+        "verdict",
+        "replyText",
+        "elapsedMs",
+        "failureReason",
+        "data",
+    ] {
+        assert!(result.get(field).is_some());
+    }
+    result
+}
+async fn setup() -> (FakeHome, tempfile::TempDir, std::path::PathBuf) {
+    let server = FakeHome::start(false).await;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let out = run(
+        &root,
+        &["pair", "--file", "-", "--json"],
+        Some(&server.code()),
+    )
+    .await;
+    assert!(out.status.success());
+    (server, temp, root)
+}
+#[tokio::test]
+async fn binary_stage3_commands_recovery_and_exact_envelope() {
+    let (server, _temp, root) = setup().await;
+    let sent = run(
+        &root,
+        &[
+            "send",
+            "bot",
+            "Reply ✓ 🚀",
+            "--request-id",
+            "stable-request-id-001",
+            "--wait",
+            "--json",
+        ],
+        None,
+    )
+    .await;
+    assert!(sent.status.success());
+    let result = stage3_object(&sent);
+    assert_eq!(result["replyText"], "Fixture answer ✓");
+    assert_eq!(result["command"], "send");
+    for (args, name) in [
+        (vec!["wait", "--run", "run", "--json"], "wait"),
+        (vec!["runs", "list", "--json"], "runs list"),
+        (vec!["runs", "show", "run", "--json"], "runs show"),
+        (vec!["tasks", "show", "task", "--json"], "tasks show"),
+        (vec!["stop", "task", "--json"], "stop"),
+    ] {
+        let out = run(&root, &args, None).await;
+        assert!(out.status.success());
+        assert_eq!(stage3_object(&out)["command"], name);
+    }
+    let out = run(&root, &["stop", "task"], None).await;
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        "Cancellation requested for task.\n"
+    );
+    assert_eq!(server.admissions.lock().unwrap().len(), 1);
+    let out = run(
+        &root,
+        &[
+            "send",
+            "bot",
+            "Reply ✓ 🚀",
+            "--request-id",
+            "stable-request-id-001",
+            "--json",
+        ],
+        None,
+    )
+    .await;
+    assert!(out.status.success());
+    assert_eq!(stage3_object(&out)["taskId"], "task");
+    let out = run(
+        &root,
+        &[
+            "send",
+            "bot",
+            "Changed",
+            "--request-id",
+            "stable-request-id-001",
+            "--json",
+        ],
+        None,
+    )
+    .await;
+    assert_eq!(out.status.code(), Some(4));
+    assert_eq!(stage3_object(&out)["verdict"], "error");
+}
+#[tokio::test]
+async fn binary_deadline_missing_answer_revocation_and_safe_usage_exits() {
+    let (server, _temp, root) = setup().await;
+    for args in [
+        vec!["send", "bot", "sensitive-canary", "--json"],
+        vec!["wait", "--run", "run", "--timeout", "0", "--json"],
+        vec!["wait", "--run", "run", "--timeout", "1.s", "--json"],
+        vec!["runs", "list", "--limit", "101", "--json"],
+        vec!["--json", "wait", "--sensitive-canary"],
+    ] {
+        let out = run(&root, &args, None).await;
+        assert_eq!(out.status.code(), Some(4));
+        stage3_object(&out);
+    }
+    server.run.lock().unwrap()["status"] = json!("running");
+    server.run.lock().unwrap()["state"] = json!("running");
+    let out = run(
+        &root,
+        &["wait", "--run", "run", "--timeout", "100ms", "--json"],
+        None,
+    )
+    .await;
+    assert_eq!(out.status.code(), Some(3));
+    assert_eq!(stage3_object(&out)["verdict"], "deadline");
+    assert!(
+        !server
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|v| v["operation"] == "stop")
+    );
+    server.run.lock().unwrap()["status"] = json!("completed");
+    server.run.lock().unwrap()["state"] = json!("done");
+    server.run.lock().unwrap()["messageId"] = Value::Null;
+    let out = run(&root, &["wait", "--run", "run", "--json"], None).await;
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(stage3_object(&out)["verdict"], "error");
+    server.set(Mode::Revoked);
+    let out = run(&root, &["runs", "show", "run", "--json"], None).await;
+    assert_eq!(out.status.code(), Some(4));
+    stage3_object(&out);
+}
