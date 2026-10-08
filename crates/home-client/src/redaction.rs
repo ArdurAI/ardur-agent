@@ -190,8 +190,8 @@ fn assignments(text: &str, command_output: bool) -> String {
         }
         let quote = bytes.get(start).copied().unwrap_or(0);
         let mut end;
-        let replacement;
-        if quote == b'"' || quote == b'\'' || (command_output && quote == b'\x60') {
+        let replacement = if quote == b'"' || quote == b'\'' || (command_output && quote == b'\x60')
+        {
             end = quoted_end(text, start);
             let closed = bytes.get(end) == Some(&quote);
             let value = &text[start + 1..end];
@@ -202,7 +202,7 @@ fn assignments(text: &str, command_output: bool) -> String {
             if closed && PLACEHOLDER.is_match(value) {
                 continue;
             }
-            replacement = format!(
+            format!(
                 "{}{REDACTED}{}",
                 quote as char,
                 if closed {
@@ -210,7 +210,7 @@ fn assignments(text: &str, command_output: bool) -> String {
                 } else {
                     String::new()
                 }
-            );
+            )
         } else {
             end = start;
             if quote == b'{' || quote == b'[' {
@@ -249,12 +249,12 @@ fn assignments(text: &str, command_output: bool) -> String {
             if end == start {
                 continue;
             }
-            replacement = if quoted.is_some() {
+            if quoted.is_some() {
                 format!("\"{REDACTED}\"")
             } else {
                 REDACTED.into()
-            };
-        }
+            }
+        };
         output.push_str(&text[copied..start]);
         output.push_str(&replacement);
         copied = end;

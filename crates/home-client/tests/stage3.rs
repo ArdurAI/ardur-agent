@@ -330,7 +330,7 @@ async fn leased_runs_project_and_wait_as_nonterminal() {
         }
     }
     for command in [wait(), send(true, "Leased task")] {
-        let (result, exit) = execute_device(&client, command, Duration::from_millis(100)).await;
+        let (result, exit) = execute_device(&client, command, Duration::from_secs(1)).await;
         assert_eq!(exit, 3);
         assert_eq!(result.verdict, "deadline");
         assert_eq!(result.json()["data"]["run"]["status"], "leased");
