@@ -46,18 +46,44 @@ pub fn default_config_dir() -> Result<PathBuf, Error> {
     }
 }
 #[cfg(unix)]
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct DiskState {
+struct DiskState<'a> {
     profile: Profile,
-    private_key: String,
+    #[serde(borrow)]
+    private_key: &'a serde_json::value::RawValue,
 }
 #[cfg(unix)]
-impl Drop for DiskState {
-    fn drop(&mut self) {
-        use zeroize::Zeroize;
-        self.private_key.zeroize();
+const MAX_KEY_BYTES: usize = 4096;
+#[cfg(unix)]
+fn read_key_bytes(raw: &str) -> Result<Zeroizing<Vec<u8>>, Error> {
+    // Borrow the raw JSON so even a rejected legacy string never enters the
+    // JSON string parser's unwiped scratch allocation.
+    let inner = raw
+        .strip_prefix('[')
+        .and_then(|v| v.strip_suffix(']'))
+        .ok_or(Error::Storage)?;
+    let mut bytes = Zeroizing::new(Vec::with_capacity(MAX_KEY_BYTES));
+    if !inner.trim().is_empty() {
+        for value in inner.split(',') {
+            if bytes.len() == MAX_KEY_BYTES {
+                return Err(Error::Storage);
+            }
+            let value = value.trim_matches([' ', '\n', '\r', '\t']);
+            if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(Error::Storage);
+            }
+            bytes.push(value.parse::<u8>().map_err(|_| Error::Storage)?);
+        }
     }
+    Ok(bytes)
+}
+#[cfg(unix)]
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DiskStateRef<'a> {
+    profile: &'a Profile,
+    private_key: &'a [u8],
 }
 #[cfg(unix)]
 mod unix {
@@ -168,35 +194,60 @@ mod unix {
             if file.metadata().map_err(|_| Error::Storage)?.len() > 65536 {
                 return Err(Error::Storage);
             }
-            let mut bytes = Zeroizing::new(Vec::new());
-            file.take(65537)
-                .read_to_end(&mut bytes)
-                .map_err(|_| Error::Storage)?;
-            if bytes.len() > 65536 {
+            // Fixed buffers also avoid freed copies of the encoded secret if
+            // the file grows during a read or serialization exceeds its bound.
+            let mut bytes = Zeroizing::new(vec![0; 65537]);
+            let mut file = file;
+            let mut len = 0;
+            while len < bytes.len() {
+                let read = file.read(&mut bytes[len..]).map_err(|_| Error::Storage)?;
+                if read == 0 {
+                    break;
+                }
+                len += read;
+            }
+            if len > 65536 {
                 return Err(Error::Storage);
             }
-            let disk: DiskState = serde_json::from_slice(&bytes).map_err(|_| Error::Storage)?;
+            bytes.truncate(len);
+            let disk: DiskState<'_> = serde_json::from_slice(&bytes).map_err(|_| Error::Storage)?;
+            let mut key_bytes = read_key_bytes(disk.private_key.get())?;
+            // Transfer the allocation into String rather than copying the PEM.
+            let private_key = String::from_utf8(std::mem::take(&mut *key_bytes))
+                .map(Zeroizing::new)
+                .map_err(|error| {
+                    let _wipe = Zeroizing::new(error.into_bytes());
+                    Error::Storage
+                })?;
             let home = StoredHome {
-                profile: disk.profile.clone(),
-                private_key: Zeroizing::new(disk.private_key.clone()),
+                profile: disk.profile,
+                private_key,
             };
             home.validate()?;
             Ok(home)
         }
         fn save(&self, home: &StoredHome) -> Result<(), Error> {
+            if home.private_key.len() > MAX_KEY_BYTES {
+                return Err(Error::Storage);
+            }
             home.validate()?;
             let dir = directory(&self.path, true)?;
             read_existing(&dir)?;
-            let bytes = Zeroizing::new(
-                serde_json::to_vec(&DiskState {
-                    profile: home.profile.clone(),
-                    private_key: home.private_key.to_string(),
-                })
-                .map_err(|_| Error::Storage)?,
-            );
-            if bytes.len() > 65536 {
-                return Err(Error::Storage);
-            }
+            let mut bytes = Zeroizing::new(vec![0; 65536]);
+            let len = {
+                // A slice writer cannot grow or leave reallocated encoded keys.
+                let mut output = &mut bytes[..];
+                serde_json::to_writer(
+                    &mut output,
+                    &DiskStateRef {
+                        profile: &home.profile,
+                        private_key: home.private_key.as_bytes(),
+                    },
+                )
+                .map_err(|_| Error::Storage)?;
+                65536 - output.len()
+            };
+            bytes.truncate(len);
             let temp = CString::new(format!(".pair-{}", home_protocol::nonce()))
                 .map_err(|_| Error::Storage)?;
             let dest = CString::new("paired-home.json").expect("literal");

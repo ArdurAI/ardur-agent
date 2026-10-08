@@ -74,3 +74,21 @@ fn invalid_key_and_oversize_are_safe_errors() {
     let e = store.load().err().unwrap();
     assert!(!e.to_string().contains("sensitive-canary"));
 }
+
+#[test]
+fn bounded_serialization_preserves_existing_state() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = FileStore::new(temp.path().canonicalize().unwrap().join("ardur"));
+    store.save(&home()).unwrap();
+    let path = store.path().join("paired-home.json");
+    let before = std::fs::read(&path).unwrap();
+    let mut oversized = home();
+    oversized.profile.url = format!("https://{}.test", "a".repeat(65536));
+    oversized.validate().unwrap();
+    assert!(store.save(&oversized).is_err());
+    assert!(std::fs::read(&path).unwrap() == before);
+    assert_eq!(store.load().unwrap().profile.grant_id, "grant");
+    oversized.private_key = zeroize::Zeroizing::new("x".repeat(4097));
+    assert!(store.save(&oversized).is_err());
+    assert!(std::fs::read(&path).unwrap() == before);
+}
