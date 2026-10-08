@@ -85,7 +85,12 @@ fn duration(raw: &str) -> Result<std::time::Duration, String> {
     } else {
         (raw, 1000.0)
     };
-    if number.is_empty() || !number.bytes().all(|b| b.is_ascii_digit() || b == b'.') {
+    let digits = |part: &str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
+    let mut parts = number.split('.');
+    let valid = parts.next().is_some_and(digits)
+        && parts.next().is_none_or(digits)
+        && parts.next().is_none();
+    if !valid {
         return Err("Choose a positive timeout.".into());
     }
     let millis = number
@@ -295,4 +300,58 @@ async fn main() {
     };
     let exit = report(command, args.json, execute(old_command).await);
     std::process::exit(exit);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Args, duration};
+    use clap::Parser;
+    #[test]
+    fn timeout_grammar_requires_digits_on_both_sides_of_decimal() {
+        for input in [
+            "1.s",
+            "1.ms",
+            "1.m",
+            "1.",
+            ".1s",
+            "..1s",
+            "1..2s",
+            "+1s",
+            "-1s",
+            "1e3s",
+            " 1s",
+            "1s ",
+            "1 s",
+            "NaNs",
+            "infs",
+            "0",
+            "0.0001s",
+            "2147483648ms",
+        ] {
+            assert!(
+                duration(input).is_err(),
+                "accepted malformed timeout: {input}"
+            );
+            assert!(
+                Args::try_parse_from(["ardur-rs", "wait", "--run", "run", "--timeout", input])
+                    .is_err()
+            );
+        }
+        for (input, millis) in [
+            ("1", 1000),
+            ("1s", 1000),
+            ("1.5s", 1500),
+            ("0.001s", 1),
+            ("1ms", 1),
+            ("0.5m", 30000),
+            ("0001.0s", 1000),
+            ("2147483647ms", 2147483647),
+        ] {
+            assert_eq!(duration(input).unwrap().as_millis(), millis, "{input}");
+            assert!(
+                Args::try_parse_from(["ardur-rs", "wait", "--run", "run", "--timeout", input])
+                    .is_ok()
+            );
+        }
+    }
 }
