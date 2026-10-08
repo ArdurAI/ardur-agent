@@ -1,6 +1,8 @@
 //! Paired-home client only. No bot execution, database, or provider dependencies.
 mod commands;
-pub use commands::{CommandResult, DeviceCommand, execute_device, safe_output};
+mod redaction;
+pub use commands::{CommandResult, DeviceCommand, execute_device};
+pub use redaction::{redact, safe_output};
 mod storage;
 mod transport;
 use home_protocol::{

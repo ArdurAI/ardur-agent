@@ -287,5 +287,5 @@ fn key_material_is_redacted_before_serialization() {
     let result = home_client::safe_output(
         "visible -----BEGIN PRIVATE KEY-----\nsynthetic\n-----END PRIVATE KEY----- Bearer synthetic-token-000000000000",
     );
-    assert_eq!(result, "visible [redacted] [redacted]");
+    assert_eq!(result, "visible [Redacted] Bearer [Redacted]");
 }

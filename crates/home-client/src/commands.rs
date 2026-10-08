@@ -1,3 +1,4 @@
+use crate::redaction::redact;
 use crate::{Error, HomeClient};
 use home_protocol::{
     DeviceRunDetail, DispatchReceipt, DispatchState, FailureCategory, MessagePage, RunFailure,
@@ -91,26 +92,24 @@ impl CommandResult {
         (result, stage3_exit(error))
     }
     pub fn human(&self) -> String {
-        if let Some(reason) = &self.failure_reason {
-            return reason.clone();
+        // Redact fields before either projection; serialized escapes never hide a credential.
+        let value = self.json();
+        if let Some(reason) = value["failureReason"].as_str() {
+            return reason.into();
         }
-        if !self.reply_text.is_empty() {
-            return self.reply_text.clone();
+        let reply = value["replyText"].as_str().unwrap_or("");
+        if !reply.is_empty() {
+            return reply.into();
         }
+        let task = value["taskId"].as_str().unwrap_or("");
+        let run = value["runId"].as_str().unwrap_or("");
         if self.command == "send" {
-            return format!(
-                "Task {}\nRun {}",
-                self.task_id.as_deref().unwrap_or(""),
-                self.run_id.as_deref().unwrap_or("")
-            );
+            return format!("Task {task}\nRun {run}");
         }
         if self.command == "stop" {
-            return format!(
-                "Cancellation requested for {}.",
-                self.task_id.as_deref().unwrap_or("")
-            );
+            return format!("Cancellation requested for {task}.");
         }
-        self.data.to_string()
+        value["data"].to_string()
     }
     pub fn json(&self) -> Value {
         redact(serde_json::to_value(self).expect("result fields serialize"))
@@ -126,23 +125,6 @@ fn stage3_exit(error: Error) -> i32 {
         | Error::Access => 4,
         _ => 2,
     }
-}
-/// Redact each string before JSON encoding; never inspect escaped serialized prose.
-fn redact(value: Value) -> Value {
-    match value {
-        Value::String(s) => Value::String(safe_output(&s)),
-        Value::Array(a) => Value::Array(a.into_iter().map(redact).collect()),
-        Value::Object(o) => Value::Object(o.into_iter().map(|(k, v)| (k, redact(v))).collect()),
-        other => other,
-    }
-}
-pub fn safe_output(s: &str) -> String {
-    use std::sync::LazyLock;
-    static KEYS: LazyLock<regex::Regex> = LazyLock::new(|| {
-        regex::Regex::new(
-        r"(?is)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|$)|\b(?:sk-[a-z0-9_-]{16,}|Bearer\s+[a-z0-9._~+/-]{16,})").expect("fixed redaction regex")
-    });
-    KEYS.replace_all(s, "[redacted]").into_owned()
 }
 pub async fn execute_device(
     client: &HomeClient,

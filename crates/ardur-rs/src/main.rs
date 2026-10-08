@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 use home_client::{
     CommandResult, DeviceCommand, Error, FileStore, HomeClient, SecretStore, default_config_dir,
-    execute_device, human_text, pair_device, safe_output,
+    execute_device, human_text, pair_device, redact,
 };
 use serde_json::{Value, json};
 use std::io::Read;
@@ -133,7 +133,7 @@ fn print_device(result: CommandResult, json_mode: bool) {
     if json_mode {
         println!("{}", result.json());
     } else {
-        println!("{}", human_text(&safe_output(&result.human())));
+        println!("{}", human_text(&result.human()));
     }
 }
 fn input(file: &str) -> Result<Zeroizing<String>, Error> {
@@ -190,6 +190,7 @@ async fn execute(command: Command) -> Result<Value, Error> {
 fn report(command: &str, json_mode: bool, result: Result<Value, Error>) -> i32 {
     match result {
         Ok(data) => {
+            let data = redact(data);
             if json_mode {
                 println!(
                     "{}",

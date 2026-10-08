@@ -66,7 +66,7 @@ async fn installed_binary_pairs_from_stdin_and_file_then_reads_signed_state() {
         assert!(out.status.success());
         assert_eq!(
             object(&out)["data"],
-            json!({"homeName":server.payload.home_name,"instanceId":"fake-home","paired":true})
+            json!({"homeName":home_client::safe_output(&server.payload.home_name),"instanceId":"fake-home","paired":true})
         );
         for command in [vec!["status", "--json"], vec!["bots", "list", "--json"]] {
             let out = run(&root, &command, None).await;
@@ -266,4 +266,58 @@ async fn binary_deadline_missing_answer_revocation_and_safe_usage_exits() {
     let out = run(&root, &["runs", "show", "run", "--json"], None).await;
     assert_eq!(out.status.code(), Some(4));
     stage3_object(&out);
+}
+
+#[tokio::test]
+async fn saved_answer_corpus_never_leaks_credentials_on_stdout() {
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../home-client/tests/fixtures/redaction.json"
+    ))
+    .unwrap();
+    let saved = &fixture["savedAnswer"];
+    let server = FakeHome::start(false).await;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let out = run(
+        &root,
+        &["pair", "--file", "-", "--json"],
+        Some(&server.code()),
+    )
+    .await;
+    assert!(out.status.success());
+    server.messages.lock().unwrap()["messages"][0]["blocks"][0]["text"] = saved["input"].clone();
+    for json_mode in [false, true] {
+        for command in [
+            vec![
+                "send",
+                "bot",
+                "Fixture",
+                "--request-id",
+                "corpus-request-001",
+                "--wait",
+            ],
+            vec!["wait", "--run", "run"],
+        ] {
+            let mut args = command;
+            if json_mode {
+                args.push("--json");
+            }
+            let out = run(&root, &args, None).await;
+            assert_eq!(out.status.code(), Some(0));
+            assert!(out.stderr.is_empty());
+            let stdout = std::str::from_utf8(&out.stdout).unwrap();
+            for credential in saved["credentials"].as_array().unwrap() {
+                assert!(
+                    !stdout.contains(credential.as_str().unwrap()),
+                    "synthetic credential leaked"
+                );
+            }
+            if json_mode {
+                assert_eq!(stage3_object(&out)["replyText"], saved["expected"]);
+            } else {
+                let expected = home_client::human_text(saved["expected"].as_str().unwrap()) + "\n";
+                assert_eq!(stdout, expected);
+            }
+        }
+    }
 }
