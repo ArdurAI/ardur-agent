@@ -23,6 +23,27 @@ if (process.argv[3] === "--verify-rust") {
     if (verifyDeviceSignature(v.publicKey, v.text + "changed", v.signature)) throw new Error("Alteration accepted");
   }
   console.log("TypeScript server verifier accepted all Rust signatures; alterations rejected.");
+} else if (process.argv[3] === "--stage3") {
+  const raw = readFileSync(resolve(oracle, "apps/cli/fixtures/device-operations.json"), "utf8");
+  const fixture = JSON.parse(raw);
+  const keys = crypto.createDeviceKeys();
+  for (const r of fixture.requests) {
+    if (contracts.canonicalDispatchJson(r.body) !== r.canonicalBody ||
+        contracts.deviceSignedText(fixture.instanceId, fixture.proof, r.operation, r.body) !== r.signedText) throw new Error("Stage 3 oracle mismatch");
+    r.signature = crypto.signRequest({instanceId:fixture.instanceId,grantId:fixture.proof.grantId,privateKey:keys.privateKey},fixture.proof.nonce,fixture.proof.timestamp,r.operation,r.body).signature;
+    if (!verifyDeviceSignature(keys.publicKey,r.signedText,r.signature)) throw new Error("Stage 3 signature mismatch");
+  }
+  for (const r of fixture.rejected) {
+    let refused = false;
+    try { contracts.canonicalDispatchJson(r.body); } catch { refused = true; }
+    if (!refused) throw new Error("Malformed Unicode accepted");
+  }
+  writeFileSync("crates/home-protocol/tests/fixtures/device-operations.json",raw);
+  delete fixture.rejected;
+  fixture.publicKey = keys.publicKey;
+  fixture.provenance = {repository:"ArdurAI/ardur-bot",revision,source:"apps/cli/fixtures/device-operations.json"};
+  writeFileSync("crates/home-protocol/tests/fixtures/typescript-stage3.json",JSON.stringify(fixture,null,2)+"\n");
+  console.log("Copied Stage 3 golden bytes and generated public TypeScript signatures.");
 } else if (process.argv[3] === "--numbers") {
   const inputs = ["333333333.33333329","8.256320039984491e-05","0.84551240822557006","1.2345678901234568","2.2250738585072014e-308"];
   const fixture = {schemaVersion:1,provenance:{repository:"ArdurAI/ardur-bot",revision,source:"packages/contracts/src/dispatch.ts"},cases:inputs.map(raw=>({raw,canonical:contracts.canonicalDispatchJson(JSON.parse(raw))}))};

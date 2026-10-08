@@ -1,0 +1,112 @@
+{
+  "version": 1,
+  "instanceId": "fixture-home",
+  "proof": {
+    "grantId": "fixture-device",
+    "nonce": "fixture-nonce-00000000000000000000",
+    "timestamp": 1790000000000
+  },
+  "requests": [
+    {
+      "operation": "dispatch",
+      "body": {
+        "clientNonce": "fixture-request-0001",
+        "botId": "fixture-bot",
+        "text": "Reply ✓ 🚀"
+      },
+      "canonicalBody": "{\"botId\":\"fixture-bot\",\"clientNonce\":\"fixture-request-0001\",\"text\":\"Reply ✓ 🚀\"}",
+      "signedText": "[\"ardur-device-v1\",\"fixture-home\",\"fixture-device\",\"fixture-nonce-00000000000000000000\",1790000000000,\"dispatch\",{\"botId\":\"fixture-bot\",\"clientNonce\":\"fixture-request-0001\",\"text\":\"Reply ✓ 🚀\"}]"
+    },
+    {
+      "operation": "runs/get",
+      "body": {
+        "runId": "fixture-run"
+      },
+      "canonicalBody": "{\"runId\":\"fixture-run\"}",
+      "signedText": "[\"ardur-device-v1\",\"fixture-home\",\"fixture-device\",\"fixture-nonce-00000000000000000000\",1790000000000,\"runs/get\",{\"runId\":\"fixture-run\"}]"
+    },
+    {
+      "operation": "tasks/get",
+      "body": {
+        "taskId": "fixture-task"
+      },
+      "canonicalBody": "{\"taskId\":\"fixture-task\"}",
+      "signedText": "[\"ardur-device-v1\",\"fixture-home\",\"fixture-device\",\"fixture-nonce-00000000000000000000\",1790000000000,\"tasks/get\",{\"taskId\":\"fixture-task\"}]"
+    },
+    {
+      "operation": "runs/list",
+      "body": {},
+      "canonicalBody": "{}",
+      "signedText": "[\"ardur-device-v1\",\"fixture-home\",\"fixture-device\",\"fixture-nonce-00000000000000000000\",1790000000000,\"runs/list\",{}]"
+    },
+    {
+      "operation": "runs/list",
+      "body": {
+        "cursor": "fixture-run",
+        "limit": 2
+      },
+      "canonicalBody": "{\"cursor\":\"fixture-run\",\"limit\":2}",
+      "signedText": "[\"ardur-device-v1\",\"fixture-home\",\"fixture-device\",\"fixture-nonce-00000000000000000000\",1790000000000,\"runs/list\",{\"cursor\":\"fixture-run\",\"limit\":2}]"
+    },
+    {
+      "operation": "messages/get",
+      "body": {
+        "botId": "fixture-bot",
+        "threadId": "fixture-thread",
+        "around": {
+          "messageId": "fixture-answer"
+        }
+      },
+      "canonicalBody": "{\"around\":{\"messageId\":\"fixture-answer\"},\"botId\":\"fixture-bot\",\"threadId\":\"fixture-thread\"}",
+      "signedText": "[\"ardur-device-v1\",\"fixture-home\",\"fixture-device\",\"fixture-nonce-00000000000000000000\",1790000000000,\"messages/get\",{\"around\":{\"messageId\":\"fixture-answer\"},\"botId\":\"fixture-bot\",\"threadId\":\"fixture-thread\"}]"
+    },
+    {
+      "operation": "messages/get",
+      "body": {
+        "groupId": "fixture-room",
+        "threadId": "fixture-thread",
+        "before": 12
+      },
+      "canonicalBody": "{\"before\":12,\"groupId\":\"fixture-room\",\"threadId\":\"fixture-thread\"}",
+      "signedText": "[\"ardur-device-v1\",\"fixture-home\",\"fixture-device\",\"fixture-nonce-00000000000000000000\",1790000000000,\"messages/get\",{\"before\":12,\"groupId\":\"fixture-room\",\"threadId\":\"fixture-thread\"}]"
+    },
+    {
+      "operation": "stop",
+      "body": {
+        "taskId": "fixture-task"
+      },
+      "canonicalBody": "{\"taskId\":\"fixture-task\"}",
+      "signedText": "[\"ardur-device-v1\",\"fixture-home\",\"fixture-device\",\"fixture-nonce-00000000000000000000\",1790000000000,\"stop\",{\"taskId\":\"fixture-task\"}]"
+    }
+  ],
+  "rejected": [
+    {
+      "name": "lone-high-value",
+      "body": {
+        "text": "\ud800"
+      },
+      "error": "Use well-formed Unicode strings."
+    },
+    {
+      "name": "lone-high-key",
+      "body": {
+        "\ud800": "value"
+      },
+      "error": "Use well-formed Unicode strings."
+    },
+    {
+      "name": "lone-low-value",
+      "body": {
+        "text": "\udfff"
+      },
+      "error": "Use well-formed Unicode strings."
+    },
+    {
+      "name": "lone-low-key",
+      "body": {
+        "\udfff": "value"
+      },
+      "error": "Use well-formed Unicode strings."
+    }
+  ]
+}
