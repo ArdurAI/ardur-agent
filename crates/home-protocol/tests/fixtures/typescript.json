@@ -1,0 +1,95 @@
+{
+  "schemaVersion": 1,
+  "provenance": {
+    "repository": "ArdurAI/ardur-bot",
+    "revision": "158ec7beb782ea8e95c8ae9b88d1568b10b4ee9f",
+    "sources": [
+      "apps/cli/src/crypto.ts",
+      "apps/cli/src/client.ts",
+      "packages/contracts/src/dispatch.ts",
+      "packages/db/src/device-grants.ts"
+    ]
+  },
+  "homeKeyAlgorithm": "rsa",
+  "payload": {
+    "version": 1,
+    "challenge": "synthetic-challenge-synthetic-challenge-synthetic-challenge-",
+    "instanceId": "fixture-home",
+    "homeName": "Home 雪",
+    "fingerprint": "28c48ce278a3f9953290d361fbe5c2c80241d164474a6e4b7e0ff465eb840376",
+    "certificateFingerprint": "94d75476bbf5432c14baeddeea0ec07e16738b931c16b4a626d73b68f1e90946",
+    "hints": [
+      "https://home.example.test"
+    ]
+  },
+  "code": "eyJ2ZXJzaW9uIjoxLCJjaGFsbGVuZ2UiOiJzeW50aGV0aWMtY2hhbGxlbmdlLXN5bnRoZXRpYy1jaGFsbGVuZ2Utc3ludGhldGljLWNoYWxsZW5nZS0iLCJpbnN0YW5jZUlkIjoiZml4dHVyZS1ob21lIiwiaG9tZU5hbWUiOiJIb21lIOmbqiIsImZpbmdlcnByaW50IjoiMjhjNDhjZTI3OGEzZjk5NTMyOTBkMzYxZmJlNWMyYzgwMjQxZDE2NDQ3NGE2ZTRiN2UwZmY0NjVlYjg0MDM3NiIsImNlcnRpZmljYXRlRmluZ2VycHJpbnQiOiI5NGQ3NTQ3NmJiZjU0MzJjMTRiYWVkZGVlYTBlYzA3ZTE2NzM4YjkzMWMxNmI0YTYyNmQ3M2I2OGYxZTkwOTQ2IiwiaGludHMiOlsiaHR0cHM6Ly9ob21lLmV4YW1wbGUudGVzdCJdfQ",
+  "publicKey": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEDmFSZ3KV9XQOIAAnm50M4DxOnoCpgxaCWeDkbkDjkGLza0p0pXhEko4LJbcX8U+gwecrYXzpJ0uspb9G8trq+A==",
+  "presencePublicKey": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE3NIxK68Ba0N1QCg+r2lONnOOn041l/sMDC4sUQrCjZcsHfuveEgzzYNAlf4uieTk+bqH41//vblc2mhnd8LSJg==",
+  "pairingText": "[\"ardur-pair-v1\",\"fixture-home\",\"synthetic-challenge-synthetic-challenge-synthetic-challenge-\",\"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEDmFSZ3KV9XQOIAAnm50M4DxOnoCpgxaCWeDkbkDjkGLza0p0pXhEko4LJbcX8U+gwecrYXzpJ0uspb9G8trq+A==\",\"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE3NIxK68Ba0N1QCg+r2lONnOOn041l/sMDC4sUQrCjZcsHfuveEgzzYNAlf4uieTk+bqH41//vblc2mhnd8LSJg==\"]",
+  "pairingSignature": "MEQCIAlNIZFf2807OkjwhMm0u3knpbdpbVBxaDSiLRBsErQZAiAN/fNJlEbsBcEvH6bgLReWULje1o+jA1j4R/pJT0iO1Q==",
+  "proof": {
+    "grantId": "fixture-grant",
+    "nonce": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn",
+    "timestamp": 1791429078000
+  },
+  "requests": [
+    {
+      "body": {
+        "text": "雪 😀 é \u0000  ",
+        "nested": {
+          "z": [
+            true,
+            null,
+            {
+              "β": "value"
+            }
+          ],
+          "a": 1
+        }
+      },
+      "canonical": "{\"nested\":{\"a\":1,\"z\":[true,null,{\"β\":\"value\"}]},\"text\":\"雪 😀 é \\u0000  \"}",
+      "text": "[\"ardur-device-v1\",\"fixture-home\",\"fixture-grant\",\"nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn\",1791429078000,\"rpc\",{\"nested\":{\"a\":1,\"z\":[true,null,{\"β\":\"value\"}]},\"text\":\"雪 😀 é \\u0000  \"}]",
+      "signature": "MEUCIQDghykbUo9fnN6sz/jIt3EEw9Mwx8fCZBHjaN3rsou1GQIgdzS60D7t0UzzbL9tJay9JaAIMUWZzmv7XG431MMLK/g="
+    },
+    {
+      "body": {
+        "2": 3,
+        "10": 4,
+        "": 1,
+        "😀": 2,
+        "numbers": [
+          0,
+          1e-7,
+          0.000001,
+          100000000000000000000,
+          1e+21,
+          9007199254740991,
+          5e-324,
+          1.7976931348623157e+308
+        ]
+      },
+      "canonical": "{\"10\":4,\"2\":3,\"numbers\":[0,1e-7,0.000001,100000000000000000000,1e+21,9007199254740991,5e-324,1.7976931348623157e+308],\"😀\":2,\"\":1}",
+      "text": "[\"ardur-device-v1\",\"fixture-home\",\"fixture-grant\",\"nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn\",1791429078000,\"rpc\",{\"10\":4,\"2\":3,\"numbers\":[0,1e-7,0.000001,100000000000000000000,1e+21,9007199254740991,5e-324,1.7976931348623157e+308],\"😀\":2,\"\":1}]",
+      "signature": "MEUCIB68/vBHF+j4jSPc90QEaFLHLXzk+eMN7rZCzIo5JjhIAiEAt9dTIGjhGAWZyXFRvQBK3+8iZZ9SMDQDBLCMX5mT7WY="
+    },
+    {
+      "body": {
+        "procedure": "bots/list",
+        "input": {}
+      },
+      "canonical": "{\"input\":{},\"procedure\":\"bots/list\"}",
+      "text": "[\"ardur-device-v1\",\"fixture-home\",\"fixture-grant\",\"nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn\",1791429078000,\"rpc\",{\"input\":{},\"procedure\":\"bots/list\"}]",
+      "signature": "MEYCIQD/qnWTeD+1CYdNAx2aOyebPB6TpJWRzfKjunHGXaY7lwIhAKwwQad55Nkln+MxUR21MzuubeIUW2z24sJYejYT13nZ"
+    }
+  ],
+  "clientChallenge": "ccccccccccccccccccccccccccccccccccccccccccc",
+  "homeText": "[\"ardur-home-v1\",\"fixture-home\",\"28c48ce278a3f9953290d361fbe5c2c80241d164474a6e4b7e0ff465eb840376\",\"ccccccccccccccccccccccccccccccccccccccccccc\"]",
+  "identity": {
+    "instanceId": "fixture-home",
+    "fingerprint": "28c48ce278a3f9953290d361fbe5c2c80241d164474a6e4b7e0ff465eb840376",
+    "certificate": "MIID6jCCAlKgAwIBAgIRAamYs+rEI4a2kex+jevHeYwwDQYJKoZIhvcNAQELBQAwFTETMBEGA1UEAxMKQXJkdXIgSG9tZTAeFw0yNjEwMDgwMzI1MDNaFw0zMTEwMDcwMzI2MDNaMBUxEzARBgNVBAMTCkFyZHVyIEhvbWUwggGiMA0GCSqGSIb3DQEBAQUAA4IBjwAwggGKAoIBgQDaolp6PVjm1L9QtJaqyrw3fwC4N8Agoyj6+VZcasaeisfLzUzs+/1czg/633+HZv+RbL6cjEY/IJSXzeEQyKrSsswrHTG0ImM9r4LaiW5uJUt6/VLJoAG4A8B78VCIUBJE4fnV4loreBwTtPrToJzIVJLsBhAjsKpkcgdXiIKnEeGV6d8Y86CopIKIyvspC9Fz3hb2JKWCHqLBVorEdsvnyGJWRXsnUIDoC4c1QkhlqFsbpbgdu1KDfKSSSzJJY4lQpm7ygLhAoDUsPa5SmkTLmxjo9cljeD7txJtgmG2FFpRB3qdztuQcuSgJYJCuyd1wqydxTrtMgeMYCY1u1IvlxjokJ3w8nm+4RMV6jlL3O06tQGFkj+f81quZyxWXZPiCxrQ1NxaWA+8ZCM0yQ9f+5BhXV/0brgDwsi+EuCaeiOjsz7IyxJU2tAbssNpH2EEmYDeJLpXq1IYDPNYkFJJjuwRqUQIMi2t6u85pjjnJYuupkks1YOFW9Yonu3SuPj0CAwEAAaM1MDMwDAYDVR0TAQH/BAIwADAOBgNVHQ8BAf8EBAMCBaAwEwYDVR0lBAwwCgYIKwYBBQUHAwEwDQYJKoZIhvcNAQELBQADggGBALP9XxFAhXlnVdk9PRlASEVxzLxJsxyCU3BEPmuLqbnDS6AfckHwEs/X21cDsOREEG0XFkYYkmvudx5UstdjiuzxNkhtD35wHuoN2HSlZr+vjX/eBQAQkWHseDehiYsfFQdBoD9wrbQAl3vc3lFMIhN7/uadb95tsr3dWLJyGyvLKRvU+Zmybl9M3rwZV+Gh2yPBlDUlsjLzw+e0Z6iqvgUgrlMC81amYZMzHWReh6g+KGiHH4/uEOxltBnf+Sa1yNM9Hzx4ISUa+mM6GSlFKMOrPhgiSWG/5G+SJl2Ah7nshttZZXwgRlact5gDKxs9jMvYzJu5oKy/ORauB2qHDyp9JYWVmzYkMIXsgqhiBcNUzyNfuhCYDSscL7ULLBGdKdcSabkE0B2sBZ3uQorkODwMA/Uk9oXcarwvlJIVcusmm083jrOcYqDVfDozd+MDoiFrakss7UTmotmZ8sYoP3WW1qW1VXjCBPvc2gThE1CYBnpL08PoA9QNidf81KVGWQ==",
+    "signature": "FzkLCho9fNlQDyv1PXRhYenUZSqf48SxF4DDS+laJ6VcTqmj38R7ffGbZpsDyDHbDHDmBSaUOiouE7Wwf1+fy2O8yDcNJ88sCkyCJ2hG31+rcktwmAP2zgQIbrOttyipUislUxl5sfWu9chiGOdHcM6DQ4UUAdvXOONoPrVNx4yPK+roo7voo0kOIv8gZd7I7J4tRuKL8kwLXXfFRjWvUZ11xkT0KS6PNmjgBeimtVKqIONWasdyHNS7b5TUc+DuFI28hQ4o3VD2Flp+PRhxGrJ4gmX7/z2AIfNLh/AYlz1J5nvK+rPno6ffNQ2VDF9xAtVNZFej6DOhC7A6EfQcFvHIrYbwsN+mkZARzzuQ9hf2mglhs9VMGJAnSzSsRJBI1D/D9prI5FU/iLc1GDRRjkoJ6Bb1jeVjzPpqmlNXjHeoF2jfBbfobjSDeFezXWeYfGa/RaTM1O9r1PHcyAi6f6eWTiwArloD3D/+EJsxZBv0Jou4nAJTa4eHcEjSRiYs"
+  },
+  "validAt": 1791429904000,
+  "expiredAt": 1949109963000
+}

@@ -1,0 +1,29 @@
+name: Home client
+on:
+  pull_request:
+    branches: [main, dev]
+  push:
+    branches: [main, dev]
+permissions:
+  contents: read
+jobs:
+  client:
+    name: Home client / ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install pinned toolchain
+        run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt --component clippy
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+      - name: Build isolated client
+        run: cargo build --locked -p home-protocol -p home-client -p ardur-rs
+      - name: Test disposable home and CLI
+        run: cargo test --locked -p home-protocol -p home-client -p ardur-rs
+      - name: Clippy client
+        run: cargo clippy --locked -p home-protocol -p home-client -p ardur-rs --all-targets -- -D warnings
+      - name: Verify public vectors in Node
+        run: node scripts/check-home-vectors.mjs

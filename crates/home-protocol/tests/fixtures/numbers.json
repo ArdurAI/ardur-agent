@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "provenance": {
+    "repository": "ArdurAI/ardur-bot",
+    "revision": "158ec7beb782ea8e95c8ae9b88d1568b10b4ee9f",
+    "source": "packages/contracts/src/dispatch.ts"
+  },
+  "cases": [
+    {
+      "raw": "333333333.33333329",
+      "canonical": "333333333.3333333"
+    },
+    {
+      "raw": "8.256320039984491e-05",
+      "canonical": "0.00008256320039984491"
+    },
+    {
+      "raw": "0.84551240822557006",
+      "canonical": "0.8455124082255701"
+    },
+    {
+      "raw": "1.2345678901234568",
+      "canonical": "1.2345678901234567"
+    },
+    {
+      "raw": "2.2250738585072014e-308",
+      "canonical": "2.2250738585072014e-308"
+    }
+  ]
+}
