@@ -1,0 +1,19 @@
+[package]
+name = "home-protocol"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+base64 = "0.22"
+p256 = { version = "0.13", features = ["ecdsa", "pkcs8", "pem"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+ring = "0.17"
+ryu-js = "1"
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+url.workspace = true
+x509-parser = "0.18"
+zeroize = "1"

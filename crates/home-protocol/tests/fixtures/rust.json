@@ -1,0 +1,95 @@
+[
+  {
+    "kind": "pairing",
+    "payload": {
+      "certificateFingerprint": "94d75476bbf5432c14baeddeea0ec07e16738b931c16b4a626d73b68f1e90946",
+      "challenge": "synthetic-challenge-synthetic-challenge-synthetic-challenge-",
+      "fingerprint": "28c48ce278a3f9953290d361fbe5c2c80241d164474a6e4b7e0ff465eb840376",
+      "hints": [
+        "https://home.example.test"
+      ],
+      "homeName": "Home 雪",
+      "instanceId": "fixture-home",
+      "version": 1
+    },
+    "presencePublicKey": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE/JNtn3OrHx1NASIy6N1CY5DQaXQaOHh2sZ/W1uxqrpbbrhJn9G4IIFtsf7JrQ/Vv6sfDrkOEjbZ1xDII9xK3/Q==",
+    "publicKey": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEaETIrVMQOR/w5F6mQB0SiMgtLWT/FQGNIZd6vZ0a44XZukoofYBYGCxVvjBQB5cdDpTsjtXaSvzNt8RdiDa87w==",
+    "signature": "MEUCICMX84RP1TkgLk1JqwseCg1gg3nVODfyYwZsdpPXK0e7AiEA+h6wGJl7zntAsLDOlK8U3UBuv1iy8fo/eT07VC5Lyuw=",
+    "text": "[\"ardur-pair-v1\",\"fixture-home\",\"synthetic-challenge-synthetic-challenge-synthetic-challenge-\",\"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEaETIrVMQOR/w5F6mQB0SiMgtLWT/FQGNIZd6vZ0a44XZukoofYBYGCxVvjBQB5cdDpTsjtXaSvzNt8RdiDa87w==\",\"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE/JNtn3OrHx1NASIy6N1CY5DQaXQaOHh2sZ/W1uxqrpbbrhJn9G4IIFtsf7JrQ/Vv6sfDrkOEjbZ1xDII9xK3/Q==\"]"
+  },
+  {
+    "body": {
+      "nested": {
+        "a": 1,
+        "z": [
+          true,
+          null,
+          {
+            "β": "value"
+          }
+        ]
+      },
+      "text": "雪 😀 é \u0000  "
+    },
+    "instanceId": "fixture-home",
+    "kind": "request",
+    "operation": "rpc",
+    "proof": {
+      "grantId": "fixture-grant",
+      "nonce": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn",
+      "signature": "",
+      "timestamp": 1791429078000
+    },
+    "publicKey": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEaETIrVMQOR/w5F6mQB0SiMgtLWT/FQGNIZd6vZ0a44XZukoofYBYGCxVvjBQB5cdDpTsjtXaSvzNt8RdiDa87w==",
+    "signature": "MEYCIQC8XkmfpWRy80OB/ANbkj4aBYmlGgb8nXf9SHKEZEk6PAIhAKVfFobDB/oifvBW5PImKyXqCWpl9WuZkWQsyiWGNKQV",
+    "text": "[\"ardur-device-v1\",\"fixture-home\",\"fixture-grant\",\"nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn\",1791429078000,\"rpc\",{\"nested\":{\"a\":1,\"z\":[true,null,{\"β\":\"value\"}]},\"text\":\"雪 😀 é \\u0000  \"}]"
+  },
+  {
+    "body": {
+      "10": 4,
+      "2": 3,
+      "numbers": [
+        0,
+        1e-7,
+        1e-6,
+        1e+20,
+        1e+21,
+        9007199254740991,
+        5e-324,
+        1.7976931348623157e+308
+      ],
+      "": 1,
+      "😀": 2
+    },
+    "instanceId": "fixture-home",
+    "kind": "request",
+    "operation": "rpc",
+    "proof": {
+      "grantId": "fixture-grant",
+      "nonce": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn",
+      "signature": "",
+      "timestamp": 1791429078000
+    },
+    "publicKey": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEaETIrVMQOR/w5F6mQB0SiMgtLWT/FQGNIZd6vZ0a44XZukoofYBYGCxVvjBQB5cdDpTsjtXaSvzNt8RdiDa87w==",
+    "signature": "MEUCIALkHrirZ9TX4cmN+Rak9kvLoCB/dufR0M+utgqeMV7QAiEAwm4gj6iL6RPjJM7RW5g3XV2WeNuW7BDCqr/ctdIVbCY=",
+    "text": "[\"ardur-device-v1\",\"fixture-home\",\"fixture-grant\",\"nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn\",1791429078000,\"rpc\",{\"10\":4,\"2\":3,\"numbers\":[0,1e-7,0.000001,100000000000000000000,1e+21,9007199254740991,5e-324,1.7976931348623157e+308],\"😀\":2,\"\":1}]"
+  },
+  {
+    "body": {
+      "input": {},
+      "procedure": "bots/list"
+    },
+    "instanceId": "fixture-home",
+    "kind": "request",
+    "operation": "rpc",
+    "proof": {
+      "grantId": "fixture-grant",
+      "nonce": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn",
+      "signature": "",
+      "timestamp": 1791429078000
+    },
+    "publicKey": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEaETIrVMQOR/w5F6mQB0SiMgtLWT/FQGNIZd6vZ0a44XZukoofYBYGCxVvjBQB5cdDpTsjtXaSvzNt8RdiDa87w==",
+    "signature": "MEUCIBkcUHPH4/3919hiEMhAFc8ge78mQxgMpreEK8k+hESCAiEAh0qjGgwbgfBuVWEnvLUJQtMhCPx8veXrulwisns0vPw=",
+    "text": "[\"ardur-device-v1\",\"fixture-home\",\"fixture-grant\",\"nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn\",1791429078000,\"rpc\",{\"input\":{},\"procedure\":\"bots/list\"}]"
+  }
+]
