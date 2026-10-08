@@ -18,3 +18,4 @@ rcgen = { version = "0.14", default-features = false, features = ["crypto", "rin
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12"] }
 base64 = "0.22"
+ring = "0.17"

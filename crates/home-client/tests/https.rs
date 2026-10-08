@@ -29,6 +29,10 @@ async fn wrong_or_expired_pin_sends_no_application_bytes() {
             matches!(result, Err(Error::Identity)),
             "expected changed identity"
         );
+        assert_eq!(
+            home.decoded_bytes.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
         assert_eq!(home.count(), 0);
     }
 }
@@ -82,4 +86,40 @@ async fn redirects_bad_json_limits_and_remote_errors_are_not_echoed() {
     ] {
         assert!(matches!(p.post(url, &json!({})).await, Err(Error::Input)));
     }
+}
+
+#[tokio::test]
+async fn partial_http_headers_are_counted_as_application_bytes() {
+    let home = FakeHome::start(false).await;
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(home.certificate.clone()).unwrap();
+    let config = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    let url = home_protocol::https_url(&home.payload.hints[0]).unwrap();
+    let socket = tokio::net::TcpStream::connect(("127.0.0.1", url.port().unwrap()))
+        .await
+        .unwrap();
+    let mut tls = tokio_rustls::TlsConnector::from(std::sync::Arc::new(config))
+        .connect(
+            rustls::pki_types::ServerName::try_from("localhost").unwrap(),
+            socket,
+        )
+        .await
+        .unwrap();
+    use tokio::io::AsyncWriteExt;
+    tls.write_all(b"POST /").await.unwrap();
+    tls.shutdown().await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while home.decoded_bytes.load(std::sync::atomic::Ordering::SeqCst) != 6 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(home.count(), 0);
 }

@@ -2,10 +2,7 @@
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use home_client::now_ms;
-use home_protocol::{
-    PairingPayload, Proof, device_signed_text, home_signed_text, pairing_signed_text, sha256,
-    sign_text, verify_device_signature,
-};
+use home_protocol::{PairingPayload, Proof, home_signed_text, sha256, sign_text};
 use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -30,7 +27,9 @@ pub enum Mode {
 }
 pub struct FakeHome {
     pub payload: PairingPayload,
+    pub certificate: rustls::pki_types::CertificateDer<'static>,
     pub calls: Arc<AtomicUsize>,
+    pub decoded_bytes: Arc<AtomicUsize>,
     pub mode: Arc<Mutex<Mode>>,
     pub seen: Arc<Mutex<Vec<Value>>>,
     task: tokio::task::JoinHandle<()>,
@@ -75,8 +74,11 @@ impl FakeHome {
             )],
         };
         let calls = Arc::new(AtomicUsize::new(0));
+        let decoded_bytes = Arc::new(AtomicUsize::new(0));
+        let byte_count = decoded_bytes.clone();
         let mode = Arc::new(Mutex::new(Mode::Normal));
         let seen = Arc::new(Mutex::new(Vec::new()));
+        let certificate = der.clone();
         let (p, c, m, s) = (payload.clone(), calls.clone(), mode.clone(), seen.clone());
         let task = tokio::spawn(async move {
             let acceptor = TlsAcceptor::from(Arc::new(config));
@@ -98,6 +100,7 @@ impl FakeHome {
                     if tls.read_exact(&mut one).await.is_err() {
                         break;
                     }
+                    byte_count.fetch_add(1, Ordering::SeqCst);
                     headers.push(one[0]);
                 }
                 if !headers.ends_with(b"\r\n\r\n") {
@@ -117,7 +120,17 @@ impl FakeHome {
                     continue;
                 }
                 let mut body = vec![0; len];
-                if tls.read_exact(&mut body).await.is_err() {
+                let mut received = 0;
+                while received < len {
+                    match tls.read(&mut body[received..]).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            byte_count.fetch_add(n, Ordering::SeqCst);
+                            received += n;
+                        }
+                    }
+                }
+                if received != len {
                     continue;
                 }
                 let value: Value = serde_json::from_slice(&body).unwrap();
@@ -172,7 +185,7 @@ impl FakeHome {
                     }
                     result
                 } else if path == "/device/pair" {
-                    let text = pairing_signed_text(
+                    let text = independent_pairing_text(
                         &p,
                         value["devicePublicKey"].as_str().unwrap(),
                         value["presencePublicKey"].as_str().unwrap(),
@@ -181,7 +194,7 @@ impl FakeHome {
                         && value["instanceId"] == p.instance_id
                         && value["platform"] == "cli"
                         && value["devicePublicKey"] != value["presencePublicKey"]
-                        && verify_device_signature(
+                        && independent_verify(
                             value["devicePublicKey"].as_str().unwrap(),
                             &text,
                             value["signature"].as_str().unwrap(),
@@ -197,12 +210,12 @@ impl FakeHome {
                 } else if path == "/device/request" {
                     let proof: Proof = serde_json::from_value(value["proof"].clone()).unwrap();
                     let op = value["operation"].as_str().unwrap();
-                    let text = device_signed_text(&p.instance_id, &proof, op, &value["body"]);
+                    let text = independent_request_text(&p.instance_id, &proof, op, &value["body"]);
                     if proof.grant_id != "fake-grant"
                         || now_ms().abs_diff(proof.timestamp) > 60000
                         || !issued.contains(&proof.nonce)
                         || used.contains(&proof.nonce)
-                        || !verify_device_signature(&device_key, &text, &proof.signature)
+                        || !independent_verify(&device_key, &text, &proof.signature)
                     {
                         status = 401;
                         json!({"message":"unavailable"})
@@ -240,7 +253,9 @@ impl FakeHome {
         });
         Self {
             payload,
+            certificate,
             calls,
+            decoded_bytes,
             mode,
             seen,
             task,
@@ -255,4 +270,103 @@ impl FakeHome {
     pub fn count(&self) -> usize {
         self.calls.load(Ordering::SeqCst)
     }
+}
+
+// Independent fixture home: construct the wire contract directly and use ring's
+// DER ECDSA verifier rather than the protocol crate's text/signature functions.
+fn independent_pairing_text(p: &PairingPayload, key: &str, presence: &str) -> String {
+    serde_json::to_string(&json!([
+        "ardur-pair-v1",
+        p.instance_id,
+        p.challenge,
+        key,
+        presence
+    ]))
+    .unwrap()
+}
+fn independent_request_text(
+    instance: &str,
+    proof: &Proof,
+    operation: &str,
+    body: &Value,
+) -> String {
+    // These routes accept only empty input or bots/list. Their canonical bytes
+    // are fixed by the committed TypeScript vectors, without a Rust canonicalizer.
+    let body = if operation == "tasks" && body == &json!({}) {
+        "{}"
+    } else if operation == "rpc" && body == &json!({"procedure":"bots/list","input":{}}) {
+        r#"{"input":{},"procedure":"bots/list"}"#
+    } else {
+        return String::new();
+    };
+    let prefix = serde_json::to_string(&json!([
+        "ardur-device-v1",
+        instance,
+        proof.grant_id,
+        proof.nonce,
+        proof.timestamp,
+        operation
+    ]))
+    .unwrap();
+    format!("{},{}]", &prefix[..prefix.len() - 1], body)
+}
+fn independent_verify(public_key: &str, text: &str, signature: &str) -> bool {
+    let (Ok(spki), Ok(signature)) = (STANDARD.decode(public_key), STANDARD.decode(signature))
+    else {
+        return false;
+    };
+    // Fixed P-256 SubjectPublicKeyInfo prefix (ecPublicKey / prime256v1).
+    const PREFIX: &[u8] = &[
+        0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08,
+        0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00,
+    ];
+    let Some(key) = spki
+        .strip_prefix(PREFIX)
+        .filter(|key| key.len() == 65 && key[0] == 4)
+    else {
+        return false;
+    };
+    !text.is_empty()
+        && ring::signature::UnparsedPublicKey::new(&ring::signature::ECDSA_P256_SHA256_ASN1, key)
+            .verify(text.as_bytes(), &signature)
+            .is_ok()
+}
+#[test]
+fn independent_home_verifier_matches_typescript_vectors() {
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../home-protocol/tests/fixtures/typescript.json"
+    ))
+    .unwrap();
+    let p: PairingPayload = serde_json::from_value(fixture["payload"].clone()).unwrap();
+    let key = fixture["publicKey"].as_str().unwrap();
+    let pairing = independent_pairing_text(&p, key, fixture["presencePublicKey"].as_str().unwrap());
+    assert_eq!(pairing, fixture["pairingText"]);
+    assert!(independent_verify(
+        key,
+        &pairing,
+        fixture["pairingSignature"].as_str().unwrap()
+    ));
+    let proof: Proof = serde_json::from_value(json!({
+        "grantId":fixture["proof"]["grantId"], "nonce":fixture["proof"]["nonce"],
+        "timestamp":fixture["proof"]["timestamp"], "signature":""
+    }))
+    .unwrap();
+    let request = fixture["requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["body"] == json!({"procedure":"bots/list","input":{}}))
+        .unwrap();
+    let text = independent_request_text(&p.instance_id, &proof, "rpc", &request["body"]);
+    assert_eq!(text, request["text"]);
+    assert!(independent_verify(
+        key,
+        &text,
+        request["signature"].as_str().unwrap()
+    ));
+    assert!(!independent_verify(
+        key,
+        &(text + "changed"),
+        request["signature"].as_str().unwrap()
+    ));
 }
