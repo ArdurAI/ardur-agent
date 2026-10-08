@@ -23,3 +23,15 @@ for (const v of rust) {
   assert(!verify("sha256",Buffer.from(text+"changed"),key,Buffer.from(v.signature,"base64")));
 }
 console.log("Public TypeScript/Rust vectors verified offline.");
+// Raw inputs are retained here: JSON.stringify would erase the differences.
+const domain = JSON.parse(readFileSync("crates/home-protocol/tests/fixtures/input-domain.json", "utf8"));
+for (const c of domain.cases) {
+  if (c.javascriptParseRejects) assert.throws(() => JSON.parse(c.raw));
+  else assert.equal(canonical(JSON.parse(c.raw)), c.javascriptCanonical);
+}
+const normalized = {negativeZero:-0,omitted:undefined};
+assert.equal(JSON.stringify(normalized), domain.normalization.wire);
+assert.equal(canonical(JSON.parse(JSON.stringify(normalized))), domain.normalization.canonical);
+assert(Object.is(JSON.parse("-0"), -0));
+assert.equal(JSON.parse("1e400"), Infinity);
+console.log("Raw Unicode and number input-domain vectors checked offline.");

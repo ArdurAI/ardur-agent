@@ -44,6 +44,8 @@ if (process.argv[3] === "--verify-rust") {
   ];
   const requests = bodies.map(body => {
     const text = contracts.deviceSignedText(payload.instanceId, proof, "rpc", body);
+    // Keep the original expression visible: this wire normalization removes
+    // undefined members and negative zero. Raw-input vectors live separately.
     return {body:JSON.parse(JSON.stringify(body)),canonical:contracts.canonicalDispatchJson(body),text,
       signature:crypto.signRequest({...payload,grantId:proof.grantId,privateKey:keys.privateKey},proof.nonce,proof.timestamp,"rpc",body).signature};
   });

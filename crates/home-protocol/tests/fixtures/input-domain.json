@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "provenance": "Accepted home contract decisions; JavaScript behavior checked independently with the offline Node checker. Unicode rejection is required on the TypeScript side in Stage 3.",
+  "cases": [
+    {"name":"lone high surrogate value","raw":"\"\\ud800\"","accepted":false,"error":"unicode","javascriptCanonical":"\"\\ud800\""},
+    {"name":"lone low surrogate value","raw":"\"\\udfff\"","accepted":false,"error":"unicode","javascriptCanonical":"\"\\udfff\""},
+    {"name":"lone high surrogate key","raw":"{\"\\ud800\":1}","accepted":false,"error":"unicode","javascriptCanonical":"{\"\\ud800\":1}"},
+    {"name":"lone low surrogate key","raw":"{\"\\udfff\":1}","accepted":false,"error":"unicode","javascriptCanonical":"{\"\\udfff\":1}"},
+    {"name":"paired surrogates","raw":"\"\\ud83d\\ude00\"","accepted":true,"canonical":"\"😀\"","javascriptCanonical":"\"😀\""},
+    {"name":"literal escape text","raw":"\"\\\\ud800\"","accepted":true,"canonical":"\"\\\\ud800\"","javascriptCanonical":"\"\\\\ud800\""},
+    {"name":"negative zero raw input","raw":"-0","accepted":true,"canonical":"0","javascriptCanonical":"0"},
+    {"name":"undefined raw input","raw":"{\"omitted\":undefined}","accepted":false,"error":"data","javascriptParseRejects":true},
+    {"name":"overflow raw input","raw":"1e400","accepted":false,"error":"data","javascriptCanonical":"null"}
+  ],
+  "normalization": {
+    "expression": "({negativeZero:-0,omitted:undefined})",
+    "wire": "{\"negativeZero\":0}",
+    "canonical": "{\"negativeZero\":0}"
+  }
+}

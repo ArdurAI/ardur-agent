@@ -14,6 +14,7 @@ use zeroize::Zeroizing;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     Input,
+    InvalidUnicode,
     Storage,
     Identity,
     Unreachable,
@@ -24,7 +25,7 @@ pub enum Error {
 impl Error {
     pub fn exit_code(self) -> i32 {
         match self {
-            Self::Input => 3,
+            Self::Input | Self::InvalidUnicode => 3,
             Self::Storage | Self::Identity | Self::Access => 2,
             _ => 1,
         }
@@ -32,6 +33,7 @@ impl Error {
     pub fn code(self) -> &'static str {
         match self {
             Self::Input => "invalid_input",
+            Self::InvalidUnicode => "invalid_unicode",
             Self::Storage => "unsafe_storage",
             Self::Identity => "home_changed",
             Self::Unreachable => "home_unreachable",
@@ -44,6 +46,7 @@ impl Error {
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
+            Self::InvalidUnicode => "JSON strings must contain well-formed Unicode; unpaired surrogates are not allowed.",
             Self::Input => "Check the arguments or copy a new pairing code from Settings, Devices.",
             Self::Storage => {
                 "Private pairing storage is unavailable or unsafe. Check its owner and permissions."
@@ -118,7 +121,10 @@ async fn hello(url: &str, pins: &HomePins, grant: Option<&str>) -> Result<Identi
     Ok(identity)
 }
 pub async fn pair_device(code: &str, name: &str) -> Result<StoredHome, Error> {
-    let p = decode_pairing_code(code).map_err(|_| Error::Input)?;
+    let p = decode_pairing_code(code).map_err(|error| match error {
+        home_protocol::InvalidProtocol::InvalidUnicode => Error::InvalidUnicode,
+        home_protocol::InvalidProtocol::InvalidData => Error::Input,
+    })?;
     if !(1..=80).contains(&string_len(name.trim())) {
         return Err(Error::Input);
     }

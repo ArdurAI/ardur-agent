@@ -59,10 +59,16 @@ pub struct Proof {
 }
 /// Errors deliberately contain no caller input or key material.
 #[derive(Debug)]
-pub struct InvalidProtocol;
+pub enum InvalidProtocol {
+    InvalidData,
+    InvalidUnicode,
+}
 impl std::fmt::Display for InvalidProtocol {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Invalid device protocol data.")
+        f.write_str(match self {
+            Self::InvalidData => "Invalid device protocol data.",
+            Self::InvalidUnicode => "JSON strings must contain well-formed Unicode; unpaired surrogates are not allowed.",
+        })
     }
 }
 impl std::error::Error for InvalidProtocol {}
@@ -77,7 +83,7 @@ pub fn fingerprint_valid(value: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 pub fn https_url(value: &str) -> Result<url::Url, InvalidProtocol> {
-    let u = url::Url::parse(value).map_err(|_| InvalidProtocol)?;
+    let u = url::Url::parse(value).map_err(|_| InvalidProtocol::InvalidData)?;
     if u.scheme() != "https"
         || u.host_str().is_none()
         || !u.username().is_empty()
@@ -85,13 +91,13 @@ pub fn https_url(value: &str) -> Result<url::Url, InvalidProtocol> {
         || u.query().is_some()
         || u.fragment().is_some()
     {
-        return Err(InvalidProtocol);
+        return Err(InvalidProtocol::InvalidData);
     }
     Ok(u)
 }
 pub fn decode_pairing_code(code: &str) -> Result<PairingPayload, InvalidProtocol> {
     if string_len(code) > 16384 {
-        return Err(InvalidProtocol);
+        return Err(InvalidProtocol::InvalidData);
     }
     let bytes = if code.trim_start().starts_with('{') {
         code.as_bytes().to_vec()
@@ -99,9 +105,11 @@ pub fn decode_pairing_code(code: &str) -> Result<PairingPayload, InvalidProtocol
         // Node accepts padded URL base64 as well as the unpadded exported code.
         URL_SAFE_NO_PAD
             .decode(code.trim().trim_end_matches('='))
-            .map_err(|_| InvalidProtocol)?
+            .map_err(|_| InvalidProtocol::InvalidData)?
     };
-    let p: PairingPayload = serde_json::from_slice(&bytes).map_err(|_| InvalidProtocol)?;
+    validate_json_strings(&bytes)?;
+    let p: PairingPayload =
+        serde_json::from_slice(&bytes).map_err(|_| InvalidProtocol::InvalidData)?;
     if p.version != 1
         || !(32..=128).contains(&string_len(&p.challenge))
         || !(1..=128).contains(&string_len(&p.instance_id))
@@ -111,9 +119,50 @@ pub fn decode_pairing_code(code: &str) -> Result<PairingPayload, InvalidProtocol
         || p.hints.len() > 8
         || p.hints.iter().any(|h| https_url(h).is_err())
     {
-        return Err(InvalidProtocol);
+        return Err(InvalidProtocol::InvalidData);
     }
     Ok(p)
+}
+/// Parse the accepted canonical JSON domain: finite numbers and well-formed
+/// Unicode in every string value and object key. Never replace signed bytes.
+pub fn parse_json(bytes: &[u8]) -> Result<Value, InvalidProtocol> {
+    validate_json_strings(bytes)?;
+    serde_json::from_slice(bytes).map_err(|_| InvalidProtocol::InvalidData)
+}
+fn validate_json_strings(bytes: &[u8]) -> Result<(), InvalidProtocol> {
+    std::str::from_utf8(bytes).map_err(|_| InvalidProtocol::InvalidUnicode)?;
+    let hex = |start: usize| -> Option<u16> {
+        let raw = bytes.get(start..start.checked_add(4)?)?;
+        raw.iter().try_fold(0u16, |value, byte| {
+            (*byte as char).to_digit(16).map(|n| value * 16 + n as u16)
+        })
+    };
+    let mut in_string = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'"' {
+            in_string = !in_string;
+        } else if in_string && bytes[i] == b'\\' {
+            if bytes.get(i + 1) == Some(&b'u') {
+                let unit = hex(i + 2).ok_or(InvalidProtocol::InvalidData)?;
+                if (0xd800..=0xdbff).contains(&unit) {
+                    if bytes.get(i + 6..i + 8) != Some(b"\\u")
+                        || !hex(i + 8).is_some_and(|low| (0xdc00..=0xdfff).contains(&low))
+                    {
+                        return Err(InvalidProtocol::InvalidUnicode);
+                    }
+                    i += 6;
+                } else if (0xdc00..=0xdfff).contains(&unit) {
+                    return Err(InvalidProtocol::InvalidUnicode);
+                }
+                i += 6;
+                continue;
+            }
+            i += 1; // Skip the escaped byte, including a literal backslash.
+        }
+        i += 1;
+    }
+    Ok(())
 }
 /// Mirrors JS number formatting and UTF-16 key ordering, not RFC 8785 or Rust ordering.
 pub fn canonical_json(value: &Value) -> String {
@@ -198,19 +247,19 @@ impl DeviceKeys {
                 request
                     .verifying_key()
                     .to_public_key_der()
-                    .map_err(|_| InvalidProtocol)?
+                    .map_err(|_| InvalidProtocol::InvalidData)?
                     .as_bytes(),
             ),
             presence_public_key: STANDARD.encode(
                 presence
                     .verifying_key()
                     .to_public_key_der()
-                    .map_err(|_| InvalidProtocol)?
+                    .map_err(|_| InvalidProtocol::InvalidData)?
                     .as_bytes(),
             ),
             private_key: request
                 .to_pkcs8_pem(LineEnding::LF)
-                .map_err(|_| InvalidProtocol)?,
+                .map_err(|_| InvalidProtocol::InvalidData)?,
         })
     }
     pub fn sign(&self, text: &str) -> Result<String, InvalidProtocol> {
@@ -218,7 +267,7 @@ impl DeviceKeys {
     }
 }
 pub fn sign_text(private_key: &str, text: &str) -> Result<String, InvalidProtocol> {
-    let key = SigningKey::from_pkcs8_pem(private_key).map_err(|_| InvalidProtocol)?;
+    let key = SigningKey::from_pkcs8_pem(private_key).map_err(|_| InvalidProtocol::InvalidData)?;
     let sig: Signature = key.sign(text.as_bytes());
     Ok(STANDARD.encode(sig.to_der().as_bytes()))
 }

@@ -41,7 +41,9 @@ Each POST is bounded to 15 seconds and a two-MiB response.
 
 TLS validates the exact full-certificate SHA-256 pin and validity interval
 before HTTP headers or body are sent. TLS handshake signatures are verified;
-0-RTT is disabled. Public-CA trust and hostname checks do not replace the
+0-RTT and TLS session resumption are disabled, including when a caller reuses
+one transport. Each POST still creates a fresh transport in the client flow.
+Public-CA trust and hostname checks do not replace the
 out-of-band home pin. Every nonce exchange additionally checks the home
 instance, public-key SPKI SHA-256 pin and fresh client-challenge proof.
 
@@ -75,6 +77,13 @@ The file is `paired-home.json` under:
 Unix requires a current-user-owned 0700 directory and 0600 regular file with
 one link. Directory traversal and file opens refuse symlinks. Reads are bounded
 to 64 KiB, checked on the opened descriptor, and keys are validated before use.
+The private key is stored as a JSON array of bytes, limited to 4096 bytes. The
+loader borrows that raw field and decodes directly into one fixed-capacity
+zeroizing allocation, then transfers it to the retained key without a PEM copy.
+Fixed read and write buffers also avoid reallocated copies of the encoded key.
+Partial keys and invalid UTF-8 are wiped on errors. The JSON parser never
+decodes a PEM string. Earlier draft files with a string key are refused; pair
+again to write the new format. There is no automatic legacy migration.
 Writes use an exclusive private temporary file, file sync, atomic rename and
 directory sync. Unsafe existing state is never overwritten or repaired silently.
 
@@ -117,6 +126,40 @@ safe-integer/max-finite boundaries. Rust uses JavaScript number formatting,
 not Rust's default JSON serialization, for signed bytes. Decimal parsing uses
 serde_json's round-trip mode so IEEE-754 parse rounding also matches JavaScript;
 separate TypeScript boundary vectors cover the regression before formatting.
+
+The accepted string domain is **well-formed Unicode** in pairing payloads and
+all canonical JSON string values and object keys. Valid surrogate pairs decode
+normally. Lone high or low surrogates are refused with a typed error and a plain
+sentence; they are never replaced with U+FFFD, which would change signed bytes.
+Rust enforces this now. The current TypeScript implementation accepts lone
+surrogates; Stage 3 must tighten its input checks to this agreed contract before
+claiming parity for all accepted inputs. `parse_json` checks raw canonical JSON;
+Rust `String` and `Value` already enforce the representable string domain.
+
+The fixture generator's `JSON.stringify` step produces the wire body: it changes
+negative zero to zero and removes object members whose value is `undefined`.
+That step cannot prove parity on the original inputs. Separate raw-input vectors
+therefore pin `-0` to canonical `0`, reject raw `undefined` as invalid JSON, and
+check the normalized object with the omitted member absent. Undefined is a
+JavaScript-only value outside the accepted JSON input domain.
+
+Finite IEEE-754 numbers are the accepted number domain. JavaScript parses
+`1e400` as Infinity and serializes it as `null`; Rust rejects the overflowing raw
+number. The agreed behavior is to refuse non-finite input before normalization,
+not silently sign it as `null`. Stage 3 must enforce this on the TypeScript side.
+The overflow vector records both current JavaScript behavior and Rust rejection.
+The raw input-domain vectors are contract tests checked with the offline Node
+checker, separate from the fixtures imported from the TypeScript oracle.
+
+The fake home builds pairing and supported request texts independently and uses
+a separate DER signature verifier. Its bots/list route is checked against the
+committed TypeScript request vector, including rejection of altered text. The
+TLS counter records every decoded byte, including incomplete headers and bodies.
+A controllable-clock regression reuses a transport across certificate expiry for
+TLS 1.2 and TLS 1.3 with a ticket-capable server. Its in-memory positive control
+reproduces the defect with resumption enabled; the fixed configuration refuses
+expiry with zero decoded HTTP bytes. An allocator probe checks successful loads,
+legacy refusal, and parser/validation error paths for freed complete PEM copies.
 
 Tests use disposable loopback HTTPS homes and in-memory grants only.
 They exercise pair/status/bots, revoked access, expired/replayed nonces,
