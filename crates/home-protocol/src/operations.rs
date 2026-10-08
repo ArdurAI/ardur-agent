@@ -15,6 +15,7 @@ pub enum DispatchState {
 #[serde(rename_all = "snake_case")]
 pub enum RunStatus {
     Queued,
+    Leased,
     Running,
     WaitingInput,
     WaitingTakeover,

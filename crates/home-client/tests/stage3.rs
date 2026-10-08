@@ -289,3 +289,70 @@ fn key_material_is_redacted_before_serialization() {
     );
     assert_eq!(result, "visible [Redacted] Bearer [Redacted]");
 }
+
+#[tokio::test]
+async fn leased_runs_project_and_wait_as_nonterminal() {
+    let server = FakeHome::start(false).await;
+    let client = paired(&server).await;
+    {
+        let mut run = server.run.lock().unwrap();
+        run["status"] = json!("leased");
+        run["state"] = json!("accepted");
+    }
+    for (command, field) in [
+        (
+            DeviceCommand::RunsShow {
+                run_id: "run".into(),
+            },
+            "run",
+        ),
+        (
+            DeviceCommand::TasksShow {
+                task_id: "task".into(),
+            },
+            "task",
+        ),
+        (
+            DeviceCommand::RunsList {
+                cursor: None,
+                limit: 50,
+            },
+            "runs",
+        ),
+    ] {
+        let (shown, exit) = run(&client, command).await;
+        assert_eq!(exit, 0);
+        if field == "runs" {
+            assert_eq!(shown["data"][field][0]["status"], "leased");
+            assert_eq!(shown["data"]["nextCursor"], "run");
+        } else {
+            assert_eq!(shown["data"][field]["status"], "leased");
+        }
+    }
+    for command in [wait(), send(true, "Leased task")] {
+        let (result, exit) = execute_device(&client, command, Duration::from_millis(100)).await;
+        assert_eq!(exit, 3);
+        assert_eq!(result.verdict, "deadline");
+        assert_eq!(result.json()["data"]["run"]["status"], "leased");
+    }
+    // A leased run can finish later; polling must reach the exact saved answer.
+    let run_state = server.run.clone();
+    let completed = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let mut run = run_state.lock().unwrap();
+        run["status"] = json!("completed");
+        run["state"] = json!("done");
+    });
+    let (result, exit) = run(&client, wait()).await;
+    completed.await.unwrap();
+    assert_eq!(exit, 0);
+    assert_eq!(result["replyText"], "Fixture answer ✓");
+    assert!(
+        !server
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|v| v["operation"] == "stop")
+    );
+}
