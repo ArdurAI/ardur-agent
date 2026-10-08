@@ -99,6 +99,7 @@ the server signature verifier without opening a database.
 ```sh
 # ORACLE is a read-only ardur-bot checkout with its existing tsx dependencies.
 node --import "${ORACLE}/node_modules/tsx/dist/loader.mjs" scripts/home-fixtures.mjs "${ORACLE}"
+node --import "${ORACLE}/node_modules/tsx/dist/loader.mjs" scripts/home-fixtures.mjs "${ORACLE}" --numbers
 cargo run -p home-protocol --example rust_vectors > crates/home-protocol/tests/fixtures/rust.json
 node --import "${ORACLE}/node_modules/tsx/dist/loader.mjs" scripts/home-fixtures.mjs "${ORACLE}" --verify-rust crates/home-protocol/tests/fixtures/rust.json
 node scripts/check-home-vectors.mjs
@@ -113,7 +114,9 @@ public-fixture check, not a claim that CI imported the separate TypeScript repo.
 Vectors cover Unicode, UTF-16 key ordering, nested arrays/objects, omitted
 optionals, negative zero, small/subnormal numbers, exponent boundaries and
 safe-integer/max-finite boundaries. Rust uses JavaScript number formatting,
-not Rust's default JSON serialization, for signed bytes.
+not Rust's default JSON serialization, for signed bytes. Decimal parsing uses
+serde_json's round-trip mode so IEEE-754 parse rounding also matches JavaScript;
+separate TypeScript boundary vectors cover the regression before formatting.
 
 Tests use disposable loopback HTTPS homes and in-memory grants only.
 They exercise pair/status/bots, revoked access, expired/replayed nonces,

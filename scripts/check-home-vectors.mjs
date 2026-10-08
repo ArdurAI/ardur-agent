@@ -5,6 +5,8 @@ import assert from "node:assert/strict";
 const canonical = (v) => Array.isArray(v) ? "["+v.map(canonical).join(",")+"]"
   : v && typeof v === "object" ? "{"+Object.entries(v).sort(([a],[b])=>a<b?-1:a>b?1:0).map(([k,v])=>JSON.stringify(k)+":"+canonical(v)).join(",")+"}" : JSON.stringify(v);
 const ts = JSON.parse(readFileSync("crates/home-protocol/tests/fixtures/typescript.json","utf8"));
+const numbers=JSON.parse(readFileSync("crates/home-protocol/tests/fixtures/numbers.json","utf8"));
+for (const c of numbers.cases) assert.equal(canonical(JSON.parse(c.raw)),c.canonical);
 const rust = JSON.parse(readFileSync("crates/home-protocol/tests/fixtures/rust.json","utf8"));
 for (const r of ts.requests) {
   assert.equal(canonical(r.body),r.canonical);

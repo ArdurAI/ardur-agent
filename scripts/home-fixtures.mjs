@@ -23,6 +23,11 @@ if (process.argv[3] === "--verify-rust") {
     if (verifyDeviceSignature(v.publicKey, v.text + "changed", v.signature)) throw new Error("Alteration accepted");
   }
   console.log("TypeScript server verifier accepted all Rust signatures; alterations rejected.");
+} else if (process.argv[3] === "--numbers") {
+  const inputs = ["333333333.33333329","8.256320039984491e-05","0.84551240822557006","1.2345678901234568","2.2250738585072014e-308"];
+  const fixture = {schemaVersion:1,provenance:{repository:"ArdurAI/ardur-bot",revision,source:"packages/contracts/src/dispatch.ts"},cases:inputs.map(raw=>({raw,canonical:contracts.canonicalDispatchJson(JSON.parse(raw))}))};
+  writeFileSync("crates/home-protocol/tests/fixtures/numbers.json",JSON.stringify(fixture,null,2)+"\n");
+  console.log("Generated TypeScript decimal-parse boundary vectors.");
 } else {
   const keys = crypto.createDeviceKeys();
   const material = await generateInstanceCertificate();
