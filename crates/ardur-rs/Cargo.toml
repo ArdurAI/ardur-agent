@@ -1,0 +1,20 @@
+[package]
+name = "ardur-rs"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+[dependencies]
+home-client = { path = "../home-client" }
+clap.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+zeroize = "1"
+libc.workspace = true
+[dev-dependencies]
+tempfile.workspace = true
+home-protocol = { path = "../home-protocol" }
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring", "pem"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12"] }
+base64 = "0.22"
