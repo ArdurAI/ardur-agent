@@ -4,15 +4,22 @@ use serde_json::Value;
 use std::sync::LazyLock;
 
 const REDACTED: &str = "[Redacted]";
+// ECMAScript WhiteSpace + LineTerminator, not Unicode's White_Space property.
+// In particular JavaScript includes FEFF and excludes NEL (0085).
+const JS_SPACE: &str = r"[\x09-\x0d\x20\x{00a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}]";
 macro_rules! pattern {
     ($name:ident, $source:expr) => {
-        static $name: LazyLock<Regex> =
-            LazyLock::new(|| Regex::new($source).expect("fixed output regex"));
+        static $name: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(&$source.replace(r"\s", JS_SPACE).replace(r"\d", "[0-9]"))
+                .expect("fixed output regex")
+        });
     };
 }
+// Match Node's stripVTControlCharacters grammar, including string payloads and
+// ST terminators. Generic ANSI stripping differs on malformed and C1 inputs.
 pattern!(
     VT,
-    r"(?:\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|[\x1b\x{009b}]\[?[0-?]*[ -/]*[@-~])"
+    r"[\x1b\x{009b}][\[\]()#;?]*(?:(?:(?:(?:;[-a-zA-Z\d/#&.:=?%@~_]+)*|[a-zA-Z\d]+(?:;[-a-zA-Z\d/#&.:=?%@~_]*)*)?(?:\x07|\x1b\\|\x{009c}))|(?:(?:\d{1,4}(?:;\d{0,4})*)?[\dA-PR-TZcf-nq-uy=><~]))"
 );
 pattern!(
     PEM,
@@ -48,6 +55,7 @@ pattern!(
     JWT,
     r"([A-Za-z0-9_-]+)\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+(?-u:\b)"
 );
+pattern!(JWT_HEADER, r"(?-u:\b)eyJ[A-Za-z0-9_-]+");
 pattern!(
     IDENTIFIER,
     r"^[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*"
@@ -70,8 +78,19 @@ fn word(b: u8) -> bool {
 fn key_byte(b: u8) -> bool {
     word(b) || b == b'-'
 }
-fn delimiter(b: u8) -> bool {
-    b.is_ascii_whitespace() || b"\"',;}&]".contains(&b)
+fn js_whitespace(ch: char) -> bool {
+    matches!(ch, '\u{9}'..='\u{d}' | ' ' | '\u{a0}' | '\u{1680}' |
+        '\u{2000}'..='\u{200a}' | '\u{2028}' | '\u{2029}' | '\u{202f}' |
+        '\u{205f}' | '\u{3000}' | '\u{feff}')
+}
+fn delimiter(ch: char) -> bool {
+    js_whitespace(ch) || "\"',;}&]".contains(ch)
+}
+fn token_end(text: &str, start: usize) -> usize {
+    text[start..]
+        .char_indices()
+        .find(|(_, ch)| delimiter(*ch))
+        .map_or(text.len(), |(offset, _)| start + offset)
 }
 fn quoted_end(text: &str, start: usize) -> usize {
     let bytes = text.as_bytes();
@@ -119,7 +138,7 @@ fn code_value(text: &str, start: usize, key: &str) -> bool {
     if rest.starts_with(['{', '[']) {
         return false;
     }
-    let end = rest.bytes().position(delimiter).unwrap_or(rest.len());
+    let end = token_end(rest, 0);
     let value = &rest[..end];
     if PLACEHOLDER.is_match(value) {
         return true;
@@ -216,9 +235,7 @@ fn assignments(text: &str, command_output: bool) -> String {
             if quote == b'{' || quote == b'[' {
                 end = container_end(text, start);
             } else {
-                while end < bytes.len() && !delimiter(bytes[end]) {
-                    end += 1;
-                }
+                end = token_end(text, end);
                 let mut credential = end;
                 while bytes
                     .get(credential)
@@ -239,9 +256,7 @@ fn assignments(text: &str, command_output: bool) -> String {
                             end += 1;
                         }
                     } else {
-                        while end < bytes.len() && !delimiter(bytes[end]) {
-                            end += 1;
-                        }
+                        end = token_end(text, end);
                     }
                 }
             }
@@ -299,7 +314,7 @@ fn redact_text(text: &str, command_output: bool) -> String {
             .expect("bearer scheme");
         let whitespace = m[end..]
             .chars()
-            .take_while(|c| c.is_whitespace())
+            .take_while(|c| js_whitespace(*c))
             .map(char::len_utf8)
             .sum::<usize>();
         format!("{}{REDACTED}", &m[..end + whitespace])
@@ -324,7 +339,7 @@ fn redact_text(text: &str, command_output: bool) -> String {
     }
     replace_bounded(&result, &JWT, key_byte, false, |c| {
         let header = c.get(1).expect("JWT header").as_str();
-        if header.starts_with("eyJ") && header.len() > 3 {
+        if JWT_HEADER.is_match(header) {
             REDACTED.into()
         } else {
             c.get(0).expect("JWT match").as_str().into()
