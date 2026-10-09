@@ -1,4 +1,5 @@
 // Offline public-fixture check. The actual TypeScript oracle check is home-fixtures.mjs --verify-rust.
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { createPublicKey, verify, X509Certificate } from "node:crypto";
 import assert from "node:assert/strict";
@@ -35,3 +36,18 @@ assert.equal(canonical(JSON.parse(JSON.stringify(normalized))), domain.normaliza
 assert(Object.is(JSON.parse("-0"), -0));
 assert.equal(JSON.parse("1e400"), Infinity);
 console.log("Raw Unicode and number input-domain vectors checked offline.");
+
+const stage3=JSON.parse(readFileSync("crates/home-protocol/tests/fixtures/typescript-stage3.json","utf8"));
+const copied=JSON.parse(readFileSync("crates/home-protocol/tests/fixtures/device-operations.json","utf8"));
+assert.equal(stage3.requests.length,8);
+for (let i=0;i<stage3.requests.length;i++) {
+  const r=stage3.requests[i], original=copied.requests[i];
+  assert.equal(canonical(r.body),original.canonicalBody);
+  assert.equal(r.signedText,original.signedText);
+  assert(verify("sha256",Buffer.from(r.signedText),createPublicKey({key:Buffer.from(stage3.publicKey,"base64"),type:"spki",format:"der"}),Buffer.from(r.signature,"base64")));
+}
+assert.equal(copied.rejected.length,4);
+console.log("Stage 3 copied golden bytes and public TypeScript signatures verified.");
+
+// Regenerate both corpora from committed, hash-pinned pure TypeScript sources.
+execFileSync(process.execPath, ["scripts/home-redaction-fixtures.mjs", "--check"], { stdio: "inherit" });

@@ -145,6 +145,8 @@ impl PinnedTransport {
         if !status.is_success() {
             return Err(if status.as_u16() == 401 || status.as_u16() == 403 {
                 Error::Access
+            } else if status.as_u16() == 409 {
+                Error::RequestChanged
             } else {
                 Error::Protocol
             });

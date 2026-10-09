@@ -4481,6 +4481,7 @@ dependencies = [
  "home-protocol",
  "libc",
  "rcgen",
+ "regex",
  "reqwest 0.12.28",
  "ring",
  "rustls",

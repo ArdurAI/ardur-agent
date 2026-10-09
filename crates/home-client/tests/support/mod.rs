@@ -4,7 +4,7 @@ use base64::engine::general_purpose::STANDARD;
 use home_client::now_ms;
 use home_protocol::{PairingPayload, Proof, home_signed_text, sha256, sign_text};
 use serde_json::{Value, json};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -24,6 +24,9 @@ pub enum Mode {
     Malformed,
     Oversize,
     SecretError,
+    LostAdmission,
+    HungRead,
+    RunningThenCancelled,
 }
 pub struct FakeHome {
     pub payload: PairingPayload,
@@ -32,6 +35,9 @@ pub struct FakeHome {
     pub decoded_bytes: Arc<AtomicUsize>,
     pub mode: Arc<Mutex<Mode>>,
     pub seen: Arc<Mutex<Vec<Value>>>,
+    pub run: Arc<Mutex<Value>>,
+    pub messages: Arc<Mutex<Value>>,
+    pub admissions: Arc<Mutex<HashMap<String, Value>>>,
     task: tokio::task::JoinHandle<()>,
 }
 impl Drop for FakeHome {
@@ -78,6 +84,15 @@ impl FakeHome {
         let byte_count = decoded_bytes.clone();
         let mode = Arc::new(Mutex::new(Mode::Normal));
         let seen = Arc::new(Mutex::new(Vec::new()));
+        let run = Arc::new(Mutex::new(
+            json!({"taskId":"task","runId":"run","threadId":"thread","botId":"bot","state":"done","cancelRequested":false,"status":"completed","cancelConfirmed":false,"messageId":"answer","failure":null,"createdAt":"2026-01-01T00:00:00Z","startedAt":null,"completedAt":null}),
+        ));
+        let messages = Arc::new(Mutex::new(
+            json!({"threadId":"thread","messages":[{"id":"answer","runId":"run","role":"bot","blocks":[{"kind":"text","text":"Fixture answer ✓"},{"kind":"text","text":"sensitive-canary","reasoning":true},{"kind":"tool-result","text":"sensitive-canary"}]}],"olderCursor":null}),
+        ));
+        let admissions = Arc::new(Mutex::new(HashMap::<String, Value>::new()));
+        let (run_state, message_state, admitted) =
+            (run.clone(), messages.clone(), admissions.clone());
         let certificate = der.clone();
         let (p, c, m, s) = (payload.clone(), calls.clone(), mode.clone(), seen.clone());
         let task = tokio::spawn(async move {
@@ -87,6 +102,8 @@ impl FakeHome {
             let mut used = HashSet::new();
             let mut issued = HashSet::new();
             let mut nonce_counter = 0;
+            let mut run_reads = 0;
+            let mut lost = false;
             loop {
                 let Ok((stream, _)) = listener.accept().await else {
                     break;
@@ -227,6 +244,59 @@ impl FakeHome {
                             && value["body"] == json!({"procedure":"bots/list","input":{}})
                         {
                             json!([{"id":"bot","name":"Bot\u{1b}]0;bad\u{7}","threadId":"thread","status":"idle","modelProvider":null,"modelId":null,"thinkingLevel":null,"runtimeKind":"pi","instructions":"sensitive-canary","runtimeConfig":{"secret":"sensitive-canary"}}])
+                        } else if op == "dispatch" {
+                            let body = &value["body"];
+                            let id = body["clientNonce"].as_str().unwrap();
+                            let changed = {
+                                let mut entries = admitted.lock().unwrap();
+                                if let Some(old) = entries.get(id) {
+                                    old != body
+                                } else {
+                                    entries.insert(id.into(), body.clone());
+                                    false
+                                }
+                            };
+                            if changed {
+                                status = 409;
+                                json!({"message":"sensitive-canary changed input"})
+                            } else {
+                                if mode == Mode::LostAdmission && !lost {
+                                    lost = true;
+                                    continue;
+                                }
+                                json!({"taskId":"task","runId":"run","threadId":"thread","botId":"bot","state":"accepted","cancelRequested":false})
+                            }
+                        } else if op == "runs/get" || op == "tasks/get" {
+                            if mode == Mode::HungRead {
+                                std::future::pending::<()>().await;
+                            }
+                            let mut run = run_state.lock().unwrap();
+                            if mode == Mode::RunningThenCancelled {
+                                run_reads += 1;
+                                run["status"] = json!(if run_reads == 1 {
+                                    "running"
+                                } else {
+                                    "cancelled"
+                                });
+                                run["state"] =
+                                    json!(if run_reads == 1 { "running" } else { "stopped" });
+                                run["cancelRequested"] = json!(true);
+                                run["cancelConfirmed"] = json!(run_reads > 1);
+                            }
+                            let field = if op == "runs/get" { "run" } else { "task" };
+                            json!({field:run.clone()})
+                        } else if op == "runs/list" {
+                            json!({"runs":[run_state.lock().unwrap().clone()],"nextCursor":"run"})
+                        } else if op == "messages/get" {
+                            if admitted.lock().unwrap().is_empty() {
+                                status = 403;
+                                json!({"message":"unavailable"})
+                            } else {
+                                message_state.lock().unwrap().clone()
+                            }
+                        } else if op == "stop" {
+                            run_state.lock().unwrap()["cancelRequested"] = json!(true);
+                            json!({"cancelRequested":true})
                         } else {
                             status = 403;
                             json!({"message":"unavailable"})
@@ -258,6 +328,9 @@ impl FakeHome {
             decoded_bytes,
             mode,
             seen,
+            run,
+            messages,
+            admissions,
             task,
         }
     }
@@ -290,12 +363,24 @@ fn independent_request_text(
     operation: &str,
     body: &Value,
 ) -> String {
+    // Stage 2 routes have fixed bodies; Stage 3 sorts JSON independently.
     // These routes accept only empty input or bots/list. Their canonical bytes
     // are fixed by the committed TypeScript vectors, without a Rust canonicalizer.
     let body = if operation == "tasks" && body == &json!({}) {
-        "{}"
+        "{}".to_owned()
     } else if operation == "rpc" && body == &json!({"procedure":"bots/list","input":{}}) {
-        r#"{"input":{},"procedure":"bots/list"}"#
+        r#"{"input":{},"procedure":"bots/list"}"#.to_owned()
+    } else if [
+        "dispatch",
+        "runs/get",
+        "tasks/get",
+        "runs/list",
+        "messages/get",
+        "stop",
+    ]
+    .contains(&operation)
+    {
+        independent_canonical(body)
     } else {
         return String::new();
     };
@@ -369,4 +454,56 @@ fn independent_home_verifier_matches_typescript_vectors() {
         &(text + "changed"),
         request["signature"].as_str().unwrap()
     ));
+}
+
+fn independent_canonical(value: &Value) -> String {
+    match value {
+        Value::Object(o) => {
+            let mut keys = o.keys().collect::<Vec<_>>();
+            keys.sort_by(|a, b| a.encode_utf16().cmp(b.encode_utf16()));
+            format!(
+                "{{{}}}",
+                keys.into_iter()
+                    .map(|k| format!(
+                        "{}:{}",
+                        serde_json::to_string(k).unwrap(),
+                        independent_canonical(&o[k])
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        }
+        Value::Array(a) => format!(
+            "[{}]",
+            a.iter()
+                .map(independent_canonical)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        _ => value.to_string(),
+    }
+}
+#[test]
+fn independent_home_verifier_matches_every_stage3_typescript_vector() {
+    let f: Value = serde_json::from_str(include_str!(
+        "../../../home-protocol/tests/fixtures/typescript-stage3.json"
+    ))
+    .unwrap();
+    let mut proof = f["proof"].clone();
+    proof["signature"] = json!("");
+    let proof: Proof = serde_json::from_value(proof).unwrap();
+    for r in f["requests"].as_array().unwrap() {
+        let text = independent_request_text(
+            f["instanceId"].as_str().unwrap(),
+            &proof,
+            r["operation"].as_str().unwrap(),
+            &r["body"],
+        );
+        assert_eq!(text, r["signedText"]);
+        assert!(independent_verify(
+            f["publicKey"].as_str().unwrap(),
+            &text,
+            r["signature"].as_str().unwrap()
+        ));
+    }
 }

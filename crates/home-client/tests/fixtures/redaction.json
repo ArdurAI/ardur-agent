@@ -1,0 +1,775 @@
+{
+  "schemaVersion": 1,
+  "provenance": {
+    "repository": "ArdurAI/ardur-bot",
+    "revision": "49551df2a61f1e0d34498b9eb06b5883801278c8",
+    "sources": [
+      "apps/cli/src/text.ts",
+      "packages/logging/src/redaction.ts"
+    ]
+  },
+  "cases": [
+    {
+      "name": "token ghp_",
+      "input": "before ghp_FAKEsynthetic1234 after",
+      "expected": "before [Redacted] after",
+      "credentials": [
+        "ghp_FAKEsynthetic1234"
+      ]
+    },
+    {
+      "name": "token gho_",
+      "input": "before gho_FAKEsynthetic1234 after",
+      "expected": "before [Redacted] after",
+      "credentials": [
+        "gho_FAKEsynthetic1234"
+      ]
+    },
+    {
+      "name": "token ghu_",
+      "input": "before ghu_FAKEsynthetic1234 after",
+      "expected": "before [Redacted] after",
+      "credentials": [
+        "ghu_FAKEsynthetic1234"
+      ]
+    },
+    {
+      "name": "token ghs_",
+      "input": "before ghs_FAKEsynthetic1234 after",
+      "expected": "before [Redacted] after",
+      "credentials": [
+        "ghs_FAKEsynthetic1234"
+      ]
+    },
+    {
+      "name": "token ghr_",
+      "input": "before ghr_FAKEsynthetic1234 after",
+      "expected": "before [Redacted] after",
+      "credentials": [
+        "ghr_FAKEsynthetic1234"
+      ]
+    },
+    {
+      "name": "token github_pat_",
+      "input": "before github_pat_FAKEsynthetic1234 after",
+      "expected": "before [Redacted] after",
+      "credentials": [
+        "github_pat_FAKEsynthetic1234"
+      ]
+    },
+    {
+      "name": "token sk-",
+      "input": "before sk-FAKEsynthetic1234 after",
+      "expected": "before [Redacted] after",
+      "credentials": [
+        "sk-FAKEsynthetic1234"
+      ]
+    },
+    {
+      "name": "token xai-",
+      "input": "before xai-FAKEsynthetic1234 after",
+      "expected": "before [Redacted] after",
+      "credentials": [
+        "xai-FAKEsynthetic1234"
+      ]
+    },
+    {
+      "name": "token ak_",
+      "input": "before ak_FAKEsynthetic1234 after",
+      "expected": "before [Redacted] after",
+      "credentials": [
+        "ak_FAKEsynthetic1234"
+      ]
+    },
+    {
+      "name": "token ck_",
+      "input": "before ck_FAKEsynthetic1234 after",
+      "expected": "before [Redacted] after",
+      "credentials": [
+        "ck_FAKEsynthetic1234"
+      ]
+    },
+    {
+      "name": "AWS id AKIA",
+      "input": "before AKIAFAKE000000000000 after",
+      "expected": "before [Redacted] after",
+      "credentials": [
+        "AKIAFAKE000000000000"
+      ]
+    },
+    {
+      "name": "AWS id ASIA",
+      "input": "before ASIAFAKE000000000000 after",
+      "expected": "before [Redacted] after",
+      "credentials": [
+        "ASIAFAKE000000000000"
+      ]
+    },
+    {
+      "name": "JWT",
+      "input": "before eyJfakeHeader.fakePayload.fakeSignature after",
+      "expected": "before [Redacted] after",
+      "credentials": [
+        "eyJfakeHeader.fakePayload.fakeSignature"
+      ]
+    },
+    {
+      "name": "AWS secret",
+      "input": "before FakeAwsSynthetic123FakeAwsSynthetic123Fa after",
+      "expected": "before [Redacted] after",
+      "credentials": [
+        "FakeAwsSynthetic123FakeAwsSynthetic123Fa"
+      ]
+    },
+    {
+      "name": "short bearer Bearer",
+      "input": "before Bearer synthetic-short after",
+      "expected": "before Bearer [Redacted] after",
+      "credentials": [
+        "synthetic-short"
+      ]
+    },
+    {
+      "name": "short bearer bEaReR",
+      "input": "before bEaReR synthetic-short after",
+      "expected": "before bEaReR [Redacted] after",
+      "credentials": [
+        "synthetic-short"
+      ]
+    },
+    {
+      "name": "URL credentials",
+      "input": "https://synthetic-user:synthetic-pass@gateway.example.test/path",
+      "expected": "https://[Redacted]@gateway.example.test/path",
+      "credentials": [
+        "synthetic-user",
+        "synthetic-pass"
+      ]
+    },
+    {
+      "name": "email privacy",
+      "input": "hello fixture@example.test",
+      "expected": "hello [Redacted]",
+      "credentials": [
+        "fixture@example.test"
+      ]
+    },
+    {
+      "name": "assignment password",
+      "input": "password=synthetic-assignment-password; status=ready",
+      "expected": "password=[Redacted]; status=ready",
+      "credentials": [
+        "synthetic-assignment-password"
+      ]
+    },
+    {
+      "name": "assignment passwd",
+      "input": "passwd=synthetic-assignment-passwd; status=ready",
+      "expected": "passwd=[Redacted]; status=ready",
+      "credentials": [
+        "synthetic-assignment-passwd"
+      ]
+    },
+    {
+      "name": "assignment secret",
+      "input": "secret=synthetic-assignment-secret; status=ready",
+      "expected": "secret=[Redacted]; status=ready",
+      "credentials": [
+        "synthetic-assignment-secret"
+      ]
+    },
+    {
+      "name": "assignment accessToken",
+      "input": "accessToken=synthetic-assignment-accessToken; status=ready",
+      "expected": "accessToken=[Redacted]; status=ready",
+      "credentials": [
+        "synthetic-assignment-accessToken"
+      ]
+    },
+    {
+      "name": "assignment Api_Key",
+      "input": "Api_Key=synthetic-assignment-Api_Key; status=ready",
+      "expected": "Api_Key=[Redacted]; status=ready",
+      "credentials": [
+        "synthetic-assignment-Api_Key"
+      ]
+    },
+    {
+      "name": "assignment private-key",
+      "input": "private-key=synthetic-assignment-private-key; status=ready",
+      "expected": "private-key=[Redacted]; status=ready",
+      "credentials": [
+        "synthetic-assignment-private-key"
+      ]
+    },
+    {
+      "name": "assignment access_key",
+      "input": "access_key=synthetic-assignment-access_key; status=ready",
+      "expected": "access_key=[Redacted]; status=ready",
+      "credentials": [
+        "synthetic-assignment-access_key"
+      ]
+    },
+    {
+      "name": "assignment clientKey",
+      "input": "clientKey=synthetic-assignment-clientKey; status=ready",
+      "expected": "clientKey=[Redacted]; status=ready",
+      "credentials": [
+        "synthetic-assignment-clientKey"
+      ]
+    },
+    {
+      "name": "assignment auth-key",
+      "input": "auth-key=synthetic-assignment-auth-key; status=ready",
+      "expected": "auth-key=[Redacted]; status=ready",
+      "credentials": [
+        "synthetic-assignment-auth-key"
+      ]
+    },
+    {
+      "name": "assignment credential",
+      "input": "credential=synthetic-assignment-credential; status=ready",
+      "expected": "credential=[Redacted]; status=ready",
+      "credentials": [
+        "synthetic-assignment-credential"
+      ]
+    },
+    {
+      "name": "assignment authorization",
+      "input": "authorization=synthetic-assignment-authorization; status=ready",
+      "expected": "authorization=[Redacted]; status=ready",
+      "credentials": [
+        "synthetic-assignment-authorization"
+      ]
+    },
+    {
+      "name": "assignment cookie",
+      "input": "cookie=synthetic-assignment-cookie; status=ready",
+      "expected": "cookie=[Redacted]; status=ready",
+      "credentials": [
+        "synthetic-assignment-cookie"
+      ]
+    },
+    {
+      "name": "assignment key",
+      "input": "key=synthetic-assignment-key; status=ready",
+      "expected": "key=[Redacted]; status=ready",
+      "credentials": [
+        "synthetic-assignment-key"
+      ]
+    },
+    {
+      "name": "scheme 31",
+      "input": "Authorization: Bearer synthetic-auth-value\r\nstatus=ready",
+      "expected": "Authorization: [Redacted]\nstatus=ready",
+      "credentials": [
+        "synthetic-auth-value"
+      ]
+    },
+    {
+      "name": "scheme 32",
+      "input": "Authorization: Bearer\tsynthetic-auth-value\r\nstatus=ready",
+      "expected": "Authorization: [Redacted]\nstatus=ready",
+      "credentials": [
+        "synthetic-auth-value"
+      ]
+    },
+    {
+      "name": "scheme 33",
+      "input": "Authorization: bAsIc synthetic-auth-value\r\nstatus=ready",
+      "expected": "Authorization: [Redacted]\nstatus=ready",
+      "credentials": [
+        "synthetic-auth-value"
+      ]
+    },
+    {
+      "name": "scheme 34",
+      "input": "Authorization: bAsIc\tsynthetic-auth-value\r\nstatus=ready",
+      "expected": "Authorization: [Redacted]\nstatus=ready",
+      "credentials": [
+        "synthetic-auth-value"
+      ]
+    },
+    {
+      "name": "scheme 35",
+      "input": "Authorization: Token synthetic-auth-value\r\nstatus=ready",
+      "expected": "Authorization: [Redacted]\nstatus=ready",
+      "credentials": [
+        "synthetic-auth-value"
+      ]
+    },
+    {
+      "name": "scheme 36",
+      "input": "Authorization: Token\tsynthetic-auth-value\r\nstatus=ready",
+      "expected": "Authorization: [Redacted]\nstatus=ready",
+      "credentials": [
+        "synthetic-auth-value"
+      ]
+    },
+    {
+      "name": "scheme 37",
+      "input": "Authorization: Fixture.Scheme synthetic-auth-value\r\nstatus=ready",
+      "expected": "Authorization: [Redacted]\nstatus=ready",
+      "credentials": [
+        "synthetic-auth-value"
+      ]
+    },
+    {
+      "name": "scheme 38",
+      "input": "Authorization: Fixture.Scheme\tsynthetic-auth-value\r\nstatus=ready",
+      "expected": "Authorization: [Redacted]\nstatus=ready",
+      "credentials": [
+        "synthetic-auth-value"
+      ]
+    },
+    {
+      "name": "scheme 39",
+      "input": "Authorization: fixture+scheme synthetic-auth-value\r\nstatus=ready",
+      "expected": "Authorization: [Redacted]\nstatus=ready",
+      "credentials": [
+        "synthetic-auth-value"
+      ]
+    },
+    {
+      "name": "scheme 40",
+      "input": "Authorization: fixture+scheme\tsynthetic-auth-value\r\nstatus=ready",
+      "expected": "Authorization: [Redacted]\nstatus=ready",
+      "credentials": [
+        "synthetic-auth-value"
+      ]
+    },
+    {
+      "name": "JSON 41",
+      "input": "{\"apiKey\":\"synthetic-quoted\",\"status\":\"ready\"}",
+      "expected": "{\"apiKey\":\"[Redacted]\",\"status\":\"ready\"}",
+      "credentials": [
+        "synthetic-quoted"
+      ]
+    },
+    {
+      "name": "JSON 42",
+      "input": "{\"apiKey\":\"synthetic \\\"quoted\\\" value\",\"status\":\"ready\"}",
+      "expected": "{\"apiKey\":\"[Redacted]\",\"status\":\"ready\"}",
+      "credentials": [
+        "synthetic \"quoted\" value"
+      ]
+    },
+    {
+      "name": "JSON 43",
+      "input": "{\"apiKey\":123456,\"status\":\"ready\"}",
+      "expected": "{\"apiKey\":\"[Redacted]\",\"status\":\"ready\"}",
+      "credentials": []
+    },
+    {
+      "name": "JSON 44",
+      "input": "{\"apiKey\":true,\"status\":\"ready\"}",
+      "expected": "{\"apiKey\":\"[Redacted]\",\"status\":\"ready\"}",
+      "credentials": []
+    },
+    {
+      "name": "JSON 45",
+      "input": "{\"apiKey\":false,\"status\":\"ready\"}",
+      "expected": "{\"apiKey\":\"[Redacted]\",\"status\":\"ready\"}",
+      "credentials": []
+    },
+    {
+      "name": "JSON 46",
+      "input": "{\"apiKey\":null,\"status\":\"ready\"}",
+      "expected": "{\"apiKey\":\"[Redacted]\",\"status\":\"ready\"}",
+      "credentials": []
+    },
+    {
+      "name": "JSON 47",
+      "input": "{\"apiKey\":[],\"status\":\"ready\"}",
+      "expected": "{\"apiKey\":\"[Redacted]\",\"status\":\"ready\"}",
+      "credentials": []
+    },
+    {
+      "name": "JSON 48",
+      "input": "{\"apiKey\":{\"nested\":[\"synthetic-container\",{\"value\":\"synthetic-inner\"}]},\"status\":\"ready\"}",
+      "expected": "{\"apiKey\":\"[Redacted]\",\"status\":\"ready\"}",
+      "credentials": [
+        "synthetic-container",
+        "synthetic-inner"
+      ]
+    },
+    {
+      "name": "escaped single quotes",
+      "input": "token='synthetic \\'quoted\\' value' status=ready",
+      "expected": "token='[Redacted]' status=ready",
+      "credentials": [
+        "synthetic \\'quoted\\' value"
+      ]
+    },
+    {
+      "name": "backtick command",
+      "input": "apiKey=`synthetic-backtick-value`; status=ready",
+      "expected": "apiKey=[Redacted]]`; status=ready",
+      "credentials": [
+        "synthetic-backtick-value"
+      ]
+    },
+    {
+      "name": "unterminated quote",
+      "input": "password=\"synthetic-unterminated",
+      "expected": "password=\"[Redacted]",
+      "credentials": [
+        "synthetic-unterminated"
+      ]
+    },
+    {
+      "name": "unterminated container",
+      "input": "secret={\"nested\":\"synthetic-container-value\"",
+      "expected": "secret=[Redacted]",
+      "credentials": [
+        "synthetic-container-value"
+      ]
+    },
+    {
+      "name": "PEM ",
+      "input": "before\n-----BEGIN PRIVATE KEY-----\nsynthetic-private-material\n-----END PRIVATE KEY-----\nafter",
+      "expected": "before\n[Redacted]\nafter",
+      "credentials": [
+        "synthetic-private-material"
+      ]
+    },
+    {
+      "name": "PEM RSA ",
+      "input": "before\n-----BEGIN RSA PRIVATE KEY-----\nsynthetic-private-material\n-----END RSA PRIVATE KEY-----\nafter",
+      "expected": "before\n[Redacted]\nafter",
+      "credentials": [
+        "synthetic-private-material"
+      ]
+    },
+    {
+      "name": "PEM EC ",
+      "input": "before\n-----BEGIN EC PRIVATE KEY-----\nsynthetic-private-material\n-----END EC PRIVATE KEY-----\nafter",
+      "expected": "before\n[Redacted]\nafter",
+      "credentials": [
+        "synthetic-private-material"
+      ]
+    },
+    {
+      "name": "PEM ENCRYPTED ",
+      "input": "before\n-----BEGIN ENCRYPTED PRIVATE KEY-----\nsynthetic-private-material\n-----END ENCRYPTED PRIVATE KEY-----\nafter",
+      "expected": "before\n[Redacted]\nafter",
+      "credentials": [
+        "synthetic-private-material"
+      ]
+    },
+    {
+      "name": "unterminated PEM",
+      "input": "before\n-----BEGIN PRIVATE KEY-----\nsynthetic-private-material",
+      "expected": "before\n[Redacted]",
+      "credentials": [
+        "synthetic-private-material"
+      ]
+    },
+    {
+      "name": "terminal controls",
+      "input": "\u001b[31mBearer syn\u0007thetic-controls\u001b[0m",
+      "expected": "Bearer [Redacted]",
+      "credentials": [
+        "synthetic-controls"
+      ]
+    },
+    {
+      "name": "boundary 59",
+      "input": "ordinary.version.string",
+      "expected": "ordinary.version.string",
+      "credentials": []
+    },
+    {
+      "name": "boundary 60",
+      "input": "unicode 雪 😀 é",
+      "expected": "unicode 雪 😀 é",
+      "credentials": []
+    },
+    {
+      "name": "boundary 61",
+      "input": "0123456789abcdef0123456789abcdef01234567",
+      "expected": "0123456789abcdef0123456789abcdef01234567",
+      "credentials": []
+    },
+    {
+      "name": "boundary 62",
+      "input": "xAKIAFAKE111111111111y",
+      "expected": "xAKIAFAKE111111111111y",
+      "credentials": []
+    },
+    {
+      "name": "boundary 63",
+      "input": "xsk-nearmiss1234",
+      "expected": "xsk-nearmiss1234",
+      "credentials": []
+    },
+    {
+      "name": "boundary 64",
+      "input": "tokenId=fixture tokenCount=42 credentialPresent=true",
+      "expected": "tokenId=fixture tokenCount=42 credentialPresent=true",
+      "credentials": []
+    },
+    {
+      "name": "boundary 65",
+      "input": "{\"key\":\"fixture-setting\",\"credentialId\":\"fixture-connection\",\"scopeKey\":\"fixture\"}",
+      "expected": "{\"key\":\"fixture-setting\",\"credentialId\":\"fixture-connection\",\"scopeKey\":\"fixture\"}",
+      "credentials": []
+    },
+    {
+      "name": "boundary 66",
+      "input": "knownSecrets: secrets; token: string; API_KEY=config.key;",
+      "expected": "knownSecrets: [Redacted]; token: [Redacted]; API_KEY=[Redacted];",
+      "credentials": []
+    },
+    {
+      "name": "boundary 67",
+      "input": "no secrets here",
+      "expected": "no secrets here",
+      "credentials": []
+    },
+    {
+      "name": "boundary 68",
+      "input": "Bearer [Redacted]",
+      "expected": "Bearer [Redacted]",
+      "credentials": []
+    },
+    {
+      "name": "boundary 69",
+      "input": "apiKey=<placeholder>; status=ready",
+      "expected": "apiKey=[Redacted]; status=ready",
+      "credentials": []
+    },
+    {
+      "name": "boundary 70",
+      "input": "apiKey=${PLACEHOLDER}; status=ready",
+      "expected": "apiKey=[Redacted]}; status=ready",
+      "credentials": []
+    },
+    {
+      "name": "boundary 71",
+      "input": "apiKey={{placeholder}}; status=ready",
+      "expected": "apiKey=[Redacted]; status=ready",
+      "credentials": []
+    },
+    {
+      "name": "boundary 72",
+      "input": "apiKey=...; status=ready",
+      "expected": "apiKey=[Redacted]; status=ready",
+      "credentials": []
+    },
+    {
+      "name": "boundary 73",
+      "input": "apiKey=''; status=ready",
+      "expected": "apiKey=''; status=ready",
+      "credentials": []
+    },
+    {
+      "name": "boundary 74",
+      "input": "apiKey=; status=ready",
+      "expected": "apiKey=; status=ready",
+      "credentials": []
+    },
+    {
+      "name": "boundary 75",
+      "input": "apiKey=[]; status=ready",
+      "expected": "apiKey=[Redacted]; status=ready",
+      "credentials": []
+    },
+    {
+      "name": "boundary 76",
+      "input": "apiKey=123; status=ready",
+      "expected": "apiKey=[Redacted]; status=ready",
+      "credentials": []
+    },
+    {
+      "name": "boundary 77",
+      "input": "password=fixture status = ready",
+      "expected": "password=[Redacted] status = ready",
+      "credentials": []
+    },
+    {
+      "name": "boundary 78",
+      "input": "fixture-boundary@example.test+suffix",
+      "expected": "[Redacted]+suffix",
+      "credentials": []
+    },
+    {
+      "name": "boundary 79",
+      "input": "fixture-boundary@example.test_suffix",
+      "expected": "fixture-boundary@example.test_suffix",
+      "credentials": []
+    },
+    {
+      "name": "boundary 80",
+      "input": "xeyJheader.payload.sig-x",
+      "expected": "xeyJheader.payload.sig-x",
+      "credentials": []
+    },
+    {
+      "name": "boundary 81",
+      "input": "雪 sk-boundary1234",
+      "expected": "雪 [Redacted]",
+      "credentials": []
+    },
+    {
+      "name": "boundary 82",
+      "input": "apiKey=雪😀",
+      "expected": "apiKey=[Redacted]",
+      "credentials": []
+    },
+    {
+      "name": "boundary 83",
+      "input": "password= synthetic-unicode",
+      "expected": "password= [Redacted]",
+      "credentials": []
+    },
+    {
+      "name": "boundary 84",
+      "input": "secret=\"雪\\😀value\"",
+      "expected": "secret=\"[Redacted]\"",
+      "credentials": []
+    },
+    {
+      "name": "boundary 85",
+      "input": "Bearer synthetic-unicode",
+      "expected": "Bearer [Redacted]",
+      "credentials": []
+    },
+    {
+      "name": "boundary 86",
+      "input": "\u001b]0;title\u0007Bearer synthetic-osc",
+      "expected": "Bearer [Redacted]",
+      "credentials": []
+    },
+    {
+      "name": "boundary 87",
+      "input": "secret={\"nested\":[\"雪😀\",{\"value\":\"synthetic\"}]}",
+      "expected": "secret=[Redacted]",
+      "credentials": []
+    },
+    {
+      "name": "boundary 88",
+      "input": "prefix.apiKey=synthetic; ready=yes",
+      "expected": "prefix.apiKey=[Redacted]; ready=yes",
+      "credentials": []
+    },
+    {
+      "name": "boundary 89",
+      "input": "authorization=Scheme \"synthetic quoted\" status=ready",
+      "expected": "authorization=[Redacted] status=ready",
+      "credentials": []
+    },
+    {
+      "name": "boundary 90",
+      "input": "token=\"<placeholder>\"",
+      "expected": "token=\"<placeholder>\"",
+      "credentials": []
+    },
+    {
+      "name": "boundary 91",
+      "input": "{\"email hint\":\"fixture-boundary@example.test\"}",
+      "expected": "{\"email hint\":\"[Redacted]\"}",
+      "credentials": []
+    },
+    {
+      "name": "boundary 92",
+      "input": "email=fixture-boundary@example.test",
+      "expected": "email=[Redacted]",
+      "credentials": []
+    },
+    {
+      "name": "round 3 FEFF assignment",
+      "input": "password﻿=﻿synthetic-feff; status=ready",
+      "expected": "password﻿=﻿[Redacted]; status=ready",
+      "credentials": [
+        "synthetic-feff"
+      ]
+    },
+    {
+      "name": "round 3 FEFF Bearer",
+      "input": "Bearer﻿synthetic-feff-bearer",
+      "expected": "Bearer﻿[Redacted]",
+      "credentials": [
+        "synthetic-feff-bearer"
+      ]
+    },
+    {
+      "name": "round 3 hyphen JWT",
+      "input": "-eyJfakeHeader.fakePayload.fakeSignature",
+      "expected": "[Redacted]",
+      "credentials": [
+        "eyJfakeHeader.fakePayload.fakeSignature"
+      ]
+    },
+    {
+      "name": "round 3 terminal string",
+      "input": "\u001bPsyntheticTerminalPayload\u001b\\Bearer synthetic-terminal-bearer",
+      "expected": "Bearer [Redacted]",
+      "credentials": [
+        "synthetic-terminal-bearer",
+        "syntheticTerminalPayload"
+      ]
+    },
+    {
+      "name": "round 3 Unicode value boundary",
+      "input": "password=synthetic-boundary following prose",
+      "expected": "password=[Redacted] following prose",
+      "credentials": [
+        "synthetic-boundary"
+      ]
+    }
+  ],
+  "savedAnswer": {
+    "input": "before ghp_FAKEsynthetic1234 after\nbefore gho_FAKEsynthetic1234 after\nbefore ghu_FAKEsynthetic1234 after\nbefore ghs_FAKEsynthetic1234 after\nbefore ghr_FAKEsynthetic1234 after\nbefore github_pat_FAKEsynthetic1234 after\nbefore sk-FAKEsynthetic1234 after\nbefore xai-FAKEsynthetic1234 after\nbefore ak_FAKEsynthetic1234 after\nbefore ck_FAKEsynthetic1234 after\nbefore AKIAFAKE000000000000 after\nbefore ASIAFAKE000000000000 after\nbefore eyJfakeHeader.fakePayload.fakeSignature after\nbefore FakeAwsSynthetic123FakeAwsSynthetic123Fa after\nbefore Bearer synthetic-short after\nbefore bEaReR synthetic-short after\nhttps://synthetic-user:synthetic-pass@gateway.example.test/path\nhello fixture@example.test\npassword=synthetic-assignment-password; status=ready\npasswd=synthetic-assignment-passwd; status=ready\nsecret=synthetic-assignment-secret; status=ready\naccessToken=synthetic-assignment-accessToken; status=ready\nApi_Key=synthetic-assignment-Api_Key; status=ready\nprivate-key=synthetic-assignment-private-key; status=ready\naccess_key=synthetic-assignment-access_key; status=ready\nclientKey=synthetic-assignment-clientKey; status=ready\nauth-key=synthetic-assignment-auth-key; status=ready\ncredential=synthetic-assignment-credential; status=ready\nauthorization=synthetic-assignment-authorization; status=ready\ncookie=synthetic-assignment-cookie; status=ready\nkey=synthetic-assignment-key; status=ready\nAuthorization: Bearer synthetic-auth-value\r\nstatus=ready\nAuthorization: Bearer\tsynthetic-auth-value\r\nstatus=ready\nAuthorization: bAsIc synthetic-auth-value\r\nstatus=ready\nAuthorization: bAsIc\tsynthetic-auth-value\r\nstatus=ready\nAuthorization: Token synthetic-auth-value\r\nstatus=ready\nAuthorization: Token\tsynthetic-auth-value\r\nstatus=ready\nAuthorization: Fixture.Scheme synthetic-auth-value\r\nstatus=ready\nAuthorization: Fixture.Scheme\tsynthetic-auth-value\r\nstatus=ready\nAuthorization: fixture+scheme synthetic-auth-value\r\nstatus=ready\nAuthorization: fixture+scheme\tsynthetic-auth-value\r\nstatus=ready\n{\"apiKey\":\"synthetic-quoted\",\"status\":\"ready\"}\n{\"apiKey\":\"synthetic \\\"quoted\\\" value\",\"status\":\"ready\"}\n{\"apiKey\":123456,\"status\":\"ready\"}\n{\"apiKey\":true,\"status\":\"ready\"}\n{\"apiKey\":false,\"status\":\"ready\"}\n{\"apiKey\":null,\"status\":\"ready\"}\n{\"apiKey\":[],\"status\":\"ready\"}\n{\"apiKey\":{\"nested\":[\"synthetic-container\",{\"value\":\"synthetic-inner\"}]},\"status\":\"ready\"}\ntoken='synthetic \\'quoted\\' value' status=ready\napiKey=`synthetic-backtick-value`; status=ready\npassword=\"synthetic-unterminated\"\nsecret={\"nested\":\"synthetic-container-value\"}\nbefore\n-----BEGIN PRIVATE KEY-----\nsynthetic-private-material\n-----END PRIVATE KEY-----\nafter\nbefore\n-----BEGIN RSA PRIVATE KEY-----\nsynthetic-private-material\n-----END RSA PRIVATE KEY-----\nafter\nbefore\n-----BEGIN EC PRIVATE KEY-----\nsynthetic-private-material\n-----END EC PRIVATE KEY-----\nafter\nbefore\n-----BEGIN ENCRYPTED PRIVATE KEY-----\nsynthetic-private-material\n-----END ENCRYPTED PRIVATE KEY-----\nafter\nbefore\n-----BEGIN PRIVATE KEY-----\nsynthetic-private-material\n-----END PRIVATE KEY-----\n\u001b[31mBearer syn\u0007thetic-controls\u001b[0m\nordinary.version.string\nunicode 雪 😀 é\n0123456789abcdef0123456789abcdef01234567\nxAKIAFAKE111111111111y\nxsk-nearmiss1234\ntokenId=fixture tokenCount=42 credentialPresent=true\n{\"key\":\"fixture-setting\",\"credentialId\":\"fixture-connection\",\"scopeKey\":\"fixture\"}\nknownSecrets: secrets; token: string; API_KEY=config.key;\nno secrets here\nBearer [Redacted]\napiKey=<placeholder>; status=ready\napiKey=${PLACEHOLDER}; status=ready\napiKey={{placeholder}}; status=ready\napiKey=...; status=ready\napiKey=''; status=ready\napiKey=; status=ready\napiKey=[]; status=ready\napiKey=123; status=ready\npassword=fixture status = ready\nfixture-boundary@example.test+suffix\nfixture-boundary@example.test_suffix\nxeyJheader.payload.sig-x\n雪 sk-boundary1234\napiKey=雪😀\npassword= synthetic-unicode\nsecret=\"雪\\😀value\"\nBearer synthetic-unicode\n\u001b]0;title\u0007Bearer synthetic-osc\nsecret={\"nested\":[\"雪😀\",{\"value\":\"synthetic\"}]}\nprefix.apiKey=synthetic; ready=yes\nauthorization=Scheme \"synthetic quoted\" status=ready\ntoken=\"<placeholder>\"\n{\"email hint\":\"fixture-boundary@example.test\"}\nemail=fixture-boundary@example.test\npassword﻿=﻿synthetic-feff; status=ready\nBearer﻿synthetic-feff-bearer\n-eyJfakeHeader.fakePayload.fakeSignature\n\u001bPsyntheticTerminalPayload\u001b\\Bearer synthetic-terminal-bearer\npassword=synthetic-boundary following prose",
+    "expected": "before [Redacted] after\nbefore [Redacted] after\nbefore [Redacted] after\nbefore [Redacted] after\nbefore [Redacted] after\nbefore [Redacted] after\nbefore [Redacted] after\nbefore [Redacted] after\nbefore [Redacted] after\nbefore [Redacted] after\nbefore [Redacted] after\nbefore [Redacted] after\nbefore [Redacted] after\nbefore [Redacted] after\nbefore Bearer [Redacted] after\nbefore bEaReR [Redacted] after\nhttps://[Redacted]@gateway.example.test/path\nhello [Redacted]\npassword=[Redacted]; status=ready\npasswd=[Redacted]; status=ready\nsecret=[Redacted]; status=ready\naccessToken=[Redacted]; status=ready\nApi_Key=[Redacted]; status=ready\nprivate-key=[Redacted]; status=ready\naccess_key=[Redacted]; status=ready\nclientKey=[Redacted]; status=ready\nauth-key=[Redacted]; status=ready\ncredential=[Redacted]; status=ready\nauthorization=[Redacted]; status=ready\ncookie=[Redacted]; status=ready\nkey=[Redacted]; status=ready\nAuthorization: [Redacted]\nstatus=ready\nAuthorization: [Redacted]\nstatus=ready\nAuthorization: [Redacted]\nstatus=ready\nAuthorization: [Redacted]\nstatus=ready\nAuthorization: [Redacted]\nstatus=ready\nAuthorization: [Redacted]\nstatus=ready\nAuthorization: [Redacted]\nstatus=ready\nAuthorization: [Redacted]\nstatus=ready\nAuthorization: [Redacted]\nstatus=ready\nAuthorization: [Redacted]\nstatus=ready\n{\"apiKey\":\"[Redacted]\",\"status\":\"ready\"}\n{\"apiKey\":\"[Redacted]\",\"status\":\"ready\"}\n{\"apiKey\":\"[Redacted]\",\"status\":\"ready\"}\n{\"apiKey\":\"[Redacted]\",\"status\":\"ready\"}\n{\"apiKey\":\"[Redacted]\",\"status\":\"ready\"}\n{\"apiKey\":\"[Redacted]\",\"status\":\"ready\"}\n{\"apiKey\":\"[Redacted]\",\"status\":\"ready\"}\n{\"apiKey\":\"[Redacted]\",\"status\":\"ready\"}\ntoken='[Redacted]' status=ready\napiKey=[Redacted]]`; status=ready\npassword=\"[Redacted]\"\nsecret=[Redacted]\nbefore\n[Redacted]\nafter\nbefore\n[Redacted]\nafter\nbefore\n[Redacted]\nafter\nbefore\n[Redacted]\nafter\nbefore\n[Redacted]\nBearer [Redacted]\nordinary.version.string\nunicode 雪 😀 é\n0123456789abcdef0123456789abcdef01234567\nxAKIAFAKE111111111111y\nxsk-nearmiss1234\ntokenId=fixture tokenCount=42 credentialPresent=true\n{\"key\":\"fixture-setting\",\"credentialId\":\"fixture-connection\",\"scopeKey\":\"fixture\"}\nknownSecrets: [Redacted]; token: [Redacted]; API_KEY=[Redacted];\nno secrets here\nBearer [Redacted]\napiKey=[Redacted]; status=ready\napiKey=[Redacted]}; status=ready\napiKey=[Redacted]; status=ready\napiKey=[Redacted]; status=ready\napiKey=''; status=ready\napiKey=; status=ready\napiKey=[Redacted]; status=ready\napiKey=[Redacted]; status=ready\npassword=[Redacted] status = ready\n[Redacted]+suffix\nfixture-boundary@example.test_suffix\nxeyJheader.payload.sig-x\n雪 [Redacted]\napiKey=[Redacted]\npassword= [Redacted]\nsecret=\"[Redacted]\"\nBearer [Redacted]\nBearer [Redacted]\nsecret=[Redacted]\nprefix.apiKey=[Redacted]; ready=yes\nauthorization=[Redacted] status=ready\ntoken=\"<placeholder>\"\n{\"email hint\":\"[Redacted]\"}\nemail=[Redacted]\npassword﻿=﻿[Redacted]; status=ready\nBearer﻿[Redacted]\n[Redacted]\nBearer [Redacted]\npassword=[Redacted] following prose",
+    "credentials": [
+      "ghp_FAKEsynthetic1234",
+      "gho_FAKEsynthetic1234",
+      "ghu_FAKEsynthetic1234",
+      "ghs_FAKEsynthetic1234",
+      "ghr_FAKEsynthetic1234",
+      "github_pat_FAKEsynthetic1234",
+      "sk-FAKEsynthetic1234",
+      "xai-FAKEsynthetic1234",
+      "ak_FAKEsynthetic1234",
+      "ck_FAKEsynthetic1234",
+      "AKIAFAKE000000000000",
+      "ASIAFAKE000000000000",
+      "eyJfakeHeader.fakePayload.fakeSignature",
+      "FakeAwsSynthetic123FakeAwsSynthetic123Fa",
+      "synthetic-short",
+      "synthetic-user",
+      "synthetic-pass",
+      "fixture@example.test",
+      "synthetic-assignment-password",
+      "synthetic-assignment-passwd",
+      "synthetic-assignment-secret",
+      "synthetic-assignment-accessToken",
+      "synthetic-assignment-Api_Key",
+      "synthetic-assignment-private-key",
+      "synthetic-assignment-access_key",
+      "synthetic-assignment-clientKey",
+      "synthetic-assignment-auth-key",
+      "synthetic-assignment-credential",
+      "synthetic-assignment-authorization",
+      "synthetic-assignment-cookie",
+      "synthetic-assignment-key",
+      "synthetic-auth-value",
+      "synthetic-quoted",
+      "synthetic \"quoted\" value",
+      "synthetic-container",
+      "synthetic-inner",
+      "synthetic \\'quoted\\' value",
+      "synthetic-backtick-value",
+      "synthetic-unterminated",
+      "synthetic-container-value",
+      "synthetic-private-material",
+      "synthetic-controls",
+      "synthetic-feff",
+      "synthetic-feff-bearer",
+      "synthetic-terminal-bearer",
+      "syntheticTerminalPayload",
+      "synthetic-boundary"
+    ]
+  }
+}

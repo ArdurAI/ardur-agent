@@ -1,4 +1,4 @@
-# Rust paired-home client (Stage 2)
+# Rust paired-home client (Stages 2 and 3)
 
 The builder and local-first user can pair a device, check its current read grant and list saved bots
 without starting another bot runtime. This is a separate `ardur-rs` executable.
@@ -30,6 +30,80 @@ identity or unsafe storage; 3 invalid input. JSON failures also include
 `error:{code,message}` and `exitCode`. Arbitrary remote errors and invalid
 arguments are never echoed. Human output escapes terminal controls and bidi
 format controls. JSON preserves the actual home/bot metadata with JSON escaping.
+
+## Stage 3 task commands
+
+These commands need the Stage 3 home operations in home PR #187, including its
+review-round receipt checks. Pair/status/bots keep their Stage 2 outputs and exits.
+
+```sh
+ardur-rs send <bot> <text> --request-id <id> [--wait] [--timeout 180s] [--json]
+ardur-rs wait --run <id> [--timeout 180s] [--json]
+ardur-rs runs list [--cursor <run-id>] [--limit 50] [--json]
+ardur-rs runs show <id> [--json]
+ardur-rs tasks show <id> [--json]
+ardur-rs stop <task-id> [--json]
+```
+
+The bot is an exact ID or an unambiguous saved name. A request ID is required for
+Rust send and must be 16–128 UTF-16 units. Text is nonblank and at most 32,000
+UTF-16 units. The home owns execution and saved model/computer pins.
+
+New commands use the TypeScript version-1 result family:
+
+```json
+{"version":1,"command":"wait","bot":null,"runId":"run-id","taskId":"task-id","verdict":"pass","replyText":"Saved answer","elapsedMs":250,"failureReason":null,"data":{"run":{}}}
+```
+
+The example abbreviates the run detail; actual data carries the complete typed
+record. A successful show/list exits 0 even when a saved run failed. Wait exits 2
+for failed/stopped runs, missing or mismatched answers, or protocol/transport
+failure; 3 for a deadline; 4 for usage/access/input/storage/identity refusal.
+Exit 1 is reserved for mismatch (there is no Rust test-bot command in this stage).
+
+Timeouts accept milliseconds, seconds or minutes (`100ms`, `1.5s`, `3m`, or bare
+seconds), up to 2,147,483,647 milliseconds, default 180 seconds. The whole send
+and wait flow uses one deadline, including nonce/signature exchange, dispatch,
+saved-state reads and sleep. Polling intervals are two seconds. A deadline drops
+the pending wait, never sends stop and never undoes admission. It cannot guarantee
+that a request already received by home did not take effect.
+
+Recovery is explicit: rerun send with the same request ID, selected bot and text.
+It maps to the existing `clientNonce`; fresh nonce/proof exchanges accompany each
+request. Home returns the original admission for identical canonical input and
+refuses changed input. No automatic retry or second recovery system is added.
+
+`stop` prints “Cancellation requested for <task-id>.” Its response is only
+`{cancelRequested:true}`; it does not confirm the task stopped. Wait keeps polling
+when cancellation is requested but unconfirmed. Input and approval waits return
+an action sentence instead of polling forever.
+
+A completed run without a saved answer is an error, not a pass. The updated home
+reports category `other` with the fixed missing-answer sentence. The client also
+fails closed when an older home omits that signal. Saved answers must match the
+exact message ID, run ID, thread and bot role; only non-reasoning text blocks are
+rendered. Tool results and arbitrary provider failure prose are never returned.
+Typed records discard extra remote fields, failure messages use fixed safe
+sentences, and private-key/token patterns are redacted before JSON serialization.
+
+### Stage 3 wire reads and boundaries
+
+All operations use the existing signed `{operation,body,proof}` request:
+
+- `runs/get {runId}` → `{run:DeviceRunDetail}`
+- `tasks/get {taskId}` → `{task:DeviceRunDetail}`
+- `runs/list {cursor?,limit?}` → `{runs,nextCursor}` (default 50, 1–100)
+- `messages/get {threadId,botId,around:{messageId}}` → bounded message page
+- Existing `dispatch {clientNonce,botId,text}` and `stop {taskId}` are unchanged.
+
+DeviceRunDetail includes taskId, runId, threadId, botId, state, cancelRequested,
+status, cancelConfirmed, messageId, failure, createdAt, startedAt and completedAt.
+State is distinct from raw run status. Failure is null or category/fixed sentence.
+
+The home requires read scope and this device's admission receipt for exact runs,
+tasks and cursors. A paired device reads messages only in threads of tasks admitted
+to it, with independent thread ownership checks. A thread without its receipt
+gets the same refusal as an unknown thread. The client never expands those grants.
 
 ## Identity and transport
 
@@ -131,9 +205,8 @@ The accepted string domain is **well-formed Unicode** in pairing payloads and
 all canonical JSON string values and object keys. Valid surrogate pairs decode
 normally. Lone high or low surrogates are refused with a typed error and a plain
 sentence; they are never replaced with U+FFFD, which would change signed bytes.
-Rust enforces this now. The current TypeScript implementation accepts lone
-surrogates; Stage 3 must tighten its input checks to this agreed contract before
-claiming parity for all accepted inputs. `parse_json` checks raw canonical JSON;
+Rust enforces this now. The Stage 3 home contract rejects lone surrogates in values and keys as well;
+the copied rejected vectors prove the accepted string domain in both clients. `parse_json` checks raw canonical JSON;
 Rust `String` and `Value` already enforce the representable string domain.
 
 The fixture generator's `JSON.stringify` step produces the wire body: it changes
@@ -182,6 +255,39 @@ cargo tree -p home-client
 Local toolchain: Rust 1.94.1. CI uses the repository pin, 1.98.1.
 The shipping client graph has no dependency on the old runtime, server,
 providers, memory, retrieval or tool-execution crates.
+
+## Stage 3 fixture provenance and proof
+
+`crates/home-protocol/tests/fixtures/device-operations.json` is a byte-for-byte
+copy of `apps/cli/fixtures/device-operations.json` from `ArdurAI/ardur-bot`
+revision `49551df2a61f1e0d34498b9eb06b5883801278c8`. It contains eight accepted
+request vectors and four rejected surrogate vectors. The copied file is unchanged;
+provenance and added public TypeScript signatures live in `typescript-stage3.json`.
+
+The `--stage3` generator mode imports the canonicalizer, signer and actual home
+signature verifier from a read-only oracle checkout. Rust checks canonical bodies,
+signed text and TypeScript DER signatures for every new operation; Rust exports
+those same bodies with public signatures to `rust.json`. The actual TypeScript
+server verifier accepts all exported Rust signatures and rejects altered text.
+The offline Node checker in CI verifies the committed public vectors; it does not
+import a separate checkout or claim a real home connection.
+
+```sh
+node --import "${ORACLE}/node_modules/tsx/dist/loader.mjs" scripts/home-fixtures.mjs "${ORACLE}" --stage3
+cargo run -p home-protocol --example rust_vectors > crates/home-protocol/tests/fixtures/rust.json
+node --import "${ORACLE}/node_modules/tsx/dist/loader.mjs" scripts/home-fixtures.mjs "${ORACLE}" --verify-rust crates/home-protocol/tests/fixtures/rust.json
+node scripts/check-home-vectors.mjs
+```
+
+Disposable HTTPS tests exercise all six commands with independently constructed
+signed texts and a separate DER verifier. They prove lost-admission recovery,
+fresh proofs, changed-body refusal, exact saved answers, requested versus confirmed
+cancellation, bounded running/hung waits, missing/mismatched answers, approval waits,
+safe failures, cursor/limit bodies and unchanged legacy commands. Unix subprocess
+tests exercise the compiled CLI with temporary profiles, never owner storage.
+Windows runs protocol and in-memory client tests; private-file pairing remains
+refused until a protected ACL backend exists. No real home, database, bot runtime
+or model call is involved, and these tests incur no model-turn cost.
 
 ## Follow-ups and acceptance boundary
 

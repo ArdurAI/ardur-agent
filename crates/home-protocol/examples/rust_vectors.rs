@@ -14,5 +14,16 @@ fn main() {
         let text = device_signed_text(&p.instance_id, &proof, "rpc", &r["body"]);
         vectors.push(json!({"kind":"request","instanceId":p.instance_id,"proof":proof,"operation":"rpc","body":r["body"],"publicKey":k.public_key,"text":text,"signature":k.sign(&text).unwrap()}));
     }
+    let stage3: Value =
+        serde_json::from_str(include_str!("../tests/fixtures/typescript-stage3.json")).unwrap();
+    let mut proof = stage3["proof"].clone();
+    proof["signature"] = json!("");
+    let proof: Proof = serde_json::from_value(proof).unwrap();
+    for r in stage3["requests"].as_array().unwrap() {
+        let operation = r["operation"].as_str().unwrap();
+        let instance = stage3["instanceId"].as_str().unwrap();
+        let text = device_signed_text(instance, &proof, operation, &r["body"]);
+        vectors.push(json!({"kind":"request","instanceId":instance,"proof":proof,"operation":operation,"body":r["body"],"publicKey":k.public_key,"text":text,"signature":k.sign(&text).unwrap()}));
+    }
     println!("{}", serde_json::to_string_pretty(&vectors).unwrap());
 }

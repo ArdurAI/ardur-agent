@@ -1,0 +1,96 @@
+{
+  "version": 1,
+  "instanceId": "fixture-home",
+  "proof": {
+    "grantId": "fixture-device",
+    "nonce": "fixture-nonce-00000000000000000000",
+    "timestamp": 1790000000000
+  },
+  "requests": [
+    {
+      "operation": "dispatch",
+      "body": {
+        "clientNonce": "fixture-request-0001",
+        "botId": "fixture-bot",
+        "text": "Reply ✓ 🚀"
+      },
+      "canonicalBody": "{\"botId\":\"fixture-bot\",\"clientNonce\":\"fixture-request-0001\",\"text\":\"Reply ✓ 🚀\"}",
+      "signedText": "[\"ardur-device-v1\",\"fixture-home\",\"fixture-device\",\"fixture-nonce-00000000000000000000\",1790000000000,\"dispatch\",{\"botId\":\"fixture-bot\",\"clientNonce\":\"fixture-request-0001\",\"text\":\"Reply ✓ 🚀\"}]",
+      "signature": "MEYCIQD0nHZSHlL1xvvYoJr1R1HaLAIeRo3zny+p8H58jqJ0ngIhAO3dLYp4O3V0PKIoXgQt4359d+QyuDBGh4MA6ZEyGpx4"
+    },
+    {
+      "operation": "runs/get",
+      "body": {
+        "runId": "fixture-run"
+      },
+      "canonicalBody": "{\"runId\":\"fixture-run\"}",
+      "signedText": "[\"ardur-device-v1\",\"fixture-home\",\"fixture-device\",\"fixture-nonce-00000000000000000000\",1790000000000,\"runs/get\",{\"runId\":\"fixture-run\"}]",
+      "signature": "MEUCIG1hM7/m2F/w1U2uBBTO2qgaZL4hf2dyWzBxv0ydqw6qAiEAxSDWnmOFPTcqWdjo2Yh1OPdhOoEsDE3Vq157KXkCcQQ="
+    },
+    {
+      "operation": "tasks/get",
+      "body": {
+        "taskId": "fixture-task"
+      },
+      "canonicalBody": "{\"taskId\":\"fixture-task\"}",
+      "signedText": "[\"ardur-device-v1\",\"fixture-home\",\"fixture-device\",\"fixture-nonce-00000000000000000000\",1790000000000,\"tasks/get\",{\"taskId\":\"fixture-task\"}]",
+      "signature": "MEUCIBphmSJTS2+ic0xgcQscmvEvhserF0cVWWxGgvWxkJRmAiEA3/XmTRfHpRyo45gf3R0N0j3B4hD/Bq+7B49PZF8GZp0="
+    },
+    {
+      "operation": "runs/list",
+      "body": {},
+      "canonicalBody": "{}",
+      "signedText": "[\"ardur-device-v1\",\"fixture-home\",\"fixture-device\",\"fixture-nonce-00000000000000000000\",1790000000000,\"runs/list\",{}]",
+      "signature": "MEUCIFNA35mUzkIQAIzKSUlA6qZbLbjiR/jUJvYNhC+0Xp9cAiEAj08tySpS8zeTJJWOgg6eDaFrPXEXvsx9VBo/T54358A="
+    },
+    {
+      "operation": "runs/list",
+      "body": {
+        "cursor": "fixture-run",
+        "limit": 2
+      },
+      "canonicalBody": "{\"cursor\":\"fixture-run\",\"limit\":2}",
+      "signedText": "[\"ardur-device-v1\",\"fixture-home\",\"fixture-device\",\"fixture-nonce-00000000000000000000\",1790000000000,\"runs/list\",{\"cursor\":\"fixture-run\",\"limit\":2}]",
+      "signature": "MEQCIFTvNpM9Lop9fD8MoIFW/kmXaYir41gG0F/akC0UVjAhAiANLnw9HAwhfQVpjQm8ec+T6Acuo23PyltQunlTTSTzCw=="
+    },
+    {
+      "operation": "messages/get",
+      "body": {
+        "botId": "fixture-bot",
+        "threadId": "fixture-thread",
+        "around": {
+          "messageId": "fixture-answer"
+        }
+      },
+      "canonicalBody": "{\"around\":{\"messageId\":\"fixture-answer\"},\"botId\":\"fixture-bot\",\"threadId\":\"fixture-thread\"}",
+      "signedText": "[\"ardur-device-v1\",\"fixture-home\",\"fixture-device\",\"fixture-nonce-00000000000000000000\",1790000000000,\"messages/get\",{\"around\":{\"messageId\":\"fixture-answer\"},\"botId\":\"fixture-bot\",\"threadId\":\"fixture-thread\"}]",
+      "signature": "MEUCIAJRaH3kOZn1q7QQpatnN8WvRWDGeAQzxdOUFP1MRsAqAiEA3TifqeooTgVN3DjVTbkAFM0LwnmrNQlUNbvXCnz82V8="
+    },
+    {
+      "operation": "messages/get",
+      "body": {
+        "groupId": "fixture-room",
+        "threadId": "fixture-thread",
+        "before": 12
+      },
+      "canonicalBody": "{\"before\":12,\"groupId\":\"fixture-room\",\"threadId\":\"fixture-thread\"}",
+      "signedText": "[\"ardur-device-v1\",\"fixture-home\",\"fixture-device\",\"fixture-nonce-00000000000000000000\",1790000000000,\"messages/get\",{\"before\":12,\"groupId\":\"fixture-room\",\"threadId\":\"fixture-thread\"}]",
+      "signature": "MEUCIQCgVc7ggkxY2sjri37kKipb+sR5i05uA3uCyL1AQHtfmAIgFBtoSqOMHFTfyL3VLBK/5TLMzl3f4pOS6v+Lhqhmv/Q="
+    },
+    {
+      "operation": "stop",
+      "body": {
+        "taskId": "fixture-task"
+      },
+      "canonicalBody": "{\"taskId\":\"fixture-task\"}",
+      "signedText": "[\"ardur-device-v1\",\"fixture-home\",\"fixture-device\",\"fixture-nonce-00000000000000000000\",1790000000000,\"stop\",{\"taskId\":\"fixture-task\"}]",
+      "signature": "MEUCIQCu0Cb23Zi1w/CkwUC+v9L+U0oku2oOHg5gg1QtYmlrCQIgZY4Gd22M+3CVz3iiYAJQ/hOHASRafNaJCpM+6Ug2gf0="
+    }
+  ],
+  "publicKey": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEEv40PIOZ722rIrfHsEB7wRmzwHx7/Aa6+3IWt0Z6VRXGxixQFnFfWbIsD/6/wZK7oewV9O5RjMnO3SJAO4jpYw==",
+  "provenance": {
+    "repository": "ArdurAI/ardur-bot",
+    "revision": "49551df2a61f1e0d34498b9eb06b5883801278c8",
+    "source": "apps/cli/fixtures/device-operations.json"
+  }
+}

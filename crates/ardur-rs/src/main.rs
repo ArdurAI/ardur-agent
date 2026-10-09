@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 use home_client::{
-    Error, FileStore, HomeClient, SecretStore, default_config_dir, human_text, pair_device,
+    CommandResult, DeviceCommand, Error, FileStore, HomeClient, SecretStore, default_config_dir,
+    execute_device, human_text, pair_device, redact,
 };
 use serde_json::{Value, json};
 use std::io::Read;
@@ -22,6 +23,33 @@ enum Command {
         name: String,
     },
     Status,
+    Send {
+        bot: String,
+        text: String,
+        #[arg(long)]
+        request_id: String,
+        #[arg(long)]
+        wait: bool,
+        #[arg(long, requires = "wait", value_parser = duration)]
+        timeout: Option<std::time::Duration>,
+    },
+    Wait {
+        #[arg(long)]
+        run: String,
+        #[arg(long, default_value = "180s", value_parser = duration)]
+        timeout: std::time::Duration,
+    },
+    Runs {
+        #[command(subcommand)]
+        command: RunsCommand,
+    },
+    Tasks {
+        #[command(subcommand)]
+        command: TasksCommand,
+    },
+    Stop {
+        task_id: String,
+    },
     Bots {
         #[command(subcommand)]
         command: BotsCommand,
@@ -30,6 +58,88 @@ enum Command {
 #[derive(Subcommand)]
 enum BotsCommand {
     List,
+}
+#[derive(Subcommand)]
+enum RunsCommand {
+    List {
+        #[arg(long)]
+        cursor: Option<String>,
+        #[arg(long, default_value_t = 50)]
+        limit: u32,
+    },
+    Show {
+        run_id: String,
+    },
+}
+#[derive(Subcommand)]
+enum TasksCommand {
+    Show { task_id: String },
+}
+fn duration(raw: &str) -> Result<std::time::Duration, String> {
+    let (number, scale) = if let Some(n) = raw.strip_suffix("ms") {
+        (n, 1.0)
+    } else if let Some(n) = raw.strip_suffix('s') {
+        (n, 1000.0)
+    } else if let Some(n) = raw.strip_suffix('m') {
+        (n, 60000.0)
+    } else {
+        (raw, 1000.0)
+    };
+    let digits = |part: &str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
+    let mut parts = number.split('.');
+    let valid = parts.next().is_some_and(digits)
+        && parts.next().is_none_or(digits)
+        && parts.next().is_none();
+    if !valid {
+        return Err("Choose a positive timeout.".into());
+    }
+    let millis = number
+        .parse::<f64>()
+        .map_err(|_| "Choose a positive timeout.")?
+        * scale;
+    if !millis.is_finite() || millis.fract() != 0.0 || !(1.0..=2147483647.0).contains(&millis) {
+        return Err("Choose a positive timeout.".into());
+    }
+    Ok(std::time::Duration::from_millis(millis as u64))
+}
+fn device_command(command: Command) -> Result<(DeviceCommand, std::time::Duration), Command> {
+    let default = std::time::Duration::from_secs(180);
+    Ok(match command {
+        Command::Send {
+            bot,
+            text,
+            request_id,
+            wait,
+            timeout,
+        } => (
+            DeviceCommand::Send {
+                bot,
+                text,
+                request_id,
+                wait,
+            },
+            timeout.unwrap_or(default),
+        ),
+        Command::Wait { run, timeout } => (DeviceCommand::Wait { run_id: run }, timeout),
+        Command::Runs {
+            command: RunsCommand::List { cursor, limit },
+        } => (DeviceCommand::RunsList { cursor, limit }, default),
+        Command::Runs {
+            command: RunsCommand::Show { run_id },
+        } => (DeviceCommand::RunsShow { run_id }, default),
+        Command::Tasks {
+            command: TasksCommand::Show { task_id },
+        } => (DeviceCommand::TasksShow { task_id }, default),
+        Command::Stop { task_id } => (DeviceCommand::Stop { task_id }, default),
+        other => return Err(other),
+    })
+}
+fn print_device(result: CommandResult, json_mode: bool) {
+    if json_mode {
+        println!("{}", result.json());
+    } else {
+        println!("{}", human_text(&result.human()));
+    }
 }
 fn input(file: &str) -> Result<Zeroizing<String>, Error> {
     let mut bytes = Zeroizing::new(Vec::new());
@@ -79,11 +189,13 @@ async fn execute(command: Command) -> Result<Value, Error> {
         Command::Bots {
             command: BotsCommand::List,
         } => HomeClient::new(store.load()?)?.bots().await,
+        _ => Err(Error::Input),
     }
 }
 fn report(command: &str, json_mode: bool, result: Result<Value, Error>) -> i32 {
     match result {
         Ok(data) => {
+            let data = redact(data);
             if json_mode {
                 println!(
                     "{}",
@@ -140,7 +252,7 @@ async fn main() {
                 if json_mode {
                     println!(
                         "{}",
-                        json!({"schemaVersion":1,"ok":true,"command":"help","data":{"usage":"ardur-rs [--json] pair --file <path|-> [--name <name>] | status | bots list","version":env!("CARGO_PKG_VERSION")}})
+                        json!({"schemaVersion":1,"ok":true,"command":"help","data":{"usage":"ardur-rs [--json] pair --file <path|-> [--name <name>] | status | bots list | send <bot> <text> --request-id <id> [--wait] [--timeout 180s] | wait --run <id> [--timeout 180s] | runs list [--cursor <id>] [--limit 50] | runs show <id> | tasks show <id> | stop <task-id>","version":env!("CARGO_PKG_VERSION")}})
                     )
                 } else {
                     print!("{e}")
@@ -148,14 +260,98 @@ async fn main() {
                 return;
             }
             // Do not echo invalid arguments (they may contain the pairing challenge).
+            let name = raw
+                .iter()
+                .filter_map(|a| a.to_str())
+                .find(|a| ["send", "wait", "runs", "tasks", "stop"].contains(a))
+                .unwrap_or("unknown");
+            if ["send", "wait", "runs", "tasks", "stop"].contains(&name)
+                || raw.iter().any(|a| {
+                    a == "send" || a == "wait" || a == "runs" || a == "tasks" || a == "stop"
+                })
+            {
+                let (result, exit) = CommandResult::error(name, Error::Input);
+                print_device(result, json_mode);
+                std::process::exit(exit);
+            }
             std::process::exit(report("unknown", json_mode, Err(Error::Input)));
         }
     };
-    let command = match &args.command {
+    let old_command = match device_command(args.command) {
+        Ok((command, duration)) => {
+            let name = command.name();
+            let client = default_config_dir()
+                .and_then(|dir| FileStore::new(dir).load())
+                .and_then(HomeClient::new);
+            let (result, exit) = match client {
+                Ok(client) => execute_device(&client, command, duration).await,
+                Err(error) => CommandResult::error(name, error),
+            };
+            print_device(result, args.json);
+            std::process::exit(exit);
+        }
+        Err(command) => command,
+    };
+    let command = match &old_command {
         Command::Pair { .. } => "pair",
         Command::Status => "status",
         Command::Bots { .. } => "bots list",
+        _ => unreachable!("device commands were handled"),
     };
-    let exit = report(command, args.json, execute(args.command).await);
+    let exit = report(command, args.json, execute(old_command).await);
     std::process::exit(exit);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Args, duration};
+    use clap::Parser;
+    #[test]
+    fn timeout_grammar_requires_digits_on_both_sides_of_decimal() {
+        for input in [
+            "1.s",
+            "1.ms",
+            "1.m",
+            "1.",
+            ".1s",
+            "..1s",
+            "1..2s",
+            "+1s",
+            "-1s",
+            "1e3s",
+            " 1s",
+            "1s ",
+            "1 s",
+            "NaNs",
+            "infs",
+            "0",
+            "0.0001s",
+            "2147483648ms",
+        ] {
+            assert!(
+                duration(input).is_err(),
+                "accepted malformed timeout: {input}"
+            );
+            assert!(
+                Args::try_parse_from(["ardur-rs", "wait", "--run", "run", "--timeout", input])
+                    .is_err()
+            );
+        }
+        for (input, millis) in [
+            ("1", 1000),
+            ("1s", 1000),
+            ("1.5s", 1500),
+            ("0.001s", 1),
+            ("1ms", 1),
+            ("0.5m", 30000),
+            ("0001.0s", 1000),
+            ("2147483647ms", 2147483647),
+        ] {
+            assert_eq!(duration(input).unwrap().as_millis(), millis, "{input}");
+            assert!(
+                Args::try_parse_from(["ardur-rs", "wait", "--run", "run", "--timeout", input])
+                    .is_ok()
+            );
+        }
+    }
 }

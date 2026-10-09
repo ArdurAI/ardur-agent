@@ -25,5 +25,8 @@ jobs:
         run: cargo test --locked -p home-protocol -p home-client -p ardur-rs
       - name: Clippy client
         run: cargo clippy --locked -p home-protocol -p home-client -p ardur-rs --all-targets -- -D warnings
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        with:
+          node-version: "26.7.0"
       - name: Verify public vectors in Node
         run: node scripts/check-home-vectors.mjs

@@ -12,10 +12,10 @@
       "instanceId": "fixture-home",
       "version": 1
     },
-    "presencePublicKey": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE/JNtn3OrHx1NASIy6N1CY5DQaXQaOHh2sZ/W1uxqrpbbrhJn9G4IIFtsf7JrQ/Vv6sfDrkOEjbZ1xDII9xK3/Q==",
-    "publicKey": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEaETIrVMQOR/w5F6mQB0SiMgtLWT/FQGNIZd6vZ0a44XZukoofYBYGCxVvjBQB5cdDpTsjtXaSvzNt8RdiDa87w==",
-    "signature": "MEUCICMX84RP1TkgLk1JqwseCg1gg3nVODfyYwZsdpPXK0e7AiEA+h6wGJl7zntAsLDOlK8U3UBuv1iy8fo/eT07VC5Lyuw=",
-    "text": "[\"ardur-pair-v1\",\"fixture-home\",\"synthetic-challenge-synthetic-challenge-synthetic-challenge-\",\"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEaETIrVMQOR/w5F6mQB0SiMgtLWT/FQGNIZd6vZ0a44XZukoofYBYGCxVvjBQB5cdDpTsjtXaSvzNt8RdiDa87w==\",\"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE/JNtn3OrHx1NASIy6N1CY5DQaXQaOHh2sZ/W1uxqrpbbrhJn9G4IIFtsf7JrQ/Vv6sfDrkOEjbZ1xDII9xK3/Q==\"]"
+    "presencePublicKey": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEOaGjtoaUPJIthfQ5SND1nMFk6lcOVQA+BZ+jRGe3pS5YfNvwrpGCItNhIuR4d2kq+j/7O8pUXNv477hLJbrfzQ==",
+    "publicKey": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEjW22ZBJ0La1wzS7BFpa1oC3PG4Hx9eVv+3dsN3ccLSSa9KTWXZG8GR9q/8wqWtEdIM/g9Ao/2q4pGC9QfpBQ6w==",
+    "signature": "MEUCIQCPMpVCo5dNmuhecfarQin5U91phyXFuP1DR0O6bJzftwIgfG1bQpdXTBs+Ti9+T/wtqUsLD58A1Yg1IE2i/fxasuw=",
+    "text": "[\"ardur-pair-v1\",\"fixture-home\",\"synthetic-challenge-synthetic-challenge-synthetic-challenge-\",\"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEjW22ZBJ0La1wzS7BFpa1oC3PG4Hx9eVv+3dsN3ccLSSa9KTWXZG8GR9q/8wqWtEdIM/g9Ao/2q4pGC9QfpBQ6w==\",\"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEOaGjtoaUPJIthfQ5SND1nMFk6lcOVQA+BZ+jRGe3pS5YfNvwrpGCItNhIuR4d2kq+j/7O8pUXNv477hLJbrfzQ==\"]"
   },
   {
     "body": {
@@ -40,8 +40,8 @@
       "signature": "",
       "timestamp": 1791429078000
     },
-    "publicKey": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEaETIrVMQOR/w5F6mQB0SiMgtLWT/FQGNIZd6vZ0a44XZukoofYBYGCxVvjBQB5cdDpTsjtXaSvzNt8RdiDa87w==",
-    "signature": "MEYCIQC8XkmfpWRy80OB/ANbkj4aBYmlGgb8nXf9SHKEZEk6PAIhAKVfFobDB/oifvBW5PImKyXqCWpl9WuZkWQsyiWGNKQV",
+    "publicKey": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEjW22ZBJ0La1wzS7BFpa1oC3PG4Hx9eVv+3dsN3ccLSSa9KTWXZG8GR9q/8wqWtEdIM/g9Ao/2q4pGC9QfpBQ6w==",
+    "signature": "MEYCIQDjqzgzC1nC7I+XtV/QKyjiKEd+/h4UcriOcmzbUWF9GwIhAJ1sTrn8tpAFcY2RVAPoAUAY2qZXG/4iFOX/R25B4WWh",
     "text": "[\"ardur-device-v1\",\"fixture-home\",\"fixture-grant\",\"nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn\",1791429078000,\"rpc\",{\"nested\":{\"a\":1,\"z\":[true,null,{\"β\":\"value\"}]},\"text\":\"雪 😀 é \\u0000  \"}]"
   },
   {
@@ -70,8 +70,8 @@
       "signature": "",
       "timestamp": 1791429078000
     },
-    "publicKey": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEaETIrVMQOR/w5F6mQB0SiMgtLWT/FQGNIZd6vZ0a44XZukoofYBYGCxVvjBQB5cdDpTsjtXaSvzNt8RdiDa87w==",
-    "signature": "MEUCIALkHrirZ9TX4cmN+Rak9kvLoCB/dufR0M+utgqeMV7QAiEAwm4gj6iL6RPjJM7RW5g3XV2WeNuW7BDCqr/ctdIVbCY=",
+    "publicKey": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEjW22ZBJ0La1wzS7BFpa1oC3PG4Hx9eVv+3dsN3ccLSSa9KTWXZG8GR9q/8wqWtEdIM/g9Ao/2q4pGC9QfpBQ6w==",
+    "signature": "MEYCIQCb9oAHVj4PV/1kwf5/x6drBKSwqGGvHxVq+ETnUzQs5AIhAOGfKNOrybTuSMOic/WiXvRLwjBVqnBzEhx2IK9rR3bf",
     "text": "[\"ardur-device-v1\",\"fixture-home\",\"fixture-grant\",\"nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn\",1791429078000,\"rpc\",{\"10\":4,\"2\":3,\"numbers\":[0,1e-7,0.000001,100000000000000000000,1e+21,9007199254740991,5e-324,1.7976931348623157e+308],\"😀\":2,\"\":1}]"
   },
   {
@@ -88,8 +88,151 @@
       "signature": "",
       "timestamp": 1791429078000
     },
-    "publicKey": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEaETIrVMQOR/w5F6mQB0SiMgtLWT/FQGNIZd6vZ0a44XZukoofYBYGCxVvjBQB5cdDpTsjtXaSvzNt8RdiDa87w==",
-    "signature": "MEUCIBkcUHPH4/3919hiEMhAFc8ge78mQxgMpreEK8k+hESCAiEAh0qjGgwbgfBuVWEnvLUJQtMhCPx8veXrulwisns0vPw=",
+    "publicKey": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEjW22ZBJ0La1wzS7BFpa1oC3PG4Hx9eVv+3dsN3ccLSSa9KTWXZG8GR9q/8wqWtEdIM/g9Ao/2q4pGC9QfpBQ6w==",
+    "signature": "MEQCIGIR1T80xzwgNwEH/8ZjK7TZvdDzR4Y0/0i/yD/IcgaxAiByDaFwJvOnLmOFKPRGIzD4Tj7ZuXyC2WRRb/UisyEfdA==",
     "text": "[\"ardur-device-v1\",\"fixture-home\",\"fixture-grant\",\"nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn\",1791429078000,\"rpc\",{\"input\":{},\"procedure\":\"bots/list\"}]"
+  },
+  {
+    "body": {
+      "botId": "fixture-bot",
+      "clientNonce": "fixture-request-0001",
+      "text": "Reply ✓ 🚀"
+    },
+    "instanceId": "fixture-home",
+    "kind": "request",
+    "operation": "dispatch",
+    "proof": {
+      "grantId": "fixture-device",
+      "nonce": "fixture-nonce-00000000000000000000",
+      "signature": "",
+      "timestamp": 1790000000000
+    },
+    "publicKey": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEjW22ZBJ0La1wzS7BFpa1oC3PG4Hx9eVv+3dsN3ccLSSa9KTWXZG8GR9q/8wqWtEdIM/g9Ao/2q4pGC9QfpBQ6w==",
+    "signature": "MEYCIQDd4ftO+Gz4mi5Avpb/R/itPWxGuV2K8BankehtLxqNSgIhALwkyhiNYle+enllWSkJ44sjptGHXpsv5huOEOo6pJND",
+    "text": "[\"ardur-device-v1\",\"fixture-home\",\"fixture-device\",\"fixture-nonce-00000000000000000000\",1790000000000,\"dispatch\",{\"botId\":\"fixture-bot\",\"clientNonce\":\"fixture-request-0001\",\"text\":\"Reply ✓ 🚀\"}]"
+  },
+  {
+    "body": {
+      "runId": "fixture-run"
+    },
+    "instanceId": "fixture-home",
+    "kind": "request",
+    "operation": "runs/get",
+    "proof": {
+      "grantId": "fixture-device",
+      "nonce": "fixture-nonce-00000000000000000000",
+      "signature": "",
+      "timestamp": 1790000000000
+    },
+    "publicKey": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEjW22ZBJ0La1wzS7BFpa1oC3PG4Hx9eVv+3dsN3ccLSSa9KTWXZG8GR9q/8wqWtEdIM/g9Ao/2q4pGC9QfpBQ6w==",
+    "signature": "MEQCIGnumCtYo2Oq6N5u7ifd5sQo7H9zsvjuA+zpw+jCJEhBAiADdLH5t48lN+ADXhxwdEvCz0KhQIWIxlxT6SaC6uOpow==",
+    "text": "[\"ardur-device-v1\",\"fixture-home\",\"fixture-device\",\"fixture-nonce-00000000000000000000\",1790000000000,\"runs/get\",{\"runId\":\"fixture-run\"}]"
+  },
+  {
+    "body": {
+      "taskId": "fixture-task"
+    },
+    "instanceId": "fixture-home",
+    "kind": "request",
+    "operation": "tasks/get",
+    "proof": {
+      "grantId": "fixture-device",
+      "nonce": "fixture-nonce-00000000000000000000",
+      "signature": "",
+      "timestamp": 1790000000000
+    },
+    "publicKey": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEjW22ZBJ0La1wzS7BFpa1oC3PG4Hx9eVv+3dsN3ccLSSa9KTWXZG8GR9q/8wqWtEdIM/g9Ao/2q4pGC9QfpBQ6w==",
+    "signature": "MEUCIGI9YtFJycqOIRr+ubTfjvbAXB8wMXBH7LyDt0u+fxBfAiEAvjDyLxSDAa+EhHsbapaMqhyf8vFQ4TyNSzoVJrID40g=",
+    "text": "[\"ardur-device-v1\",\"fixture-home\",\"fixture-device\",\"fixture-nonce-00000000000000000000\",1790000000000,\"tasks/get\",{\"taskId\":\"fixture-task\"}]"
+  },
+  {
+    "body": {},
+    "instanceId": "fixture-home",
+    "kind": "request",
+    "operation": "runs/list",
+    "proof": {
+      "grantId": "fixture-device",
+      "nonce": "fixture-nonce-00000000000000000000",
+      "signature": "",
+      "timestamp": 1790000000000
+    },
+    "publicKey": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEjW22ZBJ0La1wzS7BFpa1oC3PG4Hx9eVv+3dsN3ccLSSa9KTWXZG8GR9q/8wqWtEdIM/g9Ao/2q4pGC9QfpBQ6w==",
+    "signature": "MEUCICsEkeCftXSfzM/lu0SsaquYOxriR4R/MCIEVSGOr02jAiEAuOw/xWi7kLuySKD9Yay77nl6Nz6ovRvQssY8B+SfiF0=",
+    "text": "[\"ardur-device-v1\",\"fixture-home\",\"fixture-device\",\"fixture-nonce-00000000000000000000\",1790000000000,\"runs/list\",{}]"
+  },
+  {
+    "body": {
+      "cursor": "fixture-run",
+      "limit": 2
+    },
+    "instanceId": "fixture-home",
+    "kind": "request",
+    "operation": "runs/list",
+    "proof": {
+      "grantId": "fixture-device",
+      "nonce": "fixture-nonce-00000000000000000000",
+      "signature": "",
+      "timestamp": 1790000000000
+    },
+    "publicKey": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEjW22ZBJ0La1wzS7BFpa1oC3PG4Hx9eVv+3dsN3ccLSSa9KTWXZG8GR9q/8wqWtEdIM/g9Ao/2q4pGC9QfpBQ6w==",
+    "signature": "MEUCIFIqoNm5Tqlm0hMoVyTKu8vryFYpfUHoKy0kdtweoTyvAiEA6Z5yr2Yzt319nL1AUCYNaL7M5naSKzavEnOMSYbr2j8=",
+    "text": "[\"ardur-device-v1\",\"fixture-home\",\"fixture-device\",\"fixture-nonce-00000000000000000000\",1790000000000,\"runs/list\",{\"cursor\":\"fixture-run\",\"limit\":2}]"
+  },
+  {
+    "body": {
+      "around": {
+        "messageId": "fixture-answer"
+      },
+      "botId": "fixture-bot",
+      "threadId": "fixture-thread"
+    },
+    "instanceId": "fixture-home",
+    "kind": "request",
+    "operation": "messages/get",
+    "proof": {
+      "grantId": "fixture-device",
+      "nonce": "fixture-nonce-00000000000000000000",
+      "signature": "",
+      "timestamp": 1790000000000
+    },
+    "publicKey": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEjW22ZBJ0La1wzS7BFpa1oC3PG4Hx9eVv+3dsN3ccLSSa9KTWXZG8GR9q/8wqWtEdIM/g9Ao/2q4pGC9QfpBQ6w==",
+    "signature": "MEUCIQD8Oy3bxx6V3PBQ5Vz3qUAUjHv2+wg9IlH/3JQl76TTWAIgFJAGLj0dRIrJ725Uwyusf1HdOdsNzT6s0J2MWbk+pYo=",
+    "text": "[\"ardur-device-v1\",\"fixture-home\",\"fixture-device\",\"fixture-nonce-00000000000000000000\",1790000000000,\"messages/get\",{\"around\":{\"messageId\":\"fixture-answer\"},\"botId\":\"fixture-bot\",\"threadId\":\"fixture-thread\"}]"
+  },
+  {
+    "body": {
+      "before": 12,
+      "groupId": "fixture-room",
+      "threadId": "fixture-thread"
+    },
+    "instanceId": "fixture-home",
+    "kind": "request",
+    "operation": "messages/get",
+    "proof": {
+      "grantId": "fixture-device",
+      "nonce": "fixture-nonce-00000000000000000000",
+      "signature": "",
+      "timestamp": 1790000000000
+    },
+    "publicKey": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEjW22ZBJ0La1wzS7BFpa1oC3PG4Hx9eVv+3dsN3ccLSSa9KTWXZG8GR9q/8wqWtEdIM/g9Ao/2q4pGC9QfpBQ6w==",
+    "signature": "MEUCIBc5n26bS9+gO0vAjAtw0Ceup9auHsDsXz1BC0GbpEYwAiEAsytrZdVgFK93ppnqeYgQ2iS2U9/UBKoLAm6sw6/iY9M=",
+    "text": "[\"ardur-device-v1\",\"fixture-home\",\"fixture-device\",\"fixture-nonce-00000000000000000000\",1790000000000,\"messages/get\",{\"before\":12,\"groupId\":\"fixture-room\",\"threadId\":\"fixture-thread\"}]"
+  },
+  {
+    "body": {
+      "taskId": "fixture-task"
+    },
+    "instanceId": "fixture-home",
+    "kind": "request",
+    "operation": "stop",
+    "proof": {
+      "grantId": "fixture-device",
+      "nonce": "fixture-nonce-00000000000000000000",
+      "signature": "",
+      "timestamp": 1790000000000
+    },
+    "publicKey": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEjW22ZBJ0La1wzS7BFpa1oC3PG4Hx9eVv+3dsN3ccLSSa9KTWXZG8GR9q/8wqWtEdIM/g9Ao/2q4pGC9QfpBQ6w==",
+    "signature": "MEQCIFJ3PmMP+krUbID5RokLmL6vDQYbWKl9QnbJcP0ggBz6AiA5+STEFFacB51c+zQ4OkpqCIZbV7qgTsOD7pr9+DU07A==",
+    "text": "[\"ardur-device-v1\",\"fixture-home\",\"fixture-device\",\"fixture-nonce-00000000000000000000\",1790000000000,\"stop\",{\"taskId\":\"fixture-task\"}]"
   }
 ]
