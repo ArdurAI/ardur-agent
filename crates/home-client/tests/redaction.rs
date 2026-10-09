@@ -40,3 +40,38 @@ fn every_oracle_case_matches_before_json_or_human_output() {
         saved["expected"].as_str().unwrap()
     );
 }
+
+#[test]
+fn seeded_typescript_differential_corpus_matches_byte_for_byte() {
+    let fixture: Value =
+        serde_json::from_str(include_str!("fixtures/redaction-differential.json")).unwrap();
+    let cases = fixture["cases"].as_array().unwrap();
+    assert_eq!(fixture["generator"]["seed"], 0x59503009u32);
+    assert_eq!(fixture["generator"]["count"], cases.len());
+    assert!(cases.len() > 4000);
+    let mismatches: Vec<_> = cases
+        .iter()
+        .filter_map(|case| {
+            let actual = safe_output(case["input"].as_str().unwrap());
+            (actual != case["expected"].as_str().unwrap()).then(|| {
+                format!(
+                    "{}: input={:?}, expected={:?}, actual={actual:?}",
+                    case["name"],
+                    case["input"].as_str().unwrap(),
+                    case["expected"].as_str().unwrap()
+                )
+            })
+        })
+        .collect();
+    assert!(
+        mismatches.is_empty(),
+        "{} mismatches:\n{}",
+        mismatches.len(),
+        mismatches
+            .iter()
+            .take(20)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}

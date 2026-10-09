@@ -1,0 +1,14 @@
+{
+  "repository": "ArdurAI/ardur-bot",
+  "revision": "49551df2a61f1e0d34498b9eb06b5883801278c8",
+  "sources": [
+    {
+      "path": "apps/cli/src/text.ts",
+      "sha256": "87f01a433bbf39f831a176c0e02449f914bd9d7aee24504d83262907b027fa37"
+    },
+    {
+      "path": "packages/logging/src/redaction.ts",
+      "sha256": "4f44e4ae37a7442529bab06c41880225abcf1e23b76d2a34d8ef03147cb3ffec"
+    }
+  ]
+}

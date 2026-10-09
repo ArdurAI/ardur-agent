@@ -1,4 +1,5 @@
 // Offline public-fixture check. The actual TypeScript oracle check is home-fixtures.mjs --verify-rust.
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { createPublicKey, verify, X509Certificate } from "node:crypto";
 import assert from "node:assert/strict";
@@ -47,3 +48,6 @@ for (let i=0;i<stage3.requests.length;i++) {
 }
 assert.equal(copied.rejected.length,4);
 console.log("Stage 3 copied golden bytes and public TypeScript signatures verified.");
+
+// Regenerate both corpora from committed, hash-pinned pure TypeScript sources.
+execFileSync(process.execPath, ["scripts/home-redaction-fixtures.mjs", "--check"], { stdio: "inherit" });
