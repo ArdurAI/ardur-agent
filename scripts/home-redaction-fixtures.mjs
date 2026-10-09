@@ -5,6 +5,8 @@ import { stripTypeScriptTypes } from "node:module";
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 
+const nodeVersion = "26.7.0";
+if (process.versions.node !== nodeVersion) throw new Error("Oracle generation requires Node " + nodeVersion);
 const snapshot = "crates/home-client/tests/fixtures/oracle";
 const paths = ["apps/cli/src/text.ts", "packages/logging/src/redaction.ts"];
 const checking = process.argv.includes("--check");
@@ -24,7 +26,7 @@ const source = (path) => {
 const moduleUrl = (text) => "data:text/javascript;base64," + Buffer.from(stripTypeScriptTypes(text)).toString("base64");
 const loggingSource = source(paths[1]);
 const cliSource = source(paths[0]);
-const provenance = { repository: "ArdurAI/ardur-bot", revision, sources: paths.map((path, i) => ({ path,
+const provenance = { repository: "ArdurAI/ardur-bot", revision, nodeVersion, sources: paths.map((path, i) => ({ path,
   sha256: createHash("sha256").update(i === 0 ? cliSource : loggingSource).digest("hex") })) };
 const provenanceText = JSON.stringify(provenance, null, 2) + "\n";
 if (!checking) writeFileSync(snapshot + "/provenance.json", provenanceText);

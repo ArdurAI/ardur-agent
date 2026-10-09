@@ -1,6 +1,7 @@
 {
   "repository": "ArdurAI/ardur-bot",
   "revision": "49551df2a61f1e0d34498b9eb06b5883801278c8",
+  "nodeVersion": "26.7.0",
   "sources": [
     {
       "path": "apps/cli/src/text.ts",
