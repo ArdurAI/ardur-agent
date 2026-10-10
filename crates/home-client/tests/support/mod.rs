@@ -27,7 +27,13 @@ pub enum Mode {
     LostAdmission,
     HungRead,
     RunningThenCancelled,
+    LostRoomAdmission,
+    BoardDenied,
+    BoardProblem,
+    RoomSendRefused,
+    RecordUnavailable,
 }
+const DEVICE_RECORD_UNAVAILABLE: &str = "This record is unavailable from this device.";
 pub struct FakeHome {
     pub payload: PairingPayload,
     pub certificate: rustls::pki_types::CertificateDer<'static>,
@@ -38,6 +44,12 @@ pub struct FakeHome {
     pub run: Arc<Mutex<Value>>,
     pub messages: Arc<Mutex<Value>>,
     pub admissions: Arc<Mutex<HashMap<String, Value>>>,
+    pub rooms: Arc<Mutex<Value>>,
+    pub computers: Arc<Mutex<Value>>,
+    pub board: Arc<Mutex<Value>>,
+    pub board_item: Arc<Mutex<Value>>,
+    pub room_result: Arc<Mutex<Value>>,
+    pub room_admissions: Arc<Mutex<HashMap<String, Value>>>,
     task: tokio::task::JoinHandle<()>,
 }
 impl Drop for FakeHome {
@@ -91,8 +103,41 @@ impl FakeHome {
             json!({"threadId":"thread","messages":[{"id":"answer","runId":"run","role":"bot","blocks":[{"kind":"text","text":"Fixture answer ✓"},{"kind":"text","text":"sensitive-canary","reasoning":true},{"kind":"tool-result","text":"sensitive-canary"}]}],"olderCursor":null}),
         ));
         let admissions = Arc::new(Mutex::new(HashMap::<String, Value>::new()));
+        // Stage 4 fixture-shaped defaults: the copied home vectors double as
+        // the fake home's room, computer and board state.
+        let rooms = Arc::new(Mutex::new(
+            json!([{"id":"fixture-room","spaceId":"fixture-space","name":"Fixture room","pinned":false,"sectionId":null,"archivedAt":null,"threadId":"fixture-thread","preview":"","unread":false,"members":[{"botId":"fixture-chief","name":"Chief","color":"ink"},{"botId":"fixture-worker","name":"Beta","color":"ink"}],"updatedAt":"2026-10-01T00:00:00.000Z","createdAt":"2026-10-01T00:00:00.000Z"}]),
+        ));
+        let computers = Arc::new(Mutex::new(
+            json!([{"botId":"fixture-bot","name":"Fixture bot","status":{"computerId":"fixture-shared-computer","botId":"fixture-bot","mode":"team","kind":"docker","state":"stopped","controlHolder":"none","controlBotId":null,"takeoverRequested":false,"screenAvailable":false,"screenWidth":1280,"screenHeight":720,"homeRevision":null,"busyBotName":null,"canUpdate":false}}]),
+        ));
+        let board = Arc::new(Mutex::new(
+            json!({"items":[{"id":"work-1","title":"Fixture task","description":"","acceptanceCriteria":"","type":"task","status":"open","priority":2,"assignee":null,"labels":[],"parent":null,"dependencies":[],"dueAt":null,"deferUntil":null,"estimateMinutes":null,"externalRef":null,"createdAt":"2026-10-01T00:00:00.000Z","updatedAt":"2026-10-01T00:00:00.000Z","closedAt":null,"commentCount":0,"comments":[],"history":[],"closeWhenDone":false}],"readyIds":["work-1"],"blockedIds":[]}),
+        ));
+        let board_item = Arc::new(Mutex::new(
+            json!({"id":"work-1","title":"Fixture task","description":"","acceptanceCriteria":"","type":"task","status":"open","priority":2,"assignee":null,"labels":[],"parent":null,"dependencies":[],"dueAt":null,"deferUntil":null,"estimateMinutes":null,"externalRef":null,"createdAt":"2026-10-01T00:00:00.000Z","updatedAt":"2026-10-01T00:00:00.000Z","closedAt":null,"commentCount":0,"comments":[],"history":[],"closeWhenDone":false}),
+        ));
+        let room_result = Arc::new(Mutex::new(
+            json!({"kind":"work","taskId":"fixture-task","runId":"fixture-run-1","runIds":["fixture-run-1","fixture-run-2"],"seq":1}),
+        ));
+        let room_admissions = Arc::new(Mutex::new(HashMap::<String, Value>::new()));
         let (run_state, message_state, admitted) =
             (run.clone(), messages.clone(), admissions.clone());
+        let (
+            room_state,
+            computer_state,
+            board_state,
+            board_item_state,
+            room_send_state,
+            room_admitted,
+        ) = (
+            rooms.clone(),
+            computers.clone(),
+            board.clone(),
+            board_item.clone(),
+            room_result.clone(),
+            room_admissions.clone(),
+        );
         let certificate = der.clone();
         let (p, c, m, s) = (payload.clone(), calls.clone(), mode.clone(), seen.clone());
         let task = tokio::spawn(async move {
@@ -104,6 +149,7 @@ impl FakeHome {
             let mut nonce_counter = 0;
             let mut run_reads = 0;
             let mut lost = false;
+            let mut room_lost = false;
             loop {
                 let Ok((stream, _)) = listener.accept().await else {
                     break;
@@ -244,6 +290,131 @@ impl FakeHome {
                             && value["body"] == json!({"procedure":"bots/list","input":{}})
                         {
                             json!([{"id":"bot","name":"Bot\u{1b}]0;bad\u{7}","threadId":"thread","status":"idle","modelProvider":null,"modelId":null,"thinkingLevel":null,"runtimeKind":"pi","instructions":"sensitive-canary","runtimeConfig":{"secret":"sensitive-canary"}}])
+                        } else if op == "rpc"
+                            && value["body"]["procedure"].as_str() == Some("computer/list")
+                        {
+                            if mode == Mode::RecordUnavailable {
+                                status = 403;
+                                json!({"message":DEVICE_RECORD_UNAVAILABLE})
+                            } else {
+                                computer_state.lock().unwrap().clone()
+                            }
+                        } else if op == "rpc"
+                            && value["body"]["procedure"].as_str() == Some("board/snapshot")
+                        {
+                            if mode == Mode::RecordUnavailable {
+                                status = 403;
+                                json!({"message":DEVICE_RECORD_UNAVAILABLE})
+                            } else if mode == Mode::BoardDenied {
+                                status = 403;
+                                board_denied()
+                            } else if mode == Mode::BoardProblem {
+                                status = 400;
+                                board_problem()
+                            } else {
+                                board_state.lock().unwrap().clone()
+                            }
+                        } else if op == "rpc"
+                            && value["body"]["procedure"].as_str() == Some("board/show")
+                        {
+                            if mode == Mode::RecordUnavailable {
+                                status = 403;
+                                json!({"message":DEVICE_RECORD_UNAVAILABLE})
+                            } else if mode == Mode::BoardDenied {
+                                status = 403;
+                                board_denied()
+                            } else if mode == Mode::BoardProblem {
+                                status = 400;
+                                board_problem()
+                            } else {
+                                board_item_state.lock().unwrap().clone()
+                            }
+                        } else if op == "rooms/list" {
+                            if mode == Mode::RecordUnavailable {
+                                status = 403;
+                                json!({"message":DEVICE_RECORD_UNAVAILABLE})
+                            } else {
+                                room_state.lock().unwrap().clone()
+                            }
+                        } else if op == "rooms/send" {
+                            let body = &value["body"];
+                            if mode == Mode::RoomSendRefused {
+                                status = 403;
+                                json!({"message":"This action is unavailable from this device."})
+                            } else {
+                                let by_name = body.get("roomName").and_then(Value::as_str);
+                                let rooms = room_state.lock().unwrap();
+                                let group_id = if let Some(name) = by_name {
+                                    let found: Vec<String> = rooms
+                                        .as_array()
+                                        .unwrap()
+                                        .iter()
+                                        .filter(|r| {
+                                            r["archivedAt"].is_null()
+                                                && r["name"]
+                                                    .as_str()
+                                                    .is_some_and(|n| n.eq_ignore_ascii_case(name))
+                                        })
+                                        .filter_map(|r| r["id"].as_str().map(str::to_owned))
+                                        .collect();
+                                    if found.len() == 1 {
+                                        Some(found[0].clone())
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    body.get("groupId")
+                                        .and_then(Value::as_str)
+                                        .map(str::to_owned)
+                                };
+                                let room_thread = group_id.and_then(|id| {
+                                    rooms
+                                        .as_array()
+                                        .unwrap()
+                                        .iter()
+                                        .find(|r| r["id"] == id && r["archivedAt"].is_null())
+                                        .map(|r| r["threadId"].clone())
+                                });
+                                drop(rooms);
+                                match room_thread {
+                                    None => {
+                                        status = if by_name.is_some() { 400 } else { 403 };
+                                        json!({"message":DEVICE_RECORD_UNAVAILABLE})
+                                    }
+                                    Some(room_thread)
+                                        if body.get("threadId").is_some()
+                                            && body["threadId"] != room_thread =>
+                                    {
+                                        status = 403;
+                                        json!({"message":DEVICE_RECORD_UNAVAILABLE})
+                                    }
+                                    Some(_) => {
+                                        let nonce = body["clientNonce"].as_str().unwrap();
+                                        let mut admissions = room_admitted.lock().unwrap();
+                                        if let Some(old) = admissions.get(nonce) {
+                                            if old["request"] != *body {
+                                                status = 409;
+                                                json!({"message":"This request changed; send it as a new task."})
+                                            } else {
+                                                old["result"].clone()
+                                            }
+                                        } else {
+                                            // Admission is durable before the
+                                            // response; a lost response replays it.
+                                            let result = room_send_state.lock().unwrap().clone();
+                                            admissions.insert(
+                                                nonce.to_owned(),
+                                                json!({"request":body.clone(),"result":result.clone()}),
+                                            );
+                                            if mode == Mode::LostRoomAdmission && !room_lost {
+                                                room_lost = true;
+                                                continue;
+                                            }
+                                            result
+                                        }
+                                    }
+                                }
+                            }
                         } else if op == "dispatch" {
                             let body = &value["body"];
                             let id = body["clientNonce"].as_str().unwrap();
@@ -331,6 +502,12 @@ impl FakeHome {
             run,
             messages,
             admissions,
+            rooms,
+            computers,
+            board,
+            board_item,
+            room_result,
+            room_admissions,
             task,
         }
     }
@@ -343,6 +520,14 @@ impl FakeHome {
     pub fn count(&self) -> usize {
         self.calls.load(Ordering::SeqCst)
     }
+}
+
+// Board refusals carry the home's shared fixed problem answers.
+fn board_denied() -> Value {
+    json!({"message":"This board is only available to this computer's owner.","problem":{"code":"access_lost","message":"This board is only available to this computer's owner."}})
+}
+fn board_problem() -> Value {
+    json!({"message":"This folder has no board","problem":{"code":"no_board","message":"This folder has no board"}})
 }
 
 // Independent fixture home: construct the wire contract directly and use ring's
@@ -363,13 +548,15 @@ fn independent_request_text(
     operation: &str,
     body: &Value,
 ) -> String {
-    // Stage 2 routes have fixed bodies; Stage 3 sorts JSON independently.
+    // Stage 2 routes have fixed bodies; later stages sort JSON independently.
     // These routes accept only empty input or bots/list. Their canonical bytes
     // are fixed by the committed TypeScript vectors, without a Rust canonicalizer.
     let body = if operation == "tasks" && body == &json!({}) {
         "{}".to_owned()
     } else if operation == "rpc" && body == &json!({"procedure":"bots/list","input":{}}) {
         r#"{"input":{},"procedure":"bots/list"}"#.to_owned()
+    } else if operation == "rpc" && body == &json!({"procedure":"computer/list","input":null}) {
+        r#"{"input":null,"procedure":"computer/list"}"#.to_owned()
     } else if [
         "dispatch",
         "runs/get",
@@ -377,8 +564,15 @@ fn independent_request_text(
         "runs/list",
         "messages/get",
         "stop",
+        "rooms/list",
+        "rooms/send",
     ]
     .contains(&operation)
+        || (operation == "rpc"
+            && body
+                .get("procedure")
+                .and_then(Value::as_str)
+                .is_some_and(|p| p.starts_with("board/")))
     {
         independent_canonical(body)
     } else {

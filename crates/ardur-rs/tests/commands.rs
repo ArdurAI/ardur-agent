@@ -269,6 +269,212 @@ async fn binary_deadline_missing_answer_revocation_and_safe_usage_exits() {
 }
 
 #[tokio::test]
+async fn binary_stage4_commands_answers_and_room_send_recovery() {
+    let (server, _temp, root) = setup().await;
+    for (args, name) in [
+        (vec!["computers", "list", "--json"], "computers list"),
+        (
+            vec!["board", "list", "--workspace", "fixture-board", "--json"],
+            "board list",
+        ),
+        (
+            vec![
+                "board",
+                "show",
+                "--workspace",
+                "fixture-board",
+                "work-1",
+                "--json",
+            ],
+            "board show",
+        ),
+        (vec!["rooms", "list", "--json"], "rooms list"),
+    ] {
+        let out = run(&root, &args, None).await;
+        assert!(out.status.success());
+        assert_eq!(stage3_object(&out)["command"], name);
+    }
+    let out = run(
+        &root,
+        &[
+            "board",
+            "list",
+            "--workspace",
+            "fixture-board",
+            "--filter",
+            "{\"status\":\"open\"}",
+            "--search",
+            "Fixture",
+            "--json",
+        ],
+        None,
+    )
+    .await;
+    assert!(out.status.success());
+    assert!(
+        server
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|v| v["operation"] == "rpc"
+                && v["body"]["procedure"] == "board/snapshot"
+                && v["body"]["input"]["filter"] == json!({"status":"open"})
+                && v["body"]["input"]["search"] == "Fixture")
+    );
+    // A work answer keeps every run id; human output lists them all.
+    let out = run(
+        &root,
+        &["rooms", "send", "--room", "Fixture room", "hello", "--json"],
+        None,
+    )
+    .await;
+    assert!(out.status.success());
+    let result = stage3_object(&out);
+    assert_eq!(result["command"], "rooms send");
+    assert_eq!(
+        result["data"]["runIds"],
+        json!(["fixture-run-1", "fixture-run-2"])
+    );
+    let out = run(
+        &root,
+        &[
+            "rooms",
+            "send",
+            "--room-id",
+            "fixture-room",
+            "--thread",
+            "fixture-thread",
+            "hello",
+        ],
+        None,
+    )
+    .await;
+    assert!(out.status.success());
+    // Human output escapes terminal controls, including newlines, like Stage 3.
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        "Task fixture-task\\u{a}Runs fixture-run-1, fixture-run-2\n"
+    );
+    // A lost response is recovered by rerunning the identical command: the home
+    // returns the original admission under the same clientNonce.
+    server.set(Mode::LostRoomAdmission);
+    let out = run(
+        &root,
+        &[
+            "rooms",
+            "send",
+            "--room",
+            "Fixture room",
+            "recover me",
+            "--json",
+        ],
+        None,
+    )
+    .await;
+    assert_eq!(out.status.code(), Some(2));
+    server.set(Mode::Normal);
+    let out = run(
+        &root,
+        &[
+            "rooms",
+            "send",
+            "--room",
+            "Fixture room",
+            "recover me",
+            "--json",
+        ],
+        None,
+    )
+    .await;
+    assert!(out.status.success());
+    assert_eq!(stage3_object(&out)["taskId"], "fixture-task");
+    {
+        let seen = server.seen.lock().unwrap();
+        let sends: Vec<_> = seen
+            .iter()
+            .filter(|v| v["operation"] == "rooms/send" && v["body"]["text"] == "recover me")
+            .collect();
+        assert_eq!(sends.len(), 2);
+        assert_eq!(sends[0]["body"], sends[1]["body"]);
+        assert_ne!(sends[0]["proof"]["nonce"], sends[1]["proof"]["nonce"]);
+    }
+    // Ambiguous room names refuse with the home's own answer.
+    server.rooms.lock().unwrap().as_array_mut().unwrap().push(
+        json!({"id":"fixture-room-2","spaceId":"fixture-space","name":"Fixture room","pinned":false,"sectionId":null,"archivedAt":null,"threadId":"fixture-thread-2","preview":"","unread":false,"members":[],"updatedAt":"2026-10-01T00:00:00.000Z","createdAt":"2026-10-01T00:00:00.000Z"}),
+    );
+    let out = run(
+        &root,
+        &["rooms", "send", "--room", "Fixture room", "hello", "--json"],
+        None,
+    )
+    .await;
+    assert_eq!(out.status.code(), Some(4));
+    assert_eq!(
+        stage3_object(&out)["failureReason"],
+        "This record is unavailable from this device."
+    );
+    server.rooms.lock().unwrap().as_array_mut().unwrap().pop();
+    // Board denials print the home's fixed sentence.
+    server.set(Mode::BoardDenied);
+    let out = run(
+        &root,
+        &[
+            "board",
+            "show",
+            "--workspace",
+            "fixture-board",
+            "work-1",
+            "--json",
+        ],
+        None,
+    )
+    .await;
+    assert_eq!(out.status.code(), Some(4));
+    assert_eq!(
+        stage3_object(&out)["failureReason"],
+        "This board is only available to this computer's owner."
+    );
+    // A receipt-only greeting invents no run and prints its text honestly.
+    server.set(Mode::Normal);
+    *server.room_result.lock().unwrap() = json!({"kind":"receipt-only","seq":2,"receipt":{"id":"fixture-receipt","threadId":"fixture-thread","seq":3,"botId":"fixture-chief","requestMessageId":"fixture-message","key":"greeting","text":"Hello.","createdAt":"2026-10-01T00:00:00.000Z"}});
+    let out = run(
+        &root,
+        &["rooms", "send", "--room", "Fixture room", "hi", "--json"],
+        None,
+    )
+    .await;
+    assert!(out.status.success());
+    assert_eq!(stage3_object(&out)["data"]["kind"], "receipt-only");
+    let out = run(
+        &root,
+        &["rooms", "send", "--room", "Fixture room", "hi"],
+        None,
+    )
+    .await;
+    assert!(out.status.success());
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), "Hello.\n");
+    // Missing or conflicting room flags exit 4 with the safe envelope.
+    for args in [
+        vec!["rooms", "send", "hello", "--json"],
+        vec![
+            "rooms",
+            "send",
+            "--room",
+            "a",
+            "--room-id",
+            "b",
+            "hello",
+            "--json",
+        ],
+    ] {
+        let out = run(&root, &args, None).await;
+        assert_eq!(out.status.code(), Some(4));
+        stage3_object(&out);
+    }
+}
+
+#[tokio::test]
 async fn saved_answer_corpus_never_leaks_credentials_on_stdout() {
     let fixture: Value = serde_json::from_str(include_str!(
         "../../home-client/tests/fixtures/redaction.json"

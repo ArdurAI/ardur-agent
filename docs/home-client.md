@@ -1,4 +1,4 @@
-# Rust paired-home client (Stages 2 and 3)
+# Rust paired-home client (Stages 2, 3 and 4)
 
 The builder and local-first user can pair a device, check its current read grant and list saved bots
 without starting another bot runtime. This is a separate `ardur-rs` executable.
@@ -77,6 +77,56 @@ refuses changed input. No automatic retry or second recovery system is added.
 `{cancelRequested:true}`; it does not confirm the task stopped. Wait keeps polling
 when cancellation is requested but unconfirmed. Input and approval waits return
 an action sentence instead of polling forever.
+
+## Stage 4 daily reads and room sends
+
+These commands need the Stage 4 home operations in home PR #212. Pair/status/bots
+and the Stage 3 task commands keep their existing outputs and exits.
+
+```sh
+ardur-rs computers list [--json]
+ardur-rs board list --workspace <id> [--filter <json>] [--search <text>] [--json]
+ardur-rs board show --workspace <id> <item> [--json]
+ardur-rs rooms list [--json]
+ardur-rs rooms send (--room <name> | --room-id <id>) [--thread <id>] <text> [--json]
+```
+
+`computers list` signs `rpc` with `{"procedure":"computer/list","input":null}`
+and prints each shared computer once: bot id, name, and its computer status
+(kind, state, screen, control and update fields). `board list` signs
+`board/snapshot` with `{workspaceId, filter?, search?}` and keeps the full typed
+work items plus `readyIds`/`blockedIds`; `--filter` takes a JSON object such as
+`{"status":"open"}`. `board show` signs `board/show` with `{workspaceId, id}`.
+Board work items, comments and history never enter output as free-form remote
+blobs; the typed record keeps the scalar fields and comment counts.
+
+Board reads keep the board's own access checks. A denial (HTTP 403) or a known
+board problem (HTTP 400, shared `BoardProblem` codes such as `access_lost` or
+`no_board`) answers with the home's own fixed sentence and exits 4; unknown
+failures keep the generic home error mapping.
+
+`rooms list` signs `rooms/list` with `{}` and prints each room's id, name,
+thread and members. `rooms send` chooses exactly one of `groupId` or
+`roomName` (matching is case-insensitive inside the paired owner's space) with
+an optional `threadId`, and signs `rooms/send` with
+`{groupId?|roomName?, threadId?, clientNonce, text}`. Names that match zero or
+multiple rooms refuse with the home's own answer (“This record is unavailable
+from this device.”, exit 4); use `rooms list` and the room id. Scope, grant or
+membership refusals keep the fixed access sentence.
+
+A work answer keeps every run id: the JSON result carries the full `runIds`
+array and the human output lists them all. A greeting can return
+`{kind:"receipt-only", seq, receipt}` with no task or run; the client invents no
+run id, starts no wait, and prints the receipt text honestly.
+
+Room-send recovery is explicit and durable, like Stage 3 send. Each new send
+generates a fresh 43-character `clientNonce` and records the pending send beside
+the pairing; rerunning the identical room and text reuses that nonce, so the
+home returns the original admission — including all run ids — instead of
+starting the message twice. A completed response clears the record. Replaying a
+nonce with changed text is refused (“This request changed; send it as a new
+task.”). The pending record holds no key material and is invalidated when the
+device pairs again.
 
 A completed run without a saved answer is an error, not a pass. The updated home
 reports category `other` with the fixed missing-answer sentence. The client also
@@ -256,35 +306,54 @@ Local toolchain: Rust 1.94.1. CI uses the repository pin, 1.98.1.
 The shipping client graph has no dependency on the old runtime, server,
 providers, memory, retrieval or tool-execution crates.
 
-## Stage 3 fixture provenance and proof
+## Stage 3 and Stage 4 fixture provenance and proof
 
 `crates/home-protocol/tests/fixtures/device-operations.json` is a byte-for-byte
 copy of `apps/cli/fixtures/device-operations.json` from `ArdurAI/ardur-bot`
-revision `49551df2a61f1e0d34498b9eb06b5883801278c8`. It contains eight accepted
-request vectors and four rejected surrogate vectors. The copied file is unchanged;
-provenance and added public TypeScript signatures live in `typescript-stage3.json`.
+revision `12475e3af2e2b10605a27f0245f3db71b8e47f71` (home PR #212). It contains
+fourteen accepted request vectors — the eight Stage 3 vectors plus the Stage 4
+computer, board, room-list and room-send vectors — seven typed responses
+(multiple-run work, receipt-only greeting, room list, computer list, board
+snapshot, board item and a 403 board denial) and four rejected surrogate
+vectors. Its SHA-256 digest is
+`86fccb32d98de8d2ed20e6c26509948a9c8a67037d62e42787363afef6509466`. The copied
+file is unchanged; provenance and added public TypeScript signatures live in
+`typescript-stage4.json`, which records the source repository, revision, source
+path and that digest.
+
+`typescript-stage3.json` remains as the previous generation: its eight signed
+request vectors from revision `49551df2a61f1e0d34498b9eb06b5883801278c8` still
+match the copied golden bytes exactly.
 
 The `--stage3` generator mode imports the canonicalizer, signer and actual home
-signature verifier from a read-only oracle checkout. Rust checks canonical bodies,
-signed text and TypeScript DER signatures for every new operation; Rust exports
-those same bodies with public signatures to `rust.json`. The actual TypeScript
-server verifier accepts all exported Rust signatures and rejects altered text.
-The offline Node checker in CI verifies the committed public vectors; it does not
-import a separate checkout or claim a real home connection.
+signature verifier from a read-only oracle checkout. The `--stage4` mode signs
+the already-committed Stage 4 golden bytes with a fresh synthetic device key
+(the revision that produced those bytes is a required argument) and needs no
+checkout. Rust checks canonical bodies and signed text for every copied vector,
+verifies the public DER signatures in both TypeScript companions, and parses
+the typed responses into the Stage 4 records. The offline Node checker in CI
+verifies the committed public vectors, the provenance digest and the response
+shapes; it does not import a separate checkout or claim a real home connection.
 
 ```sh
 node --import "${ORACLE}/node_modules/tsx/dist/loader.mjs" scripts/home-fixtures.mjs "${ORACLE}" --stage3
+node scripts/home-fixtures.mjs . --stage4 12475e3af2e2b10605a27f0245f3db71b8e47f71
 cargo run -p home-protocol --example rust_vectors > crates/home-protocol/tests/fixtures/rust.json
 node --import "${ORACLE}/node_modules/tsx/dist/loader.mjs" scripts/home-fixtures.mjs "${ORACLE}" --verify-rust crates/home-protocol/tests/fixtures/rust.json
 node scripts/check-home-vectors.mjs
 ```
 
-Disposable HTTPS tests exercise all six commands with independently constructed
-signed texts and a separate DER verifier. They prove lost-admission recovery,
-fresh proofs, changed-body refusal, exact saved answers, requested versus confirmed
-cancellation, bounded running/hung waits, missing/mismatched answers, approval waits,
-safe failures, cursor/limit bodies and unchanged legacy commands. Unix subprocess
-tests exercise the compiled CLI with temporary profiles, never owner storage.
+Disposable HTTPS tests exercise all six Stage 3 commands with independently
+constructed signed texts and a separate DER verifier. They prove lost-admission
+recovery, fresh proofs, changed-body refusal, exact saved answers, requested
+versus confirmed cancellation, bounded running/hung waits, missing/mismatched
+answers, approval waits, safe failures, cursor/limit bodies and unchanged
+legacy commands. Stage 4 tests exercise the four reads and room sends against
+the same disposable home: fixture-exact signed bodies, typed projections,
+board denial and problem sentences, scope refusals, ambiguous room names,
+receipt-only greetings, multiple run ids and durable lost-response recovery
+with reused clientNonces and fresh proofs. Unix subprocess tests exercise the
+compiled CLI with temporary profiles, never owner storage.
 Windows runs protocol and in-memory client tests; private-file pairing remains
 refused until a protected ACL backend exists. No real home, database, bot runtime
 or model call is involved, and these tests incur no model-turn cost.

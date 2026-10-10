@@ -1,3 +1,4 @@
 # Oracle provenance and generated fixtures compare exact bytes on every OS.
 crates/home-client/tests/fixtures/oracle/* text eol=lf
 crates/home-client/tests/fixtures/redaction*.json text eol=lf
+crates/home-protocol/tests/fixtures/*.json text eol=lf
