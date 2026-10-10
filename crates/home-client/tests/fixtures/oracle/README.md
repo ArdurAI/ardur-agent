@@ -5,7 +5,7 @@ revision and paths in `provenance.json`. SHA-256 digests identify the copied byt
 Only these pure text functions are loaded. No application, profile, environment
 file, database or service is used.
 
-`scripts/home-redaction-fixtures.mjs` generates the 98 named cases and combined
+`scripts/home-redaction-fixtures.mjs` generates the 173 named cases and combined
 saved-answer fixture, plus 4,929 differential cases: 4,096 seeded combinations,
 all 25 JavaScript whitespace characters and terminal-control anchors. The fixture
 header records seed `0x59503009`, counts and source digests. Expected strings come
@@ -22,3 +22,7 @@ Terminal behavior intentionally follows Node's `stripVTControlCharacters` gramma
 including its handling of incomplete and C1 sequences; it is not a claim that
 every possible terminal payload is recognized. Synthetic credentials and harmless
 prose test both redaction and preservation.
+
+Named cases cover glued credential chains, literal escapes, plural credential
+keys, named counters and references, and a 1 MiB value ending in `|:`. Existing
+inputs remain intact; the updated TypeScript snapshot supplies every expectation.

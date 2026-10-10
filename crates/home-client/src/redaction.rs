@@ -37,7 +37,7 @@ pattern!(
 );
 pattern!(
     METADATA,
-    r"(?i)(?:secret|token|credential)(?:id|count|absent|present)$"
+    r"(?i)^(?:(?:max|min|num|total)tokens?|(?:used|remaining|input|output|prompt|completion|cached|reasoning|context)tokens|tokens?(?:used|remaining)|(?:known|required|missing)secrets|secret(?:names|ref|store))$|(?:secret|token|credential)(?:id|count|absent|present)$"
 );
 pattern!(
     PLACEHOLDER,
@@ -60,7 +60,7 @@ pattern!(
     IDENTIFIER,
     r"^[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*"
 );
-pattern!(CODE_SUFFIX, r"^\??[ \t]*(?:[,;}\]\r\n]|$)");
+pattern!(CODE_SUFFIX, r"^\??[ \t]*(?:[,;}\]\r\n]|$|\\[ntr])");
 pattern!(NUMBER, r"(?i)^[+-]?(?:\d+(?:\.\d+)?|0x[\da-f]+)$");
 pattern!(
     CODE_TYPE,
@@ -77,6 +77,18 @@ fn word(b: u8) -> bool {
 }
 fn key_byte(b: u8) -> bool {
     word(b) || b == b'-'
+}
+fn sensitive_key(key: &str, escaped: bool) -> bool {
+    // Read both a literal escape followed by a key and a backslash before a key.
+    // Drop the escape letter only when the remainder names a credential family.
+    let normalized: String = key.chars().filter(char::is_ascii_alphanumeric).collect();
+    let key = if escaped && key.starts_with(['n', 't', 'r']) && SENSITIVE.is_match(&normalized[1..])
+    {
+        &normalized[1..]
+    } else {
+        &normalized
+    };
+    !METADATA.is_match(key) && SENSITIVE.is_match(key)
 }
 fn js_whitespace(ch: char) -> bool {
     matches!(ch, '\u{9}'..='\u{d}' | ' ' | '\u{a0}' | '\u{1680}' |
@@ -127,7 +139,71 @@ fn container_end(text: &str, start: usize) -> usize {
     }
     text.len()
 }
-fn code_value(text: &str, start: usize, key: &str) -> bool {
+fn unquoted_value_end(text: &str, mut start: usize) -> usize {
+    let bytes = text.as_bytes();
+    while start < bytes.len() {
+        let quote = bytes[start];
+        if quote == b'"' || quote == b'\'' {
+            let end = quoted_end(text, start);
+            return end + usize::from(bytes.get(end) == Some(&quote));
+        }
+        if quote == b'{' || quote == b'[' {
+            return container_end(text, start);
+        }
+
+        // Literal escapes remain inside the value; only real delimiters end it.
+        let mut end = token_end(text, start);
+        let mut credential = end;
+        while bytes
+            .get(credential)
+            .is_some_and(|b| *b == b' ' || *b == b'\t')
+        {
+            credential += 1;
+        }
+        if end > start
+            && credential > end
+            && SCHEME.is_match(&text[start..end])
+            && !SPACED_ASSIGNMENT.is_match(&text[credential..])
+        {
+            end = credential;
+            if bytes.get(end).is_some_and(|b| *b == b'"' || *b == b'\'') {
+                let quote = bytes[end];
+                end = quoted_end(text, end);
+                end += usize::from(bytes.get(end) == Some(&quote));
+            } else {
+                end = token_end(text, end);
+            }
+        }
+
+        // A consumed run can end with another sensitive key. Scan backward only
+        // over that key, then consume its value too; repeat for arbitrary chains.
+        if end <= start
+            || !matches!(bytes[end - 1], b':' | b'=')
+            || !bytes.get(end).is_some_and(|b| matches!(b, b' ' | b'\t'))
+        {
+            return end;
+        }
+        let separator = end - 1;
+        let mut key_start = separator;
+        while key_start > start && key_byte(bytes[key_start - 1]) {
+            key_start -= 1;
+        }
+        if key_start == separator
+            || !sensitive_key(
+                &text[key_start..separator],
+                key_start > 0 && bytes[key_start - 1] == b'\\',
+            )
+        {
+            return end;
+        }
+        start = end;
+        while bytes.get(start).is_some_and(|b| matches!(b, b' ' | b'\t')) {
+            start += 1;
+        }
+    }
+    start
+}
+fn code_value(text: &str, start: usize) -> bool {
     let rest = &text[start..];
     if rest.starts_with(['"', '\'', '\x60']) {
         return false;
@@ -168,14 +244,7 @@ fn code_value(text: &str, start: usize, key: &str) -> bool {
     if identifier.contains('.') {
         return true;
     }
-    (CODE_TYPE.is_match(identifier) && suffix.trim_start_matches([' ', '\t']).starts_with(';'))
-        || (matches!(identifier, "secrets" | "credentials")
-            && key
-                == format!(
-                    "known{}{}",
-                    identifier[..1].to_uppercase(),
-                    &identifier[1..]
-                ))
+    CODE_TYPE.is_match(identifier) && suffix.trim_start_matches([' ', '\t']).starts_with(';')
 }
 fn assignments(text: &str, command_output: bool) -> String {
     let mut output = String::new();
@@ -193,18 +262,23 @@ fn assignments(text: &str, command_output: bool) -> String {
         if quoted.is_none() && matched.start() > 0 && key_byte(bytes[matched.start() - 1]) {
             continue;
         }
-        let normalized: String = key.chars().filter(char::is_ascii_alphanumeric).collect();
-        let sensitive = !METADATA.is_match(&normalized) && SENSITIVE.is_match(&normalized);
+        let escaped =
+            quoted.is_none() && matched.start() > 0 && bytes[matched.start() - 1] == b'\\';
+        let sensitive = sensitive_key(key, escaped);
         let privacy = if quoted.is_some() {
             key.to_ascii_lowercase().contains("email")
         } else {
             key.eq_ignore_ascii_case("key")
+                || (escaped
+                    && key.len() == 4
+                    && key.starts_with(['n', 'N', 't', 'T', 'r', 'R'])
+                    && key[1..].eq_ignore_ascii_case("key"))
         };
         if !sensitive && !privacy {
             continue;
         }
         let start = matched.end();
-        if command_output && quoted.is_none() && code_value(text, start, key) {
+        if command_output && quoted.is_none() && code_value(text, start) {
             continue;
         }
         let quote = bytes.get(start).copied().unwrap_or(0);
@@ -231,35 +305,7 @@ fn assignments(text: &str, command_output: bool) -> String {
                 }
             )
         } else {
-            end = start;
-            if quote == b'{' || quote == b'[' {
-                end = container_end(text, start);
-            } else {
-                end = token_end(text, end);
-                let mut credential = end;
-                while bytes
-                    .get(credential)
-                    .is_some_and(|b| *b == b' ' || *b == b'\t')
-                {
-                    credential += 1;
-                }
-                if end > start
-                    && credential > end
-                    && SCHEME.is_match(&text[start..end])
-                    && !SPACED_ASSIGNMENT.is_match(&text[credential..])
-                {
-                    end = credential;
-                    if bytes.get(end).is_some_and(|b| *b == b'"' || *b == b'\'') {
-                        let q = bytes[end];
-                        end = quoted_end(text, end);
-                        if bytes.get(end) == Some(&q) {
-                            end += 1;
-                        }
-                    } else {
-                        end = token_end(text, end);
-                    }
-                }
-            }
+            end = unquoted_value_end(text, start);
             cursor = end;
             if end == start {
                 continue;

@@ -113,6 +113,40 @@ add("round 3 hyphen JWT", "-" + jwt, [jwt]);
 add("round 3 terminal string", "\u001bPsyntheticTerminalPayload\u001b\\Bearer synthetic-terminal-bearer", ["synthetic-terminal-bearer", "syntheticTerminalPayload"]);
 add("round 3 Unicode value boundary", "password=synthetic-boundary\u00a0following prose", ["synthetic-boundary"]);
 
+add("spaced credential chain", "password: hunter2 token: abc");
+add("pipe-glued credential chain", "apiToken: x|password: y");
+add("key as credential value", "apiToken: password: y");
+add("printf literal newlines", "printf 'apiToken: x\\npassword: y\\n'");
+add("printf literal backslash token", "printf 'a\\token: zz9'");
+add("repeated glued credential chain", "password: x|apiToken: y\\nclientSecret: z token: abc");
+add("glued quoted value", 'apiToken: x|password: "synthetic chained value"');
+add("glued container value", 'apiToken: x|secret: {"nested":["synthetic chained value"]}');
+add("glued metadata stays readable", "apiToken: x|inputTokens: 42; status=ready");
+add("literal escapes inside credential", "password: x\\npart\\tpart\\rpart; status=ready");
+for (const key of ["apiTokens", "clientSecrets", "api_tokens", "tokenValue", "credentialValues",
+  "inputToken", "cachedToken", "usedToken", "remainingToken", "knownCredentials"]) {
+  const value = synthetic("new-assignment-" + key);
+  add("credential family " + key, assignment(key, value, ": ") + "; status=ready", [value]);
+}
+for (const key of ["maxTokens", "minTokens", "numTokens", "totalTokens", "maxToken", "minToken",
+  "numToken", "totalToken", "inputTokens", "outputTokens", "promptTokens", "completionTokens",
+  "cachedTokens", "reasoningTokens", "contextTokens", "usedTokens", "remainingTokens",
+  "tokenUsed", "tokensUsed", "tokenRemaining", "tokensRemaining", "tokenCount",
+  "knownSecrets", "requiredSecrets", "missingSecrets", "secretNames", "secretRef", "secretStore",
+  "credentialId", "credentialPresent", "secretAbsent", "api_token_count", "input_tokens"]) {
+  add("named metadata " + key, assignment(key, "fixture-reference", ": ") + "; status=ready");
+}
+for (const escape of ["n", "t", "r"]) {
+  for (const key of ["password", "token", "apiTokens", "inputToken", "inputTokens", "key"]) {
+    add("escaped key " + escape + " " + key, "prefix\\" + escape + key + ": synthetic-escaped; status=ready");
+  }
+}
+add("backslash key without escape letter", "prefix\\token: synthetic-escaped; status=ready");
+add("uppercase escaped key", "prefix\\Token: synthetic-escaped; status=ready");
+add("source member before literal escape", "apiToken: config.value\\npassword: synthetic-escaped; status=ready");
+// A large run ending in a separator exercises the bounded backward key scan.
+add("long value ending in pipe colon", "apiToken: " + "z".repeat(1024 * 1024) + "|: trailing");
+
 // Complete malformed examples in the combined answer so adjacent cases stay independent;
 // the standalone cases still exercise unterminated inputs exactly as written.
 const input = cases.map((c) => c.input + (c.name === "unterminated quote" ? '"'
