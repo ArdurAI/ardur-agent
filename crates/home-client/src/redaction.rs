@@ -1,4 +1,5 @@
-//! Output parity with the home CLI's safeDiagnostic; fixtures pin the pure oracle.
+//! Text parity with the home CLI's safeDiagnostic; fixtures pin the pure oracle.
+//! JSON credential-key masking is additional Rust-only output hardening.
 use regex::{Captures, Regex};
 use serde_json::Value;
 use std::sync::LazyLock;
@@ -23,7 +24,7 @@ pattern!(
 );
 pattern!(
     PEM,
-    r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)"
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----(?s:.)*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)"
 );
 pattern!(URL, r"(?i)(https?://)[^\s/:@]+:[^\s/@]+@");
 pattern!(EMAIL, r"(?i)[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}(?-u:\b)");
@@ -404,15 +405,111 @@ pub fn safe_output(text: &str) -> String {
     redact_text(&redact_text(&text, true), false)
 }
 /// Apply before serialization, including dynamic JSON keys.
+///
+/// Rust-only hardening masks every string below a credential key while retaining
+/// containers and non-string types. Answer fields use text redaction only unless
+/// nested beneath a credential key. Key classification does not read escapes.
 pub fn redact(value: Value) -> Value {
+    redact_value(value, false)
+}
+fn redact_value(value: Value, credential: bool) -> Value {
     match value {
-        Value::String(s) => Value::String(safe_output(&s)),
-        Value::Array(a) => Value::Array(a.into_iter().map(redact).collect()),
+        Value::String(s) => Value::String(if credential {
+            REDACTED.into()
+        } else {
+            safe_output(&s)
+        }),
+        Value::Array(a) => {
+            Value::Array(a.into_iter().map(|v| redact_value(v, credential)).collect())
+        }
         Value::Object(o) => Value::Object(
             o.into_iter()
-                .map(|(k, v)| (safe_output(&k), redact(v)))
+                .map(|(k, v)| {
+                    let credential = credential || sensitive_key(&k, false);
+                    (safe_output(&k), redact_value(v, credential))
+                })
                 .collect(),
         ),
         other => other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn pem_matches_nel_without_terminal_filtering() {
+        let pem = "-----BEGIN PRIVATE KEY-----\nsynthetic\u{85}material";
+        assert_eq!(PEM.replace_all(pem, REDACTED), REDACTED);
+        let closed = format!("before\n{pem}\n-----END PRIVATE KEY-----\nafter");
+        assert_eq!(
+            PEM.replace_all(&closed, REDACTED),
+            "before\n[Redacted]\nafter"
+        );
+    }
+
+    #[test]
+    fn credential_keys_mask_strings() {
+        let input = json!({
+            "password": "x", "apiToken": "x", "deviceToken": "x", "clientSecrets": "x",
+            "API_TOKEN": "x", "client-secret": "x", "nknownSecrets": "x"
+        });
+        let expected = json!({
+            "password": REDACTED, "apiToken": REDACTED, "deviceToken": REDACTED,
+            "clientSecrets": REDACTED, "API_TOKEN": REDACTED, "client-secret": REDACTED,
+            "nknownSecrets": REDACTED
+        });
+        assert_eq!(redact(input), expected);
+    }
+
+    #[test]
+    fn credential_context_masks_nested_strings_and_preserves_types() {
+        let input = json!({
+            "clientSecrets": {
+                "value": "x", "message": "x", "knownSecrets": "x",
+                "nested": ["x", {"value": "x"}, ["x", 7, true, false, null]],
+                "number": 3.5, "flag": false, "empty": null
+            },
+            "deviceToken": ["x", {"value": ["x", 42, false, null]}],
+            "ordinary": {"password": "x", "value": "readable"}
+        });
+        let expected = json!({
+            "clientSecrets": {
+                "value": REDACTED, "message": REDACTED, "knownSecrets": REDACTED,
+                "nested": [REDACTED, {"value": REDACTED}, [REDACTED, 7, true, false, null]],
+                "number": 3.5, "flag": false, "empty": null
+            },
+            "deviceToken": [REDACTED, {"value": [REDACTED, 42, false, null]}],
+            "ordinary": {"password": REDACTED, "value": "readable"}
+        });
+        assert_eq!(redact(input), expected);
+    }
+
+    #[test]
+    fn metadata_references_and_non_string_credentials_stay_readable() {
+        let input = json!({
+            "tokenCount": 42, "hasToken": true, "maxTokens": 100,
+            "modelCredentialId": "fixture-reference", "knownSecrets": ["fixture-name"],
+            "token_count": "42", "maxTokensText": "x",
+            "password": 7, "apiToken": false, "clientSecrets": null,
+            "references": {"maxTokens": "100", "modelCredentialId": "fixture-reference"}
+        });
+        let mut expected = input.clone();
+        expected["maxTokensText"] = json!(REDACTED);
+        assert_eq!(redact(input), expected);
+    }
+
+    #[test]
+    fn answer_fields_stay_readable_and_still_receive_text_redaction() {
+        let input = json!({
+            "message": "answer text", "messages": ["answer text"], "prompt": "answer text",
+            "body": "answer text", "query": "answer text",
+            "nested": {"message": "answer password=x; done"}
+        });
+        let mut expected = input.clone();
+        expected["nested"]["message"] = json!("answer password=[Redacted]; done");
+        assert_eq!(redact(input), expected);
     }
 }

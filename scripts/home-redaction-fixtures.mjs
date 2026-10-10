@@ -85,6 +85,11 @@ for (const marker of ["", "RSA ", "EC ", "ENCRYPTED "]) {
     + "\n-----END " + marker + "PRIVATE KEY-----\nafter", [synthetic("private-material")]);
 }
 add("unterminated PEM", "before\n-----BEGIN PRIVATE KEY-----\n" + synthetic("private-material"), [synthetic("private-material")]);
+const nelPem = "before\n-----BEGIN PRIVATE KEY-----\n" + synthetic("private-nel") + "\u0085material";
+const nelPemCases = [
+  ["PEM containing U+0085 closed", nelPem + "\n-----END PRIVATE KEY-----\nafter"],
+  ["PEM containing U+0085 unterminated", nelPem],
+];
 add("terminal controls", "\u001b[31mBearer syn\u0007thetic-controls\u001b[0m", ["synthetic-controls"]);
 for (const input of [
   "ordinary.version.string", "unicode 雪 😀 é", "0123456789abcdef0123456789abcdef01234567",
@@ -146,11 +151,13 @@ add("uppercase escaped key", "prefix\\Token: synthetic-escaped; status=ready");
 add("source member before literal escape", "apiToken: config.value\\npassword: synthetic-escaped; status=ready");
 // A large run ending in a separator exercises the bounded backward key scan.
 add("long value ending in pipe colon", "apiToken: " + "z".repeat(1024 * 1024) + "|: trailing");
+for (const [name, input] of nelPemCases) add(name, input, [synthetic("private-nel")]);
 
 // Complete malformed examples in the combined answer so adjacent cases stay independent;
 // the standalone cases still exercise unterminated inputs exactly as written.
 const input = cases.map((c) => c.input + (c.name === "unterminated quote" ? '"'
-  : c.name === "unterminated container" ? "}" : c.name === "unterminated PEM" ? "\n-----END PRIVATE KEY-----" : "")).join("\n");
+  : c.name === "unterminated container" ? "}" : ["unterminated PEM", "PEM containing U+0085 unterminated"].includes(c.name)
+    ? "\n-----END PRIVATE KEY-----" : "")).join("\n");
 const credentials = [...new Set(cases.flatMap((c) => c.credentials))];
 const fixture = { schemaVersion: 1, provenance: { repository: "ArdurAI/ardur-bot", revision,
   sources: ["apps/cli/src/text.ts", "packages/logging/src/redaction.ts"] },
@@ -226,6 +233,7 @@ for (let i = 0; i < 4096; i++) {
     + pick(terminals) + pick(suffixes) + pick(whitespace) + pick(families)(separator);
   diff("seeded " + i, input);
 }
+for (const [name, input] of nelPemCases) diff(name, input);
 const generated = { schemaVersion: 1, generator: { seed, randomCases: 4096, count: differential.length,
   whitespaceCodePoints: whitespace.map((char) => char.codePointAt(0)), terminalCount: terminals.length }, provenance, cases: differential };
 const differentialTarget = "crates/home-client/tests/fixtures/redaction-differential.json";

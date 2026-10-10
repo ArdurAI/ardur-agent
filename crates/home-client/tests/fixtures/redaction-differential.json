@@ -3,7 +3,7 @@
   "generator": {
     "seed": 1498427401,
     "randomCases": 4096,
-    "count": 4929,
+    "count": 4931,
     "whitespaceCodePoints": [
       9,
       10,
@@ -24693,6 +24693,16 @@
       "name": "seeded 4095",
       "input": "\u001b]unterminatedtoken=\u000b\"synthetic \\\"quoted\\\" 雪😀\"synthetic-payload/path tokenId\u000b=\u000bfixture",
       "expected": "nterminatedtoken=\"[Redacted]\"synthetic-payload/path tokenId=fixture"
+    },
+    {
+      "name": "PEM containing U+0085 closed",
+      "input": "before\n-----BEGIN PRIVATE KEY-----\nsynthetic-private-nelmaterial\n-----END PRIVATE KEY-----\nafter",
+      "expected": "before\n[Redacted]\nafter"
+    },
+    {
+      "name": "PEM containing U+0085 unterminated",
+      "input": "before\n-----BEGIN PRIVATE KEY-----\nsynthetic-private-nelmaterial",
+      "expected": "before\n[Redacted]"
     }
   ]
 }
