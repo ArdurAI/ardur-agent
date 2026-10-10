@@ -1,8 +1,8 @@
 mod support;
-use home_client::{
-    DeviceCommand, FileStore, HomeClient, SecretStore, execute_device, execute_room_send,
-    pair_device,
-};
+use home_client::{DeviceCommand, HomeClient, execute_device, execute_room_send, pair_device};
+// The private credential store is Unix-only by design (storage.rs returns Storage elsewhere).
+#[cfg(unix)]
+use home_client::{FileStore, SecretStore};
 use serde_json::{Value, json};
 use std::time::Duration;
 use support::{FakeHome, Mode};
@@ -390,6 +390,7 @@ async fn lost_room_response_recovers_the_original_admission_with_fresh_proofs() 
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn room_send_recovery_reuses_one_pending_nonce_for_the_identical_send() {
     let server = FakeHome::start(false).await;
