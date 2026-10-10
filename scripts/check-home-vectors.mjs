@@ -78,5 +78,37 @@ assert.equal(denial.body.problem.code,"access_lost");
 assert.equal(copied.responses.length,7);
 console.log("Stage 4 copied golden bytes, provenance SHA-256 and public TypeScript signatures verified.");
 
+const eventsRaw=readFileSync("crates/home-protocol/tests/fixtures/device-events.json");
+const events=JSON.parse(eventsRaw);
+const eventsProvenance=JSON.parse(readFileSync("crates/home-protocol/tests/fixtures/device-events-provenance.json","utf8"));
+assert.equal(eventsProvenance.repository,"ArdurAI/ardur-bot");
+assert.equal(eventsProvenance.revision,"2910f63e231ebc8fbf9c4177d4fc1681f04b3752");
+assert.equal(eventsProvenance.source,"apps/cli/fixtures/device-operations.json");
+assert.equal(eventsProvenance.sha256,"f5939feb81f958b8aa2bbbd38784fcd1c6dcdfdbde86440785f79a820fa5a3f3");
+assert.equal(createHash("sha256").update(eventsRaw).digest("hex"),eventsProvenance.sha256);
+assert.equal(events.requests.length,17);
+assert.equal(events.requests.filter((r)=>r.operation==="events").length,3);
+for (const r of events.requests) {
+  assert.equal(canonical(r.body),r.canonicalBody);
+  assert.equal(canonical(["ardur-device-v1",events.instanceId,events.proof.grantId,events.proof.nonce,events.proof.timestamp,r.operation,r.body]),r.signedText);
+}
+const stage5=JSON.parse(readFileSync("crates/home-protocol/tests/fixtures/typescript-stage5.json","utf8"));
+assert.deepEqual(stage5.provenance,eventsProvenance);
+assert.equal(stage5.requests.length,events.requests.length);
+const stage5Key=createPublicKey({key:Buffer.from(stage5.publicKey,"base64"),type:"spki",format:"der"});
+assert.equal(stage5Key.asymmetricKeyDetails.namedCurve,"prime256v1");
+for (let i=0;i<stage5.requests.length;i++) {
+  const r=stage5.requests[i];
+  assert.equal(r.signedText,events.requests[i].signedText);
+  assert.deepEqual(r.body,events.requests[i].body);
+  assert(verify("sha256",Buffer.from(r.signedText),stage5Key,Buffer.from(r.signature,"base64")));
+  assert(!verify("sha256",Buffer.from(r.signedText+"changed"),stage5Key,Buffer.from(r.signature,"base64")));
+}
+assert.equal(events.eventStreams.length,9);
+for (const stream of events.eventStreams) {
+  assert.equal(Buffer.concat(stream.utf8HexChunks.map((c)=>Buffer.from(c,"hex"))).toString("utf8"),stream.wire);
+}
+console.log("Stage 5 signed event bytes, SSE chunks and provenance SHA-256 verified offline.");
+
 // Regenerate both corpora from committed, hash-pinned pure TypeScript sources.
 execFileSync(process.execPath, ["scripts/home-redaction-fixtures.mjs", "--check"], { stdio: "inherit" });

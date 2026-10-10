@@ -4,7 +4,7 @@ use base64::engine::general_purpose::STANDARD;
 use home_client::now_ms;
 use home_protocol::{PairingPayload, Proof, home_signed_text, sha256, sign_text};
 use serde_json::{Value, json};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -34,7 +34,13 @@ pub enum Mode {
     RecordUnavailable,
 }
 const DEVICE_RECORD_UNAVAILABLE: &str = "This record is unavailable from this device.";
+pub struct EventResponse {
+    pub chunks: Vec<Vec<u8>>,
+    pub interrupted: bool,
+    pub finish_run: bool,
+}
 pub struct FakeHome {
+    pub event_windows: Arc<Mutex<VecDeque<EventResponse>>>,
     pub payload: PairingPayload,
     pub certificate: rustls::pki_types::CertificateDer<'static>,
     pub calls: Arc<AtomicUsize>,
@@ -138,6 +144,8 @@ impl FakeHome {
             room_result.clone(),
             room_admissions.clone(),
         );
+        let event_windows = Arc::new(Mutex::new(VecDeque::<EventResponse>::new()));
+        let windows = event_windows.clone();
         let certificate = der.clone();
         let (p, c, m, s) = (payload.clone(), calls.clone(), mode.clone(), seen.clone());
         let task = tokio::spawn(async move {
@@ -284,7 +292,29 @@ impl FakeHome {
                         json!({"message":"unavailable"})
                     } else {
                         used.insert(proof.nonce);
-                        if op == "tasks" {
+                        if op == "events" {
+                            let response = windows
+                                .lock()
+                                .unwrap()
+                                .pop_front()
+                                .expect("configured event window");
+                            let bytes: usize = response.chunks.iter().map(Vec::len).sum();
+                            let headers = format!(
+                                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                                bytes + usize::from(response.interrupted)
+                            );
+                            let _ = tls.write_all(headers.as_bytes()).await;
+                            for chunk in response.chunks {
+                                let _ = tls.write_all(&chunk).await;
+                                let _ = tls.flush().await;
+                                tokio::task::yield_now().await;
+                            }
+                            if response.finish_run {
+                                run_state.lock().unwrap()["status"] = json!("completed");
+                            }
+                            let _ = tls.shutdown().await;
+                            continue;
+                        } else if op == "tasks" {
                             json!([])
                         } else if op == "rpc"
                             && value["body"] == json!({"procedure":"bots/list","input":{}})
@@ -493,6 +523,7 @@ impl FakeHome {
             }
         });
         Self {
+            event_windows,
             payload,
             certificate,
             calls,
@@ -559,6 +590,7 @@ fn independent_request_text(
         r#"{"input":null,"procedure":"computer/list"}"#.to_owned()
     } else if [
         "dispatch",
+        "events",
         "runs/get",
         "tasks/get",
         "runs/list",

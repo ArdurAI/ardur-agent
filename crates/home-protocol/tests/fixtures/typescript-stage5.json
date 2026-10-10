@@ -1,0 +1,607 @@
+{
+  "version": 1,
+  "instanceId": "fixture-home",
+  "proof": {
+    "grantId": "fixture-device",
+    "nonce": "fixture-nonce-00000000000000000000",
+    "timestamp": 1790000000000
+  },
+  "eventWindow": {
+    "durationMs": 10000,
+    "heartbeatMs": 2000,
+    "recheckMs": 500,
+    "maxFrames": 128,
+    "maxBytes": 1048576,
+    "maxFrameBytes": 65536,
+    "maxScannedEvents": 1024
+  },
+  "eventStreams": [
+    {
+      "name": "gaps-and-heartbeat",
+      "startCursor": -1,
+      "wire": "id: 1\nevent: event\ndata: {\"id\":\"fixture-event-1\",\"spaceId\":\"fixture-space\",\"botId\":\"fixture-bot\",\"threadId\":\"fixture-thread\",\"runId\":\"fixture-run\",\"seq\":1,\"type\":\"thread.progress\",\"createdAt\":\"2026-10-01T00:00:00.000Z\",\"payload\":{\"text\":\"Reply ✓ 🚀\\nnext line\"}}\n\n: heartbeat\n\nid: 4\nevent: event\ndata: {\"id\":\"fixture-event-4\",\"spaceId\":\"fixture-space\",\"botId\":\"fixture-bot\",\"threadId\":\"fixture-thread\",\"runId\":\"fixture-run\",\"seq\":4,\"type\":\"thread.progress\",\"createdAt\":\"2026-10-01T00:00:00.000Z\",\"payload\":{\"text\":\"Reply ✓ 🚀\\nnext line\"}}\n\nevent: window\ndata: {\"nextCursor\":4,\"reason\":\"limit\"}\n\n",
+      "utf8HexChunks": [
+        "69",
+        "643a20310a65",
+        "76656e743a206576656e740a646174613a207b226964223a22666978747572652d6576656e742d31222c2273706163654964223a22666978747572652d7370616365222c22626f744964223a22666978747572652d626f74222c227468726561644964223a22666978747572652d746872656164222c2272756e4964223a22666978747572652d72756e222c22736571223a312c2274797065223a227468726561642e70726f6772657373222c22637265617465644174223a22323032362d31302d30315430303a30303a30302e3030305a222c227061796c6f6164223a7b2274657874223a225265706c7920e29c9320f0",
+        "9f9a",
+        "805c6e6e657874206c696e65227d7d0a0a3a206865617274626561740a0a69643a20340a6576656e743a206576656e740a646174613a207b226964223a22666978747572652d6576656e742d34222c2273706163654964223a22666978747572652d7370616365222c22626f744964223a22666978747572652d626f74222c227468726561644964223a22666978747572652d746872656164222c2272756e4964223a22666978747572652d72756e222c22736571223a342c2274797065223a227468726561642e70726f6772657373222c22637265617465644174223a22323032362d31302d30315430303a30303a30302e3030305a222c227061796c6f6164223a7b2274657874223a225265706c7920e29c9320f09f9a805c6e6e657874206c696e65227d7d0a0a6576656e743a2077696e646f770a646174613a207b226e657874437572736f72223a342c22726561736f6e223a226c696d6974227d0a0a"
+      ],
+      "expectedEvents": [
+        {
+          "id": "fixture-event-1",
+          "spaceId": "fixture-space",
+          "botId": "fixture-bot",
+          "threadId": "fixture-thread",
+          "runId": "fixture-run",
+          "seq": 1,
+          "type": "thread.progress",
+          "createdAt": "2026-10-01T00:00:00.000Z",
+          "payload": {
+            "text": "Reply ✓ 🚀\nnext line"
+          }
+        },
+        {
+          "id": "fixture-event-4",
+          "spaceId": "fixture-space",
+          "botId": "fixture-bot",
+          "threadId": "fixture-thread",
+          "runId": "fixture-run",
+          "seq": 4,
+          "type": "thread.progress",
+          "createdAt": "2026-10-01T00:00:00.000Z",
+          "payload": {
+            "text": "Reply ✓ 🚀\nnext line"
+          }
+        }
+      ],
+      "expectedWindow": {
+        "nextCursor": 4,
+        "reason": "limit"
+      },
+      "expectedCursor": 4
+    },
+    {
+      "name": "duplicate-frame",
+      "startCursor": -1,
+      "wire": "id: 1\nevent: event\ndata: {\"id\":\"fixture-event-1\",\"spaceId\":\"fixture-space\",\"botId\":\"fixture-bot\",\"threadId\":\"fixture-thread\",\"runId\":\"fixture-run\",\"seq\":1,\"type\":\"thread.progress\",\"createdAt\":\"2026-10-01T00:00:00.000Z\",\"payload\":{\"text\":\"Reply ✓ 🚀\\nnext line\"}}\n\nid: 1\nevent: event\ndata: {\"id\":\"fixture-event-1\",\"spaceId\":\"fixture-space\",\"botId\":\"fixture-bot\",\"threadId\":\"fixture-thread\",\"runId\":\"fixture-run\",\"seq\":1,\"type\":\"thread.progress\",\"createdAt\":\"2026-10-01T00:00:00.000Z\",\"payload\":{\"text\":\"Reply ✓ 🚀\\nnext line\"}}\n\nid: 4\nevent: event\ndata: {\"id\":\"fixture-event-4\",\"spaceId\":\"fixture-space\",\"botId\":\"fixture-bot\",\"threadId\":\"fixture-thread\",\"runId\":\"fixture-run\",\"seq\":4,\"type\":\"thread.progress\",\"createdAt\":\"2026-10-01T00:00:00.000Z\",\"payload\":{\"text\":\"Reply ✓ 🚀\\nnext line\"}}\n\nevent: window\ndata: {\"nextCursor\":4,\"reason\":\"limit\"}\n\n",
+      "utf8HexChunks": [
+        "69",
+        "643a20310a65",
+        "76656e743a206576656e740a646174613a207b226964223a22666978747572652d6576656e742d31222c2273706163654964223a22666978747572652d7370616365222c22626f744964223a22666978747572652d626f74222c227468726561644964223a22666978747572652d746872656164222c2272756e4964223a22666978747572652d72756e222c22736571223a312c2274797065223a227468726561642e70726f6772657373222c22637265617465644174223a22323032362d31302d30315430303a30303a30302e3030305a222c227061796c6f6164223a7b2274657874223a225265706c7920e29c9320f0",
+        "9f9a",
+        "805c6e6e657874206c696e65227d7d0a0a69643a20310a6576656e743a206576656e740a646174613a207b226964223a22666978747572652d6576656e742d31222c2273706163654964223a22666978747572652d7370616365222c22626f744964223a22666978747572652d626f74222c227468726561644964223a22666978747572652d746872656164222c2272756e4964223a22666978747572652d72756e222c22736571223a312c2274797065223a227468726561642e70726f6772657373222c22637265617465644174223a22323032362d31302d30315430303a30303a30302e3030305a222c227061796c6f6164223a7b2274657874223a225265706c7920e29c9320f09f9a805c6e6e657874206c696e65227d7d0a0a69643a20340a6576656e743a206576656e740a646174613a207b226964223a22666978747572652d6576656e742d34222c2273706163654964223a22666978747572652d7370616365222c22626f744964223a22666978747572652d626f74222c227468726561644964223a22666978747572652d746872656164222c2272756e4964223a22666978747572652d72756e222c22736571223a342c2274797065223a227468726561642e70726f6772657373222c22637265617465644174223a22323032362d31302d30315430303a30303a30302e3030305a222c227061796c6f6164223a7b2274657874223a225265706c7920e29c9320f09f9a805c6e6e657874206c696e65227d7d0a0a6576656e743a2077696e646f770a646174613a207b226e657874437572736f72223a342c22726561736f6e223a226c696d6974227d0a0a"
+      ],
+      "expectedEvents": [
+        {
+          "id": "fixture-event-1",
+          "spaceId": "fixture-space",
+          "botId": "fixture-bot",
+          "threadId": "fixture-thread",
+          "runId": "fixture-run",
+          "seq": 1,
+          "type": "thread.progress",
+          "createdAt": "2026-10-01T00:00:00.000Z",
+          "payload": {
+            "text": "Reply ✓ 🚀\nnext line"
+          }
+        },
+        {
+          "id": "fixture-event-4",
+          "spaceId": "fixture-space",
+          "botId": "fixture-bot",
+          "threadId": "fixture-thread",
+          "runId": "fixture-run",
+          "seq": 4,
+          "type": "thread.progress",
+          "createdAt": "2026-10-01T00:00:00.000Z",
+          "payload": {
+            "text": "Reply ✓ 🚀\nnext line"
+          }
+        }
+      ],
+      "expectedWindow": {
+        "nextCursor": 4,
+        "reason": "limit"
+      },
+      "expectedCursor": 4
+    },
+    {
+      "name": "disconnect-mid-frame",
+      "startCursor": -1,
+      "wire": "id: 1\nevent: event\ndata: {\"id\":\"fixture-event-1\",\"spaceId\":\"fixture-space\",\"botId\":\"fixture-bot\",\"threadId\":\"fixture-thread\",\"runId\":\"fixture-run\",\"seq\":1,\"type\":\"thread.progress\",\"createdAt\":\"2026-10-01T00:00:00.000Z\",\"payload\":{\"text\":\"Reply ✓ 🚀\\nnext line\"}}\n\nid: 4\nevent: event\ndata: {\"id\":\"fixture-event-4\",\"spaceId\":\"fixture-space\",\"botId\":\"fixture-bot\",\"threadId\":\"fixture-thread\",\"runId\":\"fixture-run\",\"seq\":4,\"type\":\"thread.progress\",\"createdAt\":\"2026-10-01T00:00:00.000Z\",\"payload\":{\"text\":\"Reply ✓ 🚀\\nnext line\"}",
+      "utf8HexChunks": [
+        "69",
+        "643a20310a65",
+        "76656e743a206576656e740a646174613a207b226964223a22666978747572652d6576656e742d31222c2273706163654964223a22666978747572652d7370616365222c22626f744964223a22666978747572652d626f74222c227468726561644964223a22666978747572652d746872656164222c2272756e4964223a22666978747572652d72756e222c22736571223a312c2274797065223a227468726561642e70726f6772657373222c22637265617465644174223a22323032362d31302d30315430303a30303a30302e3030305a222c227061796c6f6164223a7b2274657874223a225265706c7920e29c9320f0",
+        "9f9a",
+        "805c6e6e657874206c696e65227d7d0a0a69643a20340a6576656e743a206576656e740a646174613a207b226964223a22666978747572652d6576656e742d34222c2273706163654964223a22666978747572652d7370616365222c22626f744964223a22666978747572652d626f74222c227468726561644964223a22666978747572652d746872656164222c2272756e4964223a22666978747572652d72756e222c22736571223a342c2274797065223a227468726561642e70726f6772657373222c22637265617465644174223a22323032362d31302d30315430303a30303a30302e3030305a222c227061796c6f6164223a7b2274657874223a225265706c7920e29c9320f09f9a805c6e6e657874206c696e65227d"
+      ],
+      "expectedEvents": [
+        {
+          "id": "fixture-event-1",
+          "spaceId": "fixture-space",
+          "botId": "fixture-bot",
+          "threadId": "fixture-thread",
+          "runId": "fixture-run",
+          "seq": 1,
+          "type": "thread.progress",
+          "createdAt": "2026-10-01T00:00:00.000Z",
+          "payload": {
+            "text": "Reply ✓ 🚀\nnext line"
+          }
+        }
+      ],
+      "expectedWindow": null,
+      "expectedCursor": 1
+    },
+    {
+      "name": "reconnect",
+      "startCursor": 1,
+      "wire": "id: 4\nevent: event\ndata: {\"id\":\"fixture-event-4\",\"spaceId\":\"fixture-space\",\"botId\":\"fixture-bot\",\"threadId\":\"fixture-thread\",\"runId\":\"fixture-run\",\"seq\":4,\"type\":\"thread.progress\",\"createdAt\":\"2026-10-01T00:00:00.000Z\",\"payload\":{\"text\":\"Reply ✓ 🚀\\nnext line\"}}\n\nevent: window\ndata: {\"nextCursor\":4,\"reason\":\"limit\"}\n\n",
+      "utf8HexChunks": [
+        "69",
+        "643a20340a65",
+        "76656e743a206576656e740a646174613a207b226964223a22666978747572652d6576656e742d34222c2273706163654964223a22666978747572652d7370616365222c22626f744964223a22666978747572652d626f74222c227468726561644964223a22666978747572652d746872656164222c2272756e4964223a22666978747572652d72756e222c22736571223a342c2274797065223a227468726561642e70726f6772657373222c22637265617465644174223a22323032362d31302d30315430303a30303a30302e3030305a222c227061796c6f6164223a7b2274657874223a225265706c7920e29c9320f0",
+        "9f9a",
+        "805c6e6e657874206c696e65227d7d0a0a6576656e743a2077696e646f770a646174613a207b226e657874437572736f72223a342c22726561736f6e223a226c696d6974227d0a0a"
+      ],
+      "expectedEvents": [
+        {
+          "id": "fixture-event-4",
+          "spaceId": "fixture-space",
+          "botId": "fixture-bot",
+          "threadId": "fixture-thread",
+          "runId": "fixture-run",
+          "seq": 4,
+          "type": "thread.progress",
+          "createdAt": "2026-10-01T00:00:00.000Z",
+          "payload": {
+            "text": "Reply ✓ 🚀\nnext line"
+          }
+        }
+      ],
+      "expectedWindow": {
+        "nextCursor": 4,
+        "reason": "limit"
+      },
+      "expectedCursor": 4
+    },
+    {
+      "name": "timeout",
+      "startCursor": 4,
+      "wire": "event: window\ndata: {\"nextCursor\":4,\"reason\":\"timeout\"}\n\n",
+      "utf8HexChunks": [
+        "65",
+        "76656e743a20",
+        "77696e646f770a646174613a207b226e657874437572736f72223a342c22726561736f6e223a2274696d656f7574227d0a0a"
+      ],
+      "expectedEvents": [],
+      "expectedWindow": {
+        "nextCursor": 4,
+        "reason": "timeout"
+      },
+      "expectedCursor": 4
+    },
+    {
+      "name": "access_lost",
+      "startCursor": 4,
+      "wire": "event: window\ndata: {\"nextCursor\":4,\"reason\":\"access_lost\"}\n\n",
+      "utf8HexChunks": [
+        "65",
+        "76656e743a20",
+        "77696e646f770a646174613a207b226e657874437572736f72223a342c22726561736f6e223a226163636573735f6c6f7374227d0a0a"
+      ],
+      "expectedEvents": [],
+      "expectedWindow": {
+        "nextCursor": 4,
+        "reason": "access_lost"
+      },
+      "expectedCursor": 4
+    },
+    {
+      "name": "payload_too_large",
+      "startCursor": 4,
+      "wire": "event: window\ndata: {\"nextCursor\":4,\"reason\":\"payload_too_large\"}\n\n",
+      "utf8HexChunks": [
+        "65",
+        "76656e743a20",
+        "77696e646f770a646174613a207b226e657874437572736f72223a342c22726561736f6e223a227061796c6f61645f746f6f5f6c61726765227d0a0a"
+      ],
+      "expectedEvents": [],
+      "expectedWindow": {
+        "nextCursor": 4,
+        "reason": "payload_too_large"
+      },
+      "expectedCursor": 4
+    },
+    {
+      "name": "error",
+      "startCursor": 4,
+      "wire": "event: window\ndata: {\"nextCursor\":4,\"reason\":\"error\"}\n\n",
+      "utf8HexChunks": [
+        "65",
+        "76656e743a20",
+        "77696e646f770a646174613a207b226e657874437572736f72223a342c22726561736f6e223a226572726f72227d0a0a"
+      ],
+      "expectedEvents": [],
+      "expectedWindow": {
+        "nextCursor": 4,
+        "reason": "error"
+      },
+      "expectedCursor": 4
+    },
+    {
+      "name": "shutdown",
+      "startCursor": 4,
+      "wire": "event: window\ndata: {\"nextCursor\":4,\"reason\":\"shutdown\"}\n\n",
+      "utf8HexChunks": [
+        "65",
+        "76656e743a20",
+        "77696e646f770a646174613a207b226e657874437572736f72223a342c22726561736f6e223a2273687574646f776e227d0a0a"
+      ],
+      "expectedEvents": [],
+      "expectedWindow": {
+        "nextCursor": 4,
+        "reason": "shutdown"
+      },
+      "expectedCursor": 4
+    }
+  ],
+  "requests": [
+    {
+      "operation": "dispatch",
+      "body": {
+        "clientNonce": "fixture-request-0001",
+        "botId": "fixture-bot",
+        "text": "Reply ✓ 🚀"
+      },
+      "canonicalBody": "{\"botId\":\"fixture-bot\",\"clientNonce\":\"fixture-request-0001\",\"text\":\"Reply ✓ 🚀\"}",
+      "signedText": "[\"ardur-device-v1\",\"fixture-home\",\"fixture-device\",\"fixture-nonce-00000000000000000000\",1790000000000,\"dispatch\",{\"botId\":\"fixture-bot\",\"clientNonce\":\"fixture-request-0001\",\"text\":\"Reply ✓ 🚀\"}]",
+      "signature": "MEUCIQDNNwBqWCF5qTI7H048ETZxLOZJRLvbLvHGb0Pvm0Fg9AIgVXvJbXuRvG5AF30FUPo/p7He7776g53wVoXjul9sUMI="
+    },
+    {
+      "operation": "runs/get",
+      "body": {
+        "runId": "fixture-run"
+      },
+      "canonicalBody": "{\"runId\":\"fixture-run\"}",
+      "signedText": "[\"ardur-device-v1\",\"fixture-home\",\"fixture-device\",\"fixture-nonce-00000000000000000000\",1790000000000,\"runs/get\",{\"runId\":\"fixture-run\"}]",
+      "signature": "MEUCIQCxQLE1AYrsLWZ2lsZvsK5iNqyDEaxH6igQUW1NMmHNEAIgdqD150F91XvxaeU70zbkj6ilgVjyeUv8n1s3qHjftGk="
+    },
+    {
+      "operation": "events",
+      "body": {
+        "runId": "fixture-run",
+        "botId": "fixture-bot",
+        "threadId": "fixture-thread",
+        "cursor": -1
+      },
+      "canonicalBody": "{\"botId\":\"fixture-bot\",\"cursor\":-1,\"runId\":\"fixture-run\",\"threadId\":\"fixture-thread\"}",
+      "signedText": "[\"ardur-device-v1\",\"fixture-home\",\"fixture-device\",\"fixture-nonce-00000000000000000000\",1790000000000,\"events\",{\"botId\":\"fixture-bot\",\"cursor\":-1,\"runId\":\"fixture-run\",\"threadId\":\"fixture-thread\"}]",
+      "signature": "MEUCIDGPkdtguUhyRHEFlHEKiwpWkrke7+NSfsxCw2fLIfHAAiEA2An96fEknqe0e5x5ivtawFgqn4sZHkISDlIhEc52CLE="
+    },
+    {
+      "operation": "events",
+      "body": {
+        "runId": "fixture-room-run",
+        "groupId": "fixture-room",
+        "threadId": "fixture-room-thread",
+        "cursor": 12
+      },
+      "canonicalBody": "{\"cursor\":12,\"groupId\":\"fixture-room\",\"runId\":\"fixture-room-run\",\"threadId\":\"fixture-room-thread\"}",
+      "signedText": "[\"ardur-device-v1\",\"fixture-home\",\"fixture-device\",\"fixture-nonce-00000000000000000000\",1790000000000,\"events\",{\"cursor\":12,\"groupId\":\"fixture-room\",\"runId\":\"fixture-room-run\",\"threadId\":\"fixture-room-thread\"}]",
+      "signature": "MEUCIAYzM58h+09Jwydw88LOLZ45UcZ0avsXnZVU0yHZsVGQAiEAvvSIV+RWUnEbpoLciyWU4vbaJ7DXOCoqrZ99NW8Dlqk="
+    },
+    {
+      "operation": "events",
+      "body": {
+        "runId": "fixture-run",
+        "botId": "fixture-bot",
+        "threadId": "fixture-thread",
+        "cursor": 2147483647
+      },
+      "canonicalBody": "{\"botId\":\"fixture-bot\",\"cursor\":2147483647,\"runId\":\"fixture-run\",\"threadId\":\"fixture-thread\"}",
+      "signedText": "[\"ardur-device-v1\",\"fixture-home\",\"fixture-device\",\"fixture-nonce-00000000000000000000\",1790000000000,\"events\",{\"botId\":\"fixture-bot\",\"cursor\":2147483647,\"runId\":\"fixture-run\",\"threadId\":\"fixture-thread\"}]",
+      "signature": "MEUCIQDSLfzpzBZMN5rRBjdqzRZtI2vzsa8Ui/JpWlB12L3T9QIgclup/t1iej+yxrrn8UC1HxOPPb2LCU7ioJFrd+QniLE="
+    },
+    {
+      "operation": "tasks/get",
+      "body": {
+        "taskId": "fixture-task"
+      },
+      "canonicalBody": "{\"taskId\":\"fixture-task\"}",
+      "signedText": "[\"ardur-device-v1\",\"fixture-home\",\"fixture-device\",\"fixture-nonce-00000000000000000000\",1790000000000,\"tasks/get\",{\"taskId\":\"fixture-task\"}]",
+      "signature": "MEQCIQC/E6+NB6+hF6LqGo5vA0FkhUe/jZzZnbU32M1gyxxuwQIfVGEAyk2RQGHT0DOoGSyw2UeVa2zc1ykuMCkv8mb2yQ=="
+    },
+    {
+      "operation": "runs/list",
+      "body": {},
+      "canonicalBody": "{}",
+      "signedText": "[\"ardur-device-v1\",\"fixture-home\",\"fixture-device\",\"fixture-nonce-00000000000000000000\",1790000000000,\"runs/list\",{}]",
+      "signature": "MEUCIQCZeP7LDpiLUGF66fxdEPp71J6RYhiHaIjzjGT/NQctyQIgCLbdH7QCWNI7mhSxFIqzPyTOHLT7UQEq2v1ZUn3vzm0="
+    },
+    {
+      "operation": "runs/list",
+      "body": {
+        "cursor": "fixture-run",
+        "limit": 2
+      },
+      "canonicalBody": "{\"cursor\":\"fixture-run\",\"limit\":2}",
+      "signedText": "[\"ardur-device-v1\",\"fixture-home\",\"fixture-device\",\"fixture-nonce-00000000000000000000\",1790000000000,\"runs/list\",{\"cursor\":\"fixture-run\",\"limit\":2}]",
+      "signature": "MEUCIHJf5jyMaMj9WYZ01EGXx1ASe3Es6ogS983BIC3DSTpXAiEAgzX5iO+9xJiUpslfdzXjWRQPE9IBbNGxCUQSFDbPWH0="
+    },
+    {
+      "operation": "messages/get",
+      "body": {
+        "botId": "fixture-bot",
+        "threadId": "fixture-thread",
+        "around": {
+          "messageId": "fixture-answer"
+        }
+      },
+      "canonicalBody": "{\"around\":{\"messageId\":\"fixture-answer\"},\"botId\":\"fixture-bot\",\"threadId\":\"fixture-thread\"}",
+      "signedText": "[\"ardur-device-v1\",\"fixture-home\",\"fixture-device\",\"fixture-nonce-00000000000000000000\",1790000000000,\"messages/get\",{\"around\":{\"messageId\":\"fixture-answer\"},\"botId\":\"fixture-bot\",\"threadId\":\"fixture-thread\"}]",
+      "signature": "MEQCIFQmrHhAfy7TEta/nIZ8+sYEOmKdeY6q+kLr8nvvs+OrAiB1z8QzyoYx6F1LUW/w0v8gG+5E/sSaxc8YeeFbBb6eZw=="
+    },
+    {
+      "operation": "messages/get",
+      "body": {
+        "groupId": "fixture-room",
+        "threadId": "fixture-thread",
+        "before": 12
+      },
+      "canonicalBody": "{\"before\":12,\"groupId\":\"fixture-room\",\"threadId\":\"fixture-thread\"}",
+      "signedText": "[\"ardur-device-v1\",\"fixture-home\",\"fixture-device\",\"fixture-nonce-00000000000000000000\",1790000000000,\"messages/get\",{\"before\":12,\"groupId\":\"fixture-room\",\"threadId\":\"fixture-thread\"}]",
+      "signature": "MEUCIGzpNtTiRsP5zj/y3tOPAwgiA5CD4+AkARm78VaqPvDJAiEAndmkNPHoLLIfN+0ZNcKuB4LvNeLoP0T/5S9Hg6vp0zY="
+    },
+    {
+      "operation": "rpc",
+      "body": {
+        "procedure": "computer/list",
+        "input": null
+      },
+      "canonicalBody": "{\"input\":null,\"procedure\":\"computer/list\"}",
+      "signedText": "[\"ardur-device-v1\",\"fixture-home\",\"fixture-device\",\"fixture-nonce-00000000000000000000\",1790000000000,\"rpc\",{\"input\":null,\"procedure\":\"computer/list\"}]",
+      "signature": "MEQCICb/HK7N1kCfFsd4LsPgrAvlPdBRyKCDFexu/MBym6rtAiBhwLdmfUuAFVm1oIlOtCMbkT85CW6inCF67Gs92Ij6AA=="
+    },
+    {
+      "operation": "rpc",
+      "body": {
+        "procedure": "board/snapshot",
+        "input": {
+          "workspaceId": "fixture-board"
+        }
+      },
+      "canonicalBody": "{\"input\":{\"workspaceId\":\"fixture-board\"},\"procedure\":\"board/snapshot\"}",
+      "signedText": "[\"ardur-device-v1\",\"fixture-home\",\"fixture-device\",\"fixture-nonce-00000000000000000000\",1790000000000,\"rpc\",{\"input\":{\"workspaceId\":\"fixture-board\"},\"procedure\":\"board/snapshot\"}]",
+      "signature": "MEYCIQDCBP0+67EB+iMlzPsr9rpR3hIrqMoCZMCazflm75mxIAIhAMw69gDFwmysVsBVyq2HhToWoC2bbYEV/HWUas7DYGLC"
+    },
+    {
+      "operation": "rpc",
+      "body": {
+        "procedure": "board/show",
+        "input": {
+          "workspaceId": "fixture-board",
+          "id": "work-1"
+        }
+      },
+      "canonicalBody": "{\"input\":{\"id\":\"work-1\",\"workspaceId\":\"fixture-board\"},\"procedure\":\"board/show\"}",
+      "signedText": "[\"ardur-device-v1\",\"fixture-home\",\"fixture-device\",\"fixture-nonce-00000000000000000000\",1790000000000,\"rpc\",{\"input\":{\"id\":\"work-1\",\"workspaceId\":\"fixture-board\"},\"procedure\":\"board/show\"}]",
+      "signature": "MEYCIQD3/ULhMyB2FwAbhIEd4+APN/zIsEV4c1a6PH9hu9v2rAIhANFffAunRwMkWNqC4wKjjzZ1oDybBqBUkV4kPnObCYmy"
+    },
+    {
+      "operation": "rooms/list",
+      "body": {},
+      "canonicalBody": "{}",
+      "signedText": "[\"ardur-device-v1\",\"fixture-home\",\"fixture-device\",\"fixture-nonce-00000000000000000000\",1790000000000,\"rooms/list\",{}]",
+      "signature": "MEQCIGbvuX77lu3rPrtAwgh9iBHBnVMN/8Vt+pA7lK23vntlAiBC+Y3GjQb+yrpRELRfODLIWRjaPs6H2ASIMfoJdCPTjQ=="
+    },
+    {
+      "operation": "rooms/send",
+      "body": {
+        "groupId": "fixture-room",
+        "threadId": "fixture-thread",
+        "clientNonce": "fixture-room-request-1",
+        "text": "@Beta @Gamma compare ✓ 🚀"
+      },
+      "canonicalBody": "{\"clientNonce\":\"fixture-room-request-1\",\"groupId\":\"fixture-room\",\"text\":\"@Beta @Gamma compare ✓ 🚀\",\"threadId\":\"fixture-thread\"}",
+      "signedText": "[\"ardur-device-v1\",\"fixture-home\",\"fixture-device\",\"fixture-nonce-00000000000000000000\",1790000000000,\"rooms/send\",{\"clientNonce\":\"fixture-room-request-1\",\"groupId\":\"fixture-room\",\"text\":\"@Beta @Gamma compare ✓ 🚀\",\"threadId\":\"fixture-thread\"}]",
+      "signature": "MEUCIQCBcgTG79/ojajyBo9lsZNunGd8DUa+u8ZfNddNAJWMGQIgFsJbFmJ184DXp2TLpMlqwM4OzRx7R0TPLrZJoUe1+C0="
+    },
+    {
+      "operation": "rooms/send",
+      "body": {
+        "roomName": "Fixture room",
+        "clientNonce": "fixture-room-request-2",
+        "text": "hello"
+      },
+      "canonicalBody": "{\"clientNonce\":\"fixture-room-request-2\",\"roomName\":\"Fixture room\",\"text\":\"hello\"}",
+      "signedText": "[\"ardur-device-v1\",\"fixture-home\",\"fixture-device\",\"fixture-nonce-00000000000000000000\",1790000000000,\"rooms/send\",{\"clientNonce\":\"fixture-room-request-2\",\"roomName\":\"Fixture room\",\"text\":\"hello\"}]",
+      "signature": "MEUCIBaElSVd6rL/Wsc8pH0u3iewHp1B4uD8zF/c1fc9PDWzAiEAmZZv3AlhXEAHApt9uMYvHDYrr8cydYC5SZ9kKd5OLMo="
+    },
+    {
+      "operation": "stop",
+      "body": {
+        "taskId": "fixture-task"
+      },
+      "canonicalBody": "{\"taskId\":\"fixture-task\"}",
+      "signedText": "[\"ardur-device-v1\",\"fixture-home\",\"fixture-device\",\"fixture-nonce-00000000000000000000\",1790000000000,\"stop\",{\"taskId\":\"fixture-task\"}]",
+      "signature": "MEUCIQD58Fuz0ljTzPH0brbZ0xCAtDedyCo0IxbxlxrMfW1SnwIgOY1Io/o83r+i4f8lNvwFULUofq9j2RQazrT0KkMmIJA="
+    }
+  ],
+  "responses": [
+    {
+      "operation": "rooms/send",
+      "body": {
+        "kind": "work",
+        "taskId": "fixture-task",
+        "runId": "fixture-run-1",
+        "runIds": [
+          "fixture-run-1",
+          "fixture-run-2"
+        ],
+        "seq": 1
+      }
+    },
+    {
+      "operation": "rooms/send",
+      "body": {
+        "kind": "receipt-only",
+        "seq": 2,
+        "receipt": {
+          "id": "fixture-receipt",
+          "threadId": "fixture-thread",
+          "seq": 3,
+          "botId": "fixture-chief",
+          "requestMessageId": "fixture-message",
+          "key": "greeting",
+          "text": "Hello.",
+          "createdAt": "2026-10-01T00:00:00.000Z"
+        }
+      }
+    },
+    {
+      "operation": "rooms/list",
+      "body": [
+        {
+          "id": "fixture-room",
+          "spaceId": "fixture-space",
+          "name": "Fixture room",
+          "pinned": false,
+          "sectionId": null,
+          "archivedAt": null,
+          "threadId": "fixture-thread",
+          "preview": "",
+          "unread": false,
+          "members": [
+            {
+              "botId": "fixture-chief",
+              "name": "Chief",
+              "color": "ink"
+            },
+            {
+              "botId": "fixture-worker",
+              "name": "Beta",
+              "color": "ink"
+            }
+          ],
+          "updatedAt": "2026-10-01T00:00:00.000Z",
+          "createdAt": "2026-10-01T00:00:00.000Z"
+        }
+      ]
+    },
+    {
+      "operation": "rpc",
+      "procedure": "computer/list",
+      "status": 200,
+      "body": [
+        {
+          "botId": "fixture-bot",
+          "name": "Fixture bot",
+          "status": {
+            "computerId": "fixture-shared-computer",
+            "botId": "fixture-bot",
+            "mode": "team",
+            "kind": "docker",
+            "state": "stopped",
+            "controlHolder": "none",
+            "controlBotId": null,
+            "takeoverRequested": false,
+            "screenAvailable": false,
+            "screenWidth": 1280,
+            "screenHeight": 720,
+            "homeRevision": null,
+            "busyBotName": null,
+            "canUpdate": false
+          }
+        }
+      ]
+    },
+    {
+      "operation": "rpc",
+      "procedure": "board/snapshot",
+      "status": 200,
+      "body": {
+        "items": [
+          {
+            "id": "work-1",
+            "title": "Fixture task",
+            "description": "",
+            "acceptanceCriteria": "",
+            "type": "task",
+            "status": "open",
+            "priority": 2,
+            "assignee": null,
+            "labels": [],
+            "parent": null,
+            "dependencies": [],
+            "dueAt": null,
+            "deferUntil": null,
+            "estimateMinutes": null,
+            "externalRef": null,
+            "createdAt": "2026-10-01T00:00:00.000Z",
+            "updatedAt": "2026-10-01T00:00:00.000Z",
+            "closedAt": null,
+            "commentCount": 0,
+            "comments": [],
+            "history": [],
+            "closeWhenDone": false
+          }
+        ],
+        "readyIds": [
+          "work-1"
+        ],
+        "blockedIds": []
+      }
+    },
+    {
+      "operation": "rpc",
+      "procedure": "board/show",
+      "status": 200,
+      "body": {
+        "id": "work-1",
+        "title": "Fixture task",
+        "description": "",
+        "acceptanceCriteria": "",
+        "type": "task",
+        "status": "open",
+        "priority": 2,
+        "assignee": null,
+        "labels": [],
+        "parent": null,
+        "dependencies": [],
+        "dueAt": null,
+        "deferUntil": null,
+        "estimateMinutes": null,
+        "externalRef": null,
+        "createdAt": "2026-10-01T00:00:00.000Z",
+        "updatedAt": "2026-10-01T00:00:00.000Z",
+        "closedAt": null,
+        "commentCount": 0,
+        "comments": [],
+        "history": [],
+        "closeWhenDone": false
+      }
+    },
+    {
+      "operation": "rpc",
+      "procedure": "board/show",
+      "status": 403,
+      "body": {
+        "message": "This board is only available to this computer's owner.",
+        "problem": {
+          "code": "access_lost",
+          "message": "This board is only available to this computer's owner."
+        }
+      }
+    }
+  ],
+  "publicKey": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEM+6atbHj8cz4j3W5nNtqAX/5hw69f1APmGmDM6NXGuodDQ5P6Qpl2t2S6V4QzC2Ux1omRhOr4LI0HVfsV/RtlA==",
+  "provenance": {
+    "repository": "ArdurAI/ardur-bot",
+    "revision": "2910f63e231ebc8fbf9c4177d4fc1681f04b3752",
+    "source": "apps/cli/fixtures/device-operations.json",
+    "sha256": "f5939feb81f958b8aa2bbbd38784fcd1c6dcdfdbde86440785f79a820fa5a3f3"
+  }
+}

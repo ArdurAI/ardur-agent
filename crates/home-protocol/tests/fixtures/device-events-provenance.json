@@ -1,0 +1,6 @@
+{
+  "repository": "ArdurAI/ardur-bot",
+  "revision": "2910f63e231ebc8fbf9c4177d4fc1681f04b3752",
+  "source": "apps/cli/fixtures/device-operations.json",
+  "sha256": "f5939feb81f958b8aa2bbbd38784fcd1c6dcdfdbde86440785f79a820fa5a3f3"
+}

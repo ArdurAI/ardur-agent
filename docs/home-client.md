@@ -1,4 +1,4 @@
-# Rust paired-home client (Stages 2, 3 and 4)
+# Rust paired-home client (Stages 2–5)
 
 The builder and local-first user can pair a device, check its current read grant and list saved bots
 without starting another bot runtime. This is a separate `ardur-rs` executable.
@@ -357,6 +357,62 @@ compiled CLI with temporary profiles, never owner storage.
 Windows runs protocol and in-memory client tests; private-file pairing remains
 refused until a protected ACL backend exists. No real home, database, bot runtime
 or model call is involved, and these tests incur no model-turn cost.
+
+## Stage 5 resumable run events
+
+```sh
+ardur-rs runs events <run-id> [--follow] [--cursor <n>] [--json]
+```
+
+This command needs home PR #221. It resolves the exact run through a signed
+read, then signs `events` with its run and thread ids, bot or room id, and
+cursor. The cursor is the last thread event sequence read, defaults to `-1`,
+and accepts integers through `2147483647`. Gaps are normal: the thread also
+contains hidden activity and events from other runs.
+
+Each pinned HTTPS response streams frames as they arrive. It retains only one
+incomplete frame, handles UTF-8 split across chunks, ignores heartbeats and
+already-read ids, and validates event correlation before output. It enforces
+64 KiB per frame, 128 frames and 1 MiB per window. The home bounds windows to
+ten seconds and sends heartbeats every two seconds; the existing client
+transport adds its fifteen-second request timeout.
+
+Without `--follow`, the command reads one window. With it, `timeout` and `limit`
+reconnect from the final `nextCursor` with a fresh nonce and signature.
+Interrupted windows discard partial frames and resume from the last complete
+printed event. Transport recovery allows five consecutive retries with pauses
+from 200 ms to 2 s; successful windows pause 100 ms before reconnecting.
+Following drains limit windows even after the run ends, then checks the exact
+run after a timeout window to decide whether to stop. `access_lost`,
+`payload_too_large`, `error` and `shutdown` stop reconnects with a fixed message.
+Oversized frames also stop; they are never truncated or silently skipped.
+Ctrl-C cancels reads or backoff and prints the last safe cursor in JSON mode.
+
+JSON mode prints one versioned JSON object per event or window. Event records
+contain `event: "event"`, `cursor` and the home event in `data`; window records
+contain `event: "window"`, `data: {nextCursor, reason}` and a fixed message.
+Human output shows sequence, event type and payload, followed by the window
+message. Both projections redact decoded values and remove terminal controls
+before output. Exit codes are 0 for normal completion or Ctrl-C, 4 for lost
+access or invalid inputs, and 2 for stream or transport failures.
+
+The byte-exact Stage 5 fixture is `device-events.json`, copied from
+`apps/cli/fixtures/device-operations.json` in `ArdurAI/ardur-bot` revision
+`2910f63e231ebc8fbf9c4177d4fc1681f04b3752`. Its SHA-256 is
+`f5939feb81f958b8aa2bbbd38784fcd1c6dcdfdbde86440785f79a820fa5a3f3`;
+`device-events-provenance.json` records the origin. The public companion
+`typescript-stage5.json` adds synthetic P-256 DER signatures over those exact
+bytes; Rust and the offline Node checker verify them and reject changed text.
+Regenerate it with `node scripts/home-fixtures.mjs . --stage5
+2910f63e231ebc8fbf9c4177d4fc1681f04b3752`. The earlier Stage 4
+fixture and signature companion remain intact. Conformance checks all
+seventeen canonical request vectors, including bot, room and maximum-cursor
+events requests. Reader tests consume all nine supplied SSE cases using their
+exact hexadecimal chunks. Disposable TLS tests cover one window, follow,
+heartbeat-only responses, split Unicode, duplicates, gaps, oversized frames,
+stop reasons, revocation and interrupted-frame recovery. Unix subprocess tests
+cover JSONL, readable output and Ctrl-C; their imports are also Unix-gated.
+These tests use synthetic homes and incur no model-turn cost.
 
 ## Follow-ups and acceptance boundary
 

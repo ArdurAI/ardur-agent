@@ -8,7 +8,7 @@ import { execFileSync } from "node:child_process";
 
 const oracle = resolve(process.argv[2] ?? ".");
 const load = (p) => import(pathToFileURL(resolve(oracle, p)).href);
-// Oracle modules load lazily so offline modes (--stage4) need no checkout.
+// Oracle modules load lazily so offline modes (--stage4 and --stage5) need no checkout.
 const oracleModules = async () => {
   const [contracts, crypto, client, grants, api] = await Promise.all([
     load("packages/contracts/src/dispatch.ts"),
@@ -20,14 +20,15 @@ const oracleModules = async () => {
   return { contracts, crypto, client, verifyDeviceSignature: grants.verifyDeviceSignature, generateInstanceCertificate: api.generateInstanceCertificate };
 };
 const revision = () => execFileSync("git", ["rev-parse", "HEAD"], { cwd: oracle, encoding: "utf8" }).trim();
-if (process.argv[3] === "--stage4") {
-  // Sign the committed Stage 4 golden bytes with a fresh synthetic device key.
+if (["--stage4", "--stage5"].includes(process.argv[3])) {
+  const stage = process.argv[3] === "--stage5" ? 5 : 4;
+  // Sign the committed golden bytes with a fresh synthetic device key.
   // The signedText strings are the home's own bytes; this adds public DER
   // signatures so Rust and the offline checker can verify the exact vectors.
   // The home revision that produced the committed bytes is a required argument.
   const sourceRevision = process.argv[4];
-  if (!sourceRevision) throw new Error("Usage: home-fixtures.mjs <oracle> --stage4 <home-revision>");
-  const raw = readFileSync("crates/home-protocol/tests/fixtures/device-operations.json", "utf8");
+  if (!sourceRevision) throw new Error("Usage: home-fixtures.mjs <oracle> --stage4|--stage5 <home-revision>");
+  const raw = readFileSync(`crates/home-protocol/tests/fixtures/${stage === 5 ? "device-events" : "device-operations"}.json`, "utf8");
   const sha256 = (v) => createHash("sha256").update(v).digest("hex");
   const fixture = JSON.parse(raw);
   const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
@@ -36,7 +37,7 @@ if (process.argv[3] === "--stage4") {
   for (const r of fixture.requests) {
     r.signature = cryptoSign(null, Buffer.from(r.signedText), key).toString("base64");
     if (!verify(null, Buffer.from(r.signedText), publicKey, Buffer.from(r.signature, "base64")))
-      throw new Error("Stage 4 signature mismatch");
+      throw new Error(`Stage ${stage} signature mismatch`);
   }
   fixture.publicKey = spki;
   // Raw lone-surrogate vectors stay only in the copied golden bytes; this
@@ -48,8 +49,8 @@ if (process.argv[3] === "--stage4") {
     source: "apps/cli/fixtures/device-operations.json",
     sha256: sha256(raw),
   };
-  writeFileSync("crates/home-protocol/tests/fixtures/typescript-stage4.json", JSON.stringify(fixture, null, 2) + "\n");
-  console.log("Signed Stage 4 golden bytes with a fresh public device key.");
+  writeFileSync(`crates/home-protocol/tests/fixtures/typescript-stage${stage}.json`, JSON.stringify(fixture, null, 2) + "\n");
+  console.log(`Signed Stage ${stage} golden bytes with a fresh public device key.`);
 } else if (process.argv[3] === "--verify-rust") {
   const { contracts, verifyDeviceSignature } = await oracleModules();
   const vectors = JSON.parse(readFileSync(process.argv[4], "utf8"));
