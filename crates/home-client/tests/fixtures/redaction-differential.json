@@ -3,7 +3,7 @@
   "generator": {
     "seed": 1498427401,
     "randomCases": 4096,
-    "count": 4931,
+    "count": 5157,
     "whitespaceCodePoints": [
       9,
       10,
@@ -35,7 +35,7 @@
   },
   "provenance": {
     "repository": "ArdurAI/ardur-bot",
-    "revision": "184a23147046091eac4610bd88bf4fb3101595c9",
+    "revision": "56c47baa2f9f51009b971875487e2b28e17784b8",
     "nodeVersion": "26.7.0",
     "sources": [
       {
@@ -44,7 +44,7 @@
       },
       {
         "path": "packages/logging/src/redaction.ts",
-        "sha256": "3c24a3c53de3a9fca98a6bf7e187d62fc1b013112f4fe96599dd2e6068b10315"
+        "sha256": "1e62f8f8295e19efc27d690b5eee2e03cc589f3e4be99b7d0639b178a07c0e0c"
       }
     ]
   },
@@ -24703,6 +24703,1136 @@
       "name": "PEM containing U+0085 unterminated",
       "input": "before\n-----BEGIN PRIVATE KEY-----\nsynthetic-private-nelmaterial",
       "expected": "before\n[Redacted]"
+    },
+    {
+      "name": "current credential family passphrase",
+      "input": "passphrase=synthetic-refresh-passphrase; status=ready",
+      "expected": "passphrase=[Redacted]; status=ready"
+    },
+    {
+      "name": "current quoted credential family passphrase",
+      "input": "{\"passphrase\":\"synthetic-refresh-passphrase\",\"status\":\"ready\"}",
+      "expected": "{\"passphrase\":\"[Redacted]\",\"status\":\"ready\"}"
+    },
+    {
+      "name": "current escaped credential family n passphrase",
+      "input": "prefix\\npassphrase=synthetic-refresh-passphrase; status=ready",
+      "expected": "prefix\\npassphrase=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family t passphrase",
+      "input": "prefix\\tpassphrase=synthetic-refresh-passphrase; status=ready",
+      "expected": "prefix\\tpassphrase=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family r passphrase",
+      "input": "prefix\\rpassphrase=synthetic-refresh-passphrase; status=ready",
+      "expected": "prefix\\rpassphrase=[Redacted]; status=ready"
+    },
+    {
+      "name": "current credential family PASSPHRASE",
+      "input": "PASSPHRASE=synthetic-refresh-PASSPHRASE; status=ready",
+      "expected": "PASSPHRASE=[Redacted]; status=ready"
+    },
+    {
+      "name": "current quoted credential family PASSPHRASE",
+      "input": "{\"PASSPHRASE\":\"synthetic-refresh-PASSPHRASE\",\"status\":\"ready\"}",
+      "expected": "{\"PASSPHRASE\":\"[Redacted]\",\"status\":\"ready\"}"
+    },
+    {
+      "name": "current escaped credential family n PASSPHRASE",
+      "input": "prefix\\nPASSPHRASE=synthetic-refresh-PASSPHRASE; status=ready",
+      "expected": "prefix\\nPASSPHRASE=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family t PASSPHRASE",
+      "input": "prefix\\tPASSPHRASE=synthetic-refresh-PASSPHRASE; status=ready",
+      "expected": "prefix\\tPASSPHRASE=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family r PASSPHRASE",
+      "input": "prefix\\rPASSPHRASE=synthetic-refresh-PASSPHRASE; status=ready",
+      "expected": "prefix\\rPASSPHRASE=[Redacted]; status=ready"
+    },
+    {
+      "name": "current credential family signingKey",
+      "input": "signingKey=synthetic-refresh-signingKey; status=ready",
+      "expected": "signingKey=[Redacted]; status=ready"
+    },
+    {
+      "name": "current quoted credential family signingKey",
+      "input": "{\"signingKey\":\"synthetic-refresh-signingKey\",\"status\":\"ready\"}",
+      "expected": "{\"signingKey\":\"[Redacted]\",\"status\":\"ready\"}"
+    },
+    {
+      "name": "current escaped credential family n signingKey",
+      "input": "prefix\\nsigningKey=synthetic-refresh-signingKey; status=ready",
+      "expected": "prefix\\nsigningKey=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family t signingKey",
+      "input": "prefix\\tsigningKey=synthetic-refresh-signingKey; status=ready",
+      "expected": "prefix\\tsigningKey=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family r signingKey",
+      "input": "prefix\\rsigningKey=synthetic-refresh-signingKey; status=ready",
+      "expected": "prefix\\rsigningKey=[Redacted]; status=ready"
+    },
+    {
+      "name": "current credential family signing_key",
+      "input": "signing_key=synthetic-refresh-signing_key; status=ready",
+      "expected": "signing_key=[Redacted]; status=ready"
+    },
+    {
+      "name": "current quoted credential family signing_key",
+      "input": "{\"signing_key\":\"synthetic-refresh-signing_key\",\"status\":\"ready\"}",
+      "expected": "{\"signing_key\":\"[Redacted]\",\"status\":\"ready\"}"
+    },
+    {
+      "name": "current escaped credential family n signing_key",
+      "input": "prefix\\nsigning_key=synthetic-refresh-signing_key; status=ready",
+      "expected": "prefix\\nsigning_key=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family t signing_key",
+      "input": "prefix\\tsigning_key=synthetic-refresh-signing_key; status=ready",
+      "expected": "prefix\\tsigning_key=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family r signing_key",
+      "input": "prefix\\rsigning_key=synthetic-refresh-signing_key; status=ready",
+      "expected": "prefix\\rsigning_key=[Redacted]; status=ready"
+    },
+    {
+      "name": "current credential family SIGNING-KEY",
+      "input": "SIGNING-KEY=synthetic-refresh-SIGNING-KEY; status=ready",
+      "expected": "SIGNING-KEY=[Redacted]; status=ready"
+    },
+    {
+      "name": "current quoted credential family SIGNING-KEY",
+      "input": "{\"SIGNING-KEY\":\"synthetic-refresh-SIGNING-KEY\",\"status\":\"ready\"}",
+      "expected": "{\"SIGNING-KEY\":\"[Redacted]\",\"status\":\"ready\"}"
+    },
+    {
+      "name": "current escaped credential family n SIGNING-KEY",
+      "input": "prefix\\nSIGNING-KEY=synthetic-refresh-SIGNING-KEY; status=ready",
+      "expected": "prefix\\nSIGNING-KEY=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family t SIGNING-KEY",
+      "input": "prefix\\tSIGNING-KEY=synthetic-refresh-SIGNING-KEY; status=ready",
+      "expected": "prefix\\tSIGNING-KEY=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family r SIGNING-KEY",
+      "input": "prefix\\rSIGNING-KEY=synthetic-refresh-SIGNING-KEY; status=ready",
+      "expected": "prefix\\rSIGNING-KEY=[Redacted]; status=ready"
+    },
+    {
+      "name": "current credential family encryptionKey",
+      "input": "encryptionKey=synthetic-refresh-encryptionKey; status=ready",
+      "expected": "encryptionKey=[Redacted]; status=ready"
+    },
+    {
+      "name": "current quoted credential family encryptionKey",
+      "input": "{\"encryptionKey\":\"synthetic-refresh-encryptionKey\",\"status\":\"ready\"}",
+      "expected": "{\"encryptionKey\":\"[Redacted]\",\"status\":\"ready\"}"
+    },
+    {
+      "name": "current escaped credential family n encryptionKey",
+      "input": "prefix\\nencryptionKey=synthetic-refresh-encryptionKey; status=ready",
+      "expected": "prefix\\nencryptionKey=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family t encryptionKey",
+      "input": "prefix\\tencryptionKey=synthetic-refresh-encryptionKey; status=ready",
+      "expected": "prefix\\tencryptionKey=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family r encryptionKey",
+      "input": "prefix\\rencryptionKey=synthetic-refresh-encryptionKey; status=ready",
+      "expected": "prefix\\rencryptionKey=[Redacted]; status=ready"
+    },
+    {
+      "name": "current credential family encryption_key",
+      "input": "encryption_key=synthetic-refresh-encryption_key; status=ready",
+      "expected": "encryption_key=[Redacted]; status=ready"
+    },
+    {
+      "name": "current quoted credential family encryption_key",
+      "input": "{\"encryption_key\":\"synthetic-refresh-encryption_key\",\"status\":\"ready\"}",
+      "expected": "{\"encryption_key\":\"[Redacted]\",\"status\":\"ready\"}"
+    },
+    {
+      "name": "current escaped credential family n encryption_key",
+      "input": "prefix\\nencryption_key=synthetic-refresh-encryption_key; status=ready",
+      "expected": "prefix\\nencryption_key=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family t encryption_key",
+      "input": "prefix\\tencryption_key=synthetic-refresh-encryption_key; status=ready",
+      "expected": "prefix\\tencryption_key=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family r encryption_key",
+      "input": "prefix\\rencryption_key=synthetic-refresh-encryption_key; status=ready",
+      "expected": "prefix\\rencryption_key=[Redacted]; status=ready"
+    },
+    {
+      "name": "current credential family ENCRYPTION-KEY",
+      "input": "ENCRYPTION-KEY=synthetic-refresh-ENCRYPTION-KEY; status=ready",
+      "expected": "ENCRYPTION-KEY=[Redacted]; status=ready"
+    },
+    {
+      "name": "current quoted credential family ENCRYPTION-KEY",
+      "input": "{\"ENCRYPTION-KEY\":\"synthetic-refresh-ENCRYPTION-KEY\",\"status\":\"ready\"}",
+      "expected": "{\"ENCRYPTION-KEY\":\"[Redacted]\",\"status\":\"ready\"}"
+    },
+    {
+      "name": "current escaped credential family n ENCRYPTION-KEY",
+      "input": "prefix\\nENCRYPTION-KEY=synthetic-refresh-ENCRYPTION-KEY; status=ready",
+      "expected": "prefix\\nENCRYPTION-KEY=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family t ENCRYPTION-KEY",
+      "input": "prefix\\tENCRYPTION-KEY=synthetic-refresh-ENCRYPTION-KEY; status=ready",
+      "expected": "prefix\\tENCRYPTION-KEY=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family r ENCRYPTION-KEY",
+      "input": "prefix\\rENCRYPTION-KEY=synthetic-refresh-ENCRYPTION-KEY; status=ready",
+      "expected": "prefix\\rENCRYPTION-KEY=[Redacted]; status=ready"
+    },
+    {
+      "name": "current credential family masterKey",
+      "input": "masterKey=synthetic-refresh-masterKey; status=ready",
+      "expected": "masterKey=[Redacted]; status=ready"
+    },
+    {
+      "name": "current quoted credential family masterKey",
+      "input": "{\"masterKey\":\"synthetic-refresh-masterKey\",\"status\":\"ready\"}",
+      "expected": "{\"masterKey\":\"[Redacted]\",\"status\":\"ready\"}"
+    },
+    {
+      "name": "current escaped credential family n masterKey",
+      "input": "prefix\\nmasterKey=synthetic-refresh-masterKey; status=ready",
+      "expected": "prefix\\nmasterKey=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family t masterKey",
+      "input": "prefix\\tmasterKey=synthetic-refresh-masterKey; status=ready",
+      "expected": "prefix\\tmasterKey=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family r masterKey",
+      "input": "prefix\\rmasterKey=synthetic-refresh-masterKey; status=ready",
+      "expected": "prefix\\rmasterKey=[Redacted]; status=ready"
+    },
+    {
+      "name": "current credential family master_key",
+      "input": "master_key=synthetic-refresh-master_key; status=ready",
+      "expected": "master_key=[Redacted]; status=ready"
+    },
+    {
+      "name": "current quoted credential family master_key",
+      "input": "{\"master_key\":\"synthetic-refresh-master_key\",\"status\":\"ready\"}",
+      "expected": "{\"master_key\":\"[Redacted]\",\"status\":\"ready\"}"
+    },
+    {
+      "name": "current escaped credential family n master_key",
+      "input": "prefix\\nmaster_key=synthetic-refresh-master_key; status=ready",
+      "expected": "prefix\\nmaster_key=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family t master_key",
+      "input": "prefix\\tmaster_key=synthetic-refresh-master_key; status=ready",
+      "expected": "prefix\\tmaster_key=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family r master_key",
+      "input": "prefix\\rmaster_key=synthetic-refresh-master_key; status=ready",
+      "expected": "prefix\\rmaster_key=[Redacted]; status=ready"
+    },
+    {
+      "name": "current credential family MASTER-KEY",
+      "input": "MASTER-KEY=synthetic-refresh-MASTER-KEY; status=ready",
+      "expected": "MASTER-KEY=[Redacted]; status=ready"
+    },
+    {
+      "name": "current quoted credential family MASTER-KEY",
+      "input": "{\"MASTER-KEY\":\"synthetic-refresh-MASTER-KEY\",\"status\":\"ready\"}",
+      "expected": "{\"MASTER-KEY\":\"[Redacted]\",\"status\":\"ready\"}"
+    },
+    {
+      "name": "current escaped credential family n MASTER-KEY",
+      "input": "prefix\\nMASTER-KEY=synthetic-refresh-MASTER-KEY; status=ready",
+      "expected": "prefix\\nMASTER-KEY=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family t MASTER-KEY",
+      "input": "prefix\\tMASTER-KEY=synthetic-refresh-MASTER-KEY; status=ready",
+      "expected": "prefix\\tMASTER-KEY=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family r MASTER-KEY",
+      "input": "prefix\\rMASTER-KEY=synthetic-refresh-MASTER-KEY; status=ready",
+      "expected": "prefix\\rMASTER-KEY=[Redacted]; status=ready"
+    },
+    {
+      "name": "current credential family appKey",
+      "input": "appKey=synthetic-refresh-appKey; status=ready",
+      "expected": "appKey=[Redacted]; status=ready"
+    },
+    {
+      "name": "current quoted credential family appKey",
+      "input": "{\"appKey\":\"synthetic-refresh-appKey\",\"status\":\"ready\"}",
+      "expected": "{\"appKey\":\"[Redacted]\",\"status\":\"ready\"}"
+    },
+    {
+      "name": "current escaped credential family n appKey",
+      "input": "prefix\\nappKey=synthetic-refresh-appKey; status=ready",
+      "expected": "prefix\\nappKey=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family t appKey",
+      "input": "prefix\\tappKey=synthetic-refresh-appKey; status=ready",
+      "expected": "prefix\\tappKey=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family r appKey",
+      "input": "prefix\\rappKey=synthetic-refresh-appKey; status=ready",
+      "expected": "prefix\\rappKey=[Redacted]; status=ready"
+    },
+    {
+      "name": "current credential family app_key",
+      "input": "app_key=synthetic-refresh-app_key; status=ready",
+      "expected": "app_key=[Redacted]; status=ready"
+    },
+    {
+      "name": "current quoted credential family app_key",
+      "input": "{\"app_key\":\"synthetic-refresh-app_key\",\"status\":\"ready\"}",
+      "expected": "{\"app_key\":\"[Redacted]\",\"status\":\"ready\"}"
+    },
+    {
+      "name": "current escaped credential family n app_key",
+      "input": "prefix\\napp_key=synthetic-refresh-app_key; status=ready",
+      "expected": "prefix\\napp_key=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family t app_key",
+      "input": "prefix\\tapp_key=synthetic-refresh-app_key; status=ready",
+      "expected": "prefix\\tapp_key=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family r app_key",
+      "input": "prefix\\rapp_key=synthetic-refresh-app_key; status=ready",
+      "expected": "prefix\\rapp_key=[Redacted]; status=ready"
+    },
+    {
+      "name": "current credential family APP-KEY",
+      "input": "APP-KEY=synthetic-refresh-APP-KEY; status=ready",
+      "expected": "APP-KEY=[Redacted]; status=ready"
+    },
+    {
+      "name": "current quoted credential family APP-KEY",
+      "input": "{\"APP-KEY\":\"synthetic-refresh-APP-KEY\",\"status\":\"ready\"}",
+      "expected": "{\"APP-KEY\":\"[Redacted]\",\"status\":\"ready\"}"
+    },
+    {
+      "name": "current escaped credential family n APP-KEY",
+      "input": "prefix\\nAPP-KEY=synthetic-refresh-APP-KEY; status=ready",
+      "expected": "prefix\\nAPP-KEY=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family t APP-KEY",
+      "input": "prefix\\tAPP-KEY=synthetic-refresh-APP-KEY; status=ready",
+      "expected": "prefix\\tAPP-KEY=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family r APP-KEY",
+      "input": "prefix\\rAPP-KEY=synthetic-refresh-APP-KEY; status=ready",
+      "expected": "prefix\\rAPP-KEY=[Redacted]; status=ready"
+    },
+    {
+      "name": "current credential family sshKey",
+      "input": "sshKey=synthetic-refresh-sshKey; status=ready",
+      "expected": "sshKey=[Redacted]; status=ready"
+    },
+    {
+      "name": "current quoted credential family sshKey",
+      "input": "{\"sshKey\":\"synthetic-refresh-sshKey\",\"status\":\"ready\"}",
+      "expected": "{\"sshKey\":\"[Redacted]\",\"status\":\"ready\"}"
+    },
+    {
+      "name": "current escaped credential family n sshKey",
+      "input": "prefix\\nsshKey=synthetic-refresh-sshKey; status=ready",
+      "expected": "prefix\\nsshKey=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family t sshKey",
+      "input": "prefix\\tsshKey=synthetic-refresh-sshKey; status=ready",
+      "expected": "prefix\\tsshKey=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family r sshKey",
+      "input": "prefix\\rsshKey=synthetic-refresh-sshKey; status=ready",
+      "expected": "prefix\\rsshKey=[Redacted]; status=ready"
+    },
+    {
+      "name": "current credential family ssh_key",
+      "input": "ssh_key=synthetic-refresh-ssh_key; status=ready",
+      "expected": "ssh_key=[Redacted]; status=ready"
+    },
+    {
+      "name": "current quoted credential family ssh_key",
+      "input": "{\"ssh_key\":\"synthetic-refresh-ssh_key\",\"status\":\"ready\"}",
+      "expected": "{\"ssh_key\":\"[Redacted]\",\"status\":\"ready\"}"
+    },
+    {
+      "name": "current escaped credential family n ssh_key",
+      "input": "prefix\\nssh_key=synthetic-refresh-ssh_key; status=ready",
+      "expected": "prefix\\nssh_key=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family t ssh_key",
+      "input": "prefix\\tssh_key=synthetic-refresh-ssh_key; status=ready",
+      "expected": "prefix\\tssh_key=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family r ssh_key",
+      "input": "prefix\\rssh_key=synthetic-refresh-ssh_key; status=ready",
+      "expected": "prefix\\rssh_key=[Redacted]; status=ready"
+    },
+    {
+      "name": "current credential family SSH-KEY",
+      "input": "SSH-KEY=synthetic-refresh-SSH-KEY; status=ready",
+      "expected": "SSH-KEY=[Redacted]; status=ready"
+    },
+    {
+      "name": "current quoted credential family SSH-KEY",
+      "input": "{\"SSH-KEY\":\"synthetic-refresh-SSH-KEY\",\"status\":\"ready\"}",
+      "expected": "{\"SSH-KEY\":\"[Redacted]\",\"status\":\"ready\"}"
+    },
+    {
+      "name": "current escaped credential family n SSH-KEY",
+      "input": "prefix\\nSSH-KEY=synthetic-refresh-SSH-KEY; status=ready",
+      "expected": "prefix\\nSSH-KEY=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family t SSH-KEY",
+      "input": "prefix\\tSSH-KEY=synthetic-refresh-SSH-KEY; status=ready",
+      "expected": "prefix\\tSSH-KEY=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family r SSH-KEY",
+      "input": "prefix\\rSSH-KEY=synthetic-refresh-SSH-KEY; status=ready",
+      "expected": "prefix\\rSSH-KEY=[Redacted]; status=ready"
+    },
+    {
+      "name": "current credential family authCode",
+      "input": "authCode=synthetic-refresh-authCode; status=ready",
+      "expected": "authCode=[Redacted]; status=ready"
+    },
+    {
+      "name": "current quoted credential family authCode",
+      "input": "{\"authCode\":\"synthetic-refresh-authCode\",\"status\":\"ready\"}",
+      "expected": "{\"authCode\":\"[Redacted]\",\"status\":\"ready\"}"
+    },
+    {
+      "name": "current escaped credential family n authCode",
+      "input": "prefix\\nauthCode=synthetic-refresh-authCode; status=ready",
+      "expected": "prefix\\nauthCode=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family t authCode",
+      "input": "prefix\\tauthCode=synthetic-refresh-authCode; status=ready",
+      "expected": "prefix\\tauthCode=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family r authCode",
+      "input": "prefix\\rauthCode=synthetic-refresh-authCode; status=ready",
+      "expected": "prefix\\rauthCode=[Redacted]; status=ready"
+    },
+    {
+      "name": "current credential family AUTH_CODE",
+      "input": "AUTH_CODE=synthetic-refresh-AUTH_CODE; status=ready",
+      "expected": "AUTH_CODE=[Redacted]; status=ready"
+    },
+    {
+      "name": "current quoted credential family AUTH_CODE",
+      "input": "{\"AUTH_CODE\":\"synthetic-refresh-AUTH_CODE\",\"status\":\"ready\"}",
+      "expected": "{\"AUTH_CODE\":\"[Redacted]\",\"status\":\"ready\"}"
+    },
+    {
+      "name": "current escaped credential family n AUTH_CODE",
+      "input": "prefix\\nAUTH_CODE=synthetic-refresh-AUTH_CODE; status=ready",
+      "expected": "prefix\\nAUTH_CODE=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family t AUTH_CODE",
+      "input": "prefix\\tAUTH_CODE=synthetic-refresh-AUTH_CODE; status=ready",
+      "expected": "prefix\\tAUTH_CODE=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family r AUTH_CODE",
+      "input": "prefix\\rAUTH_CODE=synthetic-refresh-AUTH_CODE; status=ready",
+      "expected": "prefix\\rAUTH_CODE=[Redacted]; status=ready"
+    },
+    {
+      "name": "current credential family auth-code",
+      "input": "auth-code=synthetic-refresh-auth-code; status=ready",
+      "expected": "auth-code=[Redacted]; status=ready"
+    },
+    {
+      "name": "current quoted credential family auth-code",
+      "input": "{\"auth-code\":\"synthetic-refresh-auth-code\",\"status\":\"ready\"}",
+      "expected": "{\"auth-code\":\"[Redacted]\",\"status\":\"ready\"}"
+    },
+    {
+      "name": "current escaped credential family n auth-code",
+      "input": "prefix\\nauth-code=synthetic-refresh-auth-code; status=ready",
+      "expected": "prefix\\nauth-code=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family t auth-code",
+      "input": "prefix\\tauth-code=synthetic-refresh-auth-code; status=ready",
+      "expected": "prefix\\tauth-code=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family r auth-code",
+      "input": "prefix\\rauth-code=synthetic-refresh-auth-code; status=ready",
+      "expected": "prefix\\rauth-code=[Redacted]; status=ready"
+    },
+    {
+      "name": "current credential family otp",
+      "input": "otp=synthetic-refresh-otp; status=ready",
+      "expected": "otp=[Redacted]; status=ready"
+    },
+    {
+      "name": "current quoted credential family otp",
+      "input": "{\"otp\":\"synthetic-refresh-otp\",\"status\":\"ready\"}",
+      "expected": "{\"otp\":\"[Redacted]\",\"status\":\"ready\"}"
+    },
+    {
+      "name": "current escaped credential family n otp",
+      "input": "prefix\\notp=synthetic-refresh-otp; status=ready",
+      "expected": "prefix\\notp=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family t otp",
+      "input": "prefix\\totp=synthetic-refresh-otp; status=ready",
+      "expected": "prefix\\totp=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family r otp",
+      "input": "prefix\\rotp=synthetic-refresh-otp; status=ready",
+      "expected": "prefix\\rotp=[Redacted]; status=ready"
+    },
+    {
+      "name": "current credential family OTP",
+      "input": "OTP=synthetic-refresh-OTP; status=ready",
+      "expected": "OTP=[Redacted]; status=ready"
+    },
+    {
+      "name": "current quoted credential family OTP",
+      "input": "{\"OTP\":\"synthetic-refresh-OTP\",\"status\":\"ready\"}",
+      "expected": "{\"OTP\":\"[Redacted]\",\"status\":\"ready\"}"
+    },
+    {
+      "name": "current escaped credential family n OTP",
+      "input": "prefix\\nOTP=synthetic-refresh-OTP; status=ready",
+      "expected": "prefix\\nOTP=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family t OTP",
+      "input": "prefix\\tOTP=synthetic-refresh-OTP; status=ready",
+      "expected": "prefix\\tOTP=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family r OTP",
+      "input": "prefix\\rOTP=synthetic-refresh-OTP; status=ready",
+      "expected": "prefix\\rOTP=[Redacted]; status=ready"
+    },
+    {
+      "name": "current credential family totp",
+      "input": "totp=synthetic-refresh-totp; status=ready",
+      "expected": "totp=[Redacted]; status=ready"
+    },
+    {
+      "name": "current quoted credential family totp",
+      "input": "{\"totp\":\"synthetic-refresh-totp\",\"status\":\"ready\"}",
+      "expected": "{\"totp\":\"[Redacted]\",\"status\":\"ready\"}"
+    },
+    {
+      "name": "current escaped credential family n totp",
+      "input": "prefix\\ntotp=synthetic-refresh-totp; status=ready",
+      "expected": "prefix\\ntotp=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family t totp",
+      "input": "prefix\\ttotp=synthetic-refresh-totp; status=ready",
+      "expected": "prefix\\ttotp=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family r totp",
+      "input": "prefix\\rtotp=synthetic-refresh-totp; status=ready",
+      "expected": "prefix\\rtotp=[Redacted]; status=ready"
+    },
+    {
+      "name": "current credential family TOTP",
+      "input": "TOTP=synthetic-refresh-TOTP; status=ready",
+      "expected": "TOTP=[Redacted]; status=ready"
+    },
+    {
+      "name": "current quoted credential family TOTP",
+      "input": "{\"TOTP\":\"synthetic-refresh-TOTP\",\"status\":\"ready\"}",
+      "expected": "{\"TOTP\":\"[Redacted]\",\"status\":\"ready\"}"
+    },
+    {
+      "name": "current escaped credential family n TOTP",
+      "input": "prefix\\nTOTP=synthetic-refresh-TOTP; status=ready",
+      "expected": "prefix\\nTOTP=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family t TOTP",
+      "input": "prefix\\tTOTP=synthetic-refresh-TOTP; status=ready",
+      "expected": "prefix\\tTOTP=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family r TOTP",
+      "input": "prefix\\rTOTP=synthetic-refresh-TOTP; status=ready",
+      "expected": "prefix\\rTOTP=[Redacted]; status=ready"
+    },
+    {
+      "name": "current credential family GITHUB_PAT",
+      "input": "GITHUB_PAT=synthetic-refresh-GITHUB_PAT; status=ready",
+      "expected": "GITHUB_PAT=[Redacted]; status=ready"
+    },
+    {
+      "name": "current quoted credential family GITHUB_PAT",
+      "input": "{\"GITHUB_PAT\":\"synthetic-refresh-GITHUB_PAT\",\"status\":\"ready\"}",
+      "expected": "{\"GITHUB_PAT\":\"[Redacted]\",\"status\":\"ready\"}"
+    },
+    {
+      "name": "current escaped credential family n GITHUB_PAT",
+      "input": "prefix\\nGITHUB_PAT=synthetic-refresh-GITHUB_PAT; status=ready",
+      "expected": "prefix\\nGITHUB_PAT=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family t GITHUB_PAT",
+      "input": "prefix\\tGITHUB_PAT=synthetic-refresh-GITHUB_PAT; status=ready",
+      "expected": "prefix\\tGITHUB_PAT=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family r GITHUB_PAT",
+      "input": "prefix\\rGITHUB_PAT=synthetic-refresh-GITHUB_PAT; status=ready",
+      "expected": "prefix\\rGITHUB_PAT=[Redacted]; status=ready"
+    },
+    {
+      "name": "current credential family service_pat",
+      "input": "service_pat=synthetic-refresh-service_pat; status=ready",
+      "expected": "service_pat=[Redacted]; status=ready"
+    },
+    {
+      "name": "current quoted credential family service_pat",
+      "input": "{\"service_pat\":\"synthetic-refresh-service_pat\",\"status\":\"ready\"}",
+      "expected": "{\"service_pat\":\"[Redacted]\",\"status\":\"ready\"}"
+    },
+    {
+      "name": "current escaped credential family n service_pat",
+      "input": "prefix\\nservice_pat=synthetic-refresh-service_pat; status=ready",
+      "expected": "prefix\\nservice_pat=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family t service_pat",
+      "input": "prefix\\tservice_pat=synthetic-refresh-service_pat; status=ready",
+      "expected": "prefix\\tservice_pat=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family r service_pat",
+      "input": "prefix\\rservice_pat=synthetic-refresh-service_pat; status=ready",
+      "expected": "prefix\\rservice_pat=[Redacted]; status=ready"
+    },
+    {
+      "name": "current credential family service-pat",
+      "input": "service-pat=synthetic-refresh-service-pat; status=ready",
+      "expected": "service-pat=[Redacted]; status=ready"
+    },
+    {
+      "name": "current quoted credential family service-pat",
+      "input": "{\"service-pat\":\"synthetic-refresh-service-pat\",\"status\":\"ready\"}",
+      "expected": "{\"service-pat\":\"[Redacted]\",\"status\":\"ready\"}"
+    },
+    {
+      "name": "current escaped credential family n service-pat",
+      "input": "prefix\\nservice-pat=synthetic-refresh-service-pat; status=ready",
+      "expected": "prefix\\nservice-pat=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family t service-pat",
+      "input": "prefix\\tservice-pat=synthetic-refresh-service-pat; status=ready",
+      "expected": "prefix\\tservice-pat=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family r service-pat",
+      "input": "prefix\\rservice-pat=synthetic-refresh-service-pat; status=ready",
+      "expected": "prefix\\rservice-pat=[Redacted]; status=ready"
+    },
+    {
+      "name": "current credential family service-PAT",
+      "input": "service-PAT=synthetic-refresh-service-PAT; status=ready",
+      "expected": "service-PAT=[Redacted]; status=ready"
+    },
+    {
+      "name": "current quoted credential family service-PAT",
+      "input": "{\"service-PAT\":\"synthetic-refresh-service-PAT\",\"status\":\"ready\"}",
+      "expected": "{\"service-PAT\":\"[Redacted]\",\"status\":\"ready\"}"
+    },
+    {
+      "name": "current escaped credential family n service-PAT",
+      "input": "prefix\\nservice-PAT=synthetic-refresh-service-PAT; status=ready",
+      "expected": "prefix\\nservice-PAT=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family t service-PAT",
+      "input": "prefix\\tservice-PAT=synthetic-refresh-service-PAT; status=ready",
+      "expected": "prefix\\tservice-PAT=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family r service-PAT",
+      "input": "prefix\\rservice-PAT=synthetic-refresh-service-PAT; status=ready",
+      "expected": "prefix\\rservice-PAT=[Redacted]; status=ready"
+    },
+    {
+      "name": "current credential family servicePat",
+      "input": "servicePat=synthetic-refresh-servicePat; status=ready",
+      "expected": "servicePat=[Redacted]; status=ready"
+    },
+    {
+      "name": "current quoted credential family servicePat",
+      "input": "{\"servicePat\":\"synthetic-refresh-servicePat\",\"status\":\"ready\"}",
+      "expected": "{\"servicePat\":\"[Redacted]\",\"status\":\"ready\"}"
+    },
+    {
+      "name": "current escaped credential family n servicePat",
+      "input": "prefix\\nservicePat=synthetic-refresh-servicePat; status=ready",
+      "expected": "prefix\\nservicePat=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family t servicePat",
+      "input": "prefix\\tservicePat=synthetic-refresh-servicePat; status=ready",
+      "expected": "prefix\\tservicePat=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family r servicePat",
+      "input": "prefix\\rservicePat=synthetic-refresh-servicePat; status=ready",
+      "expected": "prefix\\rservicePat=[Redacted]; status=ready"
+    },
+    {
+      "name": "current credential family HTTPPat",
+      "input": "HTTPPat=synthetic-refresh-HTTPPat; status=ready",
+      "expected": "HTTPPat=[Redacted]; status=ready"
+    },
+    {
+      "name": "current quoted credential family HTTPPat",
+      "input": "{\"HTTPPat\":\"synthetic-refresh-HTTPPat\",\"status\":\"ready\"}",
+      "expected": "{\"HTTPPat\":\"[Redacted]\",\"status\":\"ready\"}"
+    },
+    {
+      "name": "current escaped credential family n HTTPPat",
+      "input": "prefix\\nHTTPPat=synthetic-refresh-HTTPPat; status=ready",
+      "expected": "prefix\\nHTTPPat=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family t HTTPPat",
+      "input": "prefix\\tHTTPPat=synthetic-refresh-HTTPPat; status=ready",
+      "expected": "prefix\\tHTTPPat=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family r HTTPPat",
+      "input": "prefix\\rHTTPPat=synthetic-refresh-HTTPPat; status=ready",
+      "expected": "prefix\\rHTTPPat=[Redacted]; status=ready"
+    },
+    {
+      "name": "current credential family v2Pat",
+      "input": "v2Pat=synthetic-refresh-v2Pat; status=ready",
+      "expected": "v2Pat=[Redacted]; status=ready"
+    },
+    {
+      "name": "current quoted credential family v2Pat",
+      "input": "{\"v2Pat\":\"synthetic-refresh-v2Pat\",\"status\":\"ready\"}",
+      "expected": "{\"v2Pat\":\"[Redacted]\",\"status\":\"ready\"}"
+    },
+    {
+      "name": "current escaped credential family n v2Pat",
+      "input": "prefix\\nv2Pat=synthetic-refresh-v2Pat; status=ready",
+      "expected": "prefix\\nv2Pat=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family t v2Pat",
+      "input": "prefix\\tv2Pat=synthetic-refresh-v2Pat; status=ready",
+      "expected": "prefix\\tv2Pat=[Redacted]; status=ready"
+    },
+    {
+      "name": "current escaped credential family r v2Pat",
+      "input": "prefix\\rv2Pat=synthetic-refresh-v2Pat; status=ready",
+      "expected": "prefix\\rv2Pat=[Redacted]; status=ready"
+    },
+    {
+      "name": "current readable name sortKey",
+      "input": "sortKey=fixture-reference; status=ready",
+      "expected": "sortKey=fixture-reference; status=ready"
+    },
+    {
+      "name": "current quoted readable name sortKey",
+      "input": "{\"sortKey\":\"fixture-reference\",\"status\":\"ready\"}",
+      "expected": "{\"sortKey\":\"fixture-reference\",\"status\":\"ready\"}"
+    },
+    {
+      "name": "current readable name primaryKey",
+      "input": "primaryKey=fixture-reference; status=ready",
+      "expected": "primaryKey=fixture-reference; status=ready"
+    },
+    {
+      "name": "current quoted readable name primaryKey",
+      "input": "{\"primaryKey\":\"fixture-reference\",\"status\":\"ready\"}",
+      "expected": "{\"primaryKey\":\"fixture-reference\",\"status\":\"ready\"}"
+    },
+    {
+      "name": "current readable name keyId",
+      "input": "keyId=fixture-reference; status=ready",
+      "expected": "keyId=fixture-reference; status=ready"
+    },
+    {
+      "name": "current quoted readable name keyId",
+      "input": "{\"keyId\":\"fixture-reference\",\"status\":\"ready\"}",
+      "expected": "{\"keyId\":\"fixture-reference\",\"status\":\"ready\"}"
+    },
+    {
+      "name": "current readable name cacheKey",
+      "input": "cacheKey=fixture-reference; status=ready",
+      "expected": "cacheKey=fixture-reference; status=ready"
+    },
+    {
+      "name": "current quoted readable name cacheKey",
+      "input": "{\"cacheKey\":\"fixture-reference\",\"status\":\"ready\"}",
+      "expected": "{\"cacheKey\":\"fixture-reference\",\"status\":\"ready\"}"
+    },
+    {
+      "name": "current readable name pinned",
+      "input": "pinned=fixture-reference; status=ready",
+      "expected": "pinned=fixture-reference; status=ready"
+    },
+    {
+      "name": "current quoted readable name pinned",
+      "input": "{\"pinned\":\"fixture-reference\",\"status\":\"ready\"}",
+      "expected": "{\"pinned\":\"fixture-reference\",\"status\":\"ready\"}"
+    },
+    {
+      "name": "current readable name pinCode",
+      "input": "pinCode=fixture-reference; status=ready",
+      "expected": "pinCode=fixture-reference; status=ready"
+    },
+    {
+      "name": "current quoted readable name pinCode",
+      "input": "{\"pinCode\":\"fixture-reference\",\"status\":\"ready\"}",
+      "expected": "{\"pinCode\":\"fixture-reference\",\"status\":\"ready\"}"
+    },
+    {
+      "name": "current readable name keyboard",
+      "input": "keyboard=fixture-reference; status=ready",
+      "expected": "keyboard=fixture-reference; status=ready"
+    },
+    {
+      "name": "current quoted readable name keyboard",
+      "input": "{\"keyboard\":\"fixture-reference\",\"status\":\"ready\"}",
+      "expected": "{\"keyboard\":\"fixture-reference\",\"status\":\"ready\"}"
+    },
+    {
+      "name": "current readable name compat",
+      "input": "compat=fixture-reference; status=ready",
+      "expected": "compat=fixture-reference; status=ready"
+    },
+    {
+      "name": "current quoted readable name compat",
+      "input": "{\"compat\":\"fixture-reference\",\"status\":\"ready\"}",
+      "expected": "{\"compat\":\"fixture-reference\",\"status\":\"ready\"}"
+    },
+    {
+      "name": "current readable name COMPAT",
+      "input": "COMPAT=fixture-reference; status=ready",
+      "expected": "COMPAT=fixture-reference; status=ready"
+    },
+    {
+      "name": "current quoted readable name COMPAT",
+      "input": "{\"COMPAT\":\"fixture-reference\",\"status\":\"ready\"}",
+      "expected": "{\"COMPAT\":\"fixture-reference\",\"status\":\"ready\"}"
+    },
+    {
+      "name": "current readable name COMPATIBLE",
+      "input": "COMPATIBLE=fixture-reference; status=ready",
+      "expected": "COMPATIBLE=fixture-reference; status=ready"
+    },
+    {
+      "name": "current quoted readable name COMPATIBLE",
+      "input": "{\"COMPATIBLE\":\"fixture-reference\",\"status\":\"ready\"}",
+      "expected": "{\"COMPATIBLE\":\"fixture-reference\",\"status\":\"ready\"}"
+    },
+    {
+      "name": "current readable name githubPattern",
+      "input": "githubPattern=fixture-reference; status=ready",
+      "expected": "githubPattern=fixture-reference; status=ready"
+    },
+    {
+      "name": "current quoted readable name githubPattern",
+      "input": "{\"githubPattern\":\"fixture-reference\",\"status\":\"ready\"}",
+      "expected": "{\"githubPattern\":\"fixture-reference\",\"status\":\"ready\"}"
+    },
+    {
+      "name": "current readable name maxTokens",
+      "input": "maxTokens=fixture-reference; status=ready",
+      "expected": "maxTokens=fixture-reference; status=ready"
+    },
+    {
+      "name": "current quoted readable name maxTokens",
+      "input": "{\"maxTokens\":\"fixture-reference\",\"status\":\"ready\"}",
+      "expected": "{\"maxTokens\":\"fixture-reference\",\"status\":\"ready\"}"
+    },
+    {
+      "name": "current readable name tokenCount",
+      "input": "tokenCount=fixture-reference; status=ready",
+      "expected": "tokenCount=fixture-reference; status=ready"
+    },
+    {
+      "name": "current quoted readable name tokenCount",
+      "input": "{\"tokenCount\":\"fixture-reference\",\"status\":\"ready\"}",
+      "expected": "{\"tokenCount\":\"fixture-reference\",\"status\":\"ready\"}"
+    },
+    {
+      "name": "current readable name authCodeCount",
+      "input": "authCodeCount=fixture-reference; status=ready",
+      "expected": "authCodeCount=fixture-reference; status=ready"
+    },
+    {
+      "name": "current quoted readable name authCodeCount",
+      "input": "{\"authCodeCount\":\"fixture-reference\",\"status\":\"ready\"}",
+      "expected": "{\"authCodeCount\":\"fixture-reference\",\"status\":\"ready\"}"
+    },
+    {
+      "name": "current readable name authCodeValue",
+      "input": "authCodeValue=fixture-reference; status=ready",
+      "expected": "authCodeValue=fixture-reference; status=ready"
+    },
+    {
+      "name": "current quoted readable name authCodeValue",
+      "input": "{\"authCodeValue\":\"fixture-reference\",\"status\":\"ready\"}",
+      "expected": "{\"authCodeValue\":\"fixture-reference\",\"status\":\"ready\"}"
+    },
+    {
+      "name": "current readable name myOtp",
+      "input": "myOtp=fixture-reference; status=ready",
+      "expected": "myOtp=fixture-reference; status=ready"
+    },
+    {
+      "name": "current quoted readable name myOtp",
+      "input": "{\"myOtp\":\"fixture-reference\",\"status\":\"ready\"}",
+      "expected": "{\"myOtp\":\"fixture-reference\",\"status\":\"ready\"}"
+    },
+    {
+      "name": "current readable name otpCount",
+      "input": "otpCount=fixture-reference; status=ready",
+      "expected": "otpCount=fixture-reference; status=ready"
+    },
+    {
+      "name": "current quoted readable name otpCount",
+      "input": "{\"otpCount\":\"fixture-reference\",\"status\":\"ready\"}",
+      "expected": "{\"otpCount\":\"fixture-reference\",\"status\":\"ready\"}"
+    },
+    {
+      "name": "current readable name totpEnabled",
+      "input": "totpEnabled=fixture-reference; status=ready",
+      "expected": "totpEnabled=fixture-reference; status=ready"
+    },
+    {
+      "name": "current quoted readable name totpEnabled",
+      "input": "{\"totpEnabled\":\"fixture-reference\",\"status\":\"ready\"}",
+      "expected": "{\"totpEnabled\":\"fixture-reference\",\"status\":\"ready\"}"
+    },
+    {
+      "name": "current readable name hotplug",
+      "input": "hotplug=fixture-reference; status=ready",
+      "expected": "hotplug=fixture-reference; status=ready"
+    },
+    {
+      "name": "current quoted readable name hotplug",
+      "input": "{\"hotplug\":\"fixture-reference\",\"status\":\"ready\"}",
+      "expected": "{\"hotplug\":\"fixture-reference\",\"status\":\"ready\"}"
+    },
+    {
+      "name": "current readable name pat",
+      "input": "pat=fixture-reference; status=ready",
+      "expected": "pat=fixture-reference; status=ready"
+    },
+    {
+      "name": "current quoted readable name pat",
+      "input": "{\"pat\":\"fixture-reference\",\"status\":\"ready\"}",
+      "expected": "{\"pat\":\"fixture-reference\",\"status\":\"ready\"}"
+    },
+    {
+      "name": "current readable name PAT",
+      "input": "PAT=fixture-reference; status=ready",
+      "expected": "PAT=fixture-reference; status=ready"
+    },
+    {
+      "name": "current quoted readable name PAT",
+      "input": "{\"PAT\":\"fixture-reference\",\"status\":\"ready\"}",
+      "expected": "{\"PAT\":\"fixture-reference\",\"status\":\"ready\"}"
+    },
+    {
+      "name": "current readable name servicepat",
+      "input": "servicepat=fixture-reference; status=ready",
+      "expected": "servicepat=fixture-reference; status=ready"
+    },
+    {
+      "name": "current quoted readable name servicepat",
+      "input": "{\"servicepat\":\"fixture-reference\",\"status\":\"ready\"}",
+      "expected": "{\"servicepat\":\"fixture-reference\",\"status\":\"ready\"}"
+    },
+    {
+      "name": "current readable name servicePAT",
+      "input": "servicePAT=fixture-reference; status=ready",
+      "expected": "servicePAT=fixture-reference; status=ready"
+    },
+    {
+      "name": "current quoted readable name servicePAT",
+      "input": "{\"servicePAT\":\"fixture-reference\",\"status\":\"ready\"}",
+      "expected": "{\"servicePAT\":\"fixture-reference\",\"status\":\"ready\"}"
+    },
+    {
+      "name": "current numeric credential password=123456",
+      "input": "password=123456",
+      "expected": "password=[Redacted]"
+    },
+    {
+      "name": "current numeric credential token=0xabcdef",
+      "input": "token=0xabcdef",
+      "expected": "token=[Redacted]"
+    },
+    {
+      "name": "current numeric credential otp: 004211",
+      "input": "otp: 004211",
+      "expected": "otp: [Redacted]"
+    },
+    {
+      "name": "current numeric credential GITHUB_PAT=987654",
+      "input": "GITHUB_PAT=987654",
+      "expected": "GITHUB_PAT=[Redacted]"
+    },
+    {
+      "name": "current numeric credential totp=-004211",
+      "input": "totp=-004211",
+      "expected": "totp=[Redacted]"
+    },
+    {
+      "name": "current numeric credential authCode=+123456",
+      "input": "authCode=+123456",
+      "expected": "authCode=[Redacted]"
+    },
+    {
+      "name": "current numeric credential passphrase=3.5",
+      "input": "passphrase=3.5",
+      "expected": "passphrase=[Redacted]"
+    },
+    {
+      "name": "current numeric credential signingKey=0XABCDEF",
+      "input": "signingKey=0XABCDEF",
+      "expected": "signingKey=[Redacted]"
+    },
+    {
+      "name": "current readable numeric counter",
+      "input": "maxTokens: 4096",
+      "expected": "maxTokens: 4096"
+    },
+    {
+      "name": "ASCII case folding long s email local part",
+      "input": "ſ@example.test",
+      "expected": "ſ@example.test"
+    },
+    {
+      "name": "ASCII case folding Kelvin email local part",
+      "input": "K@example.test",
+      "expected": "K@example.test"
+    },
+    {
+      "name": "ASCII case folding long s email domain",
+      "input": "fixture@hoſt.test",
+      "expected": "fixture@hoſt.test"
+    },
+    {
+      "name": "ASCII case folding Kelvin email domain",
+      "input": "fixture@K.test",
+      "expected": "fixture@K.test"
+    },
+    {
+      "name": "ASCII case folding long s email suffix",
+      "input": "fixture@example.teſt",
+      "expected": "[Redacted]ſt"
+    },
+    {
+      "name": "ASCII case folding Kelvin email suffix",
+      "input": "fixture@example.Kk",
+      "expected": "fixture@example.Kk"
+    },
+    {
+      "name": "ASCII case folding long s URL scheme",
+      "input": "httpſ://fixture:synthetic-url@gateway.example.test/path",
+      "expected": "httpſ://fixture:[Redacted]/path"
+    },
+    {
+      "name": "ASCII case folding ASCII uppercase URL scheme",
+      "input": "HTTPS://fixture:synthetic-url@gateway.example.test/path",
+      "expected": "HTTPS://[Redacted]@gateway.example.test/path"
+    },
+    {
+      "name": "ASCII case folding Unicode URL user and password",
+      "input": "https://雪:synthetic-雪@gateway.example.test/path",
+      "expected": "https://[Redacted]@gateway.example.test/path"
+    },
+    {
+      "name": "ASCII case folding long s credential key",
+      "input": "\"paſſword\": \"fixture-reference\"",
+      "expected": "\"paſſword\": \"fixture-reference\""
+    },
+    {
+      "name": "ASCII case folding Kelvin credential key",
+      "input": "\"apiKey\": \"fixture-reference\"",
+      "expected": "\"apiKey\": \"fixture-reference\""
+    },
+    {
+      "name": "ASCII case folding long s metadata key",
+      "input": "\"knownSecretſ\": \"fixture-reference\"",
+      "expected": "\"knownSecretſ\": \"[Redacted]\""
+    },
+    {
+      "name": "ASCII case folding Kelvin metadata key",
+      "input": "\"maxToKens\": \"fixture-reference\"",
+      "expected": "\"maxToKens\": \"fixture-reference\""
+    },
+    {
+      "name": "ASCII case folding Unicode placeholder",
+      "input": "password=\"<雪>\"",
+      "expected": "password=\"<雪>\""
+    },
+    {
+      "name": "ASCII case folding ASCII mixed case placeholder",
+      "input": "password=\"[rEdAcTeD]\"",
+      "expected": "password=\"[rEdAcTeD]\""
+    },
+    {
+      "name": "ASCII case folding ASCII mixed case bearer with Unicode whitespace",
+      "input": "bEaReR﻿synthetic-value",
+      "expected": "bEaReR﻿[Redacted]"
     }
   ]
 }
