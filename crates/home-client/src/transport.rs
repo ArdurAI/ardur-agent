@@ -118,6 +118,33 @@ impl PinnedTransport {
         })
     }
     pub async fn post(&self, url: &str, body: &Value) -> Result<Value, Error> {
+        let (status, bytes) = self.post_raw(url, body).await?;
+        if !(200..300).contains(&status) {
+            return Err(Self::status_error(status));
+        }
+        serde_json::from_slice(&bytes).map_err(|_| Error::Protocol)
+    }
+    /// Like [`post`], but a refused request (HTTP 400/403) with the home's own
+    /// bounded printable answer keeps that answer instead of the generic map.
+    pub async fn post_answer(&self, url: &str, body: &Value) -> Result<Value, Refusal> {
+        let (status, bytes) = self.post_raw(url, body).await.map_err(Refusal::Failure)?;
+        if (200..300).contains(&status) {
+            return serde_json::from_slice(&bytes).map_err(|_| Refusal::Failure(Error::Protocol));
+        }
+        if status == 400 || status == 403 {
+            if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
+                if let Some(answer) = fixed_answer(&value) {
+                    return Err(Refusal::Answer {
+                        status,
+                        code: value["problem"]["code"].as_str().map(str::to_owned),
+                        message: answer,
+                    });
+                }
+            }
+        }
+        Err(Refusal::Failure(Self::status_error(status)))
+    }
+    async fn post_raw(&self, url: &str, body: &Value) -> Result<(u16, Vec<u8>), Error> {
         let target = https_url(url).map_err(|_| Error::Input)?;
         let mut response = self
             .client
@@ -141,16 +168,7 @@ impl PinnedTransport {
                 }
                 Error::Unreachable
             })?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(if status.as_u16() == 401 || status.as_u16() == 403 {
-                Error::Access
-            } else if status.as_u16() == 409 {
-                Error::RequestChanged
-            } else {
-                Error::Protocol
-            });
-        }
+        let status = response.status().as_u16();
         let mut bytes = Vec::new();
         while let Some(chunk) = response.chunk().await.map_err(|_| Error::Unreachable)? {
             if bytes.len().saturating_add(chunk.len()) > 2 * 1024 * 1024 {
@@ -158,7 +176,60 @@ impl PinnedTransport {
             }
             bytes.extend_from_slice(&chunk);
         }
-        serde_json::from_slice(&bytes).map_err(|_| Error::Protocol)
+        Ok((status, bytes))
+    }
+    fn status_error(status: u16) -> Error {
+        if status == 401 || status == 403 {
+            Error::Access
+        } else if status == 409 {
+            Error::RequestChanged
+        } else {
+            Error::Protocol
+        }
+    }
+}
+/// A refused device request whose home answer carries a fixed printable sentence.
+#[derive(Debug)]
+pub enum Refusal {
+    /// HTTP 400/403 with the home's own bounded printable answer.
+    Answer {
+        status: u16,
+        code: Option<String>,
+        message: String,
+    },
+    /// Any other failure, mapped to the generic errors.
+    Failure(Error),
+}
+impl Refusal {
+    pub fn status(&self) -> Option<u16> {
+        match self {
+            Self::Answer { status, .. } => Some(*status),
+            Self::Failure(_) => None,
+        }
+    }
+    pub fn code(&self) -> Option<&str> {
+        match self {
+            Self::Answer { code, .. } => code.as_deref(),
+            Self::Failure(_) => None,
+        }
+    }
+    pub fn message(&self) -> Option<&str> {
+        match self {
+            Self::Answer { message, .. } => Some(message),
+            Self::Failure(_) => None,
+        }
+    }
+}
+/// The home's fixed answer sentence, accepted only when it is bounded and free
+/// of control characters; anything else keeps the generic refusal.
+fn fixed_answer(value: &Value) -> Option<String> {
+    let message = value.get("message").and_then(Value::as_str)?;
+    if (1..=200).contains(&home_protocol::string_len(message))
+        && !message.chars().any(char::is_control)
+    {
+        Some(message.to_owned())
+    } else {
+        None
     }
 }
 

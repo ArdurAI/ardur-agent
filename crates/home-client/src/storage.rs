@@ -1,7 +1,6 @@
 #[cfg(unix)]
 use crate::Profile;
 use crate::{Error, StoredHome};
-#[cfg(unix)]
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
@@ -10,6 +9,38 @@ pub trait SecretStore {
     fn prepare(&self) -> Result<(), Error>;
     fn load(&self) -> Result<StoredHome, Error>;
     fn save(&self, home: &StoredHome) -> Result<(), Error>;
+}
+/// One durable room-send recovery record: the clientNonce a send used, so a
+/// rerun with the same room and exact text replays instead of double-sending.
+/// It holds no key material; the private directory permissions still apply.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PendingRoomSend {
+    pub schema_version: u8,
+    pub client_nonce: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub room_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    pub text: String,
+}
+impl PendingRoomSend {
+    pub fn is_valid(&self) -> bool {
+        let len = |v: &Option<String>| {
+            v.as_ref()
+                .is_none_or(|s| (1..=128).contains(&home_protocol::string_len(s)))
+        };
+        self.schema_version == 1
+            && (16..=128).contains(&home_protocol::string_len(&self.client_nonce))
+            && len(&self.group_id)
+            && len(&self.room_name)
+            && len(&self.thread_id)
+            && self.group_id.is_some() != self.room_name.is_some()
+            && !self.text.trim().is_empty()
+            && home_protocol::string_len(&self.text) <= 32_000
+    }
 }
 pub struct FileStore {
     path: PathBuf,
@@ -158,8 +189,7 @@ mod unix {
         checked(&dir, true)?;
         Ok(dir)
     }
-    fn read_existing(dir: &File) -> Result<Option<File>, Error> {
-        let n = CString::new("paired-home.json").expect("literal");
+    fn read_existing_at(dir: &File, n: &CString) -> Result<Option<File>, Error> {
         // fstatat detects missing without following a link; openat revalidates the actual inode.
         let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
         // SAFETY: output pointer valid; no read of uninitialized data.
@@ -178,9 +208,106 @@ mod unix {
                 Err(Error::Storage)
             };
         }
-        let f = open_at(dir, &n, libc::O_RDONLY, 0)?;
+        let f = open_at(dir, n, libc::O_RDONLY, 0)?;
         checked(&f, false)?;
         Ok(Some(f))
+    }
+    fn read_existing(dir: &File) -> Result<Option<File>, Error> {
+        let n = CString::new("paired-home.json").expect("literal");
+        read_existing_at(dir, &n)
+    }
+    /// Atomic private write: unique 0600 temp, fsync, rename, directory fsync.
+    fn write_private(dir: &File, dest: &CString, bytes: &[u8]) -> Result<(), Error> {
+        let temp = CString::new(format!(".room-{}-pending", home_protocol::nonce()))
+            .map_err(|_| Error::Storage)?;
+        let mut created = false;
+        let result = (|| {
+            let mut f = open_at(
+                dir,
+                &temp,
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+                0o600,
+            )?;
+            created = true;
+            checked(&f, false)?;
+            f.write_all(bytes).map_err(|_| Error::Storage)?;
+            f.sync_all().map_err(|_| Error::Storage)?;
+            // SAFETY: both fds live, names valid; rename within the held private directory.
+            if unsafe {
+                libc::renameat(
+                    dir.as_raw_fd(),
+                    temp.as_ptr(),
+                    dir.as_raw_fd(),
+                    dest.as_ptr(),
+                )
+            } < 0
+            {
+                return Err(Error::Storage);
+            }
+            dir.sync_all().map_err(|_| Error::Storage)
+        })();
+        if result.is_err() && created {
+            // SAFETY: removes only the unique temporary name this write created.
+            unsafe { libc::unlinkat(dir.as_raw_fd(), temp.as_ptr(), 0) };
+        }
+        result
+    }
+    /// Remove a private file; a missing name is already the desired state.
+    fn remove_private(dir: &File, n: &CString) -> Result<(), Error> {
+        // SAFETY: dir and name live; flags 0 removes a file.
+        let result = unsafe { libc::unlinkat(dir.as_raw_fd(), n.as_ptr(), 0) };
+        if result < 0 {
+            return if std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOENT) {
+                Ok(())
+            } else {
+                Err(Error::Storage)
+            };
+        }
+        Ok(())
+    }
+    fn pending_name() -> CString {
+        CString::new("pending-room-send.json").expect("literal")
+    }
+    impl FileStore {
+        pub fn load_room_send(&self) -> Result<Option<PendingRoomSend>, Error> {
+            let dir = directory(&self.path, false)?;
+            let Some(file) = read_existing_at(&dir, &pending_name())? else {
+                return Ok(None);
+            };
+            if file.metadata().map_err(|_| Error::Storage)?.len() > 65536 {
+                return Err(Error::Storage);
+            }
+            let mut bytes = Zeroizing::new(vec![0; 65537]);
+            let mut file = file;
+            let mut len = 0;
+            while len < bytes.len() {
+                let read = file.read(&mut bytes[len..]).map_err(|_| Error::Storage)?;
+                if read == 0 {
+                    break;
+                }
+                len += read;
+            }
+            bytes.truncate(len);
+            // A malformed side record never blocks sends; it drops recovery only.
+            let pending: PendingRoomSend =
+                serde_json::from_slice(&bytes).map_err(|_| Error::Storage)?;
+            if !pending.is_valid() {
+                return Ok(None);
+            }
+            Ok(Some(pending))
+        }
+        pub fn save_room_send(&self, pending: &PendingRoomSend) -> Result<(), Error> {
+            if !pending.is_valid() {
+                return Err(Error::Storage);
+            }
+            let dir = directory(&self.path, true)?;
+            let bytes = serde_json::to_vec(pending).map_err(|_| Error::Storage)?;
+            write_private(&dir, &pending_name(), &bytes)
+        }
+        pub fn clear_room_send(&self) -> Result<(), Error> {
+            let dir = directory(&self.path, false)?;
+            remove_private(&dir, &pending_name())
+        }
     }
     impl SecretStore for FileStore {
         fn prepare(&self) -> Result<(), Error> {
@@ -282,7 +409,12 @@ mod unix {
                 // SAFETY: removes only the unique temporary name this save created.
                 unsafe { libc::unlinkat(dir.as_raw_fd(), temp.as_ptr(), 0) };
             }
-            result
+            result?;
+            // A new home invalidates any room-send recovery record from the old one.
+            // A leftover record is scoped to the old home by its clientNonce, so a
+            // failed removal is safe to ignore.
+            let _ = remove_private(&dir, &pending_name());
+            Ok(())
         }
     }
 }
@@ -296,6 +428,18 @@ impl SecretStore for FileStore {
         Err(Error::Storage)
     }
     fn save(&self, _: &StoredHome) -> Result<(), Error> {
+        Err(Error::Storage)
+    }
+}
+#[cfg(not(unix))]
+impl FileStore {
+    pub fn load_room_send(&self) -> Result<Option<PendingRoomSend>, Error> {
+        Err(Error::Storage)
+    }
+    pub fn save_room_send(&self, _: &PendingRoomSend) -> Result<(), Error> {
+        Err(Error::Storage)
+    }
+    pub fn clear_room_send(&self) -> Result<(), Error> {
         Err(Error::Storage)
     }
 }

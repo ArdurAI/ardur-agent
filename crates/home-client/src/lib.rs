@@ -1,7 +1,9 @@
 //! Paired-home client only. No bot execution, database, or provider dependencies.
 mod commands;
 mod redaction;
-pub use commands::{CommandResult, DeviceCommand, execute_device};
+pub use commands::{
+    CommandResult, DeviceCommand, execute_device, execute_room_send, fresh_client_nonce,
+};
 pub use redaction::{redact, safe_output};
 mod storage;
 mod transport;
@@ -11,8 +13,9 @@ use home_protocol::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+pub use storage::PendingRoomSend;
 pub use storage::{FileStore, SecretStore, default_config_dir};
-pub use transport::PinnedTransport;
+pub use transport::{PinnedTransport, Refusal};
 use zeroize::Zeroizing;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +82,7 @@ pub struct Profile {
     pub grant_id: String,
     pub space_id: String,
 }
+#[derive(Clone)]
 pub struct StoredHome {
     pub profile: Profile,
     pub private_key: Zeroizing<String>,
@@ -190,7 +194,11 @@ impl HomeClient {
         home.validate()?;
         Ok(Self { home })
     }
-    pub async fn request(&self, operation: &str, body: &Value) -> Result<Value, Error> {
+    async fn signed_envelope(
+        &self,
+        operation: &str,
+        body: &Value,
+    ) -> Result<(String, Value), Error> {
         let p = &self.home.profile;
         let i = hello(&p.url, &p.pins, Some(&p.grant_id)).await?;
         if !valid_nonce(&i, now_ms()) {
@@ -207,12 +215,26 @@ impl HomeClient {
             &device_signed_text(&p.pins.instance_id, &proof, operation, body),
         )
         .map_err(|_| Error::Storage)?;
-        PinnedTransport::new(&p.pins.certificate_fingerprint)?
-            .post(
-                &format!("{}/device/request", p.url),
-                &json!({"operation":operation,"body":body,"proof":proof}),
-            )
+        Ok((
+            format!("{}/device/request", p.url),
+            json!({"operation":operation,"body":body,"proof":proof}),
+        ))
+    }
+    pub async fn request(&self, operation: &str, body: &Value) -> Result<Value, Error> {
+        let (url, envelope) = self.signed_envelope(operation, body).await?;
+        PinnedTransport::new(&self.home.profile.pins.certificate_fingerprint)?
+            .post(&url, &envelope)
             .await
+    }
+    /// Signed request that keeps the home's own fixed answer on a 400/403 refusal.
+    pub async fn request_answer(&self, operation: &str, body: &Value) -> Result<Value, Refusal> {
+        let (url, envelope) = self
+            .signed_envelope(operation, body)
+            .await
+            .map_err(Refusal::Failure)?;
+        let transport = PinnedTransport::new(&self.home.profile.pins.certificate_fingerprint)
+            .map_err(Refusal::Failure)?;
+        transport.post_answer(&url, &envelope).await
     }
     pub async fn status(&self) -> Result<Value, Error> {
         let tasks = self.request("tasks", &json!({})).await?;

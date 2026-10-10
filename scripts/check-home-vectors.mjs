@@ -1,7 +1,7 @@
 // Offline public-fixture check. The actual TypeScript oracle check is home-fixtures.mjs --verify-rust.
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { createPublicKey, verify, X509Certificate } from "node:crypto";
+import { createHash, createPublicKey, verify, X509Certificate } from "node:crypto";
 import assert from "node:assert/strict";
 const canonical = (v) => Array.isArray(v) ? "["+v.map(canonical).join(",")+"]"
   : v && typeof v === "object" ? "{"+Object.entries(v).sort(([a],[b])=>a<b?-1:a>b?1:0).map(([k,v])=>JSON.stringify(k)+":"+canonical(v)).join(",")+"}" : JSON.stringify(v);
@@ -40,14 +40,43 @@ console.log("Raw Unicode and number input-domain vectors checked offline.");
 const stage3=JSON.parse(readFileSync("crates/home-protocol/tests/fixtures/typescript-stage3.json","utf8"));
 const copied=JSON.parse(readFileSync("crates/home-protocol/tests/fixtures/device-operations.json","utf8"));
 assert.equal(stage3.requests.length,8);
-for (let i=0;i<stage3.requests.length;i++) {
-  const r=stage3.requests[i], original=copied.requests[i];
+assert.equal(copied.requests.length,14);
+// The newer revision inserted Stage 4 operations before "stop", so match by content.
+const copiedByText=new Map(copied.requests.map((r)=>[r.signedText,r]));
+for (const r of stage3.requests) {
+  const original=copiedByText.get(r.signedText);
+  assert(original,`stage 3 vector missing from the copied golden bytes: ${r.signedText}`);
   assert.equal(canonical(r.body),original.canonicalBody);
-  assert.equal(r.signedText,original.signedText);
   assert(verify("sha256",Buffer.from(r.signedText),createPublicKey({key:Buffer.from(stage3.publicKey,"base64"),type:"spki",format:"der"}),Buffer.from(r.signature,"base64")));
 }
 assert.equal(copied.rejected.length,4);
-console.log("Stage 3 copied golden bytes and public TypeScript signatures verified.");
+console.log("Stage 3 vectors still match the copied golden bytes; public TypeScript signatures verified.");
+
+const stage4=JSON.parse(readFileSync("crates/home-protocol/tests/fixtures/typescript-stage4.json","utf8"));
+assert.equal(stage4.requests.length,copied.requests.length);
+assert.equal(stage4.provenance.repository,"ArdurAI/ardur-bot");
+assert.equal(stage4.provenance.revision,"12475e3af2e2b10605a27f0245f3db71b8e47f71");
+assert.equal(stage4.provenance.source,"apps/cli/fixtures/device-operations.json");
+assert.equal(stage4.provenance.sha256,createHash("sha256").update(readFileSync("crates/home-protocol/tests/fixtures/device-operations.json","utf8")).digest("hex"));
+const stage4Key=createPublicKey({key:Buffer.from(stage4.publicKey,"base64"),type:"spki",format:"der"});
+assert.equal(stage4Key.asymmetricKeyDetails.namedCurve,"prime256v1");
+for (let i=0;i<stage4.requests.length;i++) {
+  const r=stage4.requests[i], original=copied.requests[i];
+  assert.equal(canonical(r.body),original.canonicalBody);
+  assert.equal(r.signedText,original.signedText);
+  assert(verify("sha256",Buffer.from(r.signedText),stage4Key,Buffer.from(r.signature,"base64")));
+  assert(!verify("sha256",Buffer.from(r.signedText+"changed"),stage4Key,Buffer.from(r.signature,"base64")));
+}
+assert(stage4.requests.every((r)=>copiedByText.has(r.signedText)));
+const work=copied.responses.find((r)=>r.operation==="rooms/send"&&r.body.kind==="work");
+assert.equal(work.body.runIds.length,2);
+const greeting=copied.responses.find((r)=>r.operation==="rooms/send"&&r.body.kind==="receipt-only");
+assert.equal(greeting.body.taskId,undefined);
+assert.equal(greeting.body.runId,undefined);
+const denial=copied.responses.find((r)=>r.procedure==="board/show"&&r.body.problem);
+assert.equal(denial.body.problem.code,"access_lost");
+assert.equal(copied.responses.length,7);
+console.log("Stage 4 copied golden bytes, provenance SHA-256 and public TypeScript signatures verified.");
 
 // Regenerate both corpora from committed, hash-pinned pure TypeScript sources.
 execFileSync(process.execPath, ["scripts/home-redaction-fixtures.mjs", "--check"], { stdio: "inherit" });

@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 use home_client::{
     CommandResult, DeviceCommand, Error, FileStore, HomeClient, SecretStore, default_config_dir,
-    execute_device, human_text, pair_device, redact,
+    execute_device, execute_room_send, human_text, pair_device, redact,
 };
 use serde_json::{Value, json};
 use std::io::Read;
@@ -54,6 +54,18 @@ enum Command {
         #[command(subcommand)]
         command: BotsCommand,
     },
+    Computers {
+        #[command(subcommand)]
+        command: ComputersCommand,
+    },
+    Board {
+        #[command(subcommand)]
+        command: BoardCommand,
+    },
+    Rooms {
+        #[command(subcommand)]
+        command: RoomsCommand,
+    },
 }
 #[derive(Subcommand)]
 enum BotsCommand {
@@ -72,8 +84,52 @@ enum RunsCommand {
     },
 }
 #[derive(Subcommand)]
+enum ComputersCommand {
+    List,
+}
+#[derive(Subcommand)]
+enum BoardCommand {
+    List {
+        #[arg(long)]
+        workspace: String,
+        /// Board filter as a JSON object, for example {"status":"open"}.
+        #[arg(long, value_parser = board_filter)]
+        filter: Option<serde_json::Value>,
+        #[arg(long)]
+        search: Option<String>,
+    },
+    Show {
+        #[arg(long)]
+        workspace: String,
+        item: String,
+    },
+}
+#[derive(Subcommand)]
+enum RoomsCommand {
+    List,
+    Send {
+        #[arg(long, conflicts_with = "room_id")]
+        room: Option<String>,
+        #[arg(long)]
+        room_id: Option<String>,
+        #[arg(long)]
+        thread: Option<String>,
+        text: String,
+    },
+}
+#[derive(Subcommand)]
 enum TasksCommand {
     Show { task_id: String },
+}
+fn board_filter(raw: &str) -> Result<serde_json::Value, String> {
+    let value: serde_json::Value = serde_json::from_str(raw).map_err(|_| {
+        "Choose a board filter as a JSON object, for example {\"status\":\"open\"}.".to_owned()
+    })?;
+    if value.is_object() {
+        Ok(value)
+    } else {
+        Err("Choose a board filter as a JSON object, for example {\"status\":\"open\"}.".into())
+    }
 }
 fn duration(raw: &str) -> Result<std::time::Duration, String> {
     let (number, scale) = if let Some(n) = raw.strip_suffix("ms") {
@@ -131,6 +187,31 @@ fn device_command(command: Command) -> Result<(DeviceCommand, std::time::Duratio
             command: TasksCommand::Show { task_id },
         } => (DeviceCommand::TasksShow { task_id }, default),
         Command::Stop { task_id } => (DeviceCommand::Stop { task_id }, default),
+        Command::Computers {
+            command: ComputersCommand::List,
+        } => (DeviceCommand::ComputersList, default),
+        Command::Board {
+            command:
+                BoardCommand::List {
+                    workspace,
+                    filter,
+                    search,
+                },
+        } => (
+            DeviceCommand::BoardList {
+                workspace,
+                filter,
+                search,
+            },
+            default,
+        ),
+        Command::Board {
+            command: BoardCommand::Show { workspace, item },
+        } => (DeviceCommand::BoardShow { workspace, item }, default),
+        Command::Rooms {
+            command: RoomsCommand::List,
+        } => (DeviceCommand::RoomsList, default),
+        // Room sends recover through the durable pending record in the store.
         other => return Err(other),
     })
 }
@@ -252,7 +333,7 @@ async fn main() {
                 if json_mode {
                     println!(
                         "{}",
-                        json!({"schemaVersion":1,"ok":true,"command":"help","data":{"usage":"ardur-rs [--json] pair --file <path|-> [--name <name>] | status | bots list | send <bot> <text> --request-id <id> [--wait] [--timeout 180s] | wait --run <id> [--timeout 180s] | runs list [--cursor <id>] [--limit 50] | runs show <id> | tasks show <id> | stop <task-id>","version":env!("CARGO_PKG_VERSION")}})
+                        json!({"schemaVersion":1,"ok":true,"command":"help","data":{"usage":"ardur-rs [--json] pair --file <path|-> [--name <name>] | status | bots list | send <bot> <text> --request-id <id> [--wait] [--timeout 180s] | wait --run <id> [--timeout 180s] | runs list [--cursor <id>] [--limit 50] | runs show <id> | tasks show <id> | stop <task-id> | computers list | board list --workspace <id> [--filter <json>] [--search <text>] | board show --workspace <id> <item> | rooms list | rooms send (--room <name> | --room-id <id>) [--thread <id>] <text>","version":env!("CARGO_PKG_VERSION")}})
                     )
                 } else {
                     print!("{e}")
@@ -260,16 +341,22 @@ async fn main() {
                 return;
             }
             // Do not echo invalid arguments (they may contain the pairing challenge).
+            const WORDS: [&str; 8] = [
+                "send",
+                "wait",
+                "runs",
+                "tasks",
+                "stop",
+                "computers",
+                "board",
+                "rooms",
+            ];
             let name = raw
                 .iter()
                 .filter_map(|a| a.to_str())
-                .find(|a| ["send", "wait", "runs", "tasks", "stop"].contains(a))
+                .find(|a| WORDS.contains(a))
                 .unwrap_or("unknown");
-            if ["send", "wait", "runs", "tasks", "stop"].contains(&name)
-                || raw.iter().any(|a| {
-                    a == "send" || a == "wait" || a == "runs" || a == "tasks" || a == "stop"
-                })
-            {
+            if WORDS.contains(&name) || raw.iter().any(|a| WORDS.iter().any(|w| a == w)) {
                 let (result, exit) = CommandResult::error(name, Error::Input);
                 print_device(result, json_mode);
                 std::process::exit(exit);
@@ -277,6 +364,49 @@ async fn main() {
             std::process::exit(report("unknown", json_mode, Err(Error::Input)));
         }
     };
+    // Room sends carry durable lost-response recovery through the store, so
+    // they run outside the plain device-command path.
+    let rooms_send = match &args.command {
+        Command::Rooms {
+            command:
+                RoomsCommand::Send {
+                    room,
+                    room_id,
+                    thread,
+                    text,
+                },
+        } => Some((room.clone(), room_id.clone(), thread.clone(), text.clone())),
+        _ => None,
+    };
+    if let Some((room, room_id, thread, text)) = rooms_send {
+        let name = "rooms send";
+        let store = match default_config_dir().map(FileStore::new) {
+            Ok(store) => store,
+            Err(error) => {
+                let (result, exit) = CommandResult::error(name, error);
+                print_device(result, args.json);
+                std::process::exit(exit);
+            }
+        };
+        let client = store.load().and_then(HomeClient::new);
+        let (result, exit) = match client {
+            Ok(client) => {
+                execute_room_send(
+                    &store,
+                    &client,
+                    room_id,
+                    room,
+                    thread,
+                    text,
+                    std::time::Duration::from_secs(180),
+                )
+                .await
+            }
+            Err(error) => CommandResult::error(name, error),
+        };
+        print_device(result, args.json);
+        std::process::exit(exit);
+    }
     let old_command = match device_command(args.command) {
         Ok((command, duration)) => {
             let name = command.name();

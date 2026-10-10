@@ -3,18 +3,55 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { createHash, sign, X509Certificate } from "node:crypto";
+import { createHash, generateKeyPairSync, sign as cryptoSign, verify, X509Certificate } from "node:crypto";
 import { execFileSync } from "node:child_process";
 
-const oracle = resolve(process.argv[2]);
+const oracle = resolve(process.argv[2] ?? ".");
 const load = (p) => import(pathToFileURL(resolve(oracle, p)).href);
-const contracts = await load("packages/contracts/src/dispatch.ts");
-const crypto = await load("apps/cli/src/crypto.ts");
-const client = await load("apps/cli/src/client.ts");
-const { verifyDeviceSignature } = await load("packages/db/src/device-grants.ts");
-const { generateInstanceCertificate } = await load("apps/api/src/instance-certificate.js");
-const revision = execFileSync("git", ["rev-parse", "HEAD"], { cwd: oracle, encoding: "utf8" }).trim();
-if (process.argv[3] === "--verify-rust") {
+// Oracle modules load lazily so offline modes (--stage4) need no checkout.
+const oracleModules = async () => {
+  const [contracts, crypto, client, grants, api] = await Promise.all([
+    load("packages/contracts/src/dispatch.ts"),
+    load("apps/cli/src/crypto.ts"),
+    load("apps/cli/src/client.ts"),
+    load("packages/db/src/device-grants.ts"),
+    load("apps/api/src/instance-certificate.js"),
+  ]);
+  return { contracts, crypto, client, verifyDeviceSignature: grants.verifyDeviceSignature, generateInstanceCertificate: api.generateInstanceCertificate };
+};
+const revision = () => execFileSync("git", ["rev-parse", "HEAD"], { cwd: oracle, encoding: "utf8" }).trim();
+if (process.argv[3] === "--stage4") {
+  // Sign the committed Stage 4 golden bytes with a fresh synthetic device key.
+  // The signedText strings are the home's own bytes; this adds public DER
+  // signatures so Rust and the offline checker can verify the exact vectors.
+  // The home revision that produced the committed bytes is a required argument.
+  const sourceRevision = process.argv[4];
+  if (!sourceRevision) throw new Error("Usage: home-fixtures.mjs <oracle> --stage4 <home-revision>");
+  const raw = readFileSync("crates/home-protocol/tests/fixtures/device-operations.json", "utf8");
+  const sha256 = (v) => createHash("sha256").update(v).digest("hex");
+  const fixture = JSON.parse(raw);
+  const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+  const spki = publicKey.export({ type: "spki", format: "der" }).toString("base64");
+  const key = privateKey;
+  for (const r of fixture.requests) {
+    r.signature = cryptoSign(null, Buffer.from(r.signedText), key).toString("base64");
+    if (!verify(null, Buffer.from(r.signedText), publicKey, Buffer.from(r.signature, "base64")))
+      throw new Error("Stage 4 signature mismatch");
+  }
+  fixture.publicKey = spki;
+  // Raw lone-surrogate vectors stay only in the copied golden bytes; this
+  // public companion must parse with any strict JSON reader.
+  delete fixture.rejected;
+  fixture.provenance = {
+    repository: "ArdurAI/ardur-bot",
+    revision: sourceRevision,
+    source: "apps/cli/fixtures/device-operations.json",
+    sha256: sha256(raw),
+  };
+  writeFileSync("crates/home-protocol/tests/fixtures/typescript-stage4.json", JSON.stringify(fixture, null, 2) + "\n");
+  console.log("Signed Stage 4 golden bytes with a fresh public device key.");
+} else if (process.argv[3] === "--verify-rust") {
+  const { contracts, verifyDeviceSignature } = await oracleModules();
   const vectors = JSON.parse(readFileSync(process.argv[4], "utf8"));
   for (const v of vectors) {
     const text = v.kind === "pairing" ? contracts.pairingSignedText(v.payload.challenge,v.payload.instanceId,v.publicKey,v.presencePublicKey) : contracts.deviceSignedText(v.instanceId,v.proof,v.operation,v.body);
@@ -24,6 +61,7 @@ if (process.argv[3] === "--verify-rust") {
   }
   console.log("TypeScript server verifier accepted all Rust signatures; alterations rejected.");
 } else if (process.argv[3] === "--stage3") {
+  const { contracts, crypto, verifyDeviceSignature } = await oracleModules();
   const raw = readFileSync(resolve(oracle, "apps/cli/fixtures/device-operations.json"), "utf8");
   const fixture = JSON.parse(raw);
   const keys = crypto.createDeviceKeys();
@@ -41,15 +79,17 @@ if (process.argv[3] === "--verify-rust") {
   writeFileSync("crates/home-protocol/tests/fixtures/device-operations.json",raw);
   delete fixture.rejected;
   fixture.publicKey = keys.publicKey;
-  fixture.provenance = {repository:"ArdurAI/ardur-bot",revision,source:"apps/cli/fixtures/device-operations.json"};
+  fixture.provenance = {repository:"ArdurAI/ardur-bot",revision:revision(),source:"apps/cli/fixtures/device-operations.json"};
   writeFileSync("crates/home-protocol/tests/fixtures/typescript-stage3.json",JSON.stringify(fixture,null,2)+"\n");
   console.log("Copied Stage 3 golden bytes and generated public TypeScript signatures.");
 } else if (process.argv[3] === "--numbers") {
+  const { contracts } = await oracleModules();
   const inputs = ["333333333.33333329","8.256320039984491e-05","0.84551240822557006","1.2345678901234568","2.2250738585072014e-308"];
-  const fixture = {schemaVersion:1,provenance:{repository:"ArdurAI/ardur-bot",revision,source:"packages/contracts/src/dispatch.ts"},cases:inputs.map(raw=>({raw,canonical:contracts.canonicalDispatchJson(JSON.parse(raw))}))};
+  const fixture = {schemaVersion:1,provenance:{repository:"ArdurAI/ardur-bot",revision:revision(),source:"packages/contracts/src/dispatch.ts"},cases:inputs.map(raw=>({raw,canonical:contracts.canonicalDispatchJson(JSON.parse(raw))}))};
   writeFileSync("crates/home-protocol/tests/fixtures/numbers.json",JSON.stringify(fixture,null,2)+"\n");
   console.log("Generated TypeScript decimal-parse boundary vectors.");
 } else {
+  const { contracts, crypto, client, verifyDeviceSignature, generateInstanceCertificate } = await oracleModules();
   const keys = crypto.createDeviceKeys();
   const material = await generateInstanceCertificate();
   const cert = new X509Certificate(material.certificate);
@@ -73,9 +113,9 @@ if (process.argv[3] === "--verify-rust") {
   const clientChallenge = "c".repeat(43);
   const homeText = contracts.homeSignedText(payload.instanceId,payload.fingerprint,clientChallenge);
   const identity = {instanceId:payload.instanceId,fingerprint:payload.fingerprint,certificate:cert.raw.toString("base64"),
-    signature:sign("sha256",Buffer.from(homeText),material.privateKey).toString("base64")};
+    signature:cryptoSign("sha256",Buffer.from(homeText),material.privateKey).toString("base64")};
   const pairingText = contracts.pairingSignedText(payload.challenge,payload.instanceId,keys.publicKey,keys.presencePublicKey);
-  const fixture = {schemaVersion:1,provenance:{repository:"ArdurAI/ardur-bot",revision,
+  const fixture = {schemaVersion:1,provenance:{repository:"ArdurAI/ardur-bot",revision:revision(),
     sources:["apps/cli/src/crypto.ts","apps/cli/src/client.ts","packages/contracts/src/dispatch.ts","packages/db/src/device-grants.ts"]},
     homeKeyAlgorithm:cert.publicKey.asymmetricKeyType,payload,code:Buffer.from(JSON.stringify(payload)).toString("base64url"),publicKey:keys.publicKey,
     presencePublicKey:keys.presencePublicKey,pairingText,pairingSignature:crypto.signPairing(payload,keys),proof,requests,
@@ -83,5 +123,5 @@ if (process.argv[3] === "--verify-rust") {
   if (JSON.stringify(client.decodePairingCode(fixture.code)) !== JSON.stringify(payload)) throw new Error("decode failed");
   for (const r of requests) if (!verifyDeviceSignature(keys.publicKey,r.text,r.signature)) throw new Error("oracle mismatch");
   writeFileSync("crates/home-protocol/tests/fixtures/typescript.json",JSON.stringify(fixture,null,2)+"\n");
-  console.log("Generated synthetic public vectors from "+revision+"; no private keys retained.");
+  console.log("Generated synthetic public vectors from "+fixture.provenance.revision+"; no private keys retained.");
 }
