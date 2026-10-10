@@ -34,6 +34,7 @@ else if (readFileSync(snapshot + "/provenance.json", "utf8") !== provenanceText)
 const redactions = moduleUrl(loggingSource);
 const textSource = cliSource.replace('"@ardurbot/logging"', JSON.stringify(redactions));
 const { safeDiagnostic } = await import(moduleUrl(textSource));
+const { redactCommandOutput } = await import(redactions);
 const cases = [];
 const add = (name, input, credentials = []) => cases.push({ name, input, expected: safeDiagnostic(input), credentials });
 const assignment = (key, value, separator = "=") => key + separator + value;
@@ -153,6 +154,56 @@ add("source member before literal escape", "apiToken: config.value\\npassword: s
 add("long value ending in pipe colon", "apiToken: " + "z".repeat(1024 * 1024) + "|: trailing");
 for (const [name, input] of nelPemCases) add(name, input, [synthetic("private-nel")]);
 
+// Keep refresh anchors separate so seeded combinations and older cases stay stable.
+const refreshCases = [];
+const refresh = (name, input, credentials = []) => {
+  refreshCases.push({ name, input, credentials });
+  add(name, input, credentials);
+};
+for (const key of ["passphrase", "PASSPHRASE", "signingKey", "signing_key", "SIGNING-KEY",
+  "encryptionKey", "encryption_key", "ENCRYPTION-KEY", "masterKey", "master_key", "MASTER-KEY",
+  "appKey", "app_key", "APP-KEY", "sshKey", "ssh_key", "SSH-KEY",
+  "authCode", "AUTH_CODE", "auth-code", "otp", "OTP", "totp", "TOTP",
+  "GITHUB_PAT", "service_pat", "service-pat", "service-PAT", "servicePat", "HTTPPat", "v2Pat"]) {
+  const value = synthetic("refresh-" + key);
+  refresh("current credential family " + key, assignment(key, value) + "; status=ready", [value]);
+  refresh("current quoted credential family " + key, JSON.stringify({ [key]: value, status: "ready" }), [value]);
+  for (const escape of ["n", "t", "r"]) {
+    refresh("current escaped credential family " + escape + " " + key,
+      "prefix\\" + escape + assignment(key, value) + "; status=ready", [value]);
+  }
+}
+for (const key of ["sortKey", "primaryKey", "keyId", "cacheKey", "pinned", "pinCode", "keyboard",
+  "compat", "COMPAT", "COMPATIBLE", "githubPattern", "maxTokens", "tokenCount",
+  "authCodeCount", "authCodeValue", "myOtp", "otpCount", "totpEnabled", "hotplug",
+  "pat", "PAT", "servicepat", "servicePAT"]) {
+  refresh("current readable name " + key, assignment(key, "fixture-reference") + "; status=ready");
+  refresh("current quoted readable name " + key, JSON.stringify({ [key]: "fixture-reference", status: "ready" }));
+}
+for (const input of ["password=123456", "token=0xabcdef", "otp: 004211", "GITHUB_PAT=987654",
+  "totp=-004211", "authCode=+123456", "passphrase=3.5", "signingKey=0XABCDEF"]) {
+  refresh("current numeric credential " + input, input);
+}
+refresh("current readable numeric counter", "maxTokens: 4096");
+for (const [name, input] of [
+  ["long s email local part", "ſ@example.test"],
+  ["Kelvin email local part", "K@example.test"],
+  ["long s email domain", "fixture@hoſt.test"],
+  ["Kelvin email domain", "fixture@K.test"],
+  ["long s email suffix", "fixture@example.teſt"],
+  ["Kelvin email suffix", "fixture@example.Kk"],
+  ["long s URL scheme", "httpſ://fixture:synthetic-url@gateway.example.test/path"],
+  ["ASCII uppercase URL scheme", "HTTPS://fixture:synthetic-url@gateway.example.test/path"],
+  ["Unicode URL user and password", "https://雪:synthetic-雪@gateway.example.test/path"],
+  ["long s credential key", '"paſſword": "fixture-reference"'],
+  ["Kelvin credential key", '"apiKey": "fixture-reference"'],
+  ["long s metadata key", '"knownSecretſ": "fixture-reference"'],
+  ["Kelvin metadata key", '"maxToKens": "fixture-reference"'],
+  ["Unicode placeholder", 'password="<雪>"'],
+  ["ASCII mixed case placeholder", 'password="[rEdAcTeD]"'],
+  ["ASCII mixed case bearer with Unicode whitespace", "bEaReR\ufeffsynthetic-value"],
+]) refresh("ASCII case folding " + name, input);
+
 // Complete malformed examples in the combined answer so adjacent cases stay independent;
 // the standalone cases still exercise unterminated inputs exactly as written.
 const input = cases.map((c) => c.input + (c.name === "unterminated quote" ? '"'
@@ -161,7 +212,8 @@ const input = cases.map((c) => c.input + (c.name === "unterminated quote" ? '"'
 const credentials = [...new Set(cases.flatMap((c) => c.credentials))];
 const fixture = { schemaVersion: 1, provenance: { repository: "ArdurAI/ardur-bot", revision,
   sources: ["apps/cli/src/text.ts", "packages/logging/src/redaction.ts"] },
-  cases, savedAnswer: { input, expected: safeDiagnostic(input), credentials } };
+  cases, commandOutputCases: refreshCases.map(({ name, input }) => ({ name, input, expected: redactCommandOutput(input) })),
+  savedAnswer: { input, expected: safeDiagnostic(input), credentials } };
 for (const credential of credentials) {
   if (fixture.savedAnswer.expected.includes(credential)) throw new Error("Synthetic credential survived oracle redaction in " + cases.filter((c) => c.credentials.includes(credential)).map((c) => c.name).join(", "));
 }
@@ -234,6 +286,7 @@ for (let i = 0; i < 4096; i++) {
   diff("seeded " + i, input);
 }
 for (const [name, input] of nelPemCases) diff(name, input);
+for (const { name, input } of refreshCases) diff(name, input);
 const generated = { schemaVersion: 1, generator: { seed, randomCases: 4096, count: differential.length,
   whitespaceCodePoints: whitespace.map((char) => char.codePointAt(0)), terminalCount: terminals.length }, provenance, cases: differential };
 const differentialTarget = "crates/home-client/tests/fixtures/redaction-differential.json";

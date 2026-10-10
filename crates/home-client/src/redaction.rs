@@ -26,27 +26,31 @@ pattern!(
     PEM,
     r"-----BEGIN [A-Z ]*PRIVATE KEY-----(?s:.)*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)"
 );
-pattern!(URL, r"(?i)(https?://)[^\s/:@]+:[^\s/@]+@");
-pattern!(EMAIL, r"(?i)[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}(?-u:\b)");
+// The oracle's /i patterns have no u flag: fold ASCII letters only. Keep
+// Unicode enabled outside these scopes for values and JavaScript whitespace.
+pattern!(URL, r"((?i-u:https?://))[^\s/:@]+:[^\s/@]+@");
+pattern!(EMAIL, r"(?i-u:[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b)");
 pattern!(
     ASSIGNMENT,
     r#""([^"'\r\n]*)"\s*[:=]\s*|'([^"'\r\n]*)'\s*[:=]\s*|([A-Za-z0-9_-]+)["']?\s*[:=]\s*"#
 );
 pattern!(
     SENSITIVE,
-    r"(?i)password|passwd|secret|token|credential|authorization|cookie|(?:api|private|access|client|auth)key"
+    r"(?i-u:password|passwd|passphrase|secret|token|credential|authorization|cookie|(?:api|private|access|client|auth|signing|encryption|master|app|ssh)key)"
 );
+pattern!(AUTH_CODE, r"(?i-u:^(?:authcode|t?otp)$)");
+pattern!(PAT, r"(?i-u:[_-]pat$)|[A-Za-z0-9]Pat$");
 pattern!(
     METADATA,
-    r"(?i)^(?:(?:max|min|num|total)tokens?|(?:used|remaining|input|output|prompt|completion|cached|reasoning|context)tokens|tokens?(?:used|remaining)|(?:known|required|missing)secrets|secret(?:names|ref|store))$|(?:secret|token|credential)(?:id|count|absent|present)$"
+    r"(?i-u:^(?:(?:max|min|num|total)tokens?|(?:used|remaining|input|output|prompt|completion|cached|reasoning|context)tokens|tokens?(?:used|remaining)|(?:known|required|missing)secrets|secret(?:names|ref|store))$|(?:secret|token|credential)(?:id|count|absent|present)$)"
 );
 pattern!(
     PLACEHOLDER,
-    r"(?i)^(?:|\[Redacted\]|[.*…]+|<[^<>]+>|\$\{[^{}]+\}|\{\{[^{}]+\}\})$"
+    r"^(?:|(?i-u:\[Redacted\])|[.*…]+|<[^<>]+>|\$\{[^{}]+\}|\{\{[^{}]+\}\})$"
 );
 pattern!(SCHEME, r"^[A-Za-z][A-Za-z0-9._+-]*$");
 pattern!(SPACED_ASSIGNMENT, r"^[A-Za-z0-9_-]+\s+[:=]");
-pattern!(BEARER, r#"(?-u:\b)(?i:Bearer\s+)[^\s"',;&}]+"#);
+pattern!(BEARER, r#"(?-u:\b)(?i-u:Bearer)\s+[^\s"',;&}]+"#);
 pattern!(
     TOKENS,
     r"(?-u:\b)(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]+(?-u:\b)|(?-u:\b)(?:AKIA|ASIA)[A-Z0-9]{16}(?-u:\b)|(?-u:\b)(?:sk-|xai-)[A-Za-z0-9_-]{8,}(?-u:\b)|(?-u:\b)(?:ak_|ck_)[A-Za-z0-9]+(?-u:\b)"
@@ -62,7 +66,7 @@ pattern!(
     r"^[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*"
 );
 pattern!(CODE_SUFFIX, r"^\??[ \t]*(?:[,;}\]\r\n]|$|\\[ntr])");
-pattern!(NUMBER, r"(?i)^[+-]?(?:\d+(?:\.\d+)?|0x[\da-f]+)$");
+pattern!(NUMBER, r"(?i-u:^[+-]?(?:\d+(?:\.\d+)?|0x[\da-f]+)$)");
 pattern!(
     CODE_TYPE,
     r"^(?:string|number|boolean|unknown|never|any|void|bigint|symbol|object)$"
@@ -79,17 +83,20 @@ fn word(b: u8) -> bool {
 fn key_byte(b: u8) -> bool {
     word(b) || b == b'-'
 }
+fn matches_credential_key(key: &str) -> bool {
+    let normalized: String = key.chars().filter(char::is_ascii_alphanumeric).collect();
+    SENSITIVE.is_match(&normalized) || AUTH_CODE.is_match(&normalized) || PAT.is_match(key)
+}
 fn sensitive_key(key: &str, escaped: bool) -> bool {
     // Read both a literal escape followed by a key and a backslash before a key.
     // Drop the escape letter only when the remainder names a credential family.
-    let normalized: String = key.chars().filter(char::is_ascii_alphanumeric).collect();
-    let key = if escaped && key.starts_with(['n', 't', 'r']) && SENSITIVE.is_match(&normalized[1..])
-    {
-        &normalized[1..]
+    let key = if escaped && key.starts_with(['n', 't', 'r']) && matches_credential_key(&key[1..]) {
+        &key[1..]
     } else {
-        &normalized
+        key
     };
-    !METADATA.is_match(key) && SENSITIVE.is_match(key)
+    let normalized: String = key.chars().filter(char::is_ascii_alphanumeric).collect();
+    !METADATA.is_match(&normalized) && matches_credential_key(key)
 }
 fn js_whitespace(ch: char) -> bool {
     matches!(ch, '\u{9}'..='\u{d}' | ' ' | '\u{a0}' | '\u{1680}' |
@@ -229,7 +236,9 @@ fn code_value(text: &str, start: usize) -> bool {
         return false;
     }
     if NUMBER.is_match(value) {
-        return true;
+        // Credential numbers can be passwords or one-time codes. Counters are
+        // exempt by key classification before this value check is reached.
+        return false;
     }
     let Some(identifier) = IDENTIFIER.find(rest) else {
         return false;
@@ -438,6 +447,72 @@ fn redact_value(value: Value, credential: bool) -> Value {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn numeric_credentials_match_command_output_oracle() {
+        let fixture: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/redaction.json")).unwrap();
+        for case in fixture["commandOutputCases"].as_array().unwrap() {
+            if case["name"]
+                .as_str()
+                .unwrap()
+                .starts_with("current numeric")
+            {
+                assert_eq!(
+                    redact_text(case["input"].as_str().unwrap(), true),
+                    case["expected"].as_str().unwrap(),
+                    "{}",
+                    case["name"]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unicode_case_folding_matches_diagnostic_oracle() {
+        let fixture: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/redaction.json")).unwrap();
+        for case in fixture["cases"].as_array().unwrap() {
+            if case["name"]
+                .as_str()
+                .unwrap()
+                .starts_with("ASCII case folding")
+            {
+                assert_eq!(
+                    safe_output(case["input"].as_str().unwrap()),
+                    case["expected"].as_str().unwrap(),
+                    "{}",
+                    case["name"]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn command_output_matches_current_oracle_rules() {
+        let fixture: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/redaction.json")).unwrap();
+        for case in fixture["commandOutputCases"].as_array().unwrap() {
+            let input = case["input"].as_str().unwrap();
+            let without_private_keys = PEM.replace_all(input, REDACTED);
+            assert_eq!(
+                redact_text(&without_private_keys, true),
+                case["expected"].as_str().unwrap(),
+                "{}",
+                case["name"]
+            );
+            // These objects contain only string values, so text-oracle output
+            // also verifies classification for the Rust JSON hardening path.
+            if case["name"].as_str().unwrap().starts_with("current quoted") {
+                assert_eq!(
+                    redact(serde_json::from_str(input).unwrap()),
+                    serde_json::from_str::<Value>(case["expected"].as_str().unwrap()).unwrap(),
+                    "{}: JSON credential keys",
+                    case["name"]
+                );
+            }
+        }
+    }
 
     #[test]
     fn pem_matches_nel_without_terminal_filtering() {

@@ -1,6 +1,6 @@
 {
   "repository": "ArdurAI/ardur-bot",
-  "revision": "184a23147046091eac4610bd88bf4fb3101595c9",
+  "revision": "56c47baa2f9f51009b971875487e2b28e17784b8",
   "nodeVersion": "26.7.0",
   "sources": [
     {
@@ -9,7 +9,7 @@
     },
     {
       "path": "packages/logging/src/redaction.ts",
-      "sha256": "3c24a3c53de3a9fca98a6bf7e187d62fc1b013112f4fe96599dd2e6068b10315"
+      "sha256": "1e62f8f8295e19efc27d690b5eee2e03cc589f3e4be99b7d0639b178a07c0e0c"
     }
   ]
 }
