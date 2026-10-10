@@ -1,4 +1,5 @@
-//! Output parity with the home CLI's safeDiagnostic; fixtures pin the pure oracle.
+//! Text parity with the home CLI's safeDiagnostic; fixtures pin the pure oracle.
+//! JSON credential-key masking is additional Rust-only output hardening.
 use regex::{Captures, Regex};
 use serde_json::Value;
 use std::sync::LazyLock;
@@ -23,7 +24,7 @@ pattern!(
 );
 pattern!(
     PEM,
-    r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)"
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----(?s:.)*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)"
 );
 pattern!(URL, r"(?i)(https?://)[^\s/:@]+:[^\s/@]+@");
 pattern!(EMAIL, r"(?i)[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}(?-u:\b)");
@@ -37,7 +38,7 @@ pattern!(
 );
 pattern!(
     METADATA,
-    r"(?i)(?:secret|token|credential)(?:id|count|absent|present)$"
+    r"(?i)^(?:(?:max|min|num|total)tokens?|(?:used|remaining|input|output|prompt|completion|cached|reasoning|context)tokens|tokens?(?:used|remaining)|(?:known|required|missing)secrets|secret(?:names|ref|store))$|(?:secret|token|credential)(?:id|count|absent|present)$"
 );
 pattern!(
     PLACEHOLDER,
@@ -60,7 +61,7 @@ pattern!(
     IDENTIFIER,
     r"^[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*"
 );
-pattern!(CODE_SUFFIX, r"^\??[ \t]*(?:[,;}\]\r\n]|$)");
+pattern!(CODE_SUFFIX, r"^\??[ \t]*(?:[,;}\]\r\n]|$|\\[ntr])");
 pattern!(NUMBER, r"(?i)^[+-]?(?:\d+(?:\.\d+)?|0x[\da-f]+)$");
 pattern!(
     CODE_TYPE,
@@ -77,6 +78,18 @@ fn word(b: u8) -> bool {
 }
 fn key_byte(b: u8) -> bool {
     word(b) || b == b'-'
+}
+fn sensitive_key(key: &str, escaped: bool) -> bool {
+    // Read both a literal escape followed by a key and a backslash before a key.
+    // Drop the escape letter only when the remainder names a credential family.
+    let normalized: String = key.chars().filter(char::is_ascii_alphanumeric).collect();
+    let key = if escaped && key.starts_with(['n', 't', 'r']) && SENSITIVE.is_match(&normalized[1..])
+    {
+        &normalized[1..]
+    } else {
+        &normalized
+    };
+    !METADATA.is_match(key) && SENSITIVE.is_match(key)
 }
 fn js_whitespace(ch: char) -> bool {
     matches!(ch, '\u{9}'..='\u{d}' | ' ' | '\u{a0}' | '\u{1680}' |
@@ -127,7 +140,71 @@ fn container_end(text: &str, start: usize) -> usize {
     }
     text.len()
 }
-fn code_value(text: &str, start: usize, key: &str) -> bool {
+fn unquoted_value_end(text: &str, mut start: usize) -> usize {
+    let bytes = text.as_bytes();
+    while start < bytes.len() {
+        let quote = bytes[start];
+        if quote == b'"' || quote == b'\'' {
+            let end = quoted_end(text, start);
+            return end + usize::from(bytes.get(end) == Some(&quote));
+        }
+        if quote == b'{' || quote == b'[' {
+            return container_end(text, start);
+        }
+
+        // Literal escapes remain inside the value; only real delimiters end it.
+        let mut end = token_end(text, start);
+        let mut credential = end;
+        while bytes
+            .get(credential)
+            .is_some_and(|b| *b == b' ' || *b == b'\t')
+        {
+            credential += 1;
+        }
+        if end > start
+            && credential > end
+            && SCHEME.is_match(&text[start..end])
+            && !SPACED_ASSIGNMENT.is_match(&text[credential..])
+        {
+            end = credential;
+            if bytes.get(end).is_some_and(|b| *b == b'"' || *b == b'\'') {
+                let quote = bytes[end];
+                end = quoted_end(text, end);
+                end += usize::from(bytes.get(end) == Some(&quote));
+            } else {
+                end = token_end(text, end);
+            }
+        }
+
+        // A consumed run can end with another sensitive key. Scan backward only
+        // over that key, then consume its value too; repeat for arbitrary chains.
+        if end <= start
+            || !matches!(bytes[end - 1], b':' | b'=')
+            || !bytes.get(end).is_some_and(|b| matches!(b, b' ' | b'\t'))
+        {
+            return end;
+        }
+        let separator = end - 1;
+        let mut key_start = separator;
+        while key_start > start && key_byte(bytes[key_start - 1]) {
+            key_start -= 1;
+        }
+        if key_start == separator
+            || !sensitive_key(
+                &text[key_start..separator],
+                key_start > 0 && bytes[key_start - 1] == b'\\',
+            )
+        {
+            return end;
+        }
+        start = end;
+        while bytes.get(start).is_some_and(|b| matches!(b, b' ' | b'\t')) {
+            start += 1;
+        }
+    }
+    start
+}
+fn code_value(text: &str, start: usize) -> bool {
     let rest = &text[start..];
     if rest.starts_with(['"', '\'', '\x60']) {
         return false;
@@ -168,14 +245,7 @@ fn code_value(text: &str, start: usize, key: &str) -> bool {
     if identifier.contains('.') {
         return true;
     }
-    (CODE_TYPE.is_match(identifier) && suffix.trim_start_matches([' ', '\t']).starts_with(';'))
-        || (matches!(identifier, "secrets" | "credentials")
-            && key
-                == format!(
-                    "known{}{}",
-                    identifier[..1].to_uppercase(),
-                    &identifier[1..]
-                ))
+    CODE_TYPE.is_match(identifier) && suffix.trim_start_matches([' ', '\t']).starts_with(';')
 }
 fn assignments(text: &str, command_output: bool) -> String {
     let mut output = String::new();
@@ -193,18 +263,23 @@ fn assignments(text: &str, command_output: bool) -> String {
         if quoted.is_none() && matched.start() > 0 && key_byte(bytes[matched.start() - 1]) {
             continue;
         }
-        let normalized: String = key.chars().filter(char::is_ascii_alphanumeric).collect();
-        let sensitive = !METADATA.is_match(&normalized) && SENSITIVE.is_match(&normalized);
+        let escaped =
+            quoted.is_none() && matched.start() > 0 && bytes[matched.start() - 1] == b'\\';
+        let sensitive = sensitive_key(key, escaped);
         let privacy = if quoted.is_some() {
             key.to_ascii_lowercase().contains("email")
         } else {
             key.eq_ignore_ascii_case("key")
+                || (escaped
+                    && key.len() == 4
+                    && key.starts_with(['n', 'N', 't', 'T', 'r', 'R'])
+                    && key[1..].eq_ignore_ascii_case("key"))
         };
         if !sensitive && !privacy {
             continue;
         }
         let start = matched.end();
-        if command_output && quoted.is_none() && code_value(text, start, key) {
+        if command_output && quoted.is_none() && code_value(text, start) {
             continue;
         }
         let quote = bytes.get(start).copied().unwrap_or(0);
@@ -231,35 +306,7 @@ fn assignments(text: &str, command_output: bool) -> String {
                 }
             )
         } else {
-            end = start;
-            if quote == b'{' || quote == b'[' {
-                end = container_end(text, start);
-            } else {
-                end = token_end(text, end);
-                let mut credential = end;
-                while bytes
-                    .get(credential)
-                    .is_some_and(|b| *b == b' ' || *b == b'\t')
-                {
-                    credential += 1;
-                }
-                if end > start
-                    && credential > end
-                    && SCHEME.is_match(&text[start..end])
-                    && !SPACED_ASSIGNMENT.is_match(&text[credential..])
-                {
-                    end = credential;
-                    if bytes.get(end).is_some_and(|b| *b == b'"' || *b == b'\'') {
-                        let q = bytes[end];
-                        end = quoted_end(text, end);
-                        if bytes.get(end) == Some(&q) {
-                            end += 1;
-                        }
-                    } else {
-                        end = token_end(text, end);
-                    }
-                }
-            }
+            end = unquoted_value_end(text, start);
             cursor = end;
             if end == start {
                 continue;
@@ -358,15 +405,111 @@ pub fn safe_output(text: &str) -> String {
     redact_text(&redact_text(&text, true), false)
 }
 /// Apply before serialization, including dynamic JSON keys.
+///
+/// Rust-only hardening masks every string below a credential key while retaining
+/// containers and non-string types. Answer fields use text redaction only unless
+/// nested beneath a credential key. Key classification does not read escapes.
 pub fn redact(value: Value) -> Value {
+    redact_value(value, false)
+}
+fn redact_value(value: Value, credential: bool) -> Value {
     match value {
-        Value::String(s) => Value::String(safe_output(&s)),
-        Value::Array(a) => Value::Array(a.into_iter().map(redact).collect()),
+        Value::String(s) => Value::String(if credential {
+            REDACTED.into()
+        } else {
+            safe_output(&s)
+        }),
+        Value::Array(a) => {
+            Value::Array(a.into_iter().map(|v| redact_value(v, credential)).collect())
+        }
         Value::Object(o) => Value::Object(
             o.into_iter()
-                .map(|(k, v)| (safe_output(&k), redact(v)))
+                .map(|(k, v)| {
+                    let credential = credential || sensitive_key(&k, false);
+                    (safe_output(&k), redact_value(v, credential))
+                })
                 .collect(),
         ),
         other => other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn pem_matches_nel_without_terminal_filtering() {
+        let pem = "-----BEGIN PRIVATE KEY-----\nsynthetic\u{85}material";
+        assert_eq!(PEM.replace_all(pem, REDACTED), REDACTED);
+        let closed = format!("before\n{pem}\n-----END PRIVATE KEY-----\nafter");
+        assert_eq!(
+            PEM.replace_all(&closed, REDACTED),
+            "before\n[Redacted]\nafter"
+        );
+    }
+
+    #[test]
+    fn credential_keys_mask_strings() {
+        let input = json!({
+            "password": "x", "apiToken": "x", "deviceToken": "x", "clientSecrets": "x",
+            "API_TOKEN": "x", "client-secret": "x", "nknownSecrets": "x"
+        });
+        let expected = json!({
+            "password": REDACTED, "apiToken": REDACTED, "deviceToken": REDACTED,
+            "clientSecrets": REDACTED, "API_TOKEN": REDACTED, "client-secret": REDACTED,
+            "nknownSecrets": REDACTED
+        });
+        assert_eq!(redact(input), expected);
+    }
+
+    #[test]
+    fn credential_context_masks_nested_strings_and_preserves_types() {
+        let input = json!({
+            "clientSecrets": {
+                "value": "x", "message": "x", "knownSecrets": "x",
+                "nested": ["x", {"value": "x"}, ["x", 7, true, false, null]],
+                "number": 3.5, "flag": false, "empty": null
+            },
+            "deviceToken": ["x", {"value": ["x", 42, false, null]}],
+            "ordinary": {"password": "x", "value": "readable"}
+        });
+        let expected = json!({
+            "clientSecrets": {
+                "value": REDACTED, "message": REDACTED, "knownSecrets": REDACTED,
+                "nested": [REDACTED, {"value": REDACTED}, [REDACTED, 7, true, false, null]],
+                "number": 3.5, "flag": false, "empty": null
+            },
+            "deviceToken": [REDACTED, {"value": [REDACTED, 42, false, null]}],
+            "ordinary": {"password": REDACTED, "value": "readable"}
+        });
+        assert_eq!(redact(input), expected);
+    }
+
+    #[test]
+    fn metadata_references_and_non_string_credentials_stay_readable() {
+        let input = json!({
+            "tokenCount": 42, "hasToken": true, "maxTokens": 100,
+            "modelCredentialId": "fixture-reference", "knownSecrets": ["fixture-name"],
+            "token_count": "42", "maxTokensText": "x",
+            "password": 7, "apiToken": false, "clientSecrets": null,
+            "references": {"maxTokens": "100", "modelCredentialId": "fixture-reference"}
+        });
+        let mut expected = input.clone();
+        expected["maxTokensText"] = json!(REDACTED);
+        assert_eq!(redact(input), expected);
+    }
+
+    #[test]
+    fn answer_fields_stay_readable_and_still_receive_text_redaction() {
+        let input = json!({
+            "message": "answer text", "messages": ["answer text"], "prompt": "answer text",
+            "body": "answer text", "query": "answer text",
+            "nested": {"message": "answer password=x; done"}
+        });
+        let mut expected = input.clone();
+        expected["nested"]["message"] = json!("answer password=[Redacted]; done");
+        assert_eq!(redact(input), expected);
     }
 }

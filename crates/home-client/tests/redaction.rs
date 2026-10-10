@@ -15,15 +15,19 @@ fn every_oracle_case_matches_before_json_or_human_output() {
         result.run_id = Some(input.into());
         result.task_id = Some(input.into());
         result.bot = serde_json::from_value(json!({"id": input, "name": input})).ok();
-        result.data = json!({input: [input, {"nested": input}]});
+        // Keep text parity separate from Rust-only credential-key masking.
+        // Dynamic keys still receive text redaction; their non-string values retain types.
+        result.data = json!({input: [123, {"nested": false}], "text": [input, {"nested": input}]});
         let encoded = result.json();
         for field in ["command", "replyText", "failureReason", "runId", "taskId"] {
             assert_eq!(encoded[field], expected, "{}: {field}", case["name"]);
         }
         assert_eq!(encoded["bot"]["id"], expected);
         assert_eq!(encoded["bot"]["name"], expected);
-        assert_eq!(encoded["data"][expected][0], expected);
-        assert_eq!(encoded["data"][expected][1]["nested"], expected);
+        assert_eq!(encoded["data"][expected][0], 123);
+        assert_eq!(encoded["data"][expected][1]["nested"], false);
+        assert_eq!(encoded["data"]["text"][0], expected);
+        assert_eq!(encoded["data"]["text"][1]["nested"], expected);
         assert_eq!(result.human(), expected);
         assert_eq!(human_text(&result.human()), human_text(expected));
         result.failure_reason = None;

@@ -3,7 +3,7 @@
   "generator": {
     "seed": 1498427401,
     "randomCases": 4096,
-    "count": 4929,
+    "count": 4931,
     "whitespaceCodePoints": [
       9,
       10,
@@ -35,7 +35,7 @@
   },
   "provenance": {
     "repository": "ArdurAI/ardur-bot",
-    "revision": "49551df2a61f1e0d34498b9eb06b5883801278c8",
+    "revision": "184a23147046091eac4610bd88bf4fb3101595c9",
     "nodeVersion": "26.7.0",
     "sources": [
       {
@@ -44,7 +44,7 @@
       },
       {
         "path": "packages/logging/src/redaction.ts",
-        "sha256": "4f44e4ae37a7442529bab06c41880225abcf1e23b76d2a34d8ef03147cb3ffec"
+        "sha256": "3c24a3c53de3a9fca98a6bf7e187d62fc1b013112f4fe96599dd2e6068b10315"
       }
     ]
   },
@@ -137,7 +137,7 @@
     {
       "name": "whitespace 17",
       "input": "knownSecrets:\tsecrets;",
-      "expected": "knownSecrets:\t[Redacted];"
+      "expected": "knownSecrets:\tsecrets;"
     },
     {
       "name": "whitespace 18",
@@ -237,7 +237,7 @@
     {
       "name": "whitespace 37",
       "input": "knownSecrets:\nsecrets;",
-      "expected": "knownSecrets:\n[Redacted];"
+      "expected": "knownSecrets:\nsecrets;"
     },
     {
       "name": "whitespace 38",
@@ -337,7 +337,7 @@
     {
       "name": "whitespace 57",
       "input": "knownSecrets:\u000bsecrets;",
-      "expected": "knownSecrets:[Redacted];"
+      "expected": "knownSecrets:secrets;"
     },
     {
       "name": "whitespace 58",
@@ -437,7 +437,7 @@
     {
       "name": "whitespace 77",
       "input": "knownSecrets:\fsecrets;",
-      "expected": "knownSecrets:[Redacted];"
+      "expected": "knownSecrets:secrets;"
     },
     {
       "name": "whitespace 78",
@@ -537,7 +537,7 @@
     {
       "name": "whitespace 97",
       "input": "knownSecrets:\rsecrets;",
-      "expected": "knownSecrets:[Redacted];"
+      "expected": "knownSecrets:secrets;"
     },
     {
       "name": "whitespace 98",
@@ -637,7 +637,7 @@
     {
       "name": "whitespace 117",
       "input": "knownSecrets: secrets;",
-      "expected": "knownSecrets: [Redacted];"
+      "expected": "knownSecrets: secrets;"
     },
     {
       "name": "whitespace 118",
@@ -737,7 +737,7 @@
     {
       "name": "whitespace 137",
       "input": "knownSecrets: secrets;",
-      "expected": "knownSecrets: [Redacted];"
+      "expected": "knownSecrets: secrets;"
     },
     {
       "name": "whitespace 138",
@@ -837,7 +837,7 @@
     {
       "name": "whitespace 157",
       "input": "knownSecrets: secrets;",
-      "expected": "knownSecrets: [Redacted];"
+      "expected": "knownSecrets: secrets;"
     },
     {
       "name": "whitespace 158",
@@ -937,7 +937,7 @@
     {
       "name": "whitespace 177",
       "input": "knownSecrets: secrets;",
-      "expected": "knownSecrets: [Redacted];"
+      "expected": "knownSecrets: secrets;"
     },
     {
       "name": "whitespace 178",
@@ -1037,7 +1037,7 @@
     {
       "name": "whitespace 197",
       "input": "knownSecrets: secrets;",
-      "expected": "knownSecrets: [Redacted];"
+      "expected": "knownSecrets: secrets;"
     },
     {
       "name": "whitespace 198",
@@ -1137,7 +1137,7 @@
     {
       "name": "whitespace 217",
       "input": "knownSecrets: secrets;",
-      "expected": "knownSecrets: [Redacted];"
+      "expected": "knownSecrets: secrets;"
     },
     {
       "name": "whitespace 218",
@@ -1237,7 +1237,7 @@
     {
       "name": "whitespace 237",
       "input": "knownSecrets: secrets;",
-      "expected": "knownSecrets: [Redacted];"
+      "expected": "knownSecrets: secrets;"
     },
     {
       "name": "whitespace 238",
@@ -1337,7 +1337,7 @@
     {
       "name": "whitespace 257",
       "input": "knownSecrets: secrets;",
-      "expected": "knownSecrets: [Redacted];"
+      "expected": "knownSecrets: secrets;"
     },
     {
       "name": "whitespace 258",
@@ -1437,7 +1437,7 @@
     {
       "name": "whitespace 277",
       "input": "knownSecrets: secrets;",
-      "expected": "knownSecrets: [Redacted];"
+      "expected": "knownSecrets: secrets;"
     },
     {
       "name": "whitespace 278",
@@ -1537,7 +1537,7 @@
     {
       "name": "whitespace 297",
       "input": "knownSecrets: secrets;",
-      "expected": "knownSecrets: [Redacted];"
+      "expected": "knownSecrets: secrets;"
     },
     {
       "name": "whitespace 298",
@@ -1637,7 +1637,7 @@
     {
       "name": "whitespace 317",
       "input": "knownSecrets: secrets;",
-      "expected": "knownSecrets: [Redacted];"
+      "expected": "knownSecrets: secrets;"
     },
     {
       "name": "whitespace 318",
@@ -1737,7 +1737,7 @@
     {
       "name": "whitespace 337",
       "input": "knownSecrets: secrets;",
-      "expected": "knownSecrets: [Redacted];"
+      "expected": "knownSecrets: secrets;"
     },
     {
       "name": "whitespace 338",
@@ -1837,7 +1837,7 @@
     {
       "name": "whitespace 357",
       "input": "knownSecrets: secrets;",
-      "expected": "knownSecrets: [Redacted];"
+      "expected": "knownSecrets: secrets;"
     },
     {
       "name": "whitespace 358",
@@ -1937,7 +1937,7 @@
     {
       "name": "whitespace 377",
       "input": "knownSecrets: secrets;",
-      "expected": "knownSecrets: [Redacted];"
+      "expected": "knownSecrets: secrets;"
     },
     {
       "name": "whitespace 378",
@@ -2037,7 +2037,7 @@
     {
       "name": "whitespace 397",
       "input": "knownSecrets: secrets;",
-      "expected": "knownSecrets: [Redacted];"
+      "expected": "knownSecrets: secrets;"
     },
     {
       "name": "whitespace 398",
@@ -2137,7 +2137,7 @@
     {
       "name": "whitespace 417",
       "input": "knownSecrets: secrets;",
-      "expected": "knownSecrets: [Redacted];"
+      "expected": "knownSecrets: secrets;"
     },
     {
       "name": "whitespace 418",
@@ -2237,7 +2237,7 @@
     {
       "name": "whitespace 437",
       "input": "knownSecrets: secrets;",
-      "expected": "knownSecrets: [Redacted];"
+      "expected": "knownSecrets: secrets;"
     },
     {
       "name": "whitespace 438",
@@ -2337,7 +2337,7 @@
     {
       "name": "whitespace 457",
       "input": "knownSecrets: secrets;",
-      "expected": "knownSecrets: [Redacted];"
+      "expected": "knownSecrets: secrets;"
     },
     {
       "name": "whitespace 458",
@@ -2437,7 +2437,7 @@
     {
       "name": "whitespace 477",
       "input": "knownSecrets:　secrets;",
-      "expected": "knownSecrets:　[Redacted];"
+      "expected": "knownSecrets:　secrets;"
     },
     {
       "name": "whitespace 478",
@@ -2537,7 +2537,7 @@
     {
       "name": "whitespace 497",
       "input": "knownSecrets:﻿secrets;",
-      "expected": "knownSecrets:﻿[Redacted];"
+      "expected": "knownSecrets:﻿secrets;"
     },
     {
       "name": "whitespace 498",
@@ -4217,12 +4217,12 @@
     {
       "name": "seeded 0",
       "input": "(\u0000tokenId\t=\tfixture\u0007; status=ready knownSecrets:\tsecrets;",
-      "expected": "(tokenId\t=\tfixture; status=ready knownSecrets:\t[Redacted];"
+      "expected": "(tokenId\t=\tfixture; status=ready knownSecrets:\tsecrets;"
     },
     {
       "name": "seeded 1",
       "input": "before \u001b^syntheticPayload\u0007ghp_FAKEsynthetic1234\u001b[31m\" knownSecrets: secrets;",
-      "expected": "before ^syntheticPayloadghp_FAKEsynthetic1234\" knownSecrets: [Redacted];"
+      "expected": "before ^syntheticPayloadghp_FAKEsynthetic1234\" knownSecrets: secrets;"
     },
     {
       "name": "seeded 2",
@@ -4242,7 +4242,7 @@
     {
       "name": "seeded 5",
       "input": "x\u001b_synthetic-payload\u001b\\knownSecrets:\u001csecrets;\u001b_syntheticPayload\u0007\" ghp_FAKEsynthetic1234",
-      "expected": "x_synthetic-payload\\knownSecrets:[Redacted];_syntheticPayload\" [Redacted]"
+      "expected": "x_synthetic-payload\\knownSecrets:secrets;_syntheticPayload\" [Redacted]"
     },
     {
       "name": "seeded 6",
@@ -4307,7 +4307,7 @@
     {
       "name": "seeded 18",
       "input": "-\u001b^syntheticPayload\u001b\\knownSecrets: secrets;31m\"　eyJfakeHeader.fakePayload.fakeSignature",
-      "expected": "-^syntheticPayload\\knownSecrets: [Redacted];\"　[Redacted]"
+      "expected": "-^syntheticPayload\\knownSecrets: secrets;\"　[Redacted]"
     },
     {
       "name": "seeded 19",
@@ -4322,7 +4322,7 @@
     {
       "name": "seeded 21",
       "input": "雪\u001b]unterminatedASIAFAKE000000000000\u001bPsynthetic-payload\u0007 knownSecrets:﻿secrets;",
-      "expected": "雪[Redacted]-payload knownSecrets:﻿[Redacted];"
+      "expected": "雪[Redacted]-payload knownSecrets:﻿secrets;"
     },
     {
       "name": "seeded 22",
@@ -4372,7 +4372,7 @@
     {
       "name": "seeded 31",
       "input": "(\u001b[31mknownSecrets: secrets;\u001bPsyntheticPayload\u001b\\; status=ready eyJfakeHeader.fakePayload.fakeSignature",
-      "expected": "(knownSecrets: [Redacted];; status=ready [Redacted]"
+      "expected": "(knownSecrets: secrets;; status=ready [Redacted]"
     },
     {
       "name": "seeded 32",
@@ -4522,12 +4522,12 @@
     {
       "name": "seeded 61",
       "input": "(\u001b_syntheticPayload\u001b\\harmless 雪 😀 é ordinary.version.string\u001bPsyntheticPayload\u0007?next=ready knownSecrets:\fsecrets;",
-      "expected": "(_syntheticPayload\\harmless 雪 😀 é ordinary.version.string?next=ready knownSecrets:[Redacted];"
+      "expected": "(_syntheticPayload\\harmless 雪 😀 é ordinary.version.string?next=ready knownSecrets:secrets;"
     },
     {
       "name": "seeded 62",
       "input": "'\u001bPsynthetic-payload\u001b\\password=syntheticprose\u001b^synthetic-payload\u001b\\/path knownSecrets:secrets;",
-      "expected": "'synthetic-payload\\password=[Redacted] knownSecrets:[Redacted];"
+      "expected": "'synthetic-payload\\password=[Redacted] knownSecrets:secrets;"
     },
     {
       "name": "seeded 63",
@@ -4772,7 +4772,7 @@
     {
       "name": "seeded 111",
       "input": "https://example.test/\u001b]0;synthetic-title\u0007knownSecrets: secrets;\u001bPsyntheticPayload\n secret= {\"nested\":[\"synthetic\",\"雪😀\"]}",
-      "expected": "https://example.test/knownSecrets: [Redacted];\n secret= [Redacted]"
+      "expected": "https://example.test/knownSecrets: secrets;\n secret= [Redacted]"
     },
     {
       "name": "seeded 112",
@@ -4902,7 +4902,7 @@
     {
       "name": "seeded 137",
       "input": "-synthetic-payloadhttps://synthetic-user:synthetic-pass@gateway.example.test/path\u001b^synthetic-payload) knownSecrets: secrets;",
-      "expected": "-synthetic-payloadhttps://[Redacted]@gateway.example.test/path^synthetic-payload) knownSecrets: [Redacted];"
+      "expected": "-synthetic-payloadhttps://[Redacted]@gateway.example.test/path^synthetic-payload) knownSecrets: secrets;"
     },
     {
       "name": "seeded 138",
@@ -4957,7 +4957,7 @@
     {
       "name": "seeded 148",
       "input": "雪\u001b]0;synthetic-title\u0007sk-FAKEsynthetic1234\u001b]unterminated; status=ready\tknownSecrets:\u001csecrets;",
-      "expected": "雪[Redacted]; status=ready\tknownSecrets:[Redacted];"
+      "expected": "雪[Redacted]; status=ready\tknownSecrets:secrets;"
     },
     {
       "name": "seeded 149",
@@ -5002,7 +5002,7 @@
     {
       "name": "seeded 157",
       "input": "雪\u001bPsynthetic-payload\u0007ASIAFAKE000000000000\u001bPsynthetic-payload) knownSecrets: secrets;",
-      "expected": "雪synthetic-payloadASIAFAKE000000000000synthetic-payload) knownSecrets: [Redacted];"
+      "expected": "雪synthetic-payloadASIAFAKE000000000000synthetic-payload) knownSecrets: secrets;"
     },
     {
       "name": "seeded 158",
@@ -5032,7 +5032,7 @@
     {
       "name": "seeded 163",
       "input": "https://example.test/\u001b]syntheticPayload\u0007knownSecrets: secrets;\u001b_syntheticPayload\u001b\\ fixture@example.test",
-      "expected": "https://example.test/knownSecrets: [Redacted];_syntheticPayload\\ [Redacted]"
+      "expected": "https://example.test/knownSecrets: secrets;_syntheticPayload\\ [Redacted]"
     },
     {
       "name": "seeded 164",
@@ -5307,7 +5307,7 @@
     {
       "name": "seeded 218",
       "input": "synthetic-payloadeyJfakeHeader.fakePayload.fakeSignature\u001bPsyntheticPayload\n knownSecrets: secrets;",
-      "expected": "synthetic-payloadeyJfakeHeader.fakePayload.fakeSignature\n knownSecrets: [Redacted];"
+      "expected": "synthetic-payloadeyJfakeHeader.fakePayload.fakeSignature\n knownSecrets: secrets;"
     },
     {
       "name": "seeded 219",
@@ -5407,7 +5407,7 @@
     {
       "name": "seeded 238",
       "input": "x\u001b_synthetic-payload\u001b\\knownSecrets: secrets;\u001bPunterminated?next=ready\rharmless 雪 😀 é ordinary.version.string",
-      "expected": "x_synthetic-payload\\knownSecrets: [Redacted];unterminated?next=readyharmless 雪 😀 é ordinary.version.string"
+      "expected": "x_synthetic-payload\\knownSecrets: secrets;unterminated?next=readyharmless 雪 😀 é ordinary.version.string"
     },
     {
       "name": "seeded 239",
@@ -5417,12 +5417,12 @@
     {
       "name": "seeded 240",
       "input": "(\u001b]0;synthetic-titletoken= \"synthetic \\\"quoted\\\" 雪😀\"\u001b_synthetic-payload\n knownSecrets: secrets;",
-      "expected": "(token= \"[Redacted]\"_synthetic-payload\n knownSecrets: [Redacted];"
+      "expected": "(token= \"[Redacted]\"_synthetic-payload\n knownSecrets: secrets;"
     },
     {
       "name": "seeded 241",
       "input": "-\u001bPsynthetic-payload\u0007prefix-eyJfakeHeader.fakePayload.fakeSignature\u001b[?25l\"\u000bknownSecrets: secrets;",
-      "expected": "[Redacted]\"knownSecrets: [Redacted];"
+      "expected": "[Redacted]\"knownSecrets: secrets;"
     },
     {
       "name": "seeded 242",
@@ -5447,7 +5447,7 @@
     {
       "name": "seeded 246",
       "input": "https://example.test/synthetic-payloadAuthorization: Bearer synthetic-bearer\u001b[?25l) knownSecrets: secrets;",
-      "expected": "https://example.test/synthetic-payloadAuthorization: [Redacted] synthetic-bearer) knownSecrets: [Redacted];"
+      "expected": "https://example.test/synthetic-payloadAuthorization: [Redacted] synthetic-bearer) knownSecrets: secrets;"
     },
     {
       "name": "seeded 247",
@@ -5537,12 +5537,12 @@
     {
       "name": "seeded 264",
       "input": "\"\u001b_synthetic-payload\u001b\\knownSecrets: secrets;\u001b]0;synthetic-title\u0007] password = synthetic-assignment next",
-      "expected": "\"_synthetic-payload\\knownSecrets: [Redacted];] password = [Redacted] next"
+      "expected": "\"_synthetic-payload\\knownSecrets: secrets;] password = [Redacted] next"
     },
     {
       "name": "seeded 265",
       "input": "_\u001b^synthetic-payloadknownSecrets:\tsecrets;\u001b^synthetic-payload\n knownSecrets:\tsecrets;",
-      "expected": "_^synthetic-payloadknownSecrets:\t[Redacted];^synthetic-payload\n knownSecrets:\t[Redacted];"
+      "expected": "_^synthetic-payloadknownSecrets:\t[Redacted];^synthetic-payload\n knownSecrets:\tsecrets;"
     },
     {
       "name": "seeded 266",
@@ -5647,7 +5647,7 @@
     {
       "name": "seeded 286",
       "input": "-\u001b^syntheticPayloadsecret= {\"nested\":[\"synthetic\",\"雪😀\"]}\u001b]syntheticPayload\u0007'\u000bknownSecrets: secrets;",
-      "expected": "-^syntheticPayloadsecret= [Redacted]'knownSecrets: [Redacted];"
+      "expected": "-^syntheticPayloadsecret= [Redacted]'knownSecrets: secrets;"
     },
     {
       "name": "seeded 287",
@@ -5677,7 +5677,7 @@
     {
       "name": "seeded 292",
       "input": "雪31mASIAFAKE000000000000\u001bPsynthetic-payload\n knownSecrets:secrets;",
-      "expected": "雪ASIAFAKE000000000000synthetic-payload\n knownSecrets:[Redacted];"
+      "expected": "雪ASIAFAKE000000000000synthetic-payload\n knownSecrets:secrets;"
     },
     {
       "name": "seeded 293",
@@ -5687,7 +5687,7 @@
     {
       "name": "seeded 294",
       "input": "'\u001b]syntheticPayload\u001b\\harmless 雪 😀 é ordinary.version.string\u001b_syntheticPayload\u001b\\ after knownSecrets:\tsecrets;",
-      "expected": "'harmless 雪 😀 é ordinary.version.string_syntheticPayload\\ after knownSecrets:\t[Redacted];"
+      "expected": "'harmless 雪 😀 é ordinary.version.string_syntheticPayload\\ after knownSecrets:\tsecrets;"
     },
     {
       "name": "seeded 295",
@@ -5727,7 +5727,7 @@
     {
       "name": "seeded 302",
       "input": "\"\u001bPsyntheticPayload\u001b\\eyJfakeHeader.fakePayload.fakeSignature\u001b]0;synthetic-title\u001b\\ knownSecrets: secrets;",
-      "expected": "\"[Redacted] knownSecrets: [Redacted];"
+      "expected": "\"[Redacted] knownSecrets: secrets;"
     },
     {
       "name": "seeded 303",
@@ -5752,7 +5752,7 @@
     {
       "name": "seeded 307",
       "input": "\"\u001bPsynthetic-payload\u001b\\knownSecrets:secrets;\u001b]0;synthetic-title\u0007\n Bearersynthetic-bearer",
-      "expected": "\"synthetic-payload\\knownSecrets:[Redacted];\n Bearersynthetic-bearer"
+      "expected": "\"synthetic-payload\\knownSecrets:secrets;\n Bearersynthetic-bearer"
     },
     {
       "name": "seeded 308",
@@ -5982,7 +5982,7 @@
     {
       "name": "seeded 353",
       "input": "_\u001b]0;synthetic-title\"accessToken\" : \"synthetic-quoted\"\u001b_synthetic-payload\u0007\n knownSecrets: secrets;",
-      "expected": "_\"accessToken\" : \"[Redacted]\"_synthetic-payload\n knownSecrets: [Redacted];"
+      "expected": "_\"accessToken\" : \"[Redacted]\"_synthetic-payload\n knownSecrets: secrets;"
     },
     {
       "name": "seeded 354",
@@ -5997,7 +5997,7 @@
     {
       "name": "seeded 356",
       "input": "\"\u001b_synthetic-payload\u0007ASIAFAKE000000000000\u0007\n knownSecrets: secrets;",
-      "expected": "\"_synthetic-payloadASIAFAKE000000000000\n knownSecrets: [Redacted];"
+      "expected": "\"_synthetic-payloadASIAFAKE000000000000\n knownSecrets: secrets;"
     },
     {
       "name": "seeded 357",
@@ -6007,7 +6007,7 @@
     {
       "name": "seeded 358",
       "input": "https://example.test/\u001b[?25l\"accessToken\":\"synthetic-quoted\"\u001b]0;synthetic-title\u0007 after knownSecrets:secrets;",
-      "expected": "https://example.test/\"accessToken\":\"[Redacted]\" after knownSecrets:[Redacted];"
+      "expected": "https://example.test/\"accessToken\":\"[Redacted]\" after knownSecrets:secrets;"
     },
     {
       "name": "seeded 359",
@@ -6162,7 +6162,7 @@
     {
       "name": "seeded 389",
       "input": "雪synthetic-payloadghp_FAKEsynthetic1234synthetic-payload] knownSecrets:\nsecrets;",
-      "expected": "雪synthetic-payloadghp_FAKEsynthetic1234synthetic-payload] knownSecrets:\n[Redacted];"
+      "expected": "雪synthetic-payloadghp_FAKEsynthetic1234synthetic-payload] knownSecrets:\nsecrets;"
     },
     {
       "name": "seeded 390",
@@ -6187,7 +6187,7 @@
     {
       "name": "seeded 394",
       "input": "雪\u001b[31mghp_FAKEsynthetic1234\u001b_synthetic-payload\u0007\"﻿knownSecrets:\tsecrets;",
-      "expected": "雪[Redacted]-payload\"﻿knownSecrets:\t[Redacted];"
+      "expected": "雪[Redacted]-payload\"﻿knownSecrets:\tsecrets;"
     },
     {
       "name": "seeded 395",
@@ -6247,7 +6247,7 @@
     {
       "name": "seeded 406",
       "input": "-\u001bPsynthetic-payload\u001b\\sk-FAKEsynthetic1234\u001b]syntheticPayload\n knownSecrets: secrets;",
-      "expected": "-synthetic-payload\\[Redacted]\n knownSecrets: [Redacted];"
+      "expected": "-synthetic-payload\\[Redacted]\n knownSecrets: secrets;"
     },
     {
       "name": "seeded 407",
@@ -6267,12 +6267,12 @@
     {
       "name": "seeded 410",
       "input": "_\u001b_synthetic-payload\u001b\\tokenId = fixture\u001b]syntheticPayload\u0007 knownSecrets: secrets;",
-      "expected": "__synthetic-payload\\tokenId = fixture knownSecrets: [Redacted];"
+      "expected": "__synthetic-payload\\tokenId = fixture knownSecrets: secrets;"
     },
     {
       "name": "seeded 411",
       "input": "-\u001bPsyntheticPayload\u001b\\token= \"synthetic \\\"quoted\\\" 雪😀\"\u001b^syntheticPayload\u0007; status=ready knownSecrets: secrets;",
-      "expected": "-token= \"[Redacted]\"^syntheticPayload; status=ready knownSecrets: [Redacted];"
+      "expected": "-token= \"[Redacted]\"^syntheticPayload; status=ready knownSecrets: secrets;"
     },
     {
       "name": "seeded 412",
@@ -6302,7 +6302,7 @@
     {
       "name": "seeded 417",
       "input": "before \u001b[31mfixture@example.testsynthetic-payload' knownSecrets:\tsecrets;",
-      "expected": "before [Redacted]-payload' knownSecrets:\t[Redacted];"
+      "expected": "before [Redacted]-payload' knownSecrets:\tsecrets;"
     },
     {
       "name": "seeded 418",
@@ -6487,7 +6487,7 @@
     {
       "name": "seeded 454",
       "input": "x\u001b]syntheticPayloadprefix-eyJfakeHeader.fakePayload.fakeSignature\u001b_syntheticPayload; status=ready knownSecrets: secrets;",
-      "expected": "[Redacted]; status=ready knownSecrets: [Redacted];"
+      "expected": "[Redacted]; status=ready knownSecrets: secrets;"
     },
     {
       "name": "seeded 455",
@@ -6562,7 +6562,7 @@
     {
       "name": "seeded 469",
       "input": "before \u001b]syntheticPayload\u0007knownSecrets: secrets;synthetic-payload/path -eyJfakeHeader.fakePayload.fakeSignature",
-      "expected": "before knownSecrets: [Redacted];synthetic-payload/path [Redacted]"
+      "expected": "before knownSecrets: secrets;synthetic-payload/path [Redacted]"
     },
     {
       "name": "seeded 470",
@@ -6617,7 +6617,7 @@
     {
       "name": "seeded 480",
       "input": "'\u001bPsynthetic-payload\u0007secret= {\"nested\":[\"synthetic\",\"雪😀\"]}0;synthetic-title) knownSecrets: secrets;",
-      "expected": "'synthetic-payloadsecret= [Redacted]0;synthetic-title) knownSecrets: [Redacted];"
+      "expected": "'synthetic-payloadsecret= [Redacted]0;synthetic-title) knownSecrets: secrets;"
     },
     {
       "name": "seeded 481",
@@ -6677,7 +6677,7 @@
     {
       "name": "seeded 492",
       "input": "_\u001b]syntheticPayload\u0007knownSecrets: secrets;\u001b]0;synthetic-title\u0007/path ghp_FAKEsynthetic1234",
-      "expected": "_knownSecrets: [Redacted];/path [Redacted]"
+      "expected": "_knownSecrets: secrets;/path [Redacted]"
     },
     {
       "name": "seeded 493",
@@ -6687,7 +6687,7 @@
     {
       "name": "seeded 494",
       "input": "雪\u001bPsynthetic-payload\u001b\\FakeAwsSynthetic123FakeAwsSynthetic123Fa\u001b[31m' knownSecrets: secrets;",
-      "expected": "雪synthetic-payload\\[Redacted]' knownSecrets: [Redacted];"
+      "expected": "雪synthetic-payload\\[Redacted]' knownSecrets: secrets;"
     },
     {
       "name": "seeded 495",
@@ -6702,7 +6702,7 @@
     {
       "name": "seeded 497",
       "input": "before \u001bPunterminatedfixture@example.test\u001b^synthetic-payload\u0007 after knownSecrets: secrets;",
-      "expected": "before [Redacted]^synthetic-payload after knownSecrets: [Redacted];"
+      "expected": "before [Redacted]^synthetic-payload after knownSecrets: secrets;"
     },
     {
       "name": "seeded 498",
@@ -6737,7 +6737,7 @@
     {
       "name": "seeded 504",
       "input": "[\u001b]0;synthetic-title\u0007knownSecrets:  secrets;synthetic-payload\n Authorization:  Bearer  synthetic-bearer",
-      "expected": "[knownSecrets:  [Redacted];synthetic-payload\n Authorization:  [Redacted]"
+      "expected": "[knownSecrets:  secrets;synthetic-payload\n Authorization:  [Redacted]"
     },
     {
       "name": "seeded 505",
@@ -6767,7 +6767,7 @@
     {
       "name": "seeded 510",
       "input": "[\u001b]syntheticPayloadknownSecrets:\tsecrets;\u001b[?25l password\t=\tsynthetic-assignment\tnext",
-      "expected": "[knownSecrets:\t[Redacted]; password\t=\t[Redacted]"
+      "expected": "[knownSecrets:\tsecrets; password\t=\t[Redacted]"
     },
     {
       "name": "seeded 511",
@@ -6887,7 +6887,7 @@
     {
       "name": "seeded 534",
       "input": "'\u001bPsynthetic-payload\u001b\\knownSecrets: secrets;\u001b]unterminated) Authorization: Bearer synthetic-bearer",
-      "expected": "'synthetic-payload\\knownSecrets: [Redacted];nterminated) Authorization: [Redacted] synthetic-bearer"
+      "expected": "'synthetic-payload\\knownSecrets: secrets;nterminated) Authorization: [Redacted] synthetic-bearer"
     },
     {
       "name": "seeded 535",
@@ -7067,7 +7067,7 @@
     {
       "name": "seeded 570",
       "input": "\"\u001b^synthetic-payload\u0007FakeAwsSynthetic123FakeAwsSynthetic123Fa\u001bPsynthetic-payload\n knownSecrets:\u001csecrets;",
-      "expected": "\"^synthetic-payloadFakeAwsSynthetic123FakeAwsSynthetic123Fasynthetic-payload\n knownSecrets:[Redacted];"
+      "expected": "\"^synthetic-payloadFakeAwsSynthetic123FakeAwsSynthetic123Fasynthetic-payload\n knownSecrets:secrets;"
     },
     {
       "name": "seeded 571",
@@ -7127,7 +7127,7 @@
     {
       "name": "seeded 582",
       "input": "\u001b]syntheticPayload\u0007knownSecrets: secrets;\u001b_synthetic-payload\n FakeAwsSynthetic123FakeAwsSynthetic123Fa",
-      "expected": "knownSecrets: [Redacted];_synthetic-payload\n [Redacted]"
+      "expected": "knownSecrets: secrets;_synthetic-payload\n [Redacted]"
     },
     {
       "name": "seeded 583",
@@ -7142,7 +7142,7 @@
     {
       "name": "seeded 585",
       "input": "-\u001b^synthetic-payload\u001b\\ghp_FAKEsynthetic1234\u0000/path knownSecrets: secrets;",
-      "expected": "-^synthetic-payload\\[Redacted]/path knownSecrets: [Redacted];"
+      "expected": "-^synthetic-payload\\[Redacted]/path knownSecrets: secrets;"
     },
     {
       "name": "seeded 586",
@@ -7157,7 +7157,7 @@
     {
       "name": "seeded 588",
       "input": "雪\u0000knownSecrets: secrets;\u001bPsynthetic-payload\u001b\\/path Authorization: Bearer synthetic-bearer",
-      "expected": "雪knownSecrets: [Redacted];synthetic-payload\\/path Authorization: [Redacted] synthetic-bearer"
+      "expected": "雪knownSecrets: secrets;synthetic-payload\\/path Authorization: [Redacted] synthetic-bearer"
     },
     {
       "name": "seeded 589",
@@ -7182,7 +7182,7 @@
     {
       "name": "seeded 593",
       "input": "雪\u001b^synthetic-payload\u0007prefix-eyJfakeHeader.fakePayload.fakeSignature\u001b_syntheticPayload\u0007 after knownSecrets: secrets;",
-      "expected": "雪^[Redacted] after knownSecrets: [Redacted];"
+      "expected": "雪^[Redacted] after knownSecrets: secrets;"
     },
     {
       "name": "seeded 594",
@@ -7322,7 +7322,7 @@
     {
       "name": "seeded 621",
       "input": "https://example.test/\u001b_synthetic-payload\"accessToken\" : \"synthetic-quoted\"\u001b^synthetic-payload/path knownSecrets: secrets;",
-      "expected": "https://example.test/_synthetic-payload\"accessToken\" : \"[Redacted]\"^synthetic-payload/path knownSecrets: [Redacted];"
+      "expected": "https://example.test/_synthetic-payload\"accessToken\" : \"[Redacted]\"^synthetic-payload/path knownSecrets: secrets;"
     },
     {
       "name": "seeded 622",
@@ -7367,7 +7367,7 @@
     {
       "name": "seeded 630",
       "input": "'\u001b]syntheticPayload\u0007ASIAFAKE000000000000\u001b[?25l\n\rknownSecrets: secrets;",
-      "expected": "'[Redacted]\nknownSecrets: [Redacted];"
+      "expected": "'[Redacted]\nknownSecrets: secrets;"
     },
     {
       "name": "seeded 631",
@@ -7377,7 +7377,7 @@
     {
       "name": "seeded 632",
       "input": "_\u001b[?25lhttps://synthetic-user:synthetic-pass@gateway.example.test/path\u001b]syntheticPayload\" knownSecrets: secrets;",
-      "expected": "_https://[Redacted]@gateway.example.test/path\" knownSecrets: [Redacted];"
+      "expected": "_https://[Redacted]@gateway.example.test/path\" knownSecrets: secrets;"
     },
     {
       "name": "seeded 633",
@@ -7387,12 +7387,12 @@
     {
       "name": "seeded 634",
       "input": "'synthetic-payloadAuthorization:Bearersynthetic-bearer\u001b]0;synthetic-title\u0007] knownSecrets:secrets;",
-      "expected": "'synthetic-payloadAuthorization:[Redacted]] knownSecrets:[Redacted];"
+      "expected": "'synthetic-payloadAuthorization:[Redacted]] knownSecrets:secrets;"
     },
     {
       "name": "seeded 635",
       "input": "-\u001b[?25lknownSecrets:　secrets;\u001b]0;synthetic-title\u0007?next=ready eyJfakeHeader.fakePayload.fakeSignature",
-      "expected": "-knownSecrets:　[Redacted];?next=ready [Redacted]"
+      "expected": "-knownSecrets:　secrets;?next=ready [Redacted]"
     },
     {
       "name": "seeded 636",
@@ -7447,7 +7447,7 @@
     {
       "name": "seeded 646",
       "input": "(\u001b[31mBearer　synthetic-bearer\u001bPsynthetic-payload\u0007 after knownSecrets:　secrets;",
-      "expected": "(Bearer　[Redacted] after knownSecrets:　[Redacted];"
+      "expected": "(Bearer　[Redacted] after knownSecrets:　secrets;"
     },
     {
       "name": "seeded 647",
@@ -7512,7 +7512,7 @@
     {
       "name": "seeded 659",
       "input": "雪\u001b]syntheticPayload\u001b\\knownSecrets:\nsecrets;\u001b]syntheticPayload after ASIAFAKE000000000000",
-      "expected": "雪knownSecrets:\n[Redacted]; after [Redacted]"
+      "expected": "雪knownSecrets:\nsecrets; after [Redacted]"
     },
     {
       "name": "seeded 660",
@@ -7777,7 +7777,7 @@
     {
       "name": "seeded 712",
       "input": "-\u001b^syntheticPayload\u001b\\knownSecrets: secrets;\u001b]syntheticPayload\u001b\\?next=ready ASIAFAKE000000000000",
-      "expected": "-^syntheticPayload\\knownSecrets: [Redacted];?next=ready [Redacted]"
+      "expected": "-^syntheticPayload\\knownSecrets: secrets;?next=ready [Redacted]"
     },
     {
       "name": "seeded 713",
@@ -7832,7 +7832,7 @@
     {
       "name": "seeded 723",
       "input": "before \u001b[?25lsk-FAKEsynthetic1234\u001bPsyntheticPayload\u001b\\ after knownSecrets: secrets;",
-      "expected": "before [Redacted] after knownSecrets: [Redacted];"
+      "expected": "before [Redacted] after knownSecrets: secrets;"
     },
     {
       "name": "seeded 724",
@@ -7847,7 +7847,7 @@
     {
       "name": "seeded 726",
       "input": "\"\u001bPsyntheticPayloadknownSecrets: secrets;\u001b]syntheticPayload\u001b\\) tokenId = fixture",
-      "expected": "\"knownSecrets: [Redacted];) tokenId = fixture"
+      "expected": "\"knownSecrets: secrets;) tokenId = fixture"
     },
     {
       "name": "seeded 727",
@@ -7867,7 +7867,7 @@
     {
       "name": "seeded 730",
       "input": "(\u001b]syntheticPayloadknownSecrets: secrets;\u001b_synthetic-payload\u0007 FakeAwsSynthetic123FakeAwsSynthetic123Fa",
-      "expected": "(knownSecrets: [Redacted];_synthetic-payload [Redacted]"
+      "expected": "(knownSecrets: secrets;_synthetic-payload [Redacted]"
     },
     {
       "name": "seeded 731",
@@ -7917,7 +7917,7 @@
     {
       "name": "seeded 740",
       "input": "\"\u001bPsyntheticPayloadapiKey\u001c=\u001c雪😀\u001charmless\u001b^synthetic-payload\u0007\n knownSecrets:\u001csecrets;",
-      "expected": "\"apiKey=[Redacted]\n knownSecrets:[Redacted];"
+      "expected": "\"apiKey=[Redacted]\n knownSecrets:secrets;"
     },
     {
       "name": "seeded 741",
@@ -7952,7 +7952,7 @@
     {
       "name": "seeded 747",
       "input": "-\u001bPsyntheticPayload\u0007knownSecrets: secrets;synthetic-payload)　\"accessToken\" : \"synthetic-quoted\"",
-      "expected": "-knownSecrets: [Redacted];synthetic-payload)　\"accessToken\" : \"[Redacted]\""
+      "expected": "-knownSecrets: secrets;synthetic-payload)　\"accessToken\" : \"[Redacted]\""
     },
     {
       "name": "seeded 748",
@@ -7967,7 +7967,7 @@
     {
       "name": "seeded 750",
       "input": "before \u001b]syntheticPayload\u0007knownSecrets: secrets;\u0007?next=ready password=synthetic prose",
-      "expected": "before knownSecrets: [Redacted];?next=ready password=[Redacted] prose"
+      "expected": "before knownSecrets: secrets;?next=ready password=[Redacted] prose"
     },
     {
       "name": "seeded 751",
@@ -8022,7 +8022,7 @@
     {
       "name": "seeded 761",
       "input": "(31mBearer　synthetic-bearersynthetic-payload; status=ready knownSecrets:　secrets;",
-      "expected": "(Bearer　[Redacted]; status=ready knownSecrets:　[Redacted];"
+      "expected": "(Bearer　[Redacted]; status=ready knownSecrets:　secrets;"
     },
     {
       "name": "seeded 762",
@@ -8032,7 +8032,7 @@
     {
       "name": "seeded 763",
       "input": "-31mknownSecrets:\fsecrets;\u001bPsyntheticPayload?next=ready\rtoken=\f\"synthetic \\\"quoted\\\" 雪😀\"",
-      "expected": "-knownSecrets:[Redacted];?next=readytoken=\"[Redacted]\""
+      "expected": "-knownSecrets:secrets;?next=readytoken=\"[Redacted]\""
     },
     {
       "name": "seeded 764",
@@ -8127,7 +8127,7 @@
     {
       "name": "seeded 782",
       "input": "_\u0007knownSecrets: secrets;\u001b^synthetic-payload\u0007; status=ready knownSecrets: secrets;",
-      "expected": "_knownSecrets: [Redacted];^synthetic-payload; status=ready knownSecrets: [Redacted];"
+      "expected": "_knownSecrets: secrets;^synthetic-payload; status=ready knownSecrets: secrets;"
     },
     {
       "name": "seeded 783",
@@ -8167,7 +8167,7 @@
     {
       "name": "seeded 790",
       "input": "_\u001b^synthetic-payload\u0007password  =  synthetic-assignment  next\u001bPsyntheticPayload\u001b\\; status=ready　knownSecrets:  secrets;",
-      "expected": "_^synthetic-payloadpassword  =  [Redacted]; status=ready　knownSecrets:  [Redacted];"
+      "expected": "_^synthetic-payloadpassword  =  [Redacted]; status=ready　knownSecrets:  secrets;"
     },
     {
       "name": "seeded 791",
@@ -8202,7 +8202,7 @@
     {
       "name": "seeded 797",
       "input": "[\u0007secret= {\"nested\":[\"synthetic\",\"雪😀\"]}\u001b_syntheticPayload\u001b\\; status=ready knownSecrets: secrets;",
-      "expected": "[secret= [Redacted]_syntheticPayload\\; status=ready knownSecrets: [Redacted];"
+      "expected": "[secret= [Redacted]_syntheticPayload\\; status=ready knownSecrets: secrets;"
     },
     {
       "name": "seeded 798",
@@ -8227,7 +8227,7 @@
     {
       "name": "seeded 802",
       "input": "'\u001b_synthetic-payload\u001b\\knownSecrets:secrets;\u001b]syntheticPayload\u001b\\; status=ready password=synthetic-assignmentnext",
-      "expected": "'_synthetic-payload\\knownSecrets:[Redacted];; status=ready password=[Redacted]"
+      "expected": "'_synthetic-payload\\knownSecrets:secrets;; status=ready password=[Redacted]"
     },
     {
       "name": "seeded 803",
@@ -8272,7 +8272,7 @@
     {
       "name": "seeded 811",
       "input": "_\u001b]syntheticPayload\u001b\\knownSecrets: secrets;\u001b]0;synthetic-title\u001b\\?next=ready Authorization: Bearer synthetic-bearer",
-      "expected": "_knownSecrets: [Redacted];?next=ready Authorization: [Redacted] synthetic-bearer"
+      "expected": "_knownSecrets: secrets;?next=ready Authorization: [Redacted] synthetic-bearer"
     },
     {
       "name": "seeded 812",
@@ -8327,7 +8327,7 @@
     {
       "name": "seeded 822",
       "input": "before \u001bPsyntheticPayload\u0007\"accessToken\"　:　\"synthetic-quoted\"\u001bPsyntheticPayload\u0007 knownSecrets:　secrets;",
-      "expected": "before \"accessToken\"　:　\"[Redacted]\" knownSecrets:　[Redacted];"
+      "expected": "before \"accessToken\"　:　\"[Redacted]\" knownSecrets:　secrets;"
     },
     {
       "name": "seeded 823",
@@ -8487,7 +8487,7 @@
     {
       "name": "seeded 854",
       "input": "_\u001bPsyntheticPayloadknownSecrets:secrets;synthetic-payload\" token=\"synthetic \\\"quoted\\\" 雪😀\"",
-      "expected": "_knownSecrets:[Redacted];synthetic-payload\" token=\"[Redacted]\""
+      "expected": "_knownSecrets:secrets;synthetic-payload\" token=\"[Redacted]\""
     },
     {
       "name": "seeded 855",
@@ -8617,7 +8617,7 @@
     {
       "name": "seeded 880",
       "input": "_\u001b[31mharmless 雪 😀 é ordinary.version.string31m/path knownSecrets: secrets;",
-      "expected": "_harmless 雪 😀 é ordinary.version.string/path knownSecrets: [Redacted];"
+      "expected": "_harmless 雪 😀 é ordinary.version.string/path knownSecrets: secrets;"
     },
     {
       "name": "seeded 881",
@@ -8632,7 +8632,7 @@
     {
       "name": "seeded 883",
       "input": "\"\u001b]0;synthetic-title\u001b\\knownSecrets: secrets;\u001b]0;synthetic-title\u0007 after﻿harmless 雪 😀 é ordinary.version.string",
-      "expected": "\"knownSecrets: [Redacted]; after﻿harmless 雪 😀 é ordinary.version.string"
+      "expected": "\"knownSecrets: secrets; after﻿harmless 雪 😀 é ordinary.version.string"
     },
     {
       "name": "seeded 884",
@@ -8812,7 +8812,7 @@
     {
       "name": "seeded 919",
       "input": "\"\u001b_synthetic-payload\u001b\\sk-FAKEsynthetic1234\u001b[31m)\u000bknownSecrets:\fsecrets;",
-      "expected": "\"_synthetic-payload\\[Redacted])knownSecrets:[Redacted];"
+      "expected": "\"_synthetic-payload\\[Redacted])knownSecrets:secrets;"
     },
     {
       "name": "seeded 920",
@@ -8867,7 +8867,7 @@
     {
       "name": "seeded 930",
       "input": "\u001b^syntheticPayloadapiKey = 雪😀 harmless\u001b^syntheticPayload\u0007 after knownSecrets: secrets;",
-      "expected": "^syntheticPayloadapiKey = [Redacted] harmless^syntheticPayload after knownSecrets: [Redacted];"
+      "expected": "^syntheticPayloadapiKey = [Redacted] harmless^syntheticPayload after knownSecrets: secrets;"
     },
     {
       "name": "seeded 931",
@@ -8907,7 +8907,7 @@
     {
       "name": "seeded 938",
       "input": "before \u001b^synthetic-payload\u001b\\knownSecrets: secrets;\u0000?next=ready\rprefix-eyJfakeHeader.fakePayload.fakeSignature",
-      "expected": "before ^synthetic-payload\\knownSecrets: [Redacted];?next=[Redacted]"
+      "expected": "before ^synthetic-payload\\knownSecrets: secrets;?next=[Redacted]"
     },
     {
       "name": "seeded 939",
@@ -8942,7 +8942,7 @@
     {
       "name": "seeded 945",
       "input": "-\u001bPsyntheticPayload\u0007knownSecrets:　secrets;\u001b^synthetic-payload\u0007 FakeAwsSynthetic123FakeAwsSynthetic123Fa",
-      "expected": "-knownSecrets:　[Redacted];^synthetic-payload [Redacted]"
+      "expected": "-knownSecrets:　secrets;^synthetic-payload [Redacted]"
     },
     {
       "name": "seeded 946",
@@ -8972,7 +8972,7 @@
     {
       "name": "seeded 951",
       "input": "\"synthetic-payloadprefix-eyJfakeHeader.fakePayload.fakeSignature\u001b_syntheticPayload\u0007/path knownSecrets: secrets;",
-      "expected": "\"[Redacted]/path knownSecrets: [Redacted];"
+      "expected": "\"[Redacted]/path knownSecrets: secrets;"
     },
     {
       "name": "seeded 952",
@@ -9157,7 +9157,7 @@
     {
       "name": "seeded 988",
       "input": "\u001b^syntheticPayload-eyJfakeHeader.fakePayload.fakeSignature\u001b^syntheticPayload; status=ready knownSecrets: secrets;",
-      "expected": "^[Redacted]^syntheticPayload; status=ready knownSecrets: [Redacted];"
+      "expected": "^[Redacted]^syntheticPayload; status=ready knownSecrets: secrets;"
     },
     {
       "name": "seeded 989",
@@ -9302,7 +9302,7 @@
     {
       "name": "seeded 1017",
       "input": "-\u001b_syntheticPayload\u001b\\apiKey = 雪😀 harmless\u001b_synthetic-payload\u0007\n knownSecrets: secrets;",
-      "expected": "-_syntheticPayload\\apiKey = [Redacted] harmless_synthetic-payload\n knownSecrets: [Redacted];"
+      "expected": "-_syntheticPayload\\apiKey = [Redacted] harmless_synthetic-payload\n knownSecrets: secrets;"
     },
     {
       "name": "seeded 1018",
@@ -9342,7 +9342,7 @@
     {
       "name": "seeded 1025",
       "input": "雪\u001b]syntheticPayload\u001b\\eyJfakeHeader.fakePayload.fakeSignature\u001b_syntheticPayload after knownSecrets: secrets;",
-      "expected": "雪[Redacted] after knownSecrets: [Redacted];"
+      "expected": "雪[Redacted] after knownSecrets: secrets;"
     },
     {
       "name": "seeded 1026",
@@ -9437,7 +9437,7 @@
     {
       "name": "seeded 1044",
       "input": "雪0;synthetic-title\"accessToken\" : \"synthetic-quoted\"\u001b]syntheticPayload\u001b\\\"\rknownSecrets: secrets;",
-      "expected": "雪0;synthetic-title\"accessToken\" : \"[Redacted]\"\"knownSecrets: [Redacted];"
+      "expected": "雪0;synthetic-title\"accessToken\" : \"[Redacted]\"\"knownSecrets: secrets;"
     },
     {
       "name": "seeded 1045",
@@ -9462,7 +9462,7 @@
     {
       "name": "seeded 1049",
       "input": "\"ghp_FAKEsynthetic1234\u001b[?25l; status=ready knownSecrets: secrets;",
-      "expected": "\"[Redacted]; status=ready knownSecrets: [Redacted];"
+      "expected": "\"[Redacted]; status=ready knownSecrets: secrets;"
     },
     {
       "name": "seeded 1050",
@@ -9517,7 +9517,7 @@
     {
       "name": "seeded 1060",
       "input": "\u001bPunterminatedhttps://synthetic-user:synthetic-pass@gateway.example.test/path\u001b^synthetic-payload\u001b\\] knownSecrets:\nsecrets;",
-      "expected": "unterminatedhttps://[Redacted]@gateway.example.test/path^synthetic-payload\\] knownSecrets:\n[Redacted];"
+      "expected": "unterminatedhttps://[Redacted]@gateway.example.test/path^synthetic-payload\\] knownSecrets:\nsecrets;"
     },
     {
       "name": "seeded 1061",
@@ -9532,7 +9532,7 @@
     {
       "name": "seeded 1063",
       "input": "_\u001b[0msk-FAKEsynthetic1234\u001b[31m; status=ready knownSecrets: secrets;",
-      "expected": "_sk-FAKEsynthetic1234; status=ready knownSecrets: [Redacted];"
+      "expected": "_sk-FAKEsynthetic1234; status=ready knownSecrets: secrets;"
     },
     {
       "name": "seeded 1064",
@@ -9557,7 +9557,7 @@
     {
       "name": "seeded 1068",
       "input": "'\u0007eyJfakeHeader.fakePayload.fakeSignature\u001b^syntheticPayload\u0007' knownSecrets: secrets;",
-      "expected": "'[Redacted]^syntheticPayload' knownSecrets: [Redacted];"
+      "expected": "'[Redacted]^syntheticPayload' knownSecrets: secrets;"
     },
     {
       "name": "seeded 1069",
@@ -9577,7 +9577,7 @@
     {
       "name": "seeded 1072",
       "input": "before \u0000tokenId = fixturesynthetic-payload after knownSecrets: secrets;",
-      "expected": "before tokenId = fixturesynthetic-payload after knownSecrets: [Redacted];"
+      "expected": "before tokenId = fixturesynthetic-payload after knownSecrets: secrets;"
     },
     {
       "name": "seeded 1073",
@@ -9652,7 +9652,7 @@
     {
       "name": "seeded 1087",
       "input": "before \u001b]0;synthetic-titleknownSecrets: secrets;synthetic-payload) prefix-eyJfakeHeader.fakePayload.fakeSignature",
-      "expected": "before knownSecrets: [Redacted];synthetic-payload) [Redacted]"
+      "expected": "before knownSecrets: secrets;synthetic-payload) [Redacted]"
     },
     {
       "name": "seeded 1088",
@@ -9687,7 +9687,7 @@
     {
       "name": "seeded 1094",
       "input": "before \u001b[?25lknownSecrets: secrets;\u001b_syntheticPayload] fixture@example.test",
-      "expected": "before knownSecrets: [Redacted];_syntheticPayload] [Redacted]"
+      "expected": "before knownSecrets: secrets;_syntheticPayload] [Redacted]"
     },
     {
       "name": "seeded 1095",
@@ -9777,7 +9777,7 @@
     {
       "name": "seeded 1112",
       "input": "_\u001b]syntheticPayload\u0007-eyJfakeHeader.fakePayload.fakeSignature\u001bPsyntheticPayload\u001b\\' knownSecrets:　secrets;",
-      "expected": "[Redacted]' knownSecrets:　[Redacted];"
+      "expected": "[Redacted]' knownSecrets:　secrets;"
     },
     {
       "name": "seeded 1113",
@@ -9787,7 +9787,7 @@
     {
       "name": "seeded 1114",
       "input": "[\u001b_syntheticPayloadknownSecrets:﻿secrets;synthetic-payload\" knownSecrets:﻿secrets;",
-      "expected": "[_syntheticPayloadknownSecrets:﻿[Redacted];synthetic-payload\" knownSecrets:﻿[Redacted];"
+      "expected": "[_syntheticPayloadknownSecrets:﻿[Redacted];synthetic-payload\" knownSecrets:﻿secrets;"
     },
     {
       "name": "seeded 1115",
@@ -9857,7 +9857,7 @@
     {
       "name": "seeded 1128",
       "input": "[synthetic-payloadpassword﻿=﻿synthetic-assignment﻿next\u001b[0m\" knownSecrets:﻿secrets;",
-      "expected": "[synthetic-payloadpassword﻿=﻿[Redacted]﻿next\" knownSecrets:﻿[Redacted];"
+      "expected": "[synthetic-payloadpassword﻿=﻿[Redacted]﻿next\" knownSecrets:﻿secrets;"
     },
     {
       "name": "seeded 1129",
@@ -9877,7 +9877,7 @@
     {
       "name": "seeded 1132",
       "input": "\u001b_syntheticPayload\u001b\\knownSecrets: secrets;\u001bPsynthetic-payload\u001b\\'\u000btoken= \"synthetic \\\"quoted\\\" 雪😀\"",
-      "expected": "_syntheticPayload\\knownSecrets: [Redacted];synthetic-payload\\'token= \"[Redacted]\""
+      "expected": "_syntheticPayload\\knownSecrets: secrets;synthetic-payload\\'token= \"[Redacted]\""
     },
     {
       "name": "seeded 1133",
@@ -9892,7 +9892,7 @@
     {
       "name": "seeded 1135",
       "input": "-\u001bPsynthetic-payload\u0007tokenId = fixture\u001b_synthetic-payload knownSecrets: secrets;",
-      "expected": "-synthetic-payloadtokenId = fixture_synthetic-payload knownSecrets: [Redacted];"
+      "expected": "-synthetic-payloadtokenId = fixture_synthetic-payload knownSecrets: secrets;"
     },
     {
       "name": "seeded 1136",
@@ -9967,7 +9967,7 @@
     {
       "name": "seeded 1150",
       "input": "_\u001b]0;synthetic-title\u0007knownSecrets: secrets;31m) ASIAFAKE000000000000",
-      "expected": "_knownSecrets: [Redacted];) [Redacted]"
+      "expected": "_knownSecrets: secrets;) [Redacted]"
     },
     {
       "name": "seeded 1151",
@@ -10072,7 +10072,7 @@
     {
       "name": "seeded 1171",
       "input": "before \u001b]0;synthetic-titleknownSecrets:　secrets;31m]﻿ASIAFAKE000000000000",
-      "expected": "before knownSecrets:　[Redacted];]﻿[Redacted]"
+      "expected": "before knownSecrets:　secrets;]﻿[Redacted]"
     },
     {
       "name": "seeded 1172",
@@ -10092,7 +10092,7 @@
     {
       "name": "seeded 1175",
       "input": "x\u001b]0;synthetic-title\u001b\\prefix-eyJfakeHeader.fakePayload.fakeSignaturesynthetic-payload' knownSecrets:secrets;",
-      "expected": "[Redacted]' knownSecrets:[Redacted];"
+      "expected": "[Redacted]' knownSecrets:secrets;"
     },
     {
       "name": "seeded 1176",
@@ -10177,7 +10177,7 @@
     {
       "name": "seeded 1192",
       "input": "\u001b_syntheticPayload\u001b\\fixture@example.test\u001b_synthetic-payload]\nknownSecrets: secrets;",
-      "expected": "_syntheticPayload\\fixture@example.test_synthetic-payload]\nknownSecrets: [Redacted];"
+      "expected": "_syntheticPayload\\fixture@example.test_synthetic-payload]\nknownSecrets: secrets;"
     },
     {
       "name": "seeded 1193",
@@ -10262,7 +10262,7 @@
     {
       "name": "seeded 1209",
       "input": "[\u001bPsyntheticPayloadknownSecrets: secrets;\u001bPsynthetic-payload\u001b\\] ASIAFAKE000000000000",
-      "expected": "[knownSecrets: [Redacted];synthetic-payload\\] [Redacted]"
+      "expected": "[knownSecrets: secrets;synthetic-payload\\] [Redacted]"
     },
     {
       "name": "seeded 1210",
@@ -10332,7 +10332,7 @@
     {
       "name": "seeded 1223",
       "input": "雪\u001b]0;synthetic-title\u001b\\https://synthetic-user:synthetic-pass@gateway.example.test/path\u001b^syntheticPayload) knownSecrets: secrets;",
-      "expected": "雪https://[Redacted]@gateway.example.test/path^syntheticPayload) knownSecrets: [Redacted];"
+      "expected": "雪https://[Redacted]@gateway.example.test/path^syntheticPayload) knownSecrets: secrets;"
     },
     {
       "name": "seeded 1224",
@@ -10372,7 +10372,7 @@
     {
       "name": "seeded 1231",
       "input": "https://example.test/\u001b^syntheticPayload\u001b\\password=synthetic\rprosesynthetic-payload] knownSecrets:\rsecrets;",
-      "expected": "https://example.test/^syntheticPayload\\password=[Redacted]] knownSecrets:[Redacted];"
+      "expected": "https://example.test/^syntheticPayload\\password=[Redacted]] knownSecrets:secrets;"
     },
     {
       "name": "seeded 1232",
@@ -10422,7 +10422,7 @@
     {
       "name": "seeded 1241",
       "input": "before synthetic-payload\"accessToken\" : \"synthetic-quoted\"\u001b_syntheticPayload' knownSecrets: secrets;",
-      "expected": "before synthetic-payload\"accessToken\" : \"[Redacted]\"_syntheticPayload' knownSecrets: [Redacted];"
+      "expected": "before synthetic-payload\"accessToken\" : \"[Redacted]\"_syntheticPayload' knownSecrets: secrets;"
     },
     {
       "name": "seeded 1242",
@@ -10452,7 +10452,7 @@
     {
       "name": "seeded 1247",
       "input": "\"\u001bPsynthetic-payload\u0007ASIAFAKE000000000000\u001bPunterminated knownSecrets:\nsecrets;",
-      "expected": "\"synthetic-payloadASIAFAKE000000000000unterminated knownSecrets:\n[Redacted];"
+      "expected": "\"synthetic-payloadASIAFAKE000000000000unterminated knownSecrets:\nsecrets;"
     },
     {
       "name": "seeded 1248",
@@ -10647,7 +10647,7 @@
     {
       "name": "seeded 1286",
       "input": "\"31mknownSecrets:﻿secrets;\u001b_syntheticPayload/path\tfixture@example.test",
-      "expected": "\"knownSecrets:﻿[Redacted];_syntheticPayload/path\t[Redacted]"
+      "expected": "\"knownSecrets:﻿secrets;_syntheticPayload/path\t[Redacted]"
     },
     {
       "name": "seeded 1287",
@@ -10757,7 +10757,7 @@
     {
       "name": "seeded 1308",
       "input": "雪\u001b^synthetic-payload\u001b\\eyJfakeHeader.fakePayload.fakeSignature\u001b^synthetic-payload\u001b\\ knownSecrets:  secrets;",
-      "expected": "雪^synthetic-payload\\[Redacted]^synthetic-payload\\ knownSecrets:  [Redacted];"
+      "expected": "雪^synthetic-payload\\[Redacted]^synthetic-payload\\ knownSecrets:  secrets;"
     },
     {
       "name": "seeded 1309",
@@ -10767,12 +10767,12 @@
     {
       "name": "seeded 1310",
       "input": "\"\u0000knownSecrets:\nsecrets;\u001b^synthetic-payload?next=ready\fhttps://synthetic-user:synthetic-pass@gateway.example.test/path",
-      "expected": "\"knownSecrets:\n[Redacted];^synthetic-payload?next=readyhttps://[Redacted]@gateway.example.test/path"
+      "expected": "\"knownSecrets:\nsecrets;^synthetic-payload?next=readyhttps://[Redacted]@gateway.example.test/path"
     },
     {
       "name": "seeded 1311",
       "input": "雪\u001bPsyntheticPayload\u001b\\Authorization:\fBearer\fsynthetic-bearer\u001bPunterminated knownSecrets:\fsecrets;",
-      "expected": "雪Authorization:[Redacted] knownSecrets:[Redacted];"
+      "expected": "雪Authorization:[Redacted] knownSecrets:secrets;"
     },
     {
       "name": "seeded 1312",
@@ -10807,7 +10807,7 @@
     {
       "name": "seeded 1318",
       "input": "before \u001b]syntheticPayload\u0007sk-FAKEsynthetic1234\u001b]0;synthetic-title/path knownSecrets: secrets;",
-      "expected": "before [Redacted]/path knownSecrets: [Redacted];"
+      "expected": "before [Redacted]/path knownSecrets: secrets;"
     },
     {
       "name": "seeded 1319",
@@ -10962,7 +10962,7 @@
     {
       "name": "seeded 1349",
       "input": "before \u001b]syntheticPayload\u001b\\knownSecrets:\u000bsecrets;synthetic-payload\n\u000bpassword=synthetic\u000bprose",
-      "expected": "before knownSecrets:[Redacted];synthetic-payload\npassword=[Redacted]"
+      "expected": "before knownSecrets:secrets;synthetic-payload\npassword=[Redacted]"
     },
     {
       "name": "seeded 1350",
@@ -11122,12 +11122,12 @@
     {
       "name": "seeded 1381",
       "input": "_\u001b]syntheticPayload\u001b\\knownSecrets: secrets;0;synthetic-title after secret= {\"nested\":[\"synthetic\",\"雪😀\"]}",
-      "expected": "_knownSecrets: [Redacted];0;synthetic-title after secret= [Redacted]"
+      "expected": "_knownSecrets: secrets;0;synthetic-title after secret= [Redacted]"
     },
     {
       "name": "seeded 1382",
       "input": "\"\u001b_syntheticPayload\u001b\\knownSecrets: secrets;\u001bPsynthetic-payload after eyJfakeHeader.fakePayload.fakeSignature",
-      "expected": "\"_syntheticPayload\\knownSecrets: [Redacted];synthetic-payload after [Redacted]"
+      "expected": "\"_syntheticPayload\\knownSecrets: secrets;synthetic-payload after [Redacted]"
     },
     {
       "name": "seeded 1383",
@@ -11152,7 +11152,7 @@
     {
       "name": "seeded 1387",
       "input": "(\u001b_synthetic-payloadsk-FAKEsynthetic1234\u001bPsyntheticPayload\u001b\\\tknownSecrets:secrets;",
-      "expected": "(_synthetic-payloadsk-FAKEsynthetic1234\tknownSecrets:[Redacted];"
+      "expected": "(_synthetic-payloadsk-FAKEsynthetic1234\tknownSecrets:secrets;"
     },
     {
       "name": "seeded 1388",
@@ -11197,12 +11197,12 @@
     {
       "name": "seeded 1396",
       "input": "before \u001b]syntheticPayload\u0007secret={\"nested\":[\"synthetic\",\"雪😀\"]}/path knownSecrets:secrets;",
-      "expected": "before secret=[Redacted]/path knownSecrets:[Redacted];"
+      "expected": "before secret=[Redacted]/path knownSecrets:secrets;"
     },
     {
       "name": "seeded 1397",
       "input": "\u001b_syntheticPayload\u001b\\tokenId=fixture\u001b]unterminated] knownSecrets:secrets;",
-      "expected": "_syntheticPayload\\tokenId=fixturenterminated] knownSecrets:[Redacted];"
+      "expected": "_syntheticPayload\\tokenId=fixturenterminated] knownSecrets:secrets;"
     },
     {
       "name": "seeded 1398",
@@ -11247,7 +11247,7 @@
     {
       "name": "seeded 1406",
       "input": "雪\u001b_synthetic-payload\u0007Bearer synthetic-bearer\u001b]syntheticPayload\"\rknownSecrets: secrets;",
-      "expected": "雪_synthetic-payloadBearer synthetic-bearer\"knownSecrets: [Redacted];"
+      "expected": "雪_synthetic-payloadBearer synthetic-bearer\"knownSecrets: secrets;"
     },
     {
       "name": "seeded 1407",
@@ -11387,7 +11387,7 @@
     {
       "name": "seeded 1434",
       "input": "雪\u001b]unterminatedapiKey=雪😀harmless\u001b[?25l'\rknownSecrets:secrets;",
-      "expected": "雪nterminatedapiKey=[Redacted]'knownSecrets:[Redacted];"
+      "expected": "雪nterminatedapiKey=[Redacted]'knownSecrets:secrets;"
     },
     {
       "name": "seeded 1435",
@@ -11457,7 +11457,7 @@
     {
       "name": "seeded 1448",
       "input": "\u001b]syntheticPayload\u0007knownSecrets:  secrets;\u001b_syntheticPayload] ghp_FAKEsynthetic1234",
-      "expected": "knownSecrets:  [Redacted];_syntheticPayload] [Redacted]"
+      "expected": "knownSecrets:  secrets;_syntheticPayload] [Redacted]"
     },
     {
       "name": "seeded 1449",
@@ -11472,7 +11472,7 @@
     {
       "name": "seeded 1451",
       "input": "[\u001bPunterminatedghp_FAKEsynthetic1234) knownSecrets: secrets;",
-      "expected": "[unterminatedghp_FAKEsynthetic1234) knownSecrets: [Redacted];"
+      "expected": "[unterminatedghp_FAKEsynthetic1234) knownSecrets: secrets;"
     },
     {
       "name": "seeded 1452",
@@ -11487,7 +11487,7 @@
     {
       "name": "seeded 1454",
       "input": "https://example.test/\u001bPsyntheticPayload\"accessToken\"\u001c:\u001c\"synthetic-quoted\"\u001b^synthetic-payload\u0007\"﻿knownSecrets:\u001csecrets;",
-      "expected": "https://example.test/\"accessToken\":\"[Redacted]\"^synthetic-payload\"﻿knownSecrets:[Redacted];"
+      "expected": "https://example.test/\"accessToken\":\"[Redacted]\"^synthetic-payload\"﻿knownSecrets:secrets;"
     },
     {
       "name": "seeded 1455",
@@ -11532,12 +11532,12 @@
     {
       "name": "seeded 1463",
       "input": "\u001b_synthetic-payload\u0007prefix-eyJfakeHeader.fakePayload.fakeSignature\u001b]syntheticPayload\u0007 after knownSecrets: secrets;",
-      "expected": "[Redacted] after knownSecrets: [Redacted];"
+      "expected": "[Redacted] after knownSecrets: secrets;"
     },
     {
       "name": "seeded 1464",
       "input": "'\u001b[0mknownSecrets: secrets;\u001bPsynthetic-payload\u001b\\; status=ready tokenId = fixture",
-      "expected": "'knownSecrets: [Redacted];synthetic-payload\\; status=ready tokenId = fixture"
+      "expected": "'knownSecrets: secrets;synthetic-payload\\; status=ready tokenId = fixture"
     },
     {
       "name": "seeded 1465",
@@ -11582,7 +11582,7 @@
     {
       "name": "seeded 1473",
       "input": "\u001b^syntheticPayload\u0007ghp_FAKEsynthetic1234\u001b_synthetic-payload\u001b\\\nknownSecrets: secrets;",
-      "expected": "^syntheticPayloadghp_FAKEsynthetic1234_synthetic-payload\\\nknownSecrets: [Redacted];"
+      "expected": "^syntheticPayloadghp_FAKEsynthetic1234_synthetic-payload\\\nknownSecrets: secrets;"
     },
     {
       "name": "seeded 1474",
@@ -11747,7 +11747,7 @@
     {
       "name": "seeded 1506",
       "input": "https://example.test/\u001bPsynthetic-payload\u0007\"accessToken\"﻿:﻿\"synthetic-quoted\"synthetic-payload; status=ready knownSecrets:﻿secrets;",
-      "expected": "https://example.test/synthetic-payload\"accessToken\"﻿:﻿\"[Redacted]\"synthetic-payload; status=ready knownSecrets:﻿[Redacted];"
+      "expected": "https://example.test/synthetic-payload\"accessToken\"﻿:﻿\"[Redacted]\"synthetic-payload; status=ready knownSecrets:﻿secrets;"
     },
     {
       "name": "seeded 1507",
@@ -11777,7 +11777,7 @@
     {
       "name": "seeded 1512",
       "input": "https://example.test/\u001b_synthetic-payload\u0007apiKey\u000b=\u000b雪😀\u000bharmless\u001b]0;synthetic-title\u001b\\?next=ready knownSecrets:\u000bsecrets;",
-      "expected": "https://example.test/_synthetic-payloadapiKey=[Redacted] knownSecrets:[Redacted];"
+      "expected": "https://example.test/_synthetic-payloadapiKey=[Redacted] knownSecrets:secrets;"
     },
     {
       "name": "seeded 1513",
@@ -11832,7 +11832,7 @@
     {
       "name": "seeded 1523",
       "input": "\"\u001bPsyntheticPayload\u001b\\ghp_FAKEsynthetic1234\u001b^syntheticPayload/path knownSecrets:  secrets;",
-      "expected": "\"[Redacted]^syntheticPayload/path knownSecrets:  [Redacted];"
+      "expected": "\"[Redacted]^syntheticPayload/path knownSecrets:  secrets;"
     },
     {
       "name": "seeded 1524",
@@ -11842,7 +11842,7 @@
     {
       "name": "seeded 1525",
       "input": "-\u001b]0;synthetic-title\u0007secret= {\"nested\":[\"synthetic\",\"雪😀\"]}\u001b[31m?next=ready knownSecrets: secrets;",
-      "expected": "-secret= [Redacted]?next=ready knownSecrets: [Redacted];"
+      "expected": "-secret= [Redacted]?next=ready knownSecrets: secrets;"
     },
     {
       "name": "seeded 1526",
@@ -12082,7 +12082,7 @@
     {
       "name": "seeded 1573",
       "input": "(knownSecrets:\rsecrets;\u001b_syntheticPayload after sk-FAKEsynthetic1234",
-      "expected": "(knownSecrets:[Redacted];_syntheticPayload after [Redacted]"
+      "expected": "(knownSecrets:secrets;_syntheticPayload after [Redacted]"
     },
     {
       "name": "seeded 1574",
@@ -12112,12 +12112,12 @@
     {
       "name": "seeded 1579",
       "input": "before \u001b]syntheticPayloadknownSecrets:\u000bsecrets;synthetic-payload)﻿password\u000b=\u000bsynthetic-assignment\u000bnext",
-      "expected": "before knownSecrets:[Redacted];synthetic-payload)﻿password=[Redacted]"
+      "expected": "before knownSecrets:secrets;synthetic-payload)﻿password=[Redacted]"
     },
     {
       "name": "seeded 1580",
       "input": "x\u001bPsyntheticPayload\u0007FakeAwsSynthetic123FakeAwsSynthetic123Fa\u001bPsynthetic-payload\u0007 knownSecrets: secrets;",
-      "expected": "xFakeAwsSynthetic123FakeAwsSynthetic123Fasynthetic-payload knownSecrets: [Redacted];"
+      "expected": "xFakeAwsSynthetic123FakeAwsSynthetic123Fasynthetic-payload knownSecrets: secrets;"
     },
     {
       "name": "seeded 1581",
@@ -12127,7 +12127,7 @@
     {
       "name": "seeded 1582",
       "input": "https://example.test/\u001b[0mAuthorization: Bearer synthetic-bearer\u001bPsyntheticPayload\u0007\"\tknownSecrets: secrets;",
-      "expected": "https://example.test/Authorization: [Redacted] synthetic-bearer\"\tknownSecrets: [Redacted];"
+      "expected": "https://example.test/Authorization: [Redacted] synthetic-bearer\"\tknownSecrets: secrets;"
     },
     {
       "name": "seeded 1583",
@@ -12177,7 +12177,7 @@
     {
       "name": "seeded 1592",
       "input": "[\u001bPsynthetic-payloadhttps://synthetic-user:synthetic-pass@gateway.example.test/path\u001b]syntheticPayload\u0007\n knownSecrets:secrets;",
-      "expected": "[synthetic-payloadhttps://[Redacted]@gateway.example.test/path\n knownSecrets:[Redacted];"
+      "expected": "[synthetic-payloadhttps://[Redacted]@gateway.example.test/path\n knownSecrets:secrets;"
     },
     {
       "name": "seeded 1593",
@@ -12202,7 +12202,7 @@
     {
       "name": "seeded 1597",
       "input": "(knownSecrets: secrets;\u0007) ASIAFAKE000000000000",
-      "expected": "(knownSecrets: [Redacted];) [Redacted]"
+      "expected": "(knownSecrets: secrets;) [Redacted]"
     },
     {
       "name": "seeded 1598",
@@ -12282,7 +12282,7 @@
     {
       "name": "seeded 1613",
       "input": "\"\u0000knownSecrets:secrets;\u0000' Bearersynthetic-bearer",
-      "expected": "\"knownSecrets:[Redacted];' Bearersynthetic-bearer"
+      "expected": "\"knownSecrets:secrets;' Bearersynthetic-bearer"
     },
     {
       "name": "seeded 1614",
@@ -12307,7 +12307,7 @@
     {
       "name": "seeded 1618",
       "input": "before \u001bPsyntheticPayload\u0007https://synthetic-user:synthetic-pass@gateway.example.test/path\u001b[31m'\fknownSecrets:secrets;",
-      "expected": "before https://[Redacted]@gateway.example.test/path'knownSecrets:[Redacted];"
+      "expected": "before https://[Redacted]@gateway.example.test/path'knownSecrets:secrets;"
     },
     {
       "name": "seeded 1619",
@@ -12342,7 +12342,7 @@
     {
       "name": "seeded 1625",
       "input": "'\u001b^syntheticPayloadASIAFAKE000000000000\u001bPunterminated/path knownSecrets: secrets;",
-      "expected": "'^syntheticPayloadASIAFAKE000000000000unterminated/path knownSecrets: [Redacted];"
+      "expected": "'^syntheticPayloadASIAFAKE000000000000unterminated/path knownSecrets: secrets;"
     },
     {
       "name": "seeded 1626",
@@ -12397,7 +12397,7 @@
     {
       "name": "seeded 1636",
       "input": "[https://synthetic-user:synthetic-pass@gateway.example.test/path\u001bPsynthetic-payload/path knownSecrets: secrets;",
-      "expected": "[https://[Redacted]@gateway.example.test/pathsynthetic-payload/path knownSecrets: [Redacted];"
+      "expected": "[https://[Redacted]@gateway.example.test/pathsynthetic-payload/path knownSecrets: secrets;"
     },
     {
       "name": "seeded 1637",
@@ -12427,7 +12427,7 @@
     {
       "name": "seeded 1642",
       "input": "\u001bPsynthetic-payloadsk-FAKEsynthetic123431m knownSecrets:secrets;",
-      "expected": "synthetic-payloadsk-FAKEsynthetic1234 knownSecrets:[Redacted];"
+      "expected": "synthetic-payloadsk-FAKEsynthetic1234 knownSecrets:secrets;"
     },
     {
       "name": "seeded 1643",
@@ -12472,7 +12472,7 @@
     {
       "name": "seeded 1651",
       "input": "_synthetic-payloadtoken=　\"synthetic \\\"quoted\\\" 雪😀\"synthetic-payload\n\u000bknownSecrets:　secrets;",
-      "expected": "_synthetic-payloadtoken=　\"[Redacted]\"synthetic-payload\nknownSecrets:　[Redacted];"
+      "expected": "_synthetic-payloadtoken=　\"[Redacted]\"synthetic-payload\nknownSecrets:　secrets;"
     },
     {
       "name": "seeded 1652",
@@ -12612,7 +12612,7 @@
     {
       "name": "seeded 1679",
       "input": "https://example.test/\u001b]syntheticPayloadknownSecrets:\fsecrets;\u001bPsynthetic-payload?next=ready　FakeAwsSynthetic123FakeAwsSynthetic123Fa",
-      "expected": "https://example.test/knownSecrets:[Redacted];synthetic-payload?next=ready　[Redacted]"
+      "expected": "https://example.test/knownSecrets:secrets;synthetic-payload?next=ready　[Redacted]"
     },
     {
       "name": "seeded 1680",
@@ -12677,7 +12677,7 @@
     {
       "name": "seeded 1692",
       "input": "雪\u001b_syntheticPayload\u0007https://synthetic-user:synthetic-pass@gateway.example.test/path\u001b_syntheticPayload'\u000bknownSecrets: secrets;",
-      "expected": "雪_syntheticPayloadhttps://[Redacted]@gateway.example.test/path_syntheticPayload'knownSecrets: [Redacted];"
+      "expected": "雪_syntheticPayloadhttps://[Redacted]@gateway.example.test/path_syntheticPayload'knownSecrets: secrets;"
     },
     {
       "name": "seeded 1693",
@@ -12707,7 +12707,7 @@
     {
       "name": "seeded 1698",
       "input": "[\u001bPsyntheticPayload\u0007ASIAFAKE000000000000\u001b]syntheticPayload\u0007; status=ready knownSecrets:\u000bsecrets;",
-      "expected": "[[Redacted]; status=ready knownSecrets:[Redacted];"
+      "expected": "[[Redacted]; status=ready knownSecrets:secrets;"
     },
     {
       "name": "seeded 1699",
@@ -12802,7 +12802,7 @@
     {
       "name": "seeded 1717",
       "input": "\"\u001b[?25ltoken= \"synthetic \\\"quoted\\\" 雪😀\"\u001b_syntheticPayload after\tknownSecrets: secrets;",
-      "expected": "\"token= \"[Redacted]\"_syntheticPayload after\tknownSecrets: [Redacted];"
+      "expected": "\"token= \"[Redacted]\"_syntheticPayload after\tknownSecrets: secrets;"
     },
     {
       "name": "seeded 1718",
@@ -12872,7 +12872,7 @@
     {
       "name": "seeded 1731",
       "input": "[\u001bPsyntheticPayload\u001b\\harmless 雪 😀 é ordinary.version.string\u001b]0;synthetic-title\u0007) knownSecrets: secrets;",
-      "expected": "[harmless 雪 😀 é ordinary.version.string) knownSecrets: [Redacted];"
+      "expected": "[harmless 雪 😀 é ordinary.version.string) knownSecrets: secrets;"
     },
     {
       "name": "seeded 1732",
@@ -12897,12 +12897,12 @@
     {
       "name": "seeded 1736",
       "input": "[\u001b]0;synthetic-title\u0007-eyJfakeHeader.fakePayload.fakeSignature\u001b]syntheticPayload\u0007\" knownSecrets: secrets;",
-      "expected": "[[Redacted]\" knownSecrets: [Redacted];"
+      "expected": "[[Redacted]\" knownSecrets: secrets;"
     },
     {
       "name": "seeded 1737",
       "input": "_synthetic-payload\"accessToken\"\u001c:\u001c\"synthetic-quoted\"synthetic-payload after knownSecrets:\u001csecrets;",
-      "expected": "_synthetic-payload\"accessToken\":\"[Redacted]\"synthetic-payload after knownSecrets:[Redacted];"
+      "expected": "_synthetic-payload\"accessToken\":\"[Redacted]\"synthetic-payload after knownSecrets:secrets;"
     },
     {
       "name": "seeded 1738",
@@ -12947,7 +12947,7 @@
     {
       "name": "seeded 1746",
       "input": "\"\u001b[0mknownSecrets: secrets;\u001b[31m after -eyJfakeHeader.fakePayload.fakeSignature",
-      "expected": "\"knownSecrets: [Redacted]; after [Redacted]"
+      "expected": "\"knownSecrets: secrets; after [Redacted]"
     },
     {
       "name": "seeded 1747",
@@ -13007,7 +13007,7 @@
     {
       "name": "seeded 1758",
       "input": "-synthetic-payloadtoken=\u000b\"synthetic \\\"quoted\\\" 雪😀\"\u001b_syntheticPayload\u0007) knownSecrets:\u000bsecrets;",
-      "expected": "-synthetic-payloadtoken=\"[Redacted]\"_syntheticPayload) knownSecrets:[Redacted];"
+      "expected": "-synthetic-payloadtoken=\"[Redacted]\"_syntheticPayload) knownSecrets:secrets;"
     },
     {
       "name": "seeded 1759",
@@ -13057,7 +13057,7 @@
     {
       "name": "seeded 1768",
       "input": "\"\u001b^synthetic-payload\u001b\\Bearer\tsynthetic-bearer\u001bPsynthetic-payload after knownSecrets:\tsecrets;",
-      "expected": "\"^synthetic-payload\\Bearer\t[Redacted] after knownSecrets:\t[Redacted];"
+      "expected": "\"^synthetic-payload\\Bearer\t[Redacted] after knownSecrets:\tsecrets;"
     },
     {
       "name": "seeded 1769",
@@ -13192,7 +13192,7 @@
     {
       "name": "seeded 1795",
       "input": "\"\u001b[0mknownSecrets:secrets;\u001bPsyntheticPayload\u001b\\]\fhttps://synthetic-user:synthetic-pass@gateway.example.test/path",
-      "expected": "\"knownSecrets:[Redacted];]https://[Redacted]@gateway.example.test/path"
+      "expected": "\"knownSecrets:secrets;]https://[Redacted]@gateway.example.test/path"
     },
     {
       "name": "seeded 1796",
@@ -13252,7 +13252,7 @@
     {
       "name": "seeded 1807",
       "input": "[\u001b^syntheticPayload\u001b\\secret=\u000b{\"nested\":[\"synthetic\",\"雪😀\"]}\u001b_synthetic-payload\u0007\" knownSecrets:\u000bsecrets;",
-      "expected": "[^syntheticPayload\\secret=[Redacted]_synthetic-payload\" knownSecrets:[Redacted];"
+      "expected": "[^syntheticPayload\\secret=[Redacted]_synthetic-payload\" knownSecrets:secrets;"
     },
     {
       "name": "seeded 1808",
@@ -13277,7 +13277,7 @@
     {
       "name": "seeded 1812",
       "input": "before \u001b_synthetic-payload\u001b\\knownSecrets: secrets;synthetic-payload\n﻿token= \"synthetic \\\"quoted\\\" 雪😀\"",
-      "expected": "before _synthetic-payload\\knownSecrets: [Redacted];synthetic-payload\n﻿token= \"[Redacted]\""
+      "expected": "before _synthetic-payload\\knownSecrets: secrets;synthetic-payload\n﻿token= \"[Redacted]\""
     },
     {
       "name": "seeded 1813",
@@ -13592,7 +13592,7 @@
     {
       "name": "seeded 1875",
       "input": "_\u001bPsyntheticPayload\u001b\\-eyJfakeHeader.fakePayload.fakeSignature\u001bPsyntheticPayload\u001b\\; status=ready knownSecrets: secrets;",
-      "expected": "[Redacted]; status=ready knownSecrets: [Redacted];"
+      "expected": "[Redacted]; status=ready knownSecrets: secrets;"
     },
     {
       "name": "seeded 1876",
@@ -13607,7 +13607,7 @@
     {
       "name": "seeded 1878",
       "input": "-\u001bPsyntheticPayloadknownSecrets:　secrets;\u001b^synthetic-payload\u001b\\/path\fhttps://synthetic-user:synthetic-pass@gateway.example.test/path",
-      "expected": "-knownSecrets:　[Redacted];^synthetic-payload\\/pathhttps://[Redacted]@gateway.example.test/path"
+      "expected": "-knownSecrets:　secrets;^synthetic-payload\\/pathhttps://[Redacted]@gateway.example.test/path"
     },
     {
       "name": "seeded 1879",
@@ -13712,7 +13712,7 @@
     {
       "name": "seeded 1899",
       "input": "-synthetic-payloadFakeAwsSynthetic123FakeAwsSynthetic123Fa\u001b^synthetic-payload\u0007\n knownSecrets:\tsecrets;",
-      "expected": "-synthetic-payloadFakeAwsSynthetic123FakeAwsSynthetic123Fa^synthetic-payload\n knownSecrets:\t[Redacted];"
+      "expected": "-synthetic-payloadFakeAwsSynthetic123FakeAwsSynthetic123Fa^synthetic-payload\n knownSecrets:\tsecrets;"
     },
     {
       "name": "seeded 1900",
@@ -13807,7 +13807,7 @@
     {
       "name": "seeded 1918",
       "input": "https://example.test/\u001b_synthetic-payloadsk-FAKEsynthetic1234\u0007\" knownSecrets: secrets;",
-      "expected": "https://example.test/_synthetic-payloadsk-FAKEsynthetic1234\" knownSecrets: [Redacted];"
+      "expected": "https://example.test/_synthetic-payloadsk-FAKEsynthetic1234\" knownSecrets: secrets;"
     },
     {
       "name": "seeded 1919",
@@ -13847,7 +13847,7 @@
     {
       "name": "seeded 1926",
       "input": "\"\u001b_syntheticPayloadfixture@example.test\u001b_syntheticPayload after knownSecrets: secrets;",
-      "expected": "\"_syntheticPayloadfixture@example.test_syntheticPayload after knownSecrets: [Redacted];"
+      "expected": "\"_syntheticPayloadfixture@example.test_syntheticPayload after knownSecrets: secrets;"
     },
     {
       "name": "seeded 1927",
@@ -13862,7 +13862,7 @@
     {
       "name": "seeded 1929",
       "input": "\u001bPsyntheticPayloadtoken= \"synthetic \\\"quoted\\\" 雪😀\"\u001bPsynthetic-payload)\u000bknownSecrets: secrets;",
-      "expected": "token= \"[Redacted]\"synthetic-payload)knownSecrets: [Redacted];"
+      "expected": "token= \"[Redacted]\"synthetic-payload)knownSecrets: secrets;"
     },
     {
       "name": "seeded 1930",
@@ -13912,7 +13912,7 @@
     {
       "name": "seeded 1939",
       "input": "雪synthetic-payloadpassword=synthetic　prose\u001b_syntheticPayload\u0007 after knownSecrets:　secrets;",
-      "expected": "雪synthetic-payloadpassword=[Redacted]　prose_syntheticPayload after knownSecrets:　[Redacted];"
+      "expected": "雪synthetic-payloadpassword=[Redacted]　prose_syntheticPayload after knownSecrets:　secrets;"
     },
     {
       "name": "seeded 1940",
@@ -13972,7 +13972,7 @@
     {
       "name": "seeded 1951",
       "input": "雪\u001b]syntheticPayload\u001b\\https://synthetic-user:synthetic-pass@gateway.example.test/path\u001b_synthetic-payload after knownSecrets:secrets;",
-      "expected": "雪https://[Redacted]@gateway.example.test/path_synthetic-payload after knownSecrets:[Redacted];"
+      "expected": "雪https://[Redacted]@gateway.example.test/path_synthetic-payload after knownSecrets:secrets;"
     },
     {
       "name": "seeded 1952",
@@ -14032,7 +14032,7 @@
     {
       "name": "seeded 1963",
       "input": "[\u001b]0;synthetic-title\u001b\\knownSecrets:secrets;\u001b]syntheticPayload\u0007' -eyJfakeHeader.fakePayload.fakeSignature",
-      "expected": "[knownSecrets:[Redacted];' [Redacted]"
+      "expected": "[knownSecrets:secrets;' [Redacted]"
     },
     {
       "name": "seeded 1964",
@@ -14092,7 +14092,7 @@
     {
       "name": "seeded 1975",
       "input": "x\u001b]0;synthetic-title\u001b\\password=synthetic prose\u001b^syntheticPayload\u001b\\\n\tknownSecrets: secrets;",
-      "expected": "xpassword=[Redacted] prose^syntheticPayload\\\n\tknownSecrets: [Redacted];"
+      "expected": "xpassword=[Redacted] prose^syntheticPayload\\\n\tknownSecrets: secrets;"
     },
     {
       "name": "seeded 1976",
@@ -14122,7 +14122,7 @@
     {
       "name": "seeded 1981",
       "input": "雪\u001b]syntheticPayloadpassword=synthetic prose\u001bPsynthetic-payload/path knownSecrets: secrets;",
-      "expected": "雪password=[Redacted] prosesynthetic-payload/path knownSecrets: [Redacted];"
+      "expected": "雪password=[Redacted] prosesynthetic-payload/path knownSecrets: secrets;"
     },
     {
       "name": "seeded 1982",
@@ -14177,7 +14177,7 @@
     {
       "name": "seeded 1992",
       "input": "-\u001bPsynthetic-payload\u0007-eyJfakeHeader.fakePayload.fakeSignature\u001bPsynthetic-payload; status=ready knownSecrets: secrets;",
-      "expected": "[Redacted]; status=ready knownSecrets: [Redacted];"
+      "expected": "[Redacted]; status=ready knownSecrets: secrets;"
     },
     {
       "name": "seeded 1993",
@@ -14187,12 +14187,12 @@
     {
       "name": "seeded 1994",
       "input": "\u001b]syntheticPayload\u0007knownSecrets:  secrets;synthetic-payload knownSecrets:  secrets;",
-      "expected": "knownSecrets:  [Redacted];synthetic-payload knownSecrets:  [Redacted];"
+      "expected": "knownSecrets:  secrets;synthetic-payload knownSecrets:  secrets;"
     },
     {
       "name": "seeded 1995",
       "input": "雪knownSecrets: secrets;\u001b_synthetic-payload\u0007) fixture@example.test",
-      "expected": "雪knownSecrets: [Redacted];_synthetic-payload) [Redacted]"
+      "expected": "雪knownSecrets: secrets;_synthetic-payload) [Redacted]"
     },
     {
       "name": "seeded 1996",
@@ -14222,7 +14222,7 @@
     {
       "name": "seeded 2001",
       "input": "https://example.test/\u001b[31mknownSecrets: secrets;\u001b^synthetic-payload\u0007)\tharmless 雪 😀 é ordinary.version.string",
-      "expected": "https://example.test/knownSecrets: [Redacted];^synthetic-payload)\tharmless 雪 😀 é ordinary.version.string"
+      "expected": "https://example.test/knownSecrets: secrets;^synthetic-payload)\tharmless 雪 😀 é ordinary.version.string"
     },
     {
       "name": "seeded 2002",
@@ -14237,7 +14237,7 @@
     {
       "name": "seeded 2004",
       "input": "synthetic-payloadfixture@example.test\u001b]0;synthetic-title\u0007?next=ready\tknownSecrets:secrets;",
-      "expected": "[Redacted]?next=ready\tknownSecrets:[Redacted];"
+      "expected": "[Redacted]?next=ready\tknownSecrets:secrets;"
     },
     {
       "name": "seeded 2005",
@@ -14357,12 +14357,12 @@
     {
       "name": "seeded 2028",
       "input": "'\u0000ASIAFAKE000000000000\u001b_syntheticPayload?next=ready knownSecrets:﻿secrets;",
-      "expected": "'ASIAFAKE000000000000_syntheticPayload?next=ready knownSecrets:﻿[Redacted];"
+      "expected": "'ASIAFAKE000000000000_syntheticPayload?next=ready knownSecrets:﻿secrets;"
     },
     {
       "name": "seeded 2029",
       "input": "'synthetic-payloadapiKey = 雪😀 harmless\u001bPunterminated\n﻿knownSecrets: secrets;",
-      "expected": "'synthetic-payloadapiKey = [Redacted] harmlessunterminated\n﻿knownSecrets: [Redacted];"
+      "expected": "'synthetic-payloadapiKey = [Redacted] harmlessunterminated\n﻿knownSecrets: secrets;"
     },
     {
       "name": "seeded 2030",
@@ -14387,7 +14387,7 @@
     {
       "name": "seeded 2034",
       "input": "[0;synthetic-titletoken= \"synthetic \\\"quoted\\\" 雪😀\"\u001bPsynthetic-payload\n knownSecrets: secrets;",
-      "expected": "[0;synthetic-titletoken= \"[Redacted]\"synthetic-payload\n knownSecrets: [Redacted];"
+      "expected": "[0;synthetic-titletoken= \"[Redacted]\"synthetic-payload\n knownSecrets: secrets;"
     },
     {
       "name": "seeded 2035",
@@ -14447,7 +14447,7 @@
     {
       "name": "seeded 2046",
       "input": "'\u001b[31mapiKey = 雪😀 harmless\u001bPsyntheticPayload\u001b\\/path\tknownSecrets: secrets;",
-      "expected": "'apiKey = [Redacted] harmless/path\tknownSecrets: [Redacted];"
+      "expected": "'apiKey = [Redacted] harmless/path\tknownSecrets: secrets;"
     },
     {
       "name": "seeded 2047",
@@ -14472,7 +14472,7 @@
     {
       "name": "seeded 2051",
       "input": "before \u001b]0;synthetic-titlepassword=synthetic prose\u001b^syntheticPayload\u0007'﻿knownSecrets: secrets;",
-      "expected": "before password=[Redacted] prose^syntheticPayload'﻿knownSecrets: [Redacted];"
+      "expected": "before password=[Redacted] prose^syntheticPayload'﻿knownSecrets: secrets;"
     },
     {
       "name": "seeded 2052",
@@ -14502,12 +14502,12 @@
     {
       "name": "seeded 2057",
       "input": "-0;synthetic-titlepassword=synthetic prose\u001b[0m?next=ready knownSecrets: secrets;",
-      "expected": "-0;synthetic-titlepassword=[Redacted] prose?next=ready knownSecrets: [Redacted];"
+      "expected": "-0;synthetic-titlepassword=[Redacted] prose?next=ready knownSecrets: secrets;"
     },
     {
       "name": "seeded 2058",
       "input": "\u001b[?25l\"accessToken\"\u000b:\u000b\"synthetic-quoted\"; status=ready knownSecrets:\u000bsecrets;",
-      "expected": "\"accessToken\":\"[Redacted]\"; status=ready knownSecrets:[Redacted];"
+      "expected": "\"accessToken\":\"[Redacted]\"; status=ready knownSecrets:secrets;"
     },
     {
       "name": "seeded 2059",
@@ -14517,7 +14517,7 @@
     {
       "name": "seeded 2060",
       "input": "_\u001bPsyntheticPayloadFakeAwsSynthetic123FakeAwsSynthetic123Fa\u001b[?25l\n\tknownSecrets:\u000bsecrets;",
-      "expected": "_[Redacted]\n\tknownSecrets:[Redacted];"
+      "expected": "_[Redacted]\n\tknownSecrets:secrets;"
     },
     {
       "name": "seeded 2061",
@@ -14572,7 +14572,7 @@
     {
       "name": "seeded 2071",
       "input": "_\u001b_syntheticPayload\u0007FakeAwsSynthetic123FakeAwsSynthetic123Fa\u001b_synthetic-payload\u0007\" knownSecrets:\nsecrets;",
-      "expected": "__syntheticPayloadFakeAwsSynthetic123FakeAwsSynthetic123Fa_synthetic-payload\" knownSecrets:\n[Redacted];"
+      "expected": "__syntheticPayloadFakeAwsSynthetic123FakeAwsSynthetic123Fa_synthetic-payload\" knownSecrets:\nsecrets;"
     },
     {
       "name": "seeded 2072",
@@ -14812,7 +14812,7 @@
     {
       "name": "seeded 2119",
       "input": "'\u001b]syntheticPayloadknownSecrets: secrets;synthetic-payload\" ASIAFAKE000000000000",
-      "expected": "'knownSecrets: [Redacted];synthetic-payload\" [Redacted]"
+      "expected": "'knownSecrets: secrets;synthetic-payload\" [Redacted]"
     },
     {
       "name": "seeded 2120",
@@ -14832,7 +14832,7 @@
     {
       "name": "seeded 2123",
       "input": "(\u001b_syntheticPayloadpassword=synthetic prose\u001bPunterminated\" knownSecrets: secrets;",
-      "expected": "(_syntheticPayloadpassword=[Redacted] proseunterminated\" knownSecrets: [Redacted];"
+      "expected": "(_syntheticPayloadpassword=[Redacted] proseunterminated\" knownSecrets: secrets;"
     },
     {
       "name": "seeded 2124",
@@ -14892,7 +14892,7 @@
     {
       "name": "seeded 2135",
       "input": "_\u001b]0;synthetic-titlefixture@example.test\u001b]syntheticPayload]　knownSecrets:\tsecrets;",
-      "expected": "[Redacted]]　knownSecrets:\t[Redacted];"
+      "expected": "[Redacted]]　knownSecrets:\tsecrets;"
     },
     {
       "name": "seeded 2136",
@@ -14957,7 +14957,7 @@
     {
       "name": "seeded 2148",
       "input": "\"\u0007harmless 雪 😀 é ordinary.version.string\u001b]syntheticPayload\u001b\\) knownSecrets:\tsecrets;",
-      "expected": "\"harmless 雪 😀 é ordinary.version.string) knownSecrets:\t[Redacted];"
+      "expected": "\"harmless 雪 😀 é ordinary.version.string) knownSecrets:\tsecrets;"
     },
     {
       "name": "seeded 2149",
@@ -14967,7 +14967,7 @@
     {
       "name": "seeded 2150",
       "input": "-\u001b]0;synthetic-title\u001b\\knownSecrets: secrets;\u001bPsyntheticPayload\u0007 after knownSecrets: secrets;",
-      "expected": "-knownSecrets: [Redacted]; after knownSecrets: [Redacted];"
+      "expected": "-knownSecrets: secrets; after knownSecrets: secrets;"
     },
     {
       "name": "seeded 2151",
@@ -15077,7 +15077,7 @@
     {
       "name": "seeded 2172",
       "input": "雪\u001bPunterminatedsk-FAKEsynthetic123431m\n\nknownSecrets:\fsecrets;",
-      "expected": "雪unterminatedsk-FAKEsynthetic1234\n\nknownSecrets:[Redacted];"
+      "expected": "雪unterminatedsk-FAKEsynthetic1234\n\nknownSecrets:secrets;"
     },
     {
       "name": "seeded 2173",
@@ -15147,7 +15147,7 @@
     {
       "name": "seeded 2186",
       "input": "_31mknownSecrets:  secrets;\u001bPsyntheticPayload/path https://synthetic-user:synthetic-pass@gateway.example.test/path",
-      "expected": "_knownSecrets:  [Redacted];/path https://[Redacted]@gateway.example.test/path"
+      "expected": "_knownSecrets:  secrets;/path https://[Redacted]@gateway.example.test/path"
     },
     {
       "name": "seeded 2187",
@@ -15167,12 +15167,12 @@
     {
       "name": "seeded 2190",
       "input": "(\u001bPsynthetic-payload\u0007token= \"synthetic \\\"quoted\\\" 雪😀\"\u001b[0m after knownSecrets: secrets;",
-      "expected": "(synthetic-payloadtoken= \"[Redacted]\" after knownSecrets: [Redacted];"
+      "expected": "(synthetic-payloadtoken= \"[Redacted]\" after knownSecrets: secrets;"
     },
     {
       "name": "seeded 2191",
       "input": "before \u001b_syntheticPayload\u0007password=synthetic\nprose\u001bPsyntheticPayload\u001b\\\" knownSecrets:\nsecrets;",
-      "expected": "before _syntheticPayloadpassword=[Redacted]\nprose\" knownSecrets:\n[Redacted];"
+      "expected": "before _syntheticPayloadpassword=[Redacted]\nprose\" knownSecrets:\nsecrets;"
     },
     {
       "name": "seeded 2192",
@@ -15242,7 +15242,7 @@
     {
       "name": "seeded 2205",
       "input": "x\u001b]syntheticPayload\u001b\\\"accessToken\"\u001c:\u001c\"synthetic-quoted\"'﻿knownSecrets:\u001csecrets;",
-      "expected": "x\"accessToken\":\"[Redacted]\"'﻿knownSecrets:[Redacted];"
+      "expected": "x\"accessToken\":\"[Redacted]\"'﻿knownSecrets:secrets;"
     },
     {
       "name": "seeded 2206",
@@ -15262,7 +15262,7 @@
     {
       "name": "seeded 2209",
       "input": "\u0007fixture@example.test\u001b_synthetic-payload after knownSecrets:﻿secrets;",
-      "expected": "fixture@example.test_synthetic-payload after knownSecrets:﻿[Redacted];"
+      "expected": "fixture@example.test_synthetic-payload after knownSecrets:﻿secrets;"
     },
     {
       "name": "seeded 2210",
@@ -15302,7 +15302,7 @@
     {
       "name": "seeded 2217",
       "input": "\"\u001b_syntheticPayload\u001b\\fixture@example.test\u001bPsynthetic-payload\u0007/path knownSecrets: secrets;",
-      "expected": "\"_syntheticPayload\\[Redacted]-payload/path knownSecrets: [Redacted];"
+      "expected": "\"_syntheticPayload\\[Redacted]-payload/path knownSecrets: secrets;"
     },
     {
       "name": "seeded 2218",
@@ -15367,7 +15367,7 @@
     {
       "name": "seeded 2230",
       "input": "'\u001bPsyntheticPayloadknownSecrets: secrets;synthetic-payload) token= \"synthetic \\\"quoted\\\" 雪😀\"",
-      "expected": "'knownSecrets: [Redacted];synthetic-payload) token= \"[Redacted]\""
+      "expected": "'knownSecrets: secrets;synthetic-payload) token= \"[Redacted]\""
     },
     {
       "name": "seeded 2231",
@@ -15542,7 +15542,7 @@
     {
       "name": "seeded 2265",
       "input": "https://example.test/\u001b]0;synthetic-titlefixture@example.testsynthetic-payload; status=ready knownSecrets: secrets;",
-      "expected": "https://example.test/[Redacted]-payload; status=ready knownSecrets: [Redacted];"
+      "expected": "https://example.test/[Redacted]-payload; status=ready knownSecrets: secrets;"
     },
     {
       "name": "seeded 2266",
@@ -15577,7 +15577,7 @@
     {
       "name": "seeded 2272",
       "input": "(\u001b^syntheticPayload\u001b\\apiKey\t=\t雪😀\tharmlesssynthetic-payload\n knownSecrets:\tsecrets;",
-      "expected": "(^syntheticPayload\\apiKey\t=\t[Redacted]\tharmlesssynthetic-payload\n knownSecrets:\t[Redacted];"
+      "expected": "(^syntheticPayload\\apiKey\t=\t[Redacted]\tharmlesssynthetic-payload\n knownSecrets:\tsecrets;"
     },
     {
       "name": "seeded 2273",
@@ -15642,7 +15642,7 @@
     {
       "name": "seeded 2285",
       "input": "xsynthetic-payloadpassword = synthetic-assignment next\u001b_synthetic-payload\u001b\\) knownSecrets: secrets;",
-      "expected": "xsynthetic-payloadpassword = [Redacted] next_synthetic-payload\\) knownSecrets: [Redacted];"
+      "expected": "xsynthetic-payloadpassword = [Redacted] next_synthetic-payload\\) knownSecrets: secrets;"
     },
     {
       "name": "seeded 2286",
@@ -15702,7 +15702,7 @@
     {
       "name": "seeded 2297",
       "input": "'\u001b[0mharmless 雪 😀 é ordinary.version.stringsynthetic-payload after knownSecrets:\nsecrets;",
-      "expected": "'harmless 雪 😀 é ordinary.version.stringsynthetic-payload after knownSecrets:\n[Redacted];"
+      "expected": "'harmless 雪 😀 é ordinary.version.stringsynthetic-payload after knownSecrets:\nsecrets;"
     },
     {
       "name": "seeded 2298",
@@ -15727,12 +15727,12 @@
     {
       "name": "seeded 2302",
       "input": "_0;synthetic-titlepassword=synthetic﻿prose\u001b^synthetic-payload\u001b\\/path knownSecrets:﻿secrets;",
-      "expected": "_0;synthetic-titlepassword=[Redacted]﻿prose^synthetic-payload\\/path knownSecrets:﻿[Redacted];"
+      "expected": "_0;synthetic-titlepassword=[Redacted]﻿prose^synthetic-payload\\/path knownSecrets:﻿secrets;"
     },
     {
       "name": "seeded 2303",
       "input": "(\u001b]0;synthetic-title\u001b\\eyJfakeHeader.fakePayload.fakeSignature31m' knownSecrets:secrets;",
-      "expected": "([Redacted]' knownSecrets:[Redacted];"
+      "expected": "([Redacted]' knownSecrets:secrets;"
     },
     {
       "name": "seeded 2304",
@@ -15817,12 +15817,12 @@
     {
       "name": "seeded 2320",
       "input": "\u001b_syntheticPayload\u0007ASIAFAKE000000000000\u001b_syntheticPayload\u001b\\/path knownSecrets: secrets;",
-      "expected": "_syntheticPayloadASIAFAKE000000000000_syntheticPayload\\/path knownSecrets: [Redacted];"
+      "expected": "_syntheticPayloadASIAFAKE000000000000_syntheticPayload\\/path knownSecrets: secrets;"
     },
     {
       "name": "seeded 2321",
       "input": "(\u001bPsynthetic-payload\u001b\\password=synthetic prose\u001b_synthetic-payload\u0007/path\nknownSecrets: secrets;",
-      "expected": "(synthetic-payload\\password=[Redacted] prose_synthetic-payload/path\nknownSecrets: [Redacted];"
+      "expected": "(synthetic-payload\\password=[Redacted] prose_synthetic-payload/path\nknownSecrets: secrets;"
     },
     {
       "name": "seeded 2322",
@@ -15927,7 +15927,7 @@
     {
       "name": "seeded 2342",
       "input": "(\u0007password=synthetic prose\u001bPsyntheticPayload\u0007 knownSecrets: secrets;",
-      "expected": "(password=[Redacted] prose knownSecrets: [Redacted];"
+      "expected": "(password=[Redacted] prose knownSecrets: secrets;"
     },
     {
       "name": "seeded 2343",
@@ -15997,12 +15997,12 @@
     {
       "name": "seeded 2356",
       "input": "before knownSecrets: secrets;\u001b]syntheticPayload\u001b\\; status=ready fixture@example.test",
-      "expected": "before knownSecrets: [Redacted];; status=ready [Redacted]"
+      "expected": "before knownSecrets: secrets;; status=ready [Redacted]"
     },
     {
       "name": "seeded 2357",
       "input": "_\u001b^synthetic-payload\u0007https://synthetic-user:synthetic-pass@gateway.example.test/path\u001b]syntheticPayload?next=ready knownSecrets: secrets;",
-      "expected": "_^synthetic-payloadhttps://[Redacted]@gateway.example.test/path?next=ready knownSecrets: [Redacted];"
+      "expected": "_^synthetic-payloadhttps://[Redacted]@gateway.example.test/path?next=ready knownSecrets: secrets;"
     },
     {
       "name": "seeded 2358",
@@ -16072,7 +16072,7 @@
     {
       "name": "seeded 2371",
       "input": "\u001bPsyntheticPayload\u0007Bearer synthetic-bearer\u001bPsyntheticPayload\u001b\\ after knownSecrets: secrets;",
-      "expected": "Bearer [Redacted] after knownSecrets: [Redacted];"
+      "expected": "Bearer [Redacted] after knownSecrets: secrets;"
     },
     {
       "name": "seeded 2372",
@@ -16092,7 +16092,7 @@
     {
       "name": "seeded 2375",
       "input": "https://example.test/\u001bPsyntheticPayloadknownSecrets: secrets;\u001b_synthetic-payload\u0007 after﻿harmless 雪 😀 é ordinary.version.string",
-      "expected": "https://example.test/knownSecrets: [Redacted];_synthetic-payload after﻿harmless 雪 😀 é ordinary.version.string"
+      "expected": "https://example.test/knownSecrets: secrets;_synthetic-payload after﻿harmless 雪 😀 é ordinary.version.string"
     },
     {
       "name": "seeded 2376",
@@ -16192,12 +16192,12 @@
     {
       "name": "seeded 2395",
       "input": "[\u001b_syntheticPayload\u0007Bearer synthetic-bearer\u001b]0;synthetic-title?next=ready knownSecrets: secrets;",
-      "expected": "[_syntheticPayloadBearer synthetic-bearer?next=ready knownSecrets: [Redacted];"
+      "expected": "[_syntheticPayloadBearer synthetic-bearer?next=ready knownSecrets: secrets;"
     },
     {
       "name": "seeded 2396",
       "input": "\"\u001bPsyntheticPayload-eyJfakeHeader.fakePayload.fakeSignature\u001b^synthetic-payload?next=ready knownSecrets: secrets;",
-      "expected": "\"[Redacted]^synthetic-payload?next=ready knownSecrets: [Redacted];"
+      "expected": "\"[Redacted]^synthetic-payload?next=ready knownSecrets: secrets;"
     },
     {
       "name": "seeded 2397",
@@ -16232,7 +16232,7 @@
     {
       "name": "seeded 2403",
       "input": "\"\u001b[0mtoken= \"synthetic \\\"quoted\\\" 雪😀\"\u001b_syntheticPayload\u001b\\\" knownSecrets: secrets;",
-      "expected": "\"token= \"[Redacted]\"_syntheticPayload\\\" knownSecrets: [Redacted];"
+      "expected": "\"token= \"[Redacted]\"_syntheticPayload\\\" knownSecrets: secrets;"
     },
     {
       "name": "seeded 2404",
@@ -16252,7 +16252,7 @@
     {
       "name": "seeded 2407",
       "input": "[\u001b^synthetic-payload\u0007apiKey=雪😀harmless\u001b_synthetic-payload\u0007) knownSecrets:secrets;",
-      "expected": "[^synthetic-payloadapiKey=[Redacted] knownSecrets:[Redacted];"
+      "expected": "[^synthetic-payloadapiKey=[Redacted] knownSecrets:secrets;"
     },
     {
       "name": "seeded 2408",
@@ -16282,7 +16282,7 @@
     {
       "name": "seeded 2413",
       "input": "(\u001bPunterminatedsecret= {\"nested\":[\"synthetic\",\"雪😀\"]}\u001b^synthetic-payload\u0007/path knownSecrets: secrets;",
-      "expected": "(unterminatedsecret= [Redacted]^synthetic-payload/path knownSecrets: [Redacted];"
+      "expected": "(unterminatedsecret= [Redacted]^synthetic-payload/path knownSecrets: secrets;"
     },
     {
       "name": "seeded 2414",
@@ -16367,7 +16367,7 @@
     {
       "name": "seeded 2430",
       "input": "31mknownSecrets: secrets;\u001b]unterminated\n -eyJfakeHeader.fakePayload.fakeSignature",
-      "expected": "knownSecrets: [Redacted];nterminated\n [Redacted]"
+      "expected": "knownSecrets: secrets;nterminated\n [Redacted]"
     },
     {
       "name": "seeded 2431",
@@ -16417,7 +16417,7 @@
     {
       "name": "seeded 2440",
       "input": "\"\u001b[31mknownSecrets: secrets;\u001b]0;synthetic-title\u0007; status=ready Bearer synthetic-bearer",
-      "expected": "\"knownSecrets: [Redacted];; status=ready Bearer [Redacted]"
+      "expected": "\"knownSecrets: secrets;; status=ready Bearer [Redacted]"
     },
     {
       "name": "seeded 2441",
@@ -16627,17 +16627,17 @@
     {
       "name": "seeded 2482",
       "input": "雪\u001b^synthetic-payload\u0007token=\n\"synthetic \\\"quoted\\\" 雪😀\"\u001b]0;synthetic-title\n\tknownSecrets:\nsecrets;",
-      "expected": "雪^synthetic-payloadtoken=\n\"[Redacted]\"\n\tknownSecrets:\n[Redacted];"
+      "expected": "雪^synthetic-payloadtoken=\n\"[Redacted]\"\n\tknownSecrets:\nsecrets;"
     },
     {
       "name": "seeded 2483",
       "input": "\"synthetic-payloadknownSecrets: secrets;\u001b]0;synthetic-title\u001b\\/path knownSecrets: secrets;",
-      "expected": "\"synthetic-payloadknownSecrets: [Redacted];/path knownSecrets: [Redacted];"
+      "expected": "\"synthetic-payloadknownSecrets: [Redacted];/path knownSecrets: secrets;"
     },
     {
       "name": "seeded 2484",
       "input": "雪\u001b_synthetic-payload\u001b\\knownSecrets: secrets;\u001b_synthetic-payload\" password = synthetic-assignment next",
-      "expected": "雪_synthetic-payload\\knownSecrets: [Redacted];_synthetic-payload\" password = [Redacted] next"
+      "expected": "雪_synthetic-payload\\knownSecrets: secrets;_synthetic-payload\" password = [Redacted] next"
     },
     {
       "name": "seeded 2485",
@@ -16737,7 +16737,7 @@
     {
       "name": "seeded 2504",
       "input": "-\u001b]syntheticPayload\u001b\\fixture@example.test\u001b_synthetic-payload\u001b\\/path knownSecrets:  secrets;",
-      "expected": "-fixture@example.test_synthetic-payload\\/path knownSecrets:  [Redacted];"
+      "expected": "-fixture@example.test_synthetic-payload\\/path knownSecrets:  secrets;"
     },
     {
       "name": "seeded 2505",
@@ -16912,17 +16912,17 @@
     {
       "name": "seeded 2539",
       "input": "(\u001b]syntheticPayload\u001b\\knownSecrets: secrets;\u001b]0;synthetic-title\u0007 -eyJfakeHeader.fakePayload.fakeSignature",
-      "expected": "(knownSecrets: [Redacted]; [Redacted]"
+      "expected": "(knownSecrets: secrets; [Redacted]"
     },
     {
       "name": "seeded 2540",
       "input": "\"\u001b]0;synthetic-titleknownSecrets: secrets;\u001b]0;synthetic-title'\teyJfakeHeader.fakePayload.fakeSignature",
-      "expected": "\"knownSecrets: [Redacted];'\t[Redacted]"
+      "expected": "\"knownSecrets: secrets;'\t[Redacted]"
     },
     {
       "name": "seeded 2541",
       "input": "-\u001b_syntheticPayload\u001b\\knownSecrets:\rsecrets;\u001bPsynthetic-payload)\tFakeAwsSynthetic123FakeAwsSynthetic123Fa",
-      "expected": "-_syntheticPayload\\knownSecrets:[Redacted];synthetic-payload)\t[Redacted]"
+      "expected": "-_syntheticPayload\\knownSecrets:secrets;synthetic-payload)\t[Redacted]"
     },
     {
       "name": "seeded 2542",
@@ -16962,12 +16962,12 @@
     {
       "name": "seeded 2549",
       "input": "雪\u001b[0mknownSecrets: secrets;\u001bPsyntheticPayload) token= \"synthetic \\\"quoted\\\" 雪😀\"",
-      "expected": "雪knownSecrets: [Redacted];) token= \"[Redacted]\""
+      "expected": "雪knownSecrets: secrets;) token= \"[Redacted]\""
     },
     {
       "name": "seeded 2550",
       "input": "-\u001b]0;synthetic-title\u0007Bearer synthetic-bearer\u001b]0;synthetic-title/path knownSecrets: secrets;",
-      "expected": "-Bearer [Redacted] knownSecrets: [Redacted];"
+      "expected": "-Bearer [Redacted] knownSecrets: secrets;"
     },
     {
       "name": "seeded 2551",
@@ -17007,7 +17007,7 @@
     {
       "name": "seeded 2558",
       "input": "雪\u0000ghp_FAKEsynthetic1234\u0007] knownSecrets: secrets;",
-      "expected": "雪[Redacted]] knownSecrets: [Redacted];"
+      "expected": "雪[Redacted]] knownSecrets: secrets;"
     },
     {
       "name": "seeded 2559",
@@ -17017,7 +17017,7 @@
     {
       "name": "seeded 2560",
       "input": "\u001b_synthetic-payload\u0007token=  \"synthetic \\\"quoted\\\" 雪😀\"\u001b[31m)\nknownSecrets:  secrets;",
-      "expected": "_synthetic-payloadtoken=  \"[Redacted]\")\nknownSecrets:  [Redacted];"
+      "expected": "_synthetic-payloadtoken=  \"[Redacted]\")\nknownSecrets:  secrets;"
     },
     {
       "name": "seeded 2561",
@@ -17312,7 +17312,7 @@
     {
       "name": "seeded 2619",
       "input": "[\u001bPsyntheticPayload\u001b\\eyJfakeHeader.fakePayload.fakeSignature0;synthetic-title/path knownSecrets: secrets;",
-      "expected": "[[Redacted];synthetic-title/path knownSecrets: [Redacted];"
+      "expected": "[[Redacted];synthetic-title/path knownSecrets: secrets;"
     },
     {
       "name": "seeded 2620",
@@ -17322,7 +17322,7 @@
     {
       "name": "seeded 2621",
       "input": "x\u001b[?25lghp_FAKEsynthetic1234\u001b[?25l after knownSecrets: secrets;",
-      "expected": "xghp_FAKEsynthetic1234 after knownSecrets: [Redacted];"
+      "expected": "xghp_FAKEsynthetic1234 after knownSecrets: secrets;"
     },
     {
       "name": "seeded 2622",
@@ -17332,7 +17332,7 @@
     {
       "name": "seeded 2623",
       "input": "-\u001b_syntheticPayload\u001b\\knownSecrets: secrets;\u001b_syntheticPayload after\ftoken= \"synthetic \\\"quoted\\\" 雪😀\"",
-      "expected": "-_syntheticPayload\\knownSecrets: [Redacted];_syntheticPayload aftertoken= \"[Redacted]\""
+      "expected": "-_syntheticPayload\\knownSecrets: secrets;_syntheticPayload aftertoken= \"[Redacted]\""
     },
     {
       "name": "seeded 2624",
@@ -17752,7 +17752,7 @@
     {
       "name": "seeded 2707",
       "input": "https://example.test/\u001bPsyntheticPayload\u001b\\password=synthetic prose\u0000\n knownSecrets: secrets;",
-      "expected": "https://example.test/password=[Redacted] prose\n knownSecrets: [Redacted];"
+      "expected": "https://example.test/password=[Redacted] prose\n knownSecrets: secrets;"
     },
     {
       "name": "seeded 2708",
@@ -17782,7 +17782,7 @@
     {
       "name": "seeded 2713",
       "input": "\"\u001b]syntheticPayload\u0007password = synthetic-assignment next\u001b^synthetic-payload)\nknownSecrets: secrets;",
-      "expected": "\"password = [Redacted] next^synthetic-payload)\nknownSecrets: [Redacted];"
+      "expected": "\"password = [Redacted] next^synthetic-payload)\nknownSecrets: secrets;"
     },
     {
       "name": "seeded 2714",
@@ -17862,7 +17862,7 @@
     {
       "name": "seeded 2729",
       "input": "[\u001b]0;synthetic-titleknownSecrets: secrets;\u001b^syntheticPayload\u001b\\?next=ready ghp_FAKEsynthetic1234",
-      "expected": "[knownSecrets: [Redacted];^syntheticPayload\\?next=ready [Redacted]"
+      "expected": "[knownSecrets: secrets;^syntheticPayload\\?next=ready [Redacted]"
     },
     {
       "name": "seeded 2730",
@@ -17872,7 +17872,7 @@
     {
       "name": "seeded 2731",
       "input": "\u001bPunterminatedhttps://synthetic-user:synthetic-pass@gateway.example.test/path\u001b[?25l after knownSecrets: secrets;",
-      "expected": "unterminatedhttps://[Redacted]@gateway.example.test/path after knownSecrets: [Redacted];"
+      "expected": "unterminatedhttps://[Redacted]@gateway.example.test/path after knownSecrets: secrets;"
     },
     {
       "name": "seeded 2732",
@@ -17977,7 +17977,7 @@
     {
       "name": "seeded 2752",
       "input": "(\u001b^synthetic-payload\u001b\\ghp_FAKEsynthetic1234\u001bPunterminated\"\rknownSecrets: secrets;",
-      "expected": "(^synthetic-payload\\[Redacted]\"knownSecrets: [Redacted];"
+      "expected": "(^synthetic-payload\\[Redacted]\"knownSecrets: secrets;"
     },
     {
       "name": "seeded 2753",
@@ -17992,7 +17992,7 @@
     {
       "name": "seeded 2755",
       "input": "(\u001b]0;synthetic-title\u001b\\ghp_FAKEsynthetic1234\u001b[31m\n\u000bknownSecrets:secrets;",
-      "expected": "([Redacted]\nknownSecrets:[Redacted];"
+      "expected": "([Redacted]\nknownSecrets:secrets;"
     },
     {
       "name": "seeded 2756",
@@ -18327,7 +18327,7 @@
     {
       "name": "seeded 2822",
       "input": "x\u0000ghp_FAKEsynthetic1234synthetic-payload' knownSecrets: secrets;",
-      "expected": "xghp_FAKEsynthetic1234synthetic-payload' knownSecrets: [Redacted];"
+      "expected": "xghp_FAKEsynthetic1234synthetic-payload' knownSecrets: secrets;"
     },
     {
       "name": "seeded 2823",
@@ -18622,7 +18622,7 @@
     {
       "name": "seeded 2881",
       "input": "https://example.test/\u001b[?25lknownSecrets: secrets;\u001b[0m) FakeAwsSynthetic123FakeAwsSynthetic123Fa",
-      "expected": "https://example.test/knownSecrets: [Redacted];) [Redacted]"
+      "expected": "https://example.test/knownSecrets: secrets;) [Redacted]"
     },
     {
       "name": "seeded 2882",
@@ -18722,7 +18722,7 @@
     {
       "name": "seeded 2901",
       "input": "-\u001bPsyntheticPayloadknownSecrets:﻿secrets;0;synthetic-title/path harmless 雪 😀 é ordinary.version.string",
-      "expected": "-knownSecrets:﻿[Redacted];0;synthetic-title/path harmless 雪 😀 é ordinary.version.string"
+      "expected": "-knownSecrets:﻿secrets;0;synthetic-title/path harmless 雪 😀 é ordinary.version.string"
     },
     {
       "name": "seeded 2902",
@@ -18807,7 +18807,7 @@
     {
       "name": "seeded 2918",
       "input": "(\u001b^syntheticPayload\u001b\\\"accessToken\"﻿:﻿\"synthetic-quoted\"\u001bPsyntheticPayload\u001b\\ knownSecrets:﻿secrets;",
-      "expected": "(^syntheticPayload\\\"accessToken\"﻿:﻿\"[Redacted]\" knownSecrets:﻿[Redacted];"
+      "expected": "(^syntheticPayload\\\"accessToken\"﻿:﻿\"[Redacted]\" knownSecrets:﻿secrets;"
     },
     {
       "name": "seeded 2919",
@@ -18832,7 +18832,7 @@
     {
       "name": "seeded 2923",
       "input": "_\u001b[31mknownSecrets:secrets; tokenId=fixture",
-      "expected": "_knownSecrets:[Redacted]; tokenId=fixture"
+      "expected": "_knownSecrets:secrets; tokenId=fixture"
     },
     {
       "name": "seeded 2924",
@@ -18922,7 +18922,7 @@
     {
       "name": "seeded 2941",
       "input": "before \u001b^synthetic-payload\u001b\\sk-FAKEsynthetic1234\u001b_syntheticPayload\u001b\\' knownSecrets: secrets;",
-      "expected": "before ^synthetic-payload\\[Redacted]\\' knownSecrets: [Redacted];"
+      "expected": "before ^synthetic-payload\\[Redacted]\\' knownSecrets: secrets;"
     },
     {
       "name": "seeded 2942",
@@ -19087,7 +19087,7 @@
     {
       "name": "seeded 2974",
       "input": "\"\u001b[?25lknownSecrets:　secrets;\u001b]0;synthetic-title\u0007\" -eyJfakeHeader.fakePayload.fakeSignature",
-      "expected": "\"knownSecrets:　[Redacted];\" [Redacted]"
+      "expected": "\"knownSecrets:　secrets;\" [Redacted]"
     },
     {
       "name": "seeded 2975",
@@ -19102,7 +19102,7 @@
     {
       "name": "seeded 2977",
       "input": "(\u001bPsyntheticPayload\u0007knownSecrets: secrets;\u001b^synthetic-payload\u001b\\ after\rhttps://synthetic-user:synthetic-pass@gateway.example.test/path",
-      "expected": "(knownSecrets: [Redacted];^synthetic-payload\\ afterhttps://[Redacted]@gateway.example.test/path"
+      "expected": "(knownSecrets: secrets;^synthetic-payload\\ afterhttps://[Redacted]@gateway.example.test/path"
     },
     {
       "name": "seeded 2978",
@@ -19157,7 +19157,7 @@
     {
       "name": "seeded 2988",
       "input": "'\u001b[0mapiKey = 雪😀 harmlesssynthetic-payload; status=ready knownSecrets: secrets;",
-      "expected": "'apiKey = [Redacted] harmlesssynthetic-payload; status=ready knownSecrets: [Redacted];"
+      "expected": "'apiKey = [Redacted] harmlesssynthetic-payload; status=ready knownSecrets: secrets;"
     },
     {
       "name": "seeded 2989",
@@ -19192,7 +19192,7 @@
     {
       "name": "seeded 2995",
       "input": "before \u001b[?25lknownSecrets:\tsecrets;\u001b]unterminated\" ghp_FAKEsynthetic1234",
-      "expected": "before knownSecrets:\t[Redacted];nterminated\" [Redacted]"
+      "expected": "before knownSecrets:\tsecrets;nterminated\" [Redacted]"
     },
     {
       "name": "seeded 2996",
@@ -19262,7 +19262,7 @@
     {
       "name": "seeded 3009",
       "input": "\u001b_syntheticPayload\u001b\\fixture@example.test\u001b]syntheticPayload\u001b\\\" knownSecrets: secrets;",
-      "expected": "_syntheticPayload\\[Redacted]\" knownSecrets: [Redacted];"
+      "expected": "_syntheticPayload\\[Redacted]\" knownSecrets: secrets;"
     },
     {
       "name": "seeded 3010",
@@ -19427,7 +19427,7 @@
     {
       "name": "seeded 3042",
       "input": "雪\u001b_syntheticPayload\u001b\\-eyJfakeHeader.fakePayload.fakeSignaturesynthetic-payload\n\u000bknownSecrets: secrets;",
-      "expected": "雪_syntheticPayload\\[Redacted]\nknownSecrets: [Redacted];"
+      "expected": "雪_syntheticPayload\\[Redacted]\nknownSecrets: secrets;"
     },
     {
       "name": "seeded 3043",
@@ -19567,7 +19567,7 @@
     {
       "name": "seeded 3070",
       "input": "before \u001b]syntheticPayload\u001b\\ghp_FAKEsynthetic1234\u0000'\tknownSecrets:　secrets;",
-      "expected": "before [Redacted]'\tknownSecrets:　[Redacted];"
+      "expected": "before [Redacted]'\tknownSecrets:　secrets;"
     },
     {
       "name": "seeded 3071",
@@ -19587,7 +19587,7 @@
     {
       "name": "seeded 3074",
       "input": "[\u001b[?25lknownSecrets: secrets;\u001b^synthetic-payload\" ASIAFAKE000000000000",
-      "expected": "[knownSecrets: [Redacted];^synthetic-payload\" [Redacted]"
+      "expected": "[knownSecrets: secrets;^synthetic-payload\" [Redacted]"
     },
     {
       "name": "seeded 3075",
@@ -19597,7 +19597,7 @@
     {
       "name": "seeded 3076",
       "input": "https://example.test/\u0000ASIAFAKE000000000000\u001b_syntheticPayload\u0007)\tknownSecrets: secrets;",
-      "expected": "https://example.test/ASIAFAKE000000000000_syntheticPayload)\tknownSecrets: [Redacted];"
+      "expected": "https://example.test/ASIAFAKE000000000000_syntheticPayload)\tknownSecrets: secrets;"
     },
     {
       "name": "seeded 3077",
@@ -19662,7 +19662,7 @@
     {
       "name": "seeded 3089",
       "input": "x\u001b_synthetic-payloadsecret= {\"nested\":[\"synthetic\",\"雪😀\"]}\u001bPsynthetic-payload\u001b\\' knownSecrets: secrets;",
-      "expected": "x_synthetic-payloadsecret= [Redacted]synthetic-payload\\' knownSecrets: [Redacted];"
+      "expected": "x_synthetic-payloadsecret= [Redacted]synthetic-payload\\' knownSecrets: secrets;"
     },
     {
       "name": "seeded 3090",
@@ -19677,7 +19677,7 @@
     {
       "name": "seeded 3092",
       "input": "\"\u001b]0;synthetic-title\u001b\\token=\u000b\"synthetic \\\"quoted\\\" 雪😀\"\u0000 knownSecrets:\u000bsecrets;",
-      "expected": "\"token=\"[Redacted]\" knownSecrets:[Redacted];"
+      "expected": "\"token=\"[Redacted]\" knownSecrets:secrets;"
     },
     {
       "name": "seeded 3093",
@@ -19692,12 +19692,12 @@
     {
       "name": "seeded 3095",
       "input": "-\u001bPsyntheticPayload\u001b\\knownSecrets:\u001csecrets;\u001b_syntheticPayload\u0007\n Bearer\u001csynthetic-bearer",
-      "expected": "-knownSecrets:[Redacted];_syntheticPayload\n Bearersynthetic-bearer"
+      "expected": "-knownSecrets:secrets;_syntheticPayload\n Bearersynthetic-bearer"
     },
     {
       "name": "seeded 3096",
       "input": "'\u001b]syntheticPayload\u0007password = synthetic-assignment next\u001b_syntheticPayload\u0007\n knownSecrets: secrets;",
-      "expected": "'password = [Redacted] next_syntheticPayload\n knownSecrets: [Redacted];"
+      "expected": "'password = [Redacted] next_syntheticPayload\n knownSecrets: secrets;"
     },
     {
       "name": "seeded 3097",
@@ -19807,7 +19807,7 @@
     {
       "name": "seeded 3118",
       "input": "https://example.test/\u001bPunterminatedsecret=\u001c{\"nested\":[\"synthetic\",\"雪😀\"]}\u001b]0;synthetic-title\u0007)\u000bknownSecrets:\u001csecrets;",
-      "expected": "https://example.test/unterminatedsecret=[Redacted])knownSecrets:[Redacted];"
+      "expected": "https://example.test/unterminatedsecret=[Redacted])knownSecrets:secrets;"
     },
     {
       "name": "seeded 3119",
@@ -19932,7 +19932,7 @@
     {
       "name": "seeded 3143",
       "input": "\"\u001bPsyntheticPayload\u001b\\knownSecrets: secrets;\u001b_syntheticPayload\u0007\"\rASIAFAKE000000000000",
-      "expected": "\"knownSecrets: [Redacted];_syntheticPayload\"[Redacted]"
+      "expected": "\"knownSecrets: secrets;_syntheticPayload\"[Redacted]"
     },
     {
       "name": "seeded 3144",
@@ -19967,7 +19967,7 @@
     {
       "name": "seeded 3150",
       "input": "-\u001b]0;synthetic-titleapiKey\u000b=\u000b雪😀\u000bharmless\u0007\" knownSecrets:\u000bsecrets;",
-      "expected": "-apiKey=[Redacted]\" knownSecrets:[Redacted];"
+      "expected": "-apiKey=[Redacted]\" knownSecrets:secrets;"
     },
     {
       "name": "seeded 3151",
@@ -19997,7 +19997,7 @@
     {
       "name": "seeded 3156",
       "input": "(\u001b_syntheticPayloadtoken= \"synthetic \\\"quoted\\\" 雪😀\"\u001b]unterminated?next=ready knownSecrets: secrets;",
-      "expected": "(_syntheticPayloadtoken= \"[Redacted]\"nterminated?next=ready knownSecrets: [Redacted];"
+      "expected": "(_syntheticPayloadtoken= \"[Redacted]\"nterminated?next=ready knownSecrets: secrets;"
     },
     {
       "name": "seeded 3157",
@@ -20027,7 +20027,7 @@
     {
       "name": "seeded 3162",
       "input": "\"0;synthetic-title\"accessToken\" : \"synthetic-quoted\"\u001b]syntheticPayload\u0007)\tknownSecrets: secrets;",
-      "expected": "\"0;synthetic-title\"accessToken\" : \"[Redacted]\")\tknownSecrets: [Redacted];"
+      "expected": "\"0;synthetic-title\"accessToken\" : \"[Redacted]\")\tknownSecrets: secrets;"
     },
     {
       "name": "seeded 3163",
@@ -20082,7 +20082,7 @@
     {
       "name": "seeded 3173",
       "input": "-\u001bPsynthetic-payload\u001b\\secret= {\"nested\":[\"synthetic\",\"雪😀\"]}\u001b_synthetic-payload\u0007 after knownSecrets: secrets;",
-      "expected": "-synthetic-payload\\secret= [Redacted]_synthetic-payload after knownSecrets: [Redacted];"
+      "expected": "-synthetic-payload\\secret= [Redacted]_synthetic-payload after knownSecrets: secrets;"
     },
     {
       "name": "seeded 3174",
@@ -20097,7 +20097,7 @@
     {
       "name": "seeded 3176",
       "input": "https://example.test/\u001b]syntheticPayload\u0007\"accessToken\"\u001c:\u001c\"synthetic-quoted\"\u0000﻿knownSecrets:\u001csecrets;",
-      "expected": "https://example.test/\"accessToken\":\"[Redacted]\"﻿knownSecrets:[Redacted];"
+      "expected": "https://example.test/\"accessToken\":\"[Redacted]\"﻿knownSecrets:secrets;"
     },
     {
       "name": "seeded 3177",
@@ -20162,7 +20162,7 @@
     {
       "name": "seeded 3189",
       "input": "before \u001bPsynthetic-payload\u001b\\apiKey\t=\t雪😀\tharmless\u001b]syntheticPayload\u001b\\\" knownSecrets:\tsecrets;",
-      "expected": "before synthetic-payload\\apiKey\t=\t[Redacted]\tharmless\" knownSecrets:\t[Redacted];"
+      "expected": "before synthetic-payload\\apiKey\t=\t[Redacted]\tharmless\" knownSecrets:\tsecrets;"
     },
     {
       "name": "seeded 3190",
@@ -20232,7 +20232,7 @@
     {
       "name": "seeded 3203",
       "input": "-\u001b]unterminatedpassword=synthetic prose\u001b[0m)\fknownSecrets: secrets;",
-      "expected": "-nterminatedpassword=[Redacted] prose)knownSecrets: [Redacted];"
+      "expected": "-nterminatedpassword=[Redacted] prose)knownSecrets: secrets;"
     },
     {
       "name": "seeded 3204",
@@ -20277,7 +20277,7 @@
     {
       "name": "seeded 3212",
       "input": "\u001b]0;synthetic-title\u0007knownSecrets: secrets;\u0007 tokenId = fixture",
-      "expected": "knownSecrets: [Redacted]; tokenId = fixture"
+      "expected": "knownSecrets: secrets; tokenId = fixture"
     },
     {
       "name": "seeded 3213",
@@ -20322,7 +20322,7 @@
     {
       "name": "seeded 3221",
       "input": "雪\u001b[31msk-FAKEsynthetic1234\u001bPunterminated/path　knownSecrets: secrets;",
-      "expected": "雪[Redacted]/path　knownSecrets: [Redacted];"
+      "expected": "雪[Redacted]/path　knownSecrets: secrets;"
     },
     {
       "name": "seeded 3222",
@@ -20412,7 +20412,7 @@
     {
       "name": "seeded 3239",
       "input": "(\u001bPsyntheticPayloadBearer synthetic-bearer\u001b^synthetic-payload\n knownSecrets: secrets;",
-      "expected": "(Bearer [Redacted]\n knownSecrets: [Redacted];"
+      "expected": "(Bearer [Redacted]\n knownSecrets: secrets;"
     },
     {
       "name": "seeded 3240",
@@ -20502,7 +20502,7 @@
     {
       "name": "seeded 3257",
       "input": "before \u001b[31mknownSecrets:﻿secrets;0;synthetic-title\n Authorization:﻿Bearer﻿synthetic-bearer",
-      "expected": "before knownSecrets:﻿[Redacted];0;synthetic-title\n Authorization:﻿[Redacted]﻿synthetic-bearer"
+      "expected": "before knownSecrets:﻿secrets;0;synthetic-title\n Authorization:﻿[Redacted]﻿synthetic-bearer"
     },
     {
       "name": "seeded 3258",
@@ -20517,7 +20517,7 @@
     {
       "name": "seeded 3260",
       "input": "before \u0000token=\n\"synthetic \\\"quoted\\\" 雪😀\"\u001b]0;synthetic-title\u001b\\' knownSecrets:\nsecrets;",
-      "expected": "before token=\n\"[Redacted]\"' knownSecrets:\n[Redacted];"
+      "expected": "before token=\n\"[Redacted]\"' knownSecrets:\nsecrets;"
     },
     {
       "name": "seeded 3261",
@@ -20532,7 +20532,7 @@
     {
       "name": "seeded 3263",
       "input": "_\u0000tokenId = fixture31m/path\nknownSecrets: secrets;",
-      "expected": "_tokenId = fixture/path\nknownSecrets: [Redacted];"
+      "expected": "_tokenId = fixture/path\nknownSecrets: secrets;"
     },
     {
       "name": "seeded 3264",
@@ -20547,7 +20547,7 @@
     {
       "name": "seeded 3266",
       "input": "-\u001b]syntheticPayload\u0007knownSecrets: secrets;\u001b^synthetic-payload after sk-FAKEsynthetic1234",
-      "expected": "-knownSecrets: [Redacted];^synthetic-payload after [Redacted]"
+      "expected": "-knownSecrets: secrets;^synthetic-payload after [Redacted]"
     },
     {
       "name": "seeded 3267",
@@ -20607,7 +20607,7 @@
     {
       "name": "seeded 3278",
       "input": "'apiKey\r=\r雪😀\rharmless\u001b]unterminated; status=ready\nknownSecrets:\rsecrets;",
-      "expected": "'apiKey=[Redacted]; status=ready\nknownSecrets:[Redacted];"
+      "expected": "'apiKey=[Redacted]; status=ready\nknownSecrets:secrets;"
     },
     {
       "name": "seeded 3279",
@@ -20662,7 +20662,7 @@
     {
       "name": "seeded 3289",
       "input": "'\u001b]0;synthetic-title\u0007token= \"synthetic \\\"quoted\\\" 雪😀\"\u0007\" knownSecrets: secrets;",
-      "expected": "'token= \"[Redacted]\"\" knownSecrets: [Redacted];"
+      "expected": "'token= \"[Redacted]\"\" knownSecrets: secrets;"
     },
     {
       "name": "seeded 3290",
@@ -20827,7 +20827,7 @@
     {
       "name": "seeded 3322",
       "input": "_0;synthetic-titleharmless 雪 😀 é ordinary.version.string\u001bPsynthetic-payload\u0007 knownSecrets:　secrets;",
-      "expected": "_0;synthetic-titleharmless 雪 😀 é ordinary.version.stringsynthetic-payload knownSecrets:　[Redacted];"
+      "expected": "_0;synthetic-titleharmless 雪 😀 é ordinary.version.stringsynthetic-payload knownSecrets:　secrets;"
     },
     {
       "name": "seeded 3323",
@@ -20937,7 +20937,7 @@
     {
       "name": "seeded 3344",
       "input": "password=synthetic-assignmentnext\u001b[?25l after knownSecrets:secrets;",
-      "expected": "password=[Redacted] knownSecrets:[Redacted];"
+      "expected": "password=[Redacted] knownSecrets:secrets;"
     },
     {
       "name": "seeded 3345",
@@ -20982,7 +20982,7 @@
     {
       "name": "seeded 3353",
       "input": "雪\u0007knownSecrets: secrets;\u001b^syntheticPayload\u0007) Authorization: Bearer synthetic-bearer",
-      "expected": "雪knownSecrets: [Redacted];^syntheticPayload) Authorization: [Redacted] synthetic-bearer"
+      "expected": "雪knownSecrets: secrets;^syntheticPayload) Authorization: [Redacted] synthetic-bearer"
     },
     {
       "name": "seeded 3354",
@@ -21112,7 +21112,7 @@
     {
       "name": "seeded 3379",
       "input": "\"\u001bPsyntheticPayload\u0007eyJfakeHeader.fakePayload.fakeSignaturesynthetic-payload; status=ready knownSecrets:\u001csecrets;",
-      "expected": "\"[Redacted]; status=ready knownSecrets:[Redacted];"
+      "expected": "\"[Redacted]; status=ready knownSecrets:secrets;"
     },
     {
       "name": "seeded 3380",
@@ -21227,7 +21227,7 @@
     {
       "name": "seeded 3402",
       "input": "'\u001bPsyntheticPayload\u001b\\knownSecrets: secrets;\u001b_synthetic-payload\u001b\\) Bearer synthetic-bearer",
-      "expected": "'knownSecrets: [Redacted];_synthetic-payload\\) Bearer [Redacted]"
+      "expected": "'knownSecrets: secrets;_synthetic-payload\\) Bearer [Redacted]"
     },
     {
       "name": "seeded 3403",
@@ -21287,7 +21287,7 @@
     {
       "name": "seeded 3414",
       "input": "[synthetic-payloadtokenId = fixture\u001b]syntheticPayload﻿knownSecrets: secrets;",
-      "expected": "[synthetic-payloadtokenId = fixture﻿knownSecrets: [Redacted];"
+      "expected": "[synthetic-payloadtokenId = fixture﻿knownSecrets: secrets;"
     },
     {
       "name": "seeded 3415",
@@ -21362,7 +21362,7 @@
     {
       "name": "seeded 3429",
       "input": "'\u001b]syntheticPayload\u0007knownSecrets: secrets;\u001bPsynthetic-payload\u0007] FakeAwsSynthetic123FakeAwsSynthetic123Fa",
-      "expected": "'knownSecrets: [Redacted];synthetic-payload] [Redacted]"
+      "expected": "'knownSecrets: secrets;synthetic-payload] [Redacted]"
     },
     {
       "name": "seeded 3430",
@@ -21437,7 +21437,7 @@
     {
       "name": "seeded 3444",
       "input": "-\u001b^syntheticPayload\u001b\\password = synthetic-assignment next\u001b_syntheticPayload?next=ready knownSecrets: secrets;",
-      "expected": "-^syntheticPayload\\password = [Redacted] next_syntheticPayload?next=ready knownSecrets: [Redacted];"
+      "expected": "-^syntheticPayload\\password = [Redacted] next_syntheticPayload?next=ready knownSecrets: secrets;"
     },
     {
       "name": "seeded 3445",
@@ -21482,7 +21482,7 @@
     {
       "name": "seeded 3453",
       "input": "\u001b[?25lhttps://synthetic-user:synthetic-pass@gateway.example.test/path\u001bPsynthetic-payload\u0007) knownSecrets:\fsecrets;",
-      "expected": "https://[Redacted]@gateway.example.test/pathsynthetic-payload) knownSecrets:[Redacted];"
+      "expected": "https://[Redacted]@gateway.example.test/pathsynthetic-payload) knownSecrets:secrets;"
     },
     {
       "name": "seeded 3454",
@@ -21612,7 +21612,7 @@
     {
       "name": "seeded 3479",
       "input": "before prefix-eyJfakeHeader.fakePayload.fakeSignaturesynthetic-payload] knownSecrets: secrets;",
-      "expected": "before [Redacted]] knownSecrets: [Redacted];"
+      "expected": "before [Redacted]] knownSecrets: secrets;"
     },
     {
       "name": "seeded 3480",
@@ -21677,7 +21677,7 @@
     {
       "name": "seeded 3492",
       "input": "(\u001b^synthetic-payload\u001b\\knownSecrets: secrets;\u001b]0;synthetic-title\u001b\\] sk-FAKEsynthetic1234",
-      "expected": "(^synthetic-payload\\knownSecrets: [Redacted];] [Redacted]"
+      "expected": "(^synthetic-payload\\knownSecrets: secrets;] [Redacted]"
     },
     {
       "name": "seeded 3493",
@@ -21867,7 +21867,7 @@
     {
       "name": "seeded 3530",
       "input": "\"\u001b_syntheticPayload\u0007ghp_FAKEsynthetic1234\u001b_synthetic-payload\u0007' knownSecrets: secrets;",
-      "expected": "\"_syntheticPayloadghp_FAKEsynthetic1234_synthetic-payload' knownSecrets: [Redacted];"
+      "expected": "\"_syntheticPayloadghp_FAKEsynthetic1234_synthetic-payload' knownSecrets: secrets;"
     },
     {
       "name": "seeded 3531",
@@ -21947,7 +21947,7 @@
     {
       "name": "seeded 3546",
       "input": "\u001b_synthetic-payloadharmless 雪 😀 é ordinary.version.string\u001b]unterminated)　knownSecrets: secrets;",
-      "expected": "_synthetic-payloadharmless 雪 😀 é ordinary.version.stringnterminated)　knownSecrets: [Redacted];"
+      "expected": "_synthetic-payloadharmless 雪 😀 é ordinary.version.stringnterminated)　knownSecrets: secrets;"
     },
     {
       "name": "seeded 3547",
@@ -22097,7 +22097,7 @@
     {
       "name": "seeded 3576",
       "input": "雪\u001b_synthetic-payload\u001b\\password = synthetic-assignment next\u001bPsyntheticPayload\u001b\\﻿knownSecrets: secrets;",
-      "expected": "雪_synthetic-payload\\password = [Redacted]﻿knownSecrets: [Redacted];"
+      "expected": "雪_synthetic-payload\\password = [Redacted]﻿knownSecrets: secrets;"
     },
     {
       "name": "seeded 3577",
@@ -22112,7 +22112,7 @@
     {
       "name": "seeded 3579",
       "input": "\"\u001b_synthetic-payload\u001b\\FakeAwsSynthetic123FakeAwsSynthetic123Fa0;synthetic-title/path knownSecrets:  secrets;",
-      "expected": "\"_synthetic-payload\\FakeAwsSynthetic123FakeAwsSynthetic123Fa0;synthetic-title/path knownSecrets:  [Redacted];"
+      "expected": "\"_synthetic-payload\\FakeAwsSynthetic123FakeAwsSynthetic123Fa0;synthetic-title/path knownSecrets:  secrets;"
     },
     {
       "name": "seeded 3580",
@@ -22182,12 +22182,12 @@
     {
       "name": "seeded 3593",
       "input": "before \u001b[0mknownSecrets:\u000bsecrets;\u001b^syntheticPayload\u0007\" fixture@example.test",
-      "expected": "before knownSecrets:[Redacted];^syntheticPayload\" [Redacted]"
+      "expected": "before knownSecrets:secrets;^syntheticPayload\" [Redacted]"
     },
     {
       "name": "seeded 3594",
       "input": "_\u001bPsynthetic-payload\u0007-eyJfakeHeader.fakePayload.fakeSignature\u0007' knownSecrets: secrets;",
-      "expected": "[Redacted]' knownSecrets: [Redacted];"
+      "expected": "[Redacted]' knownSecrets: secrets;"
     },
     {
       "name": "seeded 3595",
@@ -22317,7 +22317,7 @@
     {
       "name": "seeded 3620",
       "input": "https://example.test/\u001b]syntheticPayload\u0007knownSecrets: secrets;\u001b]syntheticPayload\u001b\\' https://synthetic-user:synthetic-pass@gateway.example.test/path",
-      "expected": "https://example.test/knownSecrets: [Redacted];' https://[Redacted]@gateway.example.test/path"
+      "expected": "https://example.test/knownSecrets: secrets;' https://[Redacted]@gateway.example.test/path"
     },
     {
       "name": "seeded 3621",
@@ -22507,7 +22507,7 @@
     {
       "name": "seeded 3658",
       "input": "雪\u001b[?25lknownSecrets:﻿secrets;\u001bPsynthetic-payload\u0007]\u000b-eyJfakeHeader.fakePayload.fakeSignature",
-      "expected": "雪knownSecrets:﻿[Redacted];synthetic-payload][Redacted]"
+      "expected": "雪knownSecrets:﻿secrets;synthetic-payload][Redacted]"
     },
     {
       "name": "seeded 3659",
@@ -22527,7 +22527,7 @@
     {
       "name": "seeded 3662",
       "input": "'\u0000knownSecrets: secrets;\u001b^synthetic-payload\n fixture@example.test",
-      "expected": "'knownSecrets: [Redacted];^synthetic-payload\n [Redacted]"
+      "expected": "'knownSecrets: secrets;^synthetic-payload\n [Redacted]"
     },
     {
       "name": "seeded 3663",
@@ -22932,7 +22932,7 @@
     {
       "name": "seeded 3743",
       "input": "\u001b^synthetic-payload\u0007harmless 雪 😀 é ordinary.version.string\u0000 after knownSecrets: secrets;",
-      "expected": "^synthetic-payloadharmless 雪 😀 é ordinary.version.string after knownSecrets: [Redacted];"
+      "expected": "^synthetic-payloadharmless 雪 😀 é ordinary.version.string after knownSecrets: secrets;"
     },
     {
       "name": "seeded 3744",
@@ -23067,12 +23067,12 @@
     {
       "name": "seeded 3770",
       "input": "before \u001b]syntheticPayload\u001b\\eyJfakeHeader.fakePayload.fakeSignature\u001b^syntheticPayload\u001b\\) knownSecrets:\tsecrets;",
-      "expected": "before [Redacted]^syntheticPayload\\) knownSecrets:\t[Redacted];"
+      "expected": "before [Redacted]^syntheticPayload\\) knownSecrets:\tsecrets;"
     },
     {
       "name": "seeded 3771",
       "input": "_\u0000knownSecrets: secrets;\u001bPsynthetic-payload\u001b\\) Bearer synthetic-bearer",
-      "expected": "_knownSecrets: [Redacted];synthetic-payload\\) Bearer [Redacted]"
+      "expected": "_knownSecrets: secrets;synthetic-payload\\) Bearer [Redacted]"
     },
     {
       "name": "seeded 3772",
@@ -23142,7 +23142,7 @@
     {
       "name": "seeded 3785",
       "input": "\u001b_synthetic-payloadAuthorization: Bearer synthetic-bearer; status=ready knownSecrets: secrets;",
-      "expected": "_synthetic-payloadAuthorization: [Redacted]; status=ready knownSecrets: [Redacted];"
+      "expected": "_synthetic-payloadAuthorization: [Redacted]; status=ready knownSecrets: secrets;"
     },
     {
       "name": "seeded 3786",
@@ -23172,7 +23172,7 @@
     {
       "name": "seeded 3791",
       "input": "雪\u001b[0mhttps://synthetic-user:synthetic-pass@gateway.example.test/path\" knownSecrets:\fsecrets;",
-      "expected": "雪https://[Redacted]@gateway.example.test/path\" knownSecrets:[Redacted];"
+      "expected": "雪https://[Redacted]@gateway.example.test/path\" knownSecrets:secrets;"
     },
     {
       "name": "seeded 3792",
@@ -23307,7 +23307,7 @@
     {
       "name": "seeded 3818",
       "input": "https://example.test/\u001b^syntheticPayload\u001b\\password﻿=﻿synthetic-assignment﻿next\u001bPsyntheticPayload\u0007; status=ready knownSecrets:﻿secrets;",
-      "expected": "https://example.test/^syntheticPayload\\password﻿=﻿[Redacted]﻿next; status=ready knownSecrets:﻿[Redacted];"
+      "expected": "https://example.test/^syntheticPayload\\password﻿=﻿[Redacted]﻿next; status=ready knownSecrets:﻿secrets;"
     },
     {
       "name": "seeded 3819",
@@ -23337,7 +23337,7 @@
     {
       "name": "seeded 3824",
       "input": "before synthetic-payloadknownSecrets:﻿secrets;\u001bPunterminated/path knownSecrets:﻿secrets;",
-      "expected": "before synthetic-payloadknownSecrets:﻿[Redacted];unterminated/path knownSecrets:﻿[Redacted];"
+      "expected": "before synthetic-payloadknownSecrets:﻿[Redacted];unterminated/path knownSecrets:﻿secrets;"
     },
     {
       "name": "seeded 3825",
@@ -23352,7 +23352,7 @@
     {
       "name": "seeded 3827",
       "input": "\"\u0007knownSecrets: secrets;\u001b_syntheticPayload\u0007' token= \"synthetic \\\"quoted\\\" 雪😀\"",
-      "expected": "\"knownSecrets: [Redacted];_syntheticPayload' token= \"[Redacted]\""
+      "expected": "\"knownSecrets: secrets;_syntheticPayload' token= \"[Redacted]\""
     },
     {
       "name": "seeded 3828",
@@ -23692,7 +23692,7 @@
     {
       "name": "seeded 3895",
       "input": "\"\u001b^syntheticPayload\u001b\\knownSecrets: secrets;\u001b]0;synthetic-title\u0007　https://synthetic-user:synthetic-pass@gateway.example.test/path",
-      "expected": "\"^syntheticPayload\\knownSecrets: [Redacted];　https://[Redacted]@gateway.example.test/path"
+      "expected": "\"^syntheticPayload\\knownSecrets: secrets;　https://[Redacted]@gateway.example.test/path"
     },
     {
       "name": "seeded 3896",
@@ -23717,7 +23717,7 @@
     {
       "name": "seeded 3900",
       "input": "x0;synthetic-titleknownSecrets: secrets;\u001b[?25l\n﻿knownSecrets: secrets;",
-      "expected": "x0;synthetic-titleknownSecrets: [Redacted];\n﻿knownSecrets: [Redacted];"
+      "expected": "x0;synthetic-titleknownSecrets: [Redacted];\n﻿knownSecrets: secrets;"
     },
     {
       "name": "seeded 3901",
@@ -23757,7 +23757,7 @@
     {
       "name": "seeded 3908",
       "input": "[\u001b_synthetic-payloadapiKey = 雪😀 harmless\u001b^syntheticPayload\u0007\" knownSecrets: secrets;",
-      "expected": "[_synthetic-payloadapiKey = [Redacted] harmless^syntheticPayload\" knownSecrets: [Redacted];"
+      "expected": "[_synthetic-payloadapiKey = [Redacted] harmless^syntheticPayload\" knownSecrets: secrets;"
     },
     {
       "name": "seeded 3909",
@@ -23922,7 +23922,7 @@
     {
       "name": "seeded 3941",
       "input": "-\u0007token=﻿\"synthetic \\\"quoted\\\" 雪😀\"\u001b_synthetic-payload\u0007 after knownSecrets:﻿secrets;",
-      "expected": "-token=﻿\"[Redacted]\"_synthetic-payload after knownSecrets:﻿[Redacted];"
+      "expected": "-token=﻿\"[Redacted]\"_synthetic-payload after knownSecrets:﻿secrets;"
     },
     {
       "name": "seeded 3942",
@@ -23957,7 +23957,7 @@
     {
       "name": "seeded 3948",
       "input": "https://example.test/\u001bPsyntheticPayloadknownSecrets: secrets;\u001bPunterminated\n　Bearer synthetic-bearer",
-      "expected": "https://example.test/knownSecrets: [Redacted];unterminated\n　Bearer [Redacted]"
+      "expected": "https://example.test/knownSecrets: secrets;unterminated\n　Bearer [Redacted]"
     },
     {
       "name": "seeded 3949",
@@ -23967,7 +23967,7 @@
     {
       "name": "seeded 3950",
       "input": "\"\u001b]syntheticPayload\u0007knownSecrets: secrets;\u001b_syntheticPayload; status=ready eyJfakeHeader.fakePayload.fakeSignature",
-      "expected": "\"knownSecrets: [Redacted];_syntheticPayload; status=ready [Redacted]"
+      "expected": "\"knownSecrets: secrets;_syntheticPayload; status=ready [Redacted]"
     },
     {
       "name": "seeded 3951",
@@ -23997,7 +23997,7 @@
     {
       "name": "seeded 3956",
       "input": "_\u001b[0m-eyJfakeHeader.fakePayload.fakeSignature\u001bPsyntheticPayload\u0007) knownSecrets: secrets;",
-      "expected": "[Redacted]) knownSecrets: [Redacted];"
+      "expected": "[Redacted]) knownSecrets: secrets;"
     },
     {
       "name": "seeded 3957",
@@ -24057,12 +24057,12 @@
     {
       "name": "seeded 3968",
       "input": "_\u001b^syntheticPayload\"accessToken\"\f:\f\"synthetic-quoted\"\u001b_syntheticPayload\u0007] knownSecrets:\fsecrets;",
-      "expected": "_^syntheticPayload\"accessToken\":\"[Redacted]\"_syntheticPayload] knownSecrets:[Redacted];"
+      "expected": "_^syntheticPayload\"accessToken\":\"[Redacted]\"_syntheticPayload] knownSecrets:secrets;"
     },
     {
       "name": "seeded 3969",
       "input": "'\u001b^synthetic-payload\u001b\\knownSecrets:\rsecrets;\u001b_synthetic-payload\" eyJfakeHeader.fakePayload.fakeSignature",
-      "expected": "'^synthetic-payload\\knownSecrets:[Redacted];_synthetic-payload\" [Redacted]"
+      "expected": "'^synthetic-payload\\knownSecrets:secrets;_synthetic-payload\" [Redacted]"
     },
     {
       "name": "seeded 3970",
@@ -24102,7 +24102,7 @@
     {
       "name": "seeded 3977",
       "input": "[\u001b]syntheticPayloadknownSecrets: secrets;\u001b_synthetic-payload\u0007) fixture@example.test",
-      "expected": "[knownSecrets: [Redacted];_synthetic-payload) [Redacted]"
+      "expected": "[knownSecrets: secrets;_synthetic-payload) [Redacted]"
     },
     {
       "name": "seeded 3978",
@@ -24182,7 +24182,7 @@
     {
       "name": "seeded 3993",
       "input": "-\u001b[?25lknownSecrets: secrets;\u001b]unterminated -eyJfakeHeader.fakePayload.fakeSignature",
-      "expected": "-knownSecrets: [Redacted];nterminated [Redacted]"
+      "expected": "-knownSecrets: secrets;nterminated [Redacted]"
     },
     {
       "name": "seeded 3994",
@@ -24252,7 +24252,7 @@
     {
       "name": "seeded 4007",
       "input": "雪\u001bPsyntheticPayload\u0007knownSecrets: secrets;\u001b]0;synthetic-title\u0007; status=ready secret= {\"nested\":[\"synthetic\",\"雪😀\"]}",
-      "expected": "雪knownSecrets: [Redacted];; status=ready secret= [Redacted]"
+      "expected": "雪knownSecrets: secrets;; status=ready secret= [Redacted]"
     },
     {
       "name": "seeded 4008",
@@ -24277,7 +24277,7 @@
     {
       "name": "seeded 4012",
       "input": "[\u001b_syntheticPayloadAuthorization:　Bearer　synthetic-bearer\u001b_synthetic-payload\u0007'\fknownSecrets:　secrets;",
-      "expected": "[_syntheticPayloadAuthorization:　[Redacted]　synthetic-bearer_synthetic-payload'knownSecrets:　[Redacted];"
+      "expected": "[_syntheticPayloadAuthorization:　[Redacted]　synthetic-bearer_synthetic-payload'knownSecrets:　secrets;"
     },
     {
       "name": "seeded 4013",
@@ -24317,12 +24317,12 @@
     {
       "name": "seeded 4020",
       "input": "[\u001b]0;synthetic-title\u001b\\knownSecrets:secrets;\u001b_syntheticPayload] fixture@example.test",
-      "expected": "[knownSecrets:[Redacted];_syntheticPayload] [Redacted]"
+      "expected": "[knownSecrets:secrets;_syntheticPayload] [Redacted]"
     },
     {
       "name": "seeded 4021",
       "input": "\u001b]0;synthetic-titleknownSecrets: secrets;\u001b^synthetic-payload\u001b\\; status=ready harmless 雪 😀 é ordinary.version.string",
-      "expected": "knownSecrets: [Redacted];^synthetic-payload\\; status=ready harmless 雪 😀 é ordinary.version.string"
+      "expected": "knownSecrets: secrets;^synthetic-payload\\; status=ready harmless 雪 😀 é ordinary.version.string"
     },
     {
       "name": "seeded 4022",
@@ -24507,7 +24507,7 @@
     {
       "name": "seeded 4058",
       "input": "_0;synthetic-titleFakeAwsSynthetic123FakeAwsSynthetic123Fa\u001b^synthetic-payload\u001b\\\" knownSecrets: secrets;",
-      "expected": "_0;synthetic-titleFakeAwsSynthetic123FakeAwsSynthetic123Fa^synthetic-payload\\\" knownSecrets: [Redacted];"
+      "expected": "_0;synthetic-titleFakeAwsSynthetic123FakeAwsSynthetic123Fa^synthetic-payload\\\" knownSecrets: secrets;"
     },
     {
       "name": "seeded 4059",
@@ -24532,7 +24532,7 @@
     {
       "name": "seeded 4063",
       "input": "\"\u001b_syntheticPayload\u001b\\FakeAwsSynthetic123FakeAwsSynthetic123Fa\u001bPsynthetic-payload\u0007) knownSecrets:　secrets;",
-      "expected": "\"_syntheticPayload\\FakeAwsSynthetic123FakeAwsSynthetic123Fasynthetic-payload) knownSecrets:　[Redacted];"
+      "expected": "\"_syntheticPayload\\FakeAwsSynthetic123FakeAwsSynthetic123Fasynthetic-payload) knownSecrets:　secrets;"
     },
     {
       "name": "seeded 4064",
@@ -24567,7 +24567,7 @@
     {
       "name": "seeded 4070",
       "input": "(\u001bPunterminatedsecret= {\"nested\":[\"synthetic\",\"雪😀\"]}\u001bPsynthetic-payload\u001b\\\" knownSecrets: secrets;",
-      "expected": "(unterminatedsecret= [Redacted]synthetic-payload\\\" knownSecrets: [Redacted];"
+      "expected": "(unterminatedsecret= [Redacted]synthetic-payload\\\" knownSecrets: secrets;"
     },
     {
       "name": "seeded 4071",
@@ -24602,12 +24602,12 @@
     {
       "name": "seeded 4077",
       "input": "x\u001b[?25lfixture@example.test\u001b_synthetic-payload\u001b\\] knownSecrets:secrets;",
-      "expected": "xfixture@example.test_synthetic-payload\\] knownSecrets:[Redacted];"
+      "expected": "xfixture@example.test_synthetic-payload\\] knownSecrets:secrets;"
     },
     {
       "name": "seeded 4078",
       "input": "雪\u001b_syntheticPayload\u001b\\knownSecrets: secrets;\u001b]syntheticPayload\u001b\\' \"accessToken\" : \"synthetic-quoted\"",
-      "expected": "雪_syntheticPayload\\knownSecrets: [Redacted];' \"accessToken\" : \"[Redacted]\""
+      "expected": "雪_syntheticPayload\\knownSecrets: secrets;' \"accessToken\" : \"[Redacted]\""
     },
     {
       "name": "seeded 4079",
@@ -24682,7 +24682,7 @@
     {
       "name": "seeded 4093",
       "input": "-\u001b^syntheticPayloadBearer synthetic-bearer\u001bPunterminated\"\tknownSecrets: secrets;",
-      "expected": "-^syntheticPayloadBearer synthetic-bearerunterminated\"\tknownSecrets: [Redacted];"
+      "expected": "-^syntheticPayloadBearer synthetic-bearerunterminated\"\tknownSecrets: secrets;"
     },
     {
       "name": "seeded 4094",
@@ -24693,6 +24693,16 @@
       "name": "seeded 4095",
       "input": "\u001b]unterminatedtoken=\u000b\"synthetic \\\"quoted\\\" 雪😀\"synthetic-payload/path tokenId\u000b=\u000bfixture",
       "expected": "nterminatedtoken=\"[Redacted]\"synthetic-payload/path tokenId=fixture"
+    },
+    {
+      "name": "PEM containing U+0085 closed",
+      "input": "before\n-----BEGIN PRIVATE KEY-----\nsynthetic-private-nelmaterial\n-----END PRIVATE KEY-----\nafter",
+      "expected": "before\n[Redacted]\nafter"
+    },
+    {
+      "name": "PEM containing U+0085 unterminated",
+      "input": "before\n-----BEGIN PRIVATE KEY-----\nsynthetic-private-nelmaterial",
+      "expected": "before\n[Redacted]"
     }
   ]
 }
