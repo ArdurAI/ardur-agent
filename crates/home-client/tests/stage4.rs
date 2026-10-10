@@ -1,8 +1,8 @@
 mod support;
-use home_client::{DeviceCommand, HomeClient, execute_device, execute_room_send, pair_device};
+use home_client::{DeviceCommand, HomeClient, execute_device, pair_device};
 // The private credential store is Unix-only by design (storage.rs returns Storage elsewhere).
 #[cfg(unix)]
-use home_client::{FileStore, SecretStore};
+use home_client::{FileStore, SecretStore, execute_room_send};
 use serde_json::{Value, json};
 use std::time::Duration;
 use support::{FakeHome, Mode};
