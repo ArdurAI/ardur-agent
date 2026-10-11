@@ -1,0 +1,10 @@
+Usage: ardur-rs runs events [OPTIONS] <RUN_ID>
+
+Arguments:
+  <RUN_ID>  
+
+Options:
+      --follow           
+      --json             
+      --cursor <CURSOR>  [default: -1]
+  -h, --help             Print help

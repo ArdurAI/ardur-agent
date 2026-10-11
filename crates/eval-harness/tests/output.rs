@@ -7,6 +7,7 @@ use ardur_eval::runner::{Outcome, ScenarioResult};
 fn results() -> Vec<ScenarioResult> {
     vec![
         ScenarioResult {
+            home_update_required: false,
             id: "pass-one".to_string(),
             description: "a passing case".to_string(),
             outcome: Outcome::Pass,
@@ -14,6 +15,7 @@ fn results() -> Vec<ScenarioResult> {
             duration_ms: 5,
         },
         ScenarioResult {
+            home_update_required: false,
             id: "fail-one".to_string(),
             description: "a failing case".to_string(),
             outcome: Outcome::Fail {

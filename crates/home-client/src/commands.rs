@@ -235,9 +235,11 @@ impl CommandResult {
 }
 fn stage3_exit(error: Error) -> i32 {
     match error {
+        Error::UnsupportedOperation(_) => 5,
         Error::Input
         | Error::InvalidUnicode
         | Error::RequestChanged
+        | Error::NotPaired
         | Error::Storage
         | Error::Identity
         | Error::Access => 4,

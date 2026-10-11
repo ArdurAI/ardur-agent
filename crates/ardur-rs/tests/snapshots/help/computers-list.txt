@@ -1,0 +1,5 @@
+Usage: ardur-rs computers list [OPTIONS]
+
+Options:
+      --json  
+  -h, --help  Print help

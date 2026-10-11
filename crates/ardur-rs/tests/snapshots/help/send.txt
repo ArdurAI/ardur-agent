@@ -1,0 +1,12 @@
+Usage: ardur-rs send [OPTIONS] --request-id <REQUEST_ID> <BOT> <TEXT>
+
+Arguments:
+  <BOT>   
+  <TEXT>  
+
+Options:
+      --json                     
+      --request-id <REQUEST_ID>  
+      --wait                     
+      --timeout <TIMEOUT>        
+  -h, --help                     Print help

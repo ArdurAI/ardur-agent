@@ -1,0 +1,12 @@
+Run a YAML scenario or suite against the paired home, one turn at a time
+
+Usage: test run [OPTIONS] <INPUT>
+
+Arguments:
+  <INPUT>  
+
+Options:
+      --json <JSON>                
+      --junit <JUNIT>              
+      --transcripts <TRANSCRIPTS>  [default: transcripts]
+  -h, --help                       Print help

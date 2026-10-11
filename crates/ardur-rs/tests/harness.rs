@@ -394,3 +394,58 @@ async fn command_interrupt_saves_recovery_and_counts_unstarted_cases_as_unavaila
             .any(|r| r["operation"] == "stop")
     );
 }
+
+#[tokio::test]
+async fn scenario_home_update_refusal_keeps_the_distinct_exit_code() {
+    let server = FakeHome::start(false).await;
+    let client = paired(&server).await;
+    server.set(Mode::UnsupportedOperation);
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    // A pairing code is redeemed once, so the CLI pairs with its own fake home.
+    let cli_server = FakeHome::start(false).await;
+    assert!(
+        command(&root, &["pair", "--file", "-"], Some(&cli_server.code()))
+            .await
+            .status
+            .success()
+    );
+    cli_server.set(Mode::UnsupportedOperation);
+    let mut transcript = Transcript::create(dir.path()).unwrap();
+    let result = run_scenario(&client, &case(false), &mut transcript)
+        .await
+        .unwrap();
+    assert!(result.home_update_required);
+    let Outcome::Unavailable { reasons } = result.outcome else {
+        panic!("unsupported operation cannot be graded")
+    };
+    assert_eq!(
+        reasons,
+        ["Home does not support bots/list; the home must be updated."]
+    );
+    let scenario = root.join("scenario.yaml");
+    std::fs::write(
+        &scenario,
+        "id: compatibility\nprompt: first\ntarget: {kind: bot, bot: bot}\n",
+    )
+    .unwrap();
+    let transcripts = root.join("cli-transcripts");
+    let output = command(
+        &root,
+        &[
+            "test",
+            "run",
+            scenario.to_str().unwrap(),
+            "--transcripts",
+            transcripts.to_str().unwrap(),
+        ],
+        None,
+    )
+    .await;
+    assert_eq!(output.status.code(), Some(5));
+    assert!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .contains("Home does not support bots/list; the home must be updated.")
+    );
+}

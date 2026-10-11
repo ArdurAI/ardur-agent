@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "contractRevision": "2910f63e231ebc8fbf9c4177d4fc1681f04b3752",
+  "fixtureSetSha256": "78f866fea2a598634eb09895a8a04b20a8eca38e779963a3d7e5beb3060624e1",
+  "requiredOperations": [
+    "board/show",
+    "board/snapshot",
+    "bots/list",
+    "computer/list",
+    "dispatch",
+    "events",
+    "messages/get",
+    "rooms/list",
+    "rooms/send",
+    "rpc",
+    "runs/get",
+    "runs/list",
+    "stop",
+    "tasks",
+    "tasks/get"
+  ]
+}

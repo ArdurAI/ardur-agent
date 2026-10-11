@@ -1,5 +1,6 @@
 //! Paired-home client only. No bot execution, database, or provider dependencies.
 mod commands;
+pub use home_protocol::COMPATIBILITY;
 mod events;
 pub use events::{EventRecord, EventWindow, execute_run_events};
 mod redaction;
@@ -25,6 +26,7 @@ pub enum Error {
     Input,
     InvalidUnicode,
     Storage,
+    NotPaired,
     Identity,
     Unreachable,
     Protocol,
@@ -32,19 +34,23 @@ pub enum Error {
     Expired,
     RequestChanged,
     PayloadTooLarge,
+    UnsupportedOperation(&'static str),
 }
 impl Error {
     pub fn exit_code(self) -> i32 {
         match self {
+            Self::UnsupportedOperation(_) => 5,
             Self::Input | Self::InvalidUnicode | Self::RequestChanged => 3,
-            Self::Storage | Self::Identity | Self::Access => 2,
+            Self::Storage | Self::NotPaired | Self::Identity | Self::Access => 2,
             _ => 1,
         }
     }
     pub fn code(self) -> &'static str {
         match self {
+            Self::UnsupportedOperation(_) => "home_update_required",
             Self::Input => "invalid_input",
             Self::InvalidUnicode => "invalid_unicode",
+            Self::NotPaired => "not_paired",
             Self::Storage => "unsafe_storage",
             Self::Identity => "home_changed",
             Self::Unreachable => "home_unreachable",
@@ -58,11 +64,19 @@ impl Error {
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Self::UnsupportedOperation(operation) = self {
+            return write!(
+                f,
+                "Home does not support {operation}; the home must be updated."
+            );
+        }
         f.write_str(match self {
+            Self::UnsupportedOperation(_) => unreachable!(),
             Self::InvalidUnicode => "JSON strings must contain well-formed Unicode; unpaired surrogates are not allowed.",
             Self::RequestChanged => "This request changed; send it as a new task.",
             Self::PayloadTooLarge => "An event is too large. Following stopped; inspect the run at home.",
             Self::Input => "Check the arguments or copy a new pairing code from Settings, Devices.",
+            Self::NotPaired => "No paired home profile; pair this device first.",
             Self::Storage => {
                 "Private pairing storage is unavailable or unsafe. Check its owner and permissions."
             }

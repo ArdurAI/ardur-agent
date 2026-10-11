@@ -120,6 +120,9 @@ impl PinnedTransport {
     pub async fn post(&self, url: &str, body: &Value) -> Result<Value, Error> {
         let (status, bytes) = self.post_raw(url, body).await?;
         if !(200..300).contains(&status) {
+            if let Some(error) = unsupported_operation(status, &bytes, body) {
+                return Err(error);
+            }
             return Err(Self::status_error(status));
         }
         serde_json::from_slice(&bytes).map_err(|_| Error::Protocol)
@@ -128,6 +131,9 @@ impl PinnedTransport {
     /// bounded printable answer keeps that answer instead of the generic map.
     pub async fn post_answer(&self, url: &str, body: &Value) -> Result<Value, Refusal> {
         let (status, bytes) = self.post_raw(url, body).await.map_err(Refusal::Failure)?;
+        if let Some(error) = unsupported_operation(status, &bytes, body) {
+            return Err(Refusal::Failure(error));
+        }
         if (200..300).contains(&status) {
             return serde_json::from_slice(&bytes).map_err(|_| Refusal::Failure(Error::Protocol));
         }
@@ -158,9 +164,18 @@ impl PinnedTransport {
     }
     /// Open a bounded event window without buffering its body or bypassing TLS pins.
     pub async fn post_events(&self, url: &str, body: &Value) -> Result<reqwest::Response, Error> {
-        let response = self.send(url, body, "text/event-stream").await?;
+        let mut response = self.send(url, body, "text/event-stream").await?;
         if !response.status().is_success() {
-            return Err(Self::status_error(response.status().as_u16()));
+            let status = response.status().as_u16();
+            let mut bytes = Vec::new();
+            while let Some(chunk) = response.chunk().await.map_err(|_| Error::Unreachable)? {
+                if bytes.len().saturating_add(chunk.len()) > 2 * 1024 * 1024 {
+                    return Err(Error::Protocol);
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            return Err(unsupported_operation(status, &bytes, body)
+                .unwrap_or_else(|| Self::status_error(status)));
         }
         if response
             .headers()
@@ -214,6 +229,53 @@ impl PinnedTransport {
             Error::Protocol
         }
     }
+}
+/// Recognize explicit compatibility failures, never infer them from a missing
+/// record, a denied grant, or arbitrary remote text. Name the signed operation.
+fn unsupported_operation(status: u16, bytes: &[u8], request: &Value) -> Option<Error> {
+    if !matches!(status, 400 | 404 | 405 | 422 | 501) {
+        return None;
+    }
+    let value: Value = serde_json::from_slice(bytes).ok()?;
+    let code = value["problem"]["code"]
+        .as_str()
+        .or_else(|| value["error"]["code"].as_str())
+        .or_else(|| value["code"].as_str());
+    // Older homes may return a fixed sentence without a machine-readable code.
+    // Match the whole sentence, not a substring that could describe a record.
+    let message = value["message"]
+        .as_str()
+        .or_else(|| value["error"].as_str());
+    let legacy_code = match message {
+        Some("Unknown operation" | "Unknown operation.") => Some("unknown_operation"),
+        Some("Unsupported operation" | "Unsupported operation.") => Some("unsupported_operation"),
+        Some("Unknown procedure" | "Unknown procedure.") => Some("unknown_procedure"),
+        Some("Unsupported procedure" | "Unsupported procedure.") => Some("unsupported_procedure"),
+        _ => None,
+    };
+    let code = code.or(legacy_code);
+    if !matches!(
+        code,
+        Some(
+            "unknown_operation"
+                | "unsupported_operation"
+                | "unknown_procedure"
+                | "unsupported_procedure"
+                | "UNKNOWN_OPERATION"
+                | "UNSUPPORTED_OPERATION"
+        )
+    ) {
+        return None;
+    }
+    let operation = request["operation"].as_str()?;
+    let name = if operation == "rpc"
+        && matches!(code, Some("unknown_procedure" | "unsupported_procedure"))
+    {
+        request["body"]["procedure"].as_str()?
+    } else {
+        operation
+    };
+    home_protocol::required_operation(name).map(Error::UnsupportedOperation)
 }
 /// A refused device request whose home answer carries a fixed printable sentence.
 #[derive(Debug)]
@@ -434,5 +496,70 @@ mod tests {
                 .unwrap();
             assert_eq!(bytes.load(Ordering::SeqCst) - before, 0);
         }
+    }
+}
+
+#[cfg(test)]
+mod compatibility_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn only_explicit_operation_failures_mean_home_update_required() {
+        let request = json!({"operation":"runs/get","body":{"runId":"fixture-run"}});
+        for code in [
+            "unknown_operation",
+            "unsupported_operation",
+            "UNKNOWN_OPERATION",
+            "UNSUPPORTED_OPERATION",
+        ] {
+            let response =
+                serde_json::to_vec(&json!({"problem":{"code":code},"message":"sensitive-canary"}))
+                    .unwrap();
+            assert_eq!(
+                unsupported_operation(400, &response, &request),
+                Some(Error::UnsupportedOperation("runs/get"))
+            );
+            for status in [200, 401, 403, 500] {
+                assert_eq!(unsupported_operation(status, &response, &request), None);
+            }
+        }
+        for response in [
+            json!({"code":"NOT_FOUND"}),
+            json!({"message":"sensitive-canary"}),
+            json!({"problem":{"code":"record_unavailable"}}),
+        ] {
+            assert_eq!(
+                unsupported_operation(404, &serde_json::to_vec(&response).unwrap(), &request),
+                None
+            );
+        }
+        let request = json!({"operation":"rpc","body":{"procedure":"board/show"}});
+        let response = br#"{"error":{"code":"unsupported_procedure"}}"#;
+        assert_eq!(
+            unsupported_operation(501, response, &request),
+            Some(Error::UnsupportedOperation("board/show"))
+        );
+        let unsafe_request = json!({"operation":"sensitive-canary"});
+        assert_eq!(
+            unsupported_operation(400, br#"{"code":"unknown_operation"}"#, &unsafe_request),
+            None
+        );
+        assert_eq!(
+            unsupported_operation(
+                400,
+                br#"{"message":"Unknown operation"}"#,
+                &json!({"operation":"events"})
+            ),
+            Some(Error::UnsupportedOperation("events"))
+        );
+        assert_eq!(
+            unsupported_operation(
+                404,
+                br#"{"message":"Unknown operation in this record"}"#,
+                &json!({"operation":"events"})
+            ),
+            None
+        );
     }
 }

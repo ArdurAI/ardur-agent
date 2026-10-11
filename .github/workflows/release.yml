@@ -24,8 +24,57 @@ env:
   RELEASE_TAG: ${{ github.event.release.tag_name }}
 
 jobs:
+  build-client:
+    name: Package home client / ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-15
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    # Build jobs only attest; publishing to the release happens after signing.
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          ref: ${{ env.RELEASE_TAG }}
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.98.1 --profile minimal --target ${{ matrix.target }}
+      - name: Build only the shipping client
+        run: cargo build --locked --release -p ardur-rs --target ${{ matrix.target }}
+      - name: Check shipping dependency set
+        run: python scripts/check-shipping-set.py
+      - name: Package client
+        env:
+          RELEASE_TARGET: ${{ matrix.target }}
+        run: python scripts/package-home-client.py
+      - name: Attest built client provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*
+      # Archives travel to the signing job as private workflow artifacts; only
+      # the signing job publishes them, so no unsigned file reaches the release.
+      - name: Hand the archive to the signing job
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: client-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 1
+
   release-artifacts:
     name: release-sbom-sign
+    needs: build-client
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -33,32 +82,21 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ env.RELEASE_TAG }}
-
-      - name: Install pinned Rust toolchain
-        run: rustup toolchain install 1.98.1 --profile minimal
-
-      - name: Build release binaries
+      - name: Collect the three client archives
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: client-*
+          path: dist
+          merge-multiple: true
+      - name: Require exactly the three client archives
         run: |
           set -euo pipefail
-          mkdir -p dist
-          cargo build --workspace --bins --release --locked
-
-          mapfile -d '' bins < <(find target/release -maxdepth 1 -type f -perm -111 -print0 | sort -z)
-          if [ "${#bins[@]}" -eq 0 ]; then
-            echo "::error::no executable release binaries found under target/release"
-            exit 1
-          fi
-
-          for bin in "${bins[@]}"; do
-            name="$(basename "${bin}")"
-            package_dir="dist/${name}-${RELEASE_TAG}-x86_64-unknown-linux-gnu"
-            mkdir -p "${package_dir}"
-            cp "${bin}" "${package_dir}/${name}"
-            tar -C "${package_dir}" -czf "${package_dir}.tar.gz" "${name}"
-            rm -rf "${package_dir}"
+          for target in x86_64-unknown-linux-gnu aarch64-apple-darwin x86_64-pc-windows-msvc; do
+            extension=tar.gz
+            if [ "$target" = x86_64-pc-windows-msvc ]; then extension=zip; fi
+            test -s "dist/ardur-rs-${RELEASE_TAG}-${target}.${extension}"
           done
-
-          find dist -maxdepth 1 -type f -name '*.tar.gz' -print | sort
+          test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 3
 
       - name: Generate release SPDX SBOM
         uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
@@ -93,7 +131,7 @@ jobs:
           set -euo pipefail
           cd dist
           shopt -s nullglob
-          release_assets=( *.tar.gz *.spdx.json SHA256SUMS )
+          release_assets=( *.tar.gz *.zip *.spdx.json SHA256SUMS )
           if [ "${#release_assets[@]}" -eq 0 ]; then
             echo "::error::no release assets found to sign"
             exit 1

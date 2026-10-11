@@ -1,0 +1,5 @@
+Usage: ardur-rs status [OPTIONS]
+
+Options:
+      --json  
+  -h, --help  Print help

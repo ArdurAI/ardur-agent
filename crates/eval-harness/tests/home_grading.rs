@@ -164,7 +164,7 @@ fn report_totals_and_all_fields_are_redacted_before_serialization() {
             message: "api_key=fixture-error".into(),
         },
     ];
-    let results: Vec<_> = outcomes.into_iter().map(|outcome| ScenarioResult { id: "password=fixture-id".into(), description: "api_key=fixture-description".into(), outcome, reply: "password=fixture-reply\n-----BEGIN PRIVATE KEY-----\nfixture-pem\n-----END PRIVATE KEY-----".into(), duration_ms: 1 }).collect();
+    let results: Vec<_> = outcomes.into_iter().map(|outcome| ScenarioResult { home_update_required: false, id: "password=fixture-id".into(), description: "api_key=fixture-description".into(), outcome, reply: "password=fixture-reply\n-----BEGIN PRIVATE KEY-----\nfixture-pem\n-----END PRIVATE KEY-----".into(), duration_ms: 1 }).collect();
     let summary = Summary::of(&results);
     assert_eq!(
         (

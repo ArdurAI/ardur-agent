@@ -8,8 +8,18 @@ use serde_json::{Value, json};
 use std::io::Read;
 use zeroize::Zeroizing;
 mod test_run;
+fn client_version() -> &'static str {
+    static VERSION: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        format!(
+            "{} (home contract {})",
+            env!("CARGO_PKG_VERSION"),
+            home_client::COMPATIBILITY.contract_revision
+        )
+    });
+    &VERSION
+}
 #[derive(Parser)]
-#[command(name = "ardur-rs", version, about = "Paired Ardur home client")]
+#[command(name = "ardur-rs", version = client_version(), about = "Paired Ardur home client")]
 struct Args {
     #[arg(long, global = true)]
     json: bool,
@@ -343,6 +353,17 @@ async fn main() {
     let args = match Args::try_parse_from(&raw) {
         Ok(a) => a,
         Err(e) => {
+            if json_mode && e.kind() == clap::error::ErrorKind::DisplayVersion {
+                report(
+                    "version",
+                    true,
+                    Ok(json!({
+                        "version": env!("CARGO_PKG_VERSION"),
+                        "contractRevision": home_client::COMPATIBILITY.contract_revision
+                    })),
+                );
+                return;
+            }
             if matches!(
                 e.kind(),
                 clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
@@ -350,7 +371,7 @@ async fn main() {
                 if json_mode {
                     println!(
                         "{}",
-                        json!({"schemaVersion":1,"ok":true,"command":"help","data":{"usage":"ardur-rs [--json] pair --file <path|-> [--name <name>] | status | bots list | send <bot> <text> --request-id <id> [--wait] [--timeout 180s] | wait --run <id> [--timeout 180s] | runs list [--cursor <id>] [--limit 50] | runs show <id> | runs events <run-id> [--follow] [--cursor <n>] | tasks show <id> | stop <task-id> | computers list | board list --workspace <id> [--filter <json>] [--search <text>] | board show --workspace <id> <item> | rooms list | rooms send (--room <name> | --room-id <id>) [--thread <id>] <text>","version":env!("CARGO_PKG_VERSION")}})
+                        json!({"schemaVersion":1,"ok":true,"command":"help","data":{"usage":"ardur-rs [--json] pair --file <path|-> [--name <name>] | status | bots list | send <bot> <text> --request-id <id> [--wait] [--timeout 180s] | wait --run <id> [--timeout 180s] | runs list [--cursor <id>] [--limit 50] | runs show <id> | runs events <run-id> [--follow] [--cursor <n>] | tasks show <id> | stop <task-id> | computers list | board list --workspace <id> [--filter <json>] [--search <text>] | board show --workspace <id> <item> | rooms list | rooms send (--room <name> | --room-id <id>) [--thread <id>] <text>","version":env!("CARGO_PKG_VERSION"),"contractRevision":home_client::COMPATIBILITY.contract_revision}})
                     )
                 } else {
                     print!("{e}")
@@ -577,3 +598,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod help_snapshots;

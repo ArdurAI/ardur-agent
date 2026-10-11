@@ -1,0 +1,7 @@
+Usage: ardur-rs runs list [OPTIONS]
+
+Options:
+      --cursor <CURSOR>  
+      --json             
+      --limit <LIMIT>    [default: 50]
+  -h, --help             Print help

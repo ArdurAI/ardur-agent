@@ -1,0 +1,9 @@
+Usage: ardur-rs board show [OPTIONS] --workspace <WORKSPACE> <ITEM>
+
+Arguments:
+  <ITEM>  
+
+Options:
+      --json                   
+      --workspace <WORKSPACE>  
+  -h, --help                   Print help
