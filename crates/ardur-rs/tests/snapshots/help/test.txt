@@ -1,4 +1,4 @@
-Usage: test <COMMAND>
+Usage: ardur-rs test <COMMAND>
 
 Commands:
   run   Run a YAML scenario or suite against the paired home, one turn at a time

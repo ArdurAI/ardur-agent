@@ -1,6 +1,6 @@
 Run a YAML scenario or suite against the paired home, one turn at a time
 
-Usage: test run [OPTIONS] <INPUT>
+Usage: ardur-rs test run [OPTIONS] <INPUT>
 
 Arguments:
   <INPUT>  

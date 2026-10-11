@@ -12,7 +12,7 @@ use std::path::PathBuf;
 // This command's --json takes a file, unlike the device commands' boolean flag.
 // Parse its own command tree so their established global flag remains compatible.
 #[derive(Parser)]
-#[command(name = "ardur-rs test")]
+#[command(name = "ardur-rs test", bin_name = "ardur-rs test")]
 struct Args {
     #[command(subcommand)]
     command: Command,

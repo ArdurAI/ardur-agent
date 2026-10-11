@@ -19,7 +19,7 @@ fn client_version() -> &'static str {
     &VERSION
 }
 #[derive(Parser)]
-#[command(name = "ardur-rs", version = client_version(), about = "Paired Ardur home client")]
+#[command(name = "ardur-rs", bin_name = "ardur-rs", version = client_version(), about = "Paired Ardur home client")]
 struct Args {
     #[arg(long, global = true)]
     json: bool,
