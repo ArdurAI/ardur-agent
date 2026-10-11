@@ -196,6 +196,117 @@ async fn task_mismatch_is_unavailable_even_if_the_text_would_pass() {
         Outcome::Unavailable { .. }
     ));
 }
+
+#[tokio::test]
+async fn multi_turn_room_reuses_resolved_thread_on_follow_up_turns() {
+    let server = FakeHome::start(false).await;
+    let client = paired(&server).await;
+    server.set(Mode::ScenarioTurns);
+    let case = HomeScenario::from_yaml(
+        "id: room-turns\nprompt: first\nfollow_ups: [second]\nmax_turns: 2\ntarget: {kind: room, room_id: fixture-room}\nexpected:\n  exact: \"reply fixture-run-1\\nreply fixture-run-2\"\n",
+    )
+    .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let mut transcript = Transcript::create(dir.path()).unwrap();
+    let result = run_scenario(&client, &case, &mut transcript).await.unwrap();
+    assert_eq!(result.outcome, Outcome::Pass);
+    assert_eq!(result.reply, "reply fixture-run-1\nreply fixture-run-2");
+
+    let seen = server.seen.lock().unwrap();
+    let sends: Vec<_> = seen
+        .iter()
+        .filter(|v| v["operation"] == "rooms/send")
+        .collect();
+    assert_eq!(sends.len(), 2);
+    // Thread resolved on turn 1 is reused on turn 2.
+    assert_eq!(sends[0]["body"]["threadId"], "fixture-thread");
+    assert_eq!(sends[1]["body"]["threadId"], "fixture-thread");
+    assert_ne!(
+        sends[0]["body"]["clientNonce"],
+        sends[1]["body"]["clientNonce"]
+    );
+
+    let saved = records(dir.path());
+    let requests: Vec<_> = saved.iter().filter(|v| v["kind"] == "request").collect();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0]["target"]["threadId"], "fixture-thread");
+    assert_eq!(requests[1]["target"]["threadId"], "fixture-thread");
+}
+
+#[tokio::test]
+async fn multi_turn_bot_threads_correlation_fields_and_rejects_mismatch() {
+    let server = FakeHome::start(false).await;
+    let client = paired(&server).await;
+    server.set(Mode::ScenarioTurns);
+    let bot_name = serde_json::to_string("Bot\u{1b}]0;bad\u{7}").unwrap();
+    // Scenario target uses the bot name; admission returns bot id and thread id.
+    let case = HomeScenario::from_yaml(&format!(
+        "id: bot-turns\nprompt: first\nfollow_ups: [second]\nmax_turns: 2\ntarget: {{kind: bot, bot: {}}}\nexpected: {{exact: 'reply run-2'}}\n",
+        bot_name.trim()
+    ))
+    .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let mut transcript = Transcript::create(dir.path()).unwrap();
+    let result = run_scenario(&client, &case, &mut transcript).await.unwrap();
+    assert_eq!(result.outcome, Outcome::Pass);
+    assert_eq!(result.reply, "reply run-2");
+
+    let saved = records(dir.path());
+    let admissions: Vec<_> = saved.iter().filter(|v| v["kind"] == "admission").collect();
+    assert_eq!(admissions.len(), 2);
+    assert_eq!(admissions[0]["result"]["bot"]["id"], "bot");
+    assert_eq!(admissions[0]["result"]["bot"]["name"], "Bot");
+    assert_eq!(admissions[0]["result"]["data"]["threadId"], "thread");
+    assert_eq!(admissions[1]["result"]["bot"]["id"], "bot");
+    assert_eq!(admissions[1]["result"]["data"]["threadId"], "thread");
+
+    {
+        let seen = server.seen.lock().unwrap();
+        let dispatches: Vec<_> = seen
+            .iter()
+            .filter(|v| v["operation"] == "dispatch")
+            .collect();
+        assert_eq!(dispatches.len(), 2);
+        assert_eq!(dispatches[0]["body"]["botId"], "bot");
+        // Turn 2 is sent with the bot id returned by the first admission.
+        assert_eq!(dispatches[1]["body"]["botId"], "bot");
+        assert_ne!(
+            dispatches[0]["body"]["clientNonce"],
+            dispatches[1]["body"]["clientNonce"]
+        );
+    }
+
+    // Mismatched thread, task, or bot id on answer must be rejected as unavailable (home.rs ~341-355).
+    for (field, wrong) in [
+        ("threadId", "unrelated-thread"),
+        ("botId", "unrelated-bot"),
+        ("taskId", "unrelated-task"),
+    ] {
+        let server = FakeHome::start(false).await;
+        let client = paired(&server).await;
+        server.run.lock().unwrap()[field] = json!(wrong);
+        if field == "threadId" {
+            server.messages.lock().unwrap()["threadId"] = json!(wrong);
+        }
+        let mismatch_case = HomeScenario::from_yaml(&format!(
+            "id: mismatch\nprompt: first\nfollow_ups: [second]\nmax_turns: 2\ntarget: {{kind: bot, bot: {}}}\nexpected: {{exact: 'Fixture answer ✓'}}\n",
+            bot_name.trim()
+        ))
+        .unwrap();
+        let mismatch_dir = tempfile::tempdir().unwrap();
+        let mut mismatch_transcript = Transcript::create(mismatch_dir.path()).unwrap();
+        let mismatch_result = run_scenario(&client, &mismatch_case, &mut mismatch_transcript)
+            .await
+            .unwrap();
+        assert_eq!(
+            mismatch_result.outcome,
+            Outcome::Unavailable {
+                reasons: vec!["Task or conversation correlation changed.".into()]
+            }
+        );
+    }
+}
+
 async fn command(home: &Path, args: &[&str], input: Option<&str>) -> std::process::Output {
     let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_ardur-rs"))
         .args(args)
