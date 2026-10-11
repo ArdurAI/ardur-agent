@@ -12,6 +12,7 @@ use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 #[derive(Clone, Copy, PartialEq)]
 pub enum Mode {
+    ScenarioTurns,
     Normal,
     WrongInstance,
     WrongFingerprint,
@@ -158,6 +159,7 @@ impl FakeHome {
             let mut run_reads = 0;
             let mut lost = false;
             let mut room_lost = false;
+            let mut scenario_receipts = HashMap::<String, Value>::new();
             loop {
                 let Ok((stream, _)) = listener.accept().await else {
                     break;
@@ -445,6 +447,26 @@ impl FakeHome {
                                     }
                                 }
                             }
+                        } else if op == "dispatch" && mode == Mode::ScenarioTurns {
+                            let body = &value["body"];
+                            let id = body["clientNonce"].as_str().unwrap();
+                            let next = scenario_receipts.len() + 1;
+                            let receipt = scenario_receipts.entry(id.into()).or_insert_with(|| json!({"taskId":format!("task-{next}"),"runId":format!("run-{next}"),"threadId":"thread","botId":"bot","state":"accepted","cancelRequested":false})).clone();
+                            admitted.lock().unwrap().insert(id.into(), body.clone());
+                            receipt
+                        } else if op == "runs/get" && mode == Mode::ScenarioTurns {
+                            let id = value["body"]["runId"].as_str().unwrap();
+                            let mut run = scenario_receipts.values().find(|r| r["runId"] == id).cloned().unwrap_or_else(|| json!({"taskId":"fixture-task","runId":id,"threadId":"fixture-thread","botId":"bot","state":"done","cancelRequested":false}));
+                            run["status"] = json!("completed");
+                            run["cancelConfirmed"] = json!(false);
+                            run["messageId"] = json!(format!("answer-{id}"));
+                            run["createdAt"] = json!("2026-01-01T00:00:00Z");
+                            json!({"run":run})
+                        } else if op == "messages/get" && mode == Mode::ScenarioTurns {
+                            let body = &value["body"];
+                            let message = body["around"]["messageId"].as_str().unwrap();
+                            let run = message.strip_prefix("answer-").unwrap();
+                            json!({"threadId":body["threadId"],"messages":[{"id":"newer-unrelated","runId":"other-run","role":"bot","blocks":[{"kind":"text","text":"wrong answer"}]},{"id":message,"runId":run,"role":"bot","blocks":[{"kind":"text","text":format!("reply {run}")},{"kind":"text","text":"password=fixture-secret","reasoning":true},{"kind":"tool-result","text":"cost_usd=0 tool_called=search"}]}],"olderCursor":null})
                         } else if op == "dispatch" {
                             let body = &value["body"];
                             let id = body["clientNonce"].as_str().unwrap();

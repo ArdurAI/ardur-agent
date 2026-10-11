@@ -25,6 +25,7 @@ name = "ardur_eval"
 path = "src/lib.rs"
 
 [dependencies]
+home-client = { path = "../home-client" }
 # Scenario files are YAML; results serialize to JSON. `serde_yaml` parses the
 # scenario format, `serde_json` emits the machine-readable result report.
 serde = { workspace = true }

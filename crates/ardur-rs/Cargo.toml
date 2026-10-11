@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 [dependencies]
+ardur-eval = { path = "../eval-harness" }
 home-client = { path = "../home-client" }
 clap.workspace = true
 serde_json.workspace = true

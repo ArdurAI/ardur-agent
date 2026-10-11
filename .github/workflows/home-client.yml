@@ -22,9 +22,9 @@ jobs:
       - name: Build isolated client
         run: cargo build --locked -p home-protocol -p home-client -p ardur-rs
       - name: Test disposable home and CLI
-        run: cargo test --locked -p home-protocol -p home-client -p ardur-rs
+        run: cargo test --locked -p home-protocol -p home-client -p ardur-rs -p ardur-eval
       - name: Clippy client
-        run: cargo clippy --locked -p home-protocol -p home-client -p ardur-rs --all-targets -- -D warnings
+        run: cargo clippy --locked -p home-protocol -p home-client -p ardur-rs -p ardur-eval --all-targets -- -D warnings
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
         with:
           node-version: "26.7.0"
