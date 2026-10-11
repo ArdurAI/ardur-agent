@@ -1,5 +1,7 @@
 //! Paired-home client only. No bot execution, database, or provider dependencies.
 mod commands;
+mod events;
+pub use events::{EventRecord, EventWindow, execute_run_events};
 mod redaction;
 pub use commands::{
     CommandResult, DeviceCommand, execute_device, execute_room_send, fresh_client_nonce,
@@ -29,6 +31,7 @@ pub enum Error {
     Access,
     Expired,
     RequestChanged,
+    PayloadTooLarge,
 }
 impl Error {
     pub fn exit_code(self) -> i32 {
@@ -49,6 +52,7 @@ impl Error {
             Self::Access => "access_refused",
             Self::Expired => "expired_nonce",
             Self::RequestChanged => "request_changed",
+            Self::PayloadTooLarge => "payload_too_large",
         }
     }
 }
@@ -57,6 +61,7 @@ impl std::fmt::Display for Error {
         f.write_str(match self {
             Self::InvalidUnicode => "JSON strings must contain well-formed Unicode; unpaired surrogates are not allowed.",
             Self::RequestChanged => "This request changed; send it as a new task.",
+            Self::PayloadTooLarge => "An event is too large. Following stopped; inspect the run at home.",
             Self::Input => "Check the arguments or copy a new pairing code from Settings, Devices.",
             Self::Storage => {
                 "Private pairing storage is unavailable or unsafe. Check its owner and permissions."

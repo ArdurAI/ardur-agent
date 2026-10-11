@@ -145,11 +145,46 @@ impl PinnedTransport {
         Err(Refusal::Failure(Self::status_error(status)))
     }
     async fn post_raw(&self, url: &str, body: &Value) -> Result<(u16, Vec<u8>), Error> {
+        let mut response = self.send(url, body, "application/json").await?;
+        let status = response.status().as_u16();
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(|_| Error::Unreachable)? {
+            if bytes.len().saturating_add(chunk.len()) > 2 * 1024 * 1024 {
+                return Err(Error::Protocol);
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        Ok((status, bytes))
+    }
+    /// Open a bounded event window without buffering its body or bypassing TLS pins.
+    pub async fn post_events(&self, url: &str, body: &Value) -> Result<reqwest::Response, Error> {
+        let response = self.send(url, body, "text/event-stream").await?;
+        if !response.status().is_success() {
+            return Err(Self::status_error(response.status().as_u16()));
+        }
+        if response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.split(';').next())
+            .is_none_or(|v| !v.trim().eq_ignore_ascii_case("text/event-stream"))
+        {
+            return Err(Error::Protocol);
+        }
+        Ok(response)
+    }
+    async fn send(
+        &self,
+        url: &str,
+        body: &Value,
+        accept: &str,
+    ) -> Result<reqwest::Response, Error> {
         let target = https_url(url).map_err(|_| Error::Input)?;
-        let mut response = self
+        let response = self
             .client
             .post(target)
             .header("content-type", "application/json")
+            .header("accept", accept)
             .body(encode_body(body))
             .send()
             .await
@@ -168,15 +203,7 @@ impl PinnedTransport {
                 }
                 Error::Unreachable
             })?;
-        let status = response.status().as_u16();
-        let mut bytes = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(|_| Error::Unreachable)? {
-            if bytes.len().saturating_add(chunk.len()) > 2 * 1024 * 1024 {
-                return Err(Error::Protocol);
-            }
-            bytes.extend_from_slice(&chunk);
-        }
-        Ok((status, bytes))
+        Ok(response)
     }
     fn status_error(status: u16) -> Error {
         if status == 401 || status == 403 {

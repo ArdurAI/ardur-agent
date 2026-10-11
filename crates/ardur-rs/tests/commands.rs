@@ -527,3 +527,129 @@ async fn saved_answer_corpus_never_leaks_credentials_on_stdout() {
         }
     }
 }
+
+#[tokio::test]
+async fn events_command_prints_jsonl_and_readable_lines_from_signed_windows() {
+    for json_mode in [true, false] {
+        let server = FakeHome::start(false).await;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        assert!(
+            run(
+                &root,
+                &["pair", "--file", "-", "--json"],
+                Some(&server.code())
+            )
+            .await
+            .status
+            .success()
+        );
+        let text = format!(
+            "id: 4\nevent: event\ndata: {}\n\nevent: window\ndata: {{\"nextCursor\":7,\"reason\":\"timeout\"}}\n\n",
+            json!({"seq":4,"runId":"run","threadId":"thread","botId":"bot","type":"thread.progress","payload":{"text":"Reply ✓ 🚀 token=private-canary\u{1b}[2J"}})
+        );
+        server
+            .event_windows
+            .lock()
+            .unwrap()
+            .push_back(support::EventResponse {
+                chunks: vec![text.into_bytes()],
+                interrupted: false,
+                finish_run: false,
+            });
+        let mut args = vec!["runs", "events", "run", "--cursor", "1"];
+        if json_mode {
+            args.push("--json");
+        }
+        let out = run(&root, &args, None).await;
+        assert!(out.status.success());
+        assert!(out.stderr.is_empty());
+        let text = String::from_utf8(out.stdout).unwrap();
+        assert!(!text.contains("private-canary"));
+        assert!(!text.contains('\u{1b}'));
+        assert!(text.contains("Reply ✓ 🚀"));
+        assert_eq!(text.lines().count(), 2);
+        if json_mode {
+            let lines: Vec<Value> = text
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            assert_eq!(lines[0]["event"], "event");
+            assert_eq!(lines[0]["cursor"], 4);
+            assert_eq!(lines[1]["data"]["nextCursor"], 7);
+        }
+        let seen = server.seen.lock().unwrap();
+        assert_eq!(
+            seen.iter().find(|r| r["operation"] == "events").unwrap()["body"]["cursor"],
+            1
+        );
+    }
+}
+
+#[tokio::test]
+async fn ctrl_c_stops_the_events_process_cleanly_with_its_last_cursor() {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    let server = FakeHome::start(false).await;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    assert!(
+        run(
+            &root,
+            &["pair", "--file", "-", "--json"],
+            Some(&server.code())
+        )
+        .await
+        .status
+        .success()
+    );
+    server.run.lock().unwrap()["status"] = json!("running");
+    server
+        .event_windows
+        .lock()
+        .unwrap()
+        .push_back(support::EventResponse {
+            chunks: vec![
+                b"event: window\ndata: {\"nextCursor\":7,\"reason\":\"timeout\"}\n\n".to_vec(),
+            ],
+            interrupted: false,
+            finish_run: false,
+        });
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_ardur-rs"))
+        .args(["runs", "events", "run", "--follow", "--json"])
+        .env("HOME", &root)
+        .env_remove("XDG_CONFIG_HOME")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let first = tokio::time::timeout(std::time::Duration::from_secs(5), lines.next_line())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&first).unwrap()["data"]["nextCursor"],
+        7
+    );
+    // Signal only the subprocess created by this test.
+    assert_eq!(
+        unsafe { libc::kill(child.id().unwrap() as i32, libc::SIGINT) },
+        0
+    );
+    let last = tokio::time::timeout(std::time::Duration::from_secs(5), lines.next_line())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let last: Value = serde_json::from_str(&last).unwrap();
+    assert_eq!(last["data"]["reason"], "interrupted");
+    assert_eq!(last["data"]["nextCursor"], 7);
+    let out = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(out.stderr.is_empty());
+}

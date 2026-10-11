@@ -1,7 +1,8 @@
 use clap::{Parser, Subcommand};
 use home_client::{
-    CommandResult, DeviceCommand, Error, FileStore, HomeClient, SecretStore, default_config_dir,
-    execute_device, execute_room_send, human_text, pair_device, redact,
+    CommandResult, DeviceCommand, Error, EventRecord, EventWindow, FileStore, HomeClient,
+    SecretStore, default_config_dir, execute_device, execute_room_send, execute_run_events,
+    human_text, pair_device, redact,
 };
 use serde_json::{Value, json};
 use std::io::Read;
@@ -73,6 +74,13 @@ enum BotsCommand {
 }
 #[derive(Subcommand)]
 enum RunsCommand {
+    Events {
+        run_id: String,
+        #[arg(long)]
+        follow: bool,
+        #[arg(long, default_value_t = -1, allow_hyphen_values = true, value_parser = clap::value_parser!(i64).range(-1..=2147483647))]
+        cursor: i64,
+    },
     List {
         #[arg(long)]
         cursor: Option<String>,
@@ -333,7 +341,7 @@ async fn main() {
                 if json_mode {
                     println!(
                         "{}",
-                        json!({"schemaVersion":1,"ok":true,"command":"help","data":{"usage":"ardur-rs [--json] pair --file <path|-> [--name <name>] | status | bots list | send <bot> <text> --request-id <id> [--wait] [--timeout 180s] | wait --run <id> [--timeout 180s] | runs list [--cursor <id>] [--limit 50] | runs show <id> | tasks show <id> | stop <task-id> | computers list | board list --workspace <id> [--filter <json>] [--search <text>] | board show --workspace <id> <item> | rooms list | rooms send (--room <name> | --room-id <id>) [--thread <id>] <text>","version":env!("CARGO_PKG_VERSION")}})
+                        json!({"schemaVersion":1,"ok":true,"command":"help","data":{"usage":"ardur-rs [--json] pair --file <path|-> [--name <name>] | status | bots list | send <bot> <text> --request-id <id> [--wait] [--timeout 180s] | wait --run <id> [--timeout 180s] | runs list [--cursor <id>] [--limit 50] | runs show <id> | runs events <run-id> [--follow] [--cursor <n>] | tasks show <id> | stop <task-id> | computers list | board list --workspace <id> [--filter <json>] [--search <text>] | board show --workspace <id> <item> | rooms list | rooms send (--room <name> | --room-id <id>) [--thread <id>] <text>","version":env!("CARGO_PKG_VERSION")}})
                     )
                 } else {
                     print!("{e}")
@@ -364,6 +372,59 @@ async fn main() {
             std::process::exit(report("unknown", json_mode, Err(Error::Input)));
         }
     };
+    if let Command::Runs {
+        command:
+            RunsCommand::Events {
+                run_id,
+                follow,
+                cursor,
+            },
+    } = &args.command
+    {
+        let client = default_config_dir()
+            .and_then(|dir| FileStore::new(dir).load())
+            .and_then(HomeClient::new);
+        let mut output = std::io::stdout().lock();
+        let saved_cursor = std::cell::Cell::new(*cursor);
+        let mut print = |record: EventRecord| -> Result<(), Error> {
+            use std::io::Write;
+            let line = if args.json {
+                record.json().to_string()
+            } else {
+                record.human()
+            };
+            writeln!(output, "{line}")
+                .and_then(|_| output.flush())
+                .map_err(|_| Error::Unreachable)?;
+            saved_cursor.set(record.cursor());
+            Ok(())
+        };
+        let outcome = match client {
+            Ok(client) => {
+                tokio::select! {
+                    result = execute_run_events(&client, run_id, *cursor, *follow, &mut print) => result,
+                    signal = tokio::signal::ctrl_c() => {
+                        if signal.is_err() { Err(Error::Protocol) }
+                        else {
+                            let window = EventWindow { next_cursor: saved_cursor.get(), reason: "interrupted".into() };
+                            print(EventRecord::Window(window.clone())).map(|_| window)
+                        }
+                    }
+                }
+            }
+            Err(error) => Err(error),
+        };
+        drop(output);
+        let exit = match outcome {
+            Ok(window) => window.exit_code(),
+            Err(error) => {
+                let (result, exit) = CommandResult::error("runs events", error);
+                print_device(result, args.json);
+                exit
+            }
+        };
+        std::process::exit(exit);
+    }
     // Room sends carry durable lost-response recovery through the store, so
     // they run outside the plain device-command path.
     let rooms_send = match &args.command {
@@ -436,6 +497,23 @@ async fn main() {
 mod tests {
     use super::{Args, duration};
     use clap::Parser;
+    #[test]
+    fn events_arguments_accept_only_thread_cursor_bounds() {
+        for cursor in ["-1", "0", "2147483647"] {
+            assert!(
+                Args::try_parse_from([
+                    "ardur-rs", "runs", "events", "run", "--follow", "--cursor", cursor, "--json"
+                ])
+                .is_ok()
+            );
+        }
+        for cursor in ["-2", "2147483648", "1.5", "secret-value"] {
+            assert!(
+                Args::try_parse_from(["ardur-rs", "runs", "events", "run", "--cursor", cursor])
+                    .is_err()
+            );
+        }
+    }
     #[test]
     fn timeout_grammar_requires_digits_on_both_sides_of_decimal() {
         for input in [
