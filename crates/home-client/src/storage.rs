@@ -316,8 +316,14 @@ mod unix {
             Ok(())
         }
         fn load(&self) -> Result<StoredHome, Error> {
+            if let Err(error) = std::fs::symlink_metadata(&self.path) {
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    return Err(Error::NotPaired);
+                }
+                return Err(Error::Storage);
+            }
             let dir = directory(&self.path, false)?;
-            let file = read_existing(&dir)?.ok_or(Error::Storage)?;
+            let file = read_existing(&dir)?.ok_or(Error::NotPaired)?;
             if file.metadata().map_err(|_| Error::Storage)?.len() > 65536 {
                 return Err(Error::Storage);
             }

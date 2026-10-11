@@ -1,0 +1,11 @@
+Usage: ardur-rs rooms send [OPTIONS] <TEXT>
+
+Arguments:
+  <TEXT>  
+
+Options:
+      --json               
+      --room <ROOM>        
+      --room-id <ROOM_ID>  
+      --thread <THREAD>    
+  -h, --help               Print help

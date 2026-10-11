@@ -215,6 +215,7 @@ pub fn unavailable(case: &HomeScenario, reason: &str) -> ScenarioResult {
         },
         reply: String::new(),
         duration_ms: 0,
+        home_update_required: false,
     }
 }
 
@@ -229,9 +230,9 @@ pub async fn run_scenario(
     transcript.append(json!({"version":1,"kind":"scenario","id":case.scenario.id,"description":case.scenario.description}))?;
     let duration = Duration::from_secs(case.scenario.timeout_secs);
     let work = exchange(client, case, transcript);
-    let (outcome, reply) = match tokio::time::timeout(duration, work).await {
+    let (outcome, reply, home_update_required) = match tokio::time::timeout(duration, work).await {
         Ok(result) => result?,
-        Err(_) => (Outcome::Unavailable { reasons: vec!["Deadline reached; home work was not cancelled. Resume admitted runs with wait.".into()] }, String::new()),
+        Err(_) => (Outcome::Unavailable { reasons: vec!["Deadline reached; home work was not cancelled. Resume admitted runs with wait.".into()] }, String::new(), false),
     };
     let result = ScenarioResult {
         id: case.scenario.id.clone(),
@@ -239,6 +240,7 @@ pub async fn run_scenario(
         outcome,
         reply,
         duration_ms: started.elapsed().as_millis(),
+        home_update_required,
     };
     transcript.append(json!({"kind":"result","result":result}))?;
     Ok(result)
@@ -248,13 +250,19 @@ async fn exchange(
     client: &HomeClient,
     case: &HomeScenario,
     transcript: &mut Transcript,
-) -> io::Result<(Outcome, String)> {
+) -> io::Result<(Outcome, String, bool)> {
     let timeout = Duration::from_secs(case.scenario.timeout_secs);
     let mut thread = None;
     if let Target::Room { room_id, thread_id } = &case.target {
         let (rooms, exit) = execute_device(client, DeviceCommand::RoomsList, timeout).await;
         if exit != 0 {
-            return Ok(missing("Room evidence unavailable."));
+            return Ok(missing_command(
+                rooms
+                    .failure_reason
+                    .as_deref()
+                    .unwrap_or("Room evidence unavailable."),
+                exit,
+            ));
         }
         let resolved = rooms.data["rooms"]
             .as_array()
@@ -292,10 +300,11 @@ async fn exchange(
         // Even a failed/stopped admission can carry recovery ids.
         transcript.append(json!({"kind":"admission","turn":turn,"result":sent.json()}))?;
         if exit != 0 {
-            return Ok(missing(
+            return Ok(missing_command(
                 sent.failure_reason
                     .as_deref()
                     .unwrap_or("Dispatch evidence unavailable."),
+                exit,
             ));
         }
         let task = sent.task_id.as_deref();
@@ -340,11 +349,12 @@ async fn exchange(
             .await;
             transcript.append(json!({"kind":"answer","turn":turn,"result":answer.json()}))?;
             if exit != 0 {
-                return Ok(missing(
+                return Ok(missing_command(
                     answer
                         .failure_reason
                         .as_deref()
                         .unwrap_or("Answer evidence unavailable."),
+                    exit,
                 ));
             }
             let detail = &answer.data["run"];
@@ -369,13 +379,19 @@ async fn exchange(
         None,
         case.scenario.max_tokens,
     );
-    Ok((outcome, final_reply))
+    Ok((outcome, final_reply, false))
 }
-fn missing(reason: &str) -> (Outcome, String) {
+fn missing_command(reason: &str, exit: i32) -> (Outcome, String, bool) {
+    let mut result = missing(reason);
+    result.2 = exit == 5;
+    result
+}
+fn missing(reason: &str) -> (Outcome, String, bool) {
     (
         Outcome::Unavailable {
             reasons: vec![reason.into()],
         },
         String::new(),
+        false,
     )
 }

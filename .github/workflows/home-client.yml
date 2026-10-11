@@ -21,6 +21,22 @@ jobs:
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
       - name: Build isolated client
         run: cargo build --locked -p home-protocol -p home-client -p ardur-rs
+      - name: Guard shipping dependency set
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/test-home-packaging.py
+          python scripts/test-shipping-set.py
+          python scripts/check-shipping-set.py
+      - name: Install client into a disposable directory
+        shell: bash
+        run: cargo install --locked --path crates/ardur-rs --root "${RUNNER_TEMP}/home-client-install"
+      - name: Smoke installed client without a paired profile
+        shell: bash
+        run: |
+          binary="${RUNNER_TEMP}/home-client-install/bin/ardur-rs"
+          if [ "${RUNNER_OS}" = Windows ]; then binary="${binary}.exe"; fi
+          python scripts/home-install-smoke.py "$binary"
       - name: Test disposable home and CLI
         run: cargo test --locked -p home-protocol -p home-client -p ardur-rs -p ardur-eval
       - name: Clippy client

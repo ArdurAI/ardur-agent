@@ -1,4 +1,6 @@
 //! Ardur device wire protocol. This crate never executes bots or opens connections.
+mod compat;
+pub use compat::{COMPATIBILITY, Compatibility, required_operation};
 mod operations;
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};

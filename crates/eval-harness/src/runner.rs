@@ -150,6 +150,9 @@ pub struct ScenarioResult {
     pub reply: String,
     /// Wall-clock milliseconds the exchange took.
     pub duration_ms: u128,
+    /// An explicit home compatibility refusal, distinct from unavailable evidence.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub home_update_required: bool,
 }
 
 /// Grade a `reply` (plus optional server-reported usage/cost/tools) against the
@@ -249,6 +252,7 @@ pub async fn run_scenario(
 
     // A short closure to stamp an outcome with the scenario's identity + timing.
     let result_with = |outcome: Outcome, reply: String| ScenarioResult {
+        home_update_required: false,
         id: scenario.id.clone(),
         description: scenario.description.clone(),
         outcome,

@@ -1,0 +1,8 @@
+Usage: ardur-rs runs show [OPTIONS] <RUN_ID>
+
+Arguments:
+  <RUN_ID>  
+
+Options:
+      --json  
+  -h, --help  Print help

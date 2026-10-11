@@ -152,3 +152,89 @@ Contributions are welcome. See **[CONTRIBUTING.md](CONTRIBUTING.md)** — note t
 
 Licensed under the [Apache License, Version 2.0](LICENSE) — chosen for its
 explicit patent grant and enterprise clarity.
+
+## Home client
+
+The Rust home client is available as `ardur-rs`. It sends signed requests to a
+paired home; the home owns bot execution and saved model settings. The existing
+commands and runtime documentation above remain available during this stage.
+
+Install from a source checkout with the pinned Rust toolchain:
+
+```sh
+cargo install --locked --path crates/ardur-rs
+ardur-rs --version
+ardur-rs --help
+```
+
+For a checkout with cached dependencies, add `--offline` to the install command.
+Release packaging builds only this client for Linux x86_64, macOS arm64, and
+Windows x86_64. Windows can install the binary and display help and version,
+but pairing still fails safely until private storage with current-user ACLs
+is implemented. Unix profiles use a private directory (0700) and file (0600).
+The private-file format has always used `schemaVersion: 1` and a byte-array key;
+existing profiles load without a rewrite. Missing or newer format versions are
+refused. Keep the profile private and never copy its key into a report.
+
+Copy a pairing code from the home's Settings, Devices page into a private file,
+then pair and inspect the home:
+
+```sh
+ardur-rs pair --file pairing-code.txt --name "Command line"
+ardur-rs status
+ardur-rs bots list
+```
+
+`pair --file -` reads the code from standard input. Each command has `--help`.
+The command list is:
+
+- `pair`, `status`, and `bots list`.
+- `send <bot> <text> --request-id <id> [--wait] [--timeout 180s]`.
+- `wait --run <id> [--timeout 180s]`, `stop <task-id>`.
+- `runs list [--cursor <id>] [--limit 50]`, `runs show <id>`.
+- `runs events <run-id> [--follow] [--cursor <n>]`.
+- `tasks show <id>`, `computers list`.
+- `board list --workspace <id> [--filter <json>] [--search <text>]`.
+- `board show --workspace <id> <item>`.
+- `rooms list`, `rooms send (--room <name> | --room-id <id>) [--thread <id>] <text>`.
+- `test run <file-or-directory> [--json <report>] [--junit <report>] [--transcripts <directory>]`.
+
+Device commands accept the global `--json` flag. Scenario tests instead use
+`--json <report>` to write a report. See [scenario details](crates/ardur-rs/README.md)
+for evidence rules and recovery after interruption.
+
+Exit codes retain the existing command-group meanings:
+
+| Command group | Exit codes |
+| --- | --- |
+| Pair, status, bots | 0 success; 1 transport/protocol failure; 2 pairing, storage, identity, or access refusal; 3 invalid input |
+| Send, wait, stop, reads, rooms | 0 success; 1 completed work failed; 2 unavailable answer or transport/protocol failure; 3 waiting deadline; 4 input, pairing, storage, identity, or access refusal |
+| Events | 0 window ended (including interruption); 2 stream/protocol failure; 4 input/access refusal |
+| Test run | 0 all pass; 1 assertion failure; 2 unavailable evidence or input/output error; 130 interruption |
+| All home commands | 5 home operation unsupported: update the home |
+
+An explicit unknown or unsupported operation response prints
+`Home does not support <operation>; the home must be updated.` Generic missing
+records and permission denials retain their existing diagnosis.
+
+The compatibility manifest is [crates/home-protocol/compat.json](crates/home-protocol/compat.json).
+It records the newest conformance fixture's home contract revision, a SHA-256
+digest of the full fixture set, and the operations the client needs. The fixtures
+retain their individual source revisions. `ardur-rs --version` reports the client
+version and contract revision; `ardur-rs --version --json` reports both as fields.
+A protocol test recomputes the fixture digest and operation list and fails on drift.
+
+CI checks the normal shipping dependency tree, snapshots command help, installs
+into a disposable directory on all three operating systems, and checks that an
+unpaired installed client fails clearly. To review and update help snapshots:
+
+```sh
+UPDATE_SNAPSHOTS=1 cargo test --offline --locked -p ardur-rs --bin ardur-rs command_help_snapshots
+```
+
+Snapshot updates must be reviewed alongside the command change. Text snapshots
+and conformance fixtures use LF on every platform. The shipping guard permits
+only the home protocol, home transport, command parser, and remote evaluation
+workspace crates. It rejects runtime/server/provider/channel crates and local
+execution, scheduling, plugin, tool, web, adapter, and embedding surfaces; a new
+workspace dependency requires an explicit shipping-set review.

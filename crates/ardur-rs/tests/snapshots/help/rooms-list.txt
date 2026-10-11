@@ -1,0 +1,5 @@
+Usage: ardur-rs rooms list [OPTIONS]
+
+Options:
+      --json  
+  -h, --help  Print help

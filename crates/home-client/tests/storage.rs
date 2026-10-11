@@ -92,3 +92,52 @@ fn bounded_serialization_preserves_existing_state() {
     assert!(store.save(&oversized).is_err());
     assert!(std::fs::read(&path).unwrap() == before);
 }
+
+#[test]
+fn version_one_profile_still_loads_without_rewriting_private_state() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap().join("ardur");
+    let store = FileStore::new(root.clone());
+    store.prepare().unwrap();
+    let h = home();
+    // The original format has always been schemaVersion 1 with a byte-array key.
+    // Construct it independently of the current writer to catch format drift.
+    let old = serde_json::json!({"profile":{
+        "schemaVersion":1,"url":"https://home.test","homeName":"Home",
+        "pins":{"instanceId":"home","fingerprint":"a".repeat(64),"certificateFingerprint":"b".repeat(64)},
+        "grantId":"grant","spaceId":"space"
+    },"privateKey":h.private_key.as_bytes()});
+    let path = root.join("paired-home.json");
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .unwrap();
+    file.write_all(old.to_string().as_bytes()).unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let loaded = store.load().unwrap();
+    assert_eq!(loaded.profile.schema_version, 1);
+    assert_eq!(loaded.private_key, h.private_key);
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(
+        std::fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    let mut unsupported = old.clone();
+    unsupported["profile"]["schemaVersion"] = serde_json::json!(2);
+    std::fs::write(&path, unsupported.to_string()).unwrap();
+    assert_eq!(store.load().err().unwrap(), home_client::Error::Storage);
+    unsupported["profile"]
+        .as_object_mut()
+        .unwrap()
+        .remove("schemaVersion");
+    std::fs::write(&path, unsupported.to_string()).unwrap();
+    assert_eq!(store.load().err().unwrap(), home_client::Error::Storage);
+}

@@ -12,7 +12,7 @@ use std::path::PathBuf;
 // This command's --json takes a file, unlike the device commands' boolean flag.
 // Parse its own command tree so their established global flag remains compatible.
 #[derive(Parser)]
-#[command(name = "ardur-rs test")]
+#[command(name = "ardur-rs test", bin_name = "ardur-rs test")]
 struct Args {
     #[command(subcommand)]
     command: Command,
@@ -138,6 +138,8 @@ async fn run(command: Command) -> Result<i32, &'static str> {
     let summary = Summary::of(&results);
     Ok(if interrupted {
         130
+    } else if results.iter().any(|result| result.home_update_required) {
+        5
     } else if summary.failed > 0 {
         1
     } else if summary.unavailable > 0 || summary.errored > 0 {
@@ -145,6 +147,16 @@ async fn run(command: Command) -> Result<i32, &'static str> {
     } else {
         0
     })
+}
+
+#[cfg(test)]
+pub(super) fn help_command() -> clap::Command {
+    use clap::CommandFactory;
+    Args::command()
+}
+#[cfg(test)]
+pub(super) fn help_error(raw: &[String]) -> clap::Error {
+    Args::try_parse_from(raw).err().expect("help exits parsing")
 }
 
 #[cfg(test)]

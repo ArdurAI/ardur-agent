@@ -1,0 +1,8 @@
+Usage: ardur-rs board list [OPTIONS] --workspace <WORKSPACE>
+
+Options:
+      --json                   
+      --workspace <WORKSPACE>  
+      --filter <FILTER>        Board filter as a JSON object, for example {"status":"open"}
+      --search <SEARCH>        
+  -h, --help                   Print help

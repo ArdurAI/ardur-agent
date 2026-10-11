@@ -2,3 +2,5 @@
 crates/home-client/tests/fixtures/oracle/* text eol=lf
 crates/home-client/tests/fixtures/redaction*.json text eol=lf
 crates/home-protocol/tests/fixtures/*.json text eol=lf
+crates/ardur-rs/tests/snapshots/** text eol=lf
+crates/home-protocol/compat.json text eol=lf

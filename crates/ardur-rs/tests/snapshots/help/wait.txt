@@ -1,0 +1,7 @@
+Usage: ardur-rs wait [OPTIONS] --run <RUN>
+
+Options:
+      --json               
+      --run <RUN>          
+      --timeout <TIMEOUT>  [default: 180s]
+  -h, --help               Print help

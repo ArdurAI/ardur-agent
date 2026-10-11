@@ -653,3 +653,64 @@ async fn ctrl_c_stops_the_events_process_cleanly_with_its_last_cursor() {
     assert!(out.status.success());
     assert!(out.stderr.is_empty());
 }
+
+#[tokio::test]
+async fn unknown_home_operations_have_a_distinct_exit_and_safe_sentence() {
+    let server = FakeHome::start(false).await;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    assert!(
+        run(&root, &["pair", "--file", "-"], Some(&server.code()))
+            .await
+            .status
+            .success()
+    );
+    for mode in [Mode::UnknownOperation, Mode::UnsupportedOperation] {
+        server.set(mode);
+        for (args, operation) in [
+            (vec!["status"], "tasks"),
+            (vec!["runs", "show", "run"], "runs/get"),
+            (
+                vec!["rooms", "send", "--room-id", "fixture-room", "hello"],
+                "rooms/send",
+            ),
+            (
+                vec!["board", "show", "--workspace", "fixture-board", "work-1"],
+                "board/show",
+            ),
+        ] {
+            for json_mode in [false, true] {
+                let mut args = args.clone();
+                if json_mode {
+                    args.push("--json");
+                }
+                let out = run(&root, &args, None).await;
+                assert_eq!(out.status.code(), Some(5));
+                let sentence =
+                    format!("Home does not support {operation}; the home must be updated.");
+                if json_mode {
+                    let value: Value = serde_json::from_slice(&out.stdout).unwrap();
+                    if operation == "tasks" {
+                        assert_eq!(value["error"]["code"], "home_update_required");
+                        assert_eq!(value["error"]["message"], sentence);
+                        assert_eq!(value["exitCode"], 5);
+                    } else {
+                        assert_eq!(value["failureReason"], sentence);
+                    }
+                    assert!(out.stderr.is_empty());
+                } else {
+                    let text = String::from_utf8([out.stdout, out.stderr].concat()).unwrap();
+                    assert_eq!(text, format!("{sentence}\n"));
+                }
+            }
+        }
+    }
+    // An event operation refusal is an HTTP JSON error before any SSE frames.
+    server.set(Mode::UnsupportedEvents);
+    let out = run(&root, &["runs", "events", "run", "--follow"], None).await;
+    assert_eq!(out.status.code(), Some(5));
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        "Home does not support events; the home must be updated.\n"
+    );
+}

@@ -1,0 +1,8 @@
+Usage: ardur-rs stop [OPTIONS] <TASK_ID>
+
+Arguments:
+  <TASK_ID>  
+
+Options:
+      --json  
+  -h, --help  Print help

@@ -33,6 +33,9 @@ pub enum Mode {
     BoardProblem,
     RoomSendRefused,
     RecordUnavailable,
+    UnknownOperation,
+    UnsupportedOperation,
+    UnsupportedEvents,
 }
 const DEVICE_RECORD_UNAVAILABLE: &str = "This record is unavailable from this device.";
 pub struct EventResponse {
@@ -294,7 +297,23 @@ impl FakeHome {
                         json!({"message":"unavailable"})
                     } else {
                         used.insert(proof.nonce);
-                        if op == "events" {
+                        if matches!(mode, Mode::UnknownOperation | Mode::UnsupportedOperation)
+                            || (mode == Mode::UnsupportedEvents && op == "events")
+                        {
+                            status = if mode == Mode::UnknownOperation {
+                                400
+                            } else {
+                                501
+                            };
+                            let code = if op == "rpc" {
+                                "unknown_procedure"
+                            } else if mode == Mode::UnknownOperation {
+                                "unknown_operation"
+                            } else {
+                                "unsupported_operation"
+                            };
+                            json!({"problem":{"code":code},"message":"sensitive-canary"})
+                        } else if op == "events" {
                             let response = windows
                                 .lock()
                                 .unwrap()
