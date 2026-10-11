@@ -7,6 +7,7 @@ use home_client::{
 use serde_json::{Value, json};
 use std::io::Read;
 use zeroize::Zeroizing;
+mod test_run;
 #[derive(Parser)]
 #[command(name = "ardur-rs", version, about = "Paired Ardur home client")]
 struct Args {
@@ -17,6 +18,11 @@ struct Args {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Run paired-home scenarios. Use `test run --help` for report options.
+    Test {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        arguments: Vec<std::ffi::OsString>,
+    },
     Pair {
         #[arg(long)]
         file: String,
@@ -330,6 +336,9 @@ fn report(command: &str, json_mode: bool, result: Result<Value, Error>) -> i32 {
 #[tokio::main]
 async fn main() {
     let raw = std::env::args_os().collect::<Vec<_>>();
+    if raw.get(1).is_some_and(|arg| arg == "test") {
+        std::process::exit(test_run::entry(&raw[1..]).await);
+    }
     let json_mode = raw.iter().any(|a| a == "--json");
     let args = match Args::try_parse_from(&raw) {
         Ok(a) => a,
@@ -372,6 +381,11 @@ async fn main() {
             std::process::exit(report("unknown", json_mode, Err(Error::Input)));
         }
     };
+    if matches!(&args.command, Command::Test { .. }) {
+        let (result, exit) = CommandResult::error("test run", Error::Input);
+        print_device(result, args.json);
+        std::process::exit(exit);
+    }
     if let Command::Runs {
         command:
             RunsCommand::Events {

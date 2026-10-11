@@ -123,6 +123,11 @@ pub enum Outcome {
         /// What went wrong.
         message: String,
     },
+    /// Required evidence could not be obtained; no assertion failure is claimed.
+    Unavailable {
+        /// The evidence needed to grade this scenario.
+        reasons: Vec<String>,
+    },
 }
 
 impl Outcome {
@@ -159,6 +164,12 @@ pub fn grade(
     max_tokens: u32,
 ) -> Vec<String> {
     let mut reasons = Vec::new();
+
+    if let Some(exact) = &expected.exact {
+        if reply != exact {
+            reasons.push(format!("expected reply to equal {exact:?}"));
+        }
+    }
 
     for needle in &expected.contains {
         if !reply.contains(needle.as_str()) {

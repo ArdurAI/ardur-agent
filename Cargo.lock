@@ -708,6 +708,7 @@ dependencies = [
  "anyhow",
  "assert_cmd",
  "clap",
+ "home-client",
  "regex",
  "reqwest 0.12.28",
  "serde",
@@ -1183,6 +1184,7 @@ dependencies = [
 name = "ardur-rs"
 version = "0.1.0"
 dependencies = [
+ "ardur-eval",
  "base64 0.22.1",
  "clap",
  "home-client",

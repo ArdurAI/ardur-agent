@@ -70,6 +70,9 @@ fn default_timeout_secs() -> u64 {
 /// that only assert the server answered at all).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Expected {
+    /// The whole reply must equal this text, including whitespace and case.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exact: Option<String>,
     /// Each substring must appear in the reply (case-sensitive).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub contains: Vec<String>,

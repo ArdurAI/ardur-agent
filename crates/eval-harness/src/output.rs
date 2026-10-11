@@ -39,6 +39,8 @@ pub struct Summary {
     pub failed: usize,
     /// Number of scenarios that errored (transport/timeout/etc.).
     pub errored: usize,
+    /// Number of scenarios lacking required evidence.
+    pub unavailable: usize,
 }
 
 impl Summary {
@@ -50,6 +52,7 @@ impl Summary {
                 Outcome::Pass => s.passed += 1,
                 Outcome::Fail { .. } => s.failed += 1,
                 Outcome::Error { .. } => s.errored += 1,
+                Outcome::Unavailable { .. } => s.unavailable += 1,
             }
         }
         s
@@ -57,17 +60,19 @@ impl Summary {
 
     /// Total scenarios tallied.
     pub fn total(&self) -> usize {
-        self.passed + self.failed + self.errored
+        self.passed + self.failed + self.errored + self.unavailable
     }
 
-    /// True when no scenario failed or errored — the run is green.
+    /// True only when every scenario passed with the required evidence.
     pub fn is_green(&self) -> bool {
-        self.failed == 0 && self.errored == 0
+        self.failed == 0 && self.errored == 0 && self.unavailable == 0
     }
 }
 
 /// Render `results` in the requested `format`.
 pub fn render(results: &[ScenarioResult], format: Format) -> String {
+    let safe: Vec<_> = results.iter().cloned().map(sanitize).collect();
+    let results = safe.as_slice();
     match format {
         Format::Json => render_json(results),
         Format::Junit => render_junit(results),
@@ -83,6 +88,7 @@ fn render_json(results: &[ScenarioResult]) -> String {
             "passed": summary.passed,
             "failed": summary.failed,
             "errored": summary.errored,
+            "unavailable": summary.unavailable,
         },
         "results": results,
     });
@@ -91,7 +97,11 @@ fn render_json(results: &[ScenarioResult]) -> String {
 
 /// Minimal XML escaping for attribute/text content.
 fn xml_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
+    // XML 1.0 excludes two noncharacters that are valid Rust scalar values.
+    s.chars()
+        .filter(|c| !matches!(c, '\u{fffe}' | '\u{ffff}'))
+        .collect::<String>()
+        .replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
@@ -103,10 +113,11 @@ fn render_junit(results: &[ScenarioResult]) -> String {
     let mut out = String::new();
     out.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
     out.push_str(&format!(
-        "<testsuite name=\"ardur-eval\" tests=\"{}\" failures=\"{}\" errors=\"{}\">\n",
+        "<testsuite name=\"ardur-eval\" tests=\"{}\" failures=\"{}\" errors=\"{}\" skipped=\"{}\">\n",
         summary.total(),
         summary.failed,
         summary.errored,
+        summary.unavailable,
     ));
     for r in results {
         let time = r.duration_ms as f64 / 1000.0;
@@ -126,6 +137,12 @@ fn render_junit(results: &[ScenarioResult]) -> String {
                     xml_escape(&r.reply),
                 ));
                 out.push_str("  ");
+            }
+            Outcome::Unavailable { reasons } => {
+                out.push_str(&format!(
+                    "<skipped message=\"{}\"/>",
+                    xml_escape(&reasons.join("; "))
+                ));
             }
             Outcome::Error { message } => {
                 out.push('\n');
@@ -147,10 +164,11 @@ fn render_markdown(results: &[ScenarioResult]) -> String {
     let mut out = String::new();
     out.push_str("# Ardur Eval Report\n\n");
     out.push_str(&format!(
-        "**{} passed**, **{} failed**, **{} errored** of {} scenarios.\n\n",
+        "**{} passed**, **{} failed**, **{} errored**, **{} unavailable** of {} scenarios.\n\n",
         summary.passed,
         summary.failed,
         summary.errored,
+        summary.unavailable,
         summary.total(),
     ));
     out.push_str("| Scenario | Status | Duration | Detail |\n");
@@ -160,6 +178,7 @@ fn render_markdown(results: &[ScenarioResult]) -> String {
             Outcome::Pass => ("✅ pass".to_string(), String::new()),
             Outcome::Fail { reasons } => ("❌ fail".to_string(), reasons.join("; ")),
             Outcome::Error { message } => ("⚠️ error".to_string(), message.clone()),
+            Outcome::Unavailable { reasons } => ("unavailable".to_string(), reasons.join("; ")),
         };
         // Keep cell content single-line: escape pipes and collapse newlines.
         let detail = detail.replace('|', "\\|").replace('\n', " ");
@@ -169,4 +188,22 @@ fn render_markdown(results: &[ScenarioResult]) -> String {
         ));
     }
     out
+}
+
+// Sanitize fields before escaping XML or JSON; serialized escapes can hide secrets.
+fn sanitize(mut result: ScenarioResult) -> ScenarioResult {
+    use home_client::safe_output;
+    result.id = safe_output(&result.id);
+    result.description = safe_output(&result.description);
+    result.reply = safe_output(&result.reply);
+    match &mut result.outcome {
+        Outcome::Fail { reasons } | Outcome::Unavailable { reasons } => {
+            for reason in reasons {
+                *reason = safe_output(reason);
+            }
+        }
+        Outcome::Error { message } => *message = safe_output(message),
+        Outcome::Pass => {}
+    }
+    result
 }
