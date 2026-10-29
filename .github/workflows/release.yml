@@ -81,7 +81,7 @@ jobs:
           ./smoke/ardur --version
 
       - name: Stage target archives
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-${{ matrix.target }}
           path: dist/*.tar.gz
@@ -108,7 +108,7 @@ jobs:
           persist-credentials: false
 
       - name: Collect all target archives
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: release-*
           path: dist
@@ -121,7 +121,7 @@ jobs:
       # Preserve the existing single release-level workspace SBOM, not one per
       # binary/target. Disable the action's otherwise automatic early upload.
       - name: Generate release SPDX SBOM
-        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
           path: .
           format: spdx-json
