@@ -13,7 +13,7 @@
 # binary, so the runtime image does not need curl/wget/shell packages.
 # ARD-303: Docker build is validated in CI with a /healthz smoke test.
 
-FROM rust:1.98.1-slim@sha256:ce84a5edd80c5f91e05c5533b1e53eb1da54028f33734dc06aa6b49fa190462d AS builder
+FROM rust:1.99.1-slim@sha256:f6c4a35d21dbb3c89d7a8d056c193e94fc09037f2b58dd858b09c39a47dd02d7 AS builder
 
 # pkg-config + libssl-dev cover openssl-sys transitive dependencies. g++ provides
 # libstdc++ for native ML/search dependencies at the final link step.
